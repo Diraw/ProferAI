@@ -13,42 +13,52 @@
  * 本文件仅负责 props 透传与折叠/展开外壳装配。
  */
 
-import * as React from 'react'
-import { cn } from '@/lib/utils'
-import { SearchDialog } from './SearchDialog'
-import { useLeftSidebar } from './left-sidebar/use-left-sidebar'
-import { SidebarRail } from './left-sidebar/rail'
-import { ExpandedSidebar } from './left-sidebar/expanded-sidebar'
-import { SidebarDialogs } from './left-sidebar/sidebar-dialogs'
+import * as React from "react";
+import { cn } from "@/lib/utils";
+import { SearchDialog } from "./SearchDialog";
+import { useLeftSidebar } from "./left-sidebar/use-left-sidebar";
+import { SidebarRail } from "./left-sidebar/rail";
+import { ExpandedSidebar } from "./left-sidebar/expanded-sidebar";
+import { SidebarDialogs } from "./left-sidebar/sidebar-dialogs";
 
-export type { LeftSidebarProps } from './left-sidebar/types'
-import type { LeftSidebarProps } from './left-sidebar/types'
+export type { LeftSidebarProps } from "./left-sidebar/types";
+import type { LeftSidebarProps } from "./left-sidebar/types";
 
-export function LeftSidebar({ width, noTransition, tabletMode, renderSearchDialog = true }: LeftSidebarProps): React.ReactElement {
-  const s = useLeftSidebar(tabletMode)
-  const isClassic = s.isClassic
-  const sidebarCollapsed = s.sidebarCollapsed
+export function LeftSidebar({
+  width,
+  noTransition,
+  tabletMode,
+  renderSearchDialog = true,
+}: LeftSidebarProps): React.ReactElement {
+  const s = useLeftSidebar(tabletMode);
+  const isClassic = s.isClassic;
+  const sidebarCollapsed = s.sidebarCollapsed;
 
   return (
     <div
       className={cn(
-        'relative h-full overflow-hidden sidebar-collapse-ease',
-        !noTransition && 'transition-[width] duration-300 will-change-[width] contain-layout',
+        "relative h-full overflow-hidden sidebar-collapse-ease",
+        !noTransition &&
+          "transition-[width] duration-300 will-change-[width] contain-layout",
         isClassic
-          ? 'bg-surface-raised rounded-2xl shadow-xl dark:shadow-md'
-          : 'bg-sidebar rounded-2xl shadow-xl dark:shadow-md'
+          ? "bg-surface-raised rounded-2xl shadow-xl dark:shadow-md"
+          : "bg-sidebar rounded-2xl shadow-xl dark:shadow-md",
       )}
       style={{
-        width: sidebarCollapsed ? 60 : width ?? 300,
+        width: sidebarCollapsed ? 60 : (width ?? 300),
         minWidth: sidebarCollapsed ? 60 : 200,
         flexShrink: sidebarCollapsed ? 0 : 1,
       }}
     >
+      {s.isMac && (
+        <MacTrafficLights classic={isClassic} collapsed={sidebarCollapsed} />
+      )}
+
       {sidebarCollapsed ? <SidebarRail s={s} /> : <ExpandedSidebar s={s} />}
       {/* 迁移/搜索对话框：双视图共享状态，必须只在外层渲染唯一实例，
           否则 Radix Portal 双实例同时打开会叠出双遮罩+双内容 */}
       <SidebarDialogs s={s} />
       {renderSearchDialog && <SearchDialog />}
     </div>
-  )
+  );
 }

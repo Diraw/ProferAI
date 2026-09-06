@@ -69,7 +69,6 @@ function BuiltinPresetTag(): React.ReactElement {
   );
 }
 
-
 import type {
   AgentPreset,
   AgentPresetCreateInput,
@@ -82,7 +81,9 @@ import type {
 import {
   AGENT_PRESET_TOOL_GROUP_SUPPRESS_MAP,
   AGENT_PRESET_GROUP_TOOL_NAMES,
+  AGENT_PRESET_CAPABILITY_GROUPS,
 } from "@profer/shared";
+import type { AgentPresetSuppressKey } from "@profer/shared";
 
 // ===== 表单状态 =====
 
@@ -100,24 +101,15 @@ interface PresetFormState {
   basePresetId: string; // '' = 独立预设 / 内置预设 ID = 派生
 }
 
-/** 产品内置工具组选项（预设可禁用） */
+/** 产品内置能力组选项直接来自 shared registry，避免 UI 与运行时清单漂移。 */
 /** Radix Select 保留空字符串给 placeholder，表单的“跟随/独立”状态使用非空哨兵值。 */
 const SELECT_DEFAULT_VALUE = "__default__";
 
-const TOOL_GROUP_OPTIONS: Array<{
-  value: AgentPresetToolGroup;
-  label: string;
-  hint: string;
-}> = [
-  { value: "task-graph", label: "任务图", hint: "子任务图工具" },
-  { value: "memory", label: "长期记忆", hint: "Auto Memory 与 memory-archive" },
-  {
-    value: "collaboration",
-    label: "协作子 Agent",
-    hint: "委派与协作工具（等价禁止委派）",
-  },
-  { value: "automation", label: "定时任务", hint: "Profer Automation 工具" },
-];
+const TOOL_GROUP_OPTIONS = AGENT_PRESET_CAPABILITY_GROUPS.map((group) => ({
+  value: group.id,
+  label: group.label,
+  hint: group.hint,
+}));
 
 /** 与运行时一致的自动映射（shared 唯一事实表）：工具组禁用 → 隐藏对应提示词段 key（含 automation） */
 
@@ -469,9 +461,10 @@ export function AgentPresetSettings({
           .map((s) => s.trim())
           .filter(Boolean)
       : null;
-    const suppressPromptSections = form.disabledToolGroups.map(
-      (g) => AGENT_PRESET_TOOL_GROUP_SUPPRESS_MAP[g],
-    );
+    const suppressPromptSections = form.disabledToolGroups
+      .map((g) => AGENT_PRESET_TOOL_GROUP_SUPPRESS_MAP[g])
+      .filter((key): key is AgentPresetSuppressKey => key !== undefined);
+
     return {
       name: form.name,
       description: form.description,
@@ -1515,6 +1508,7 @@ export function AgentPresetSettings({
               这是 Profer 内置元预设，只读，不能编辑、重命名或删除。
             </p>
           )}
+
           <DialogFooter>
             <Button
               variant="outline"

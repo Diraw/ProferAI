@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 // prompt builder 经 config-paths 间接导入 Electron；Bun 单测需提供最小主进程 mock。
-mock.module('./agent-workspace-manager', () => ({
+mock.module('./workspace-mcp-config', () => ({
   getWorkspaceMcpConfig: () => ({
     servers: {
       allowed: { type: 'http', enabled: true, url: 'https://allowed.example.test/mcp' },
@@ -130,10 +130,11 @@ describe('buildSystemPrompt', () => {
     expect(piPrompt).not.toContain('自动追加一次只做最小验证的续轮')
     // 工具名按 runtime 适配：Pi 带 mcp__ 前缀，Claude 用 in-process MCP 裸名
     expect(piPrompt).toContain('mcp__task-graph__proma_task_create')
-    expect(piPrompt).toContain('mcp__agent-presets__preset_create')
+    expect(piPrompt).toContain('mcp__agent-presets__preset_list')
+    expect(piPrompt).not.toContain('mcp__agent-presets__preset_create')
     expect(piPrompt).not.toContain('用 `proma_task_create` 创建子任务')
     expect(claudePrompt).toContain('用 `proma_task_create` 创建子任务')
-    expect(claudePrompt).toContain('`preset_create` 新建')
+    expect(claudePrompt).toContain('预设创建、修改、删除、设为默认和切换当前会话，必须由用户在设置页或会话工具栏执行')
     expect(claudePrompt).not.toContain('mcp__agent-presets__preset_create')
     expect(piPrompt).toContain('不要等待 SDK 自动落盘')
     expect(piPrompt).toContain('可以读取和写入')
@@ -310,6 +311,84 @@ describe('buildSystemPrompt', () => {
     })
     expect(prompt).not.toContain('## 团队共享知识记忆')
     expect(prompt).not.toContain('mcp__team-memory__list_team_memories')
+  })
+
+  test('单工具裁剪时 Prompt 不描述已关闭的具体入口', () => {
+    const prompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['generate_image', 'send_local_image', 'BrowserPreviewOpen', 'WebSearch', 'WebFetch'],
+    })
+    expect(prompt).not.toContain('`generate_image`')
+    expect(prompt).not.toContain('`send_local_image`')
+    expect(prompt).not.toContain('`BrowserPreviewOpen`')
+    expect(prompt).not.toContain('`WebSearch`')
+    expect(prompt).not.toContain('`WebFetch`')
+    expect(prompt).not.toContain('## Profer 受管浏览器')
+    expect(prompt).not.toContain('BrowserObserve')
+  })
+
+  test('六类能力硬禁用时 Prompt 与动态浏览器上下文不暴露对应入口', () => {
+    const disabled = ['browser', 'clipboard', 'preview', 'image', 'web', 'ppt-materials'] as const
+    const prompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledToolGroups: disabled,
+    })
+    expect(prompt).not.toContain('## Profer 受管浏览器')
+    expect(prompt).not.toContain('`inspect_preview`')
+    expect(prompt).not.toContain('`generate_image`')
+    expect(prompt).not.toContain('`WebSearch`')
+    expect(prompt).toContain('当前预设已关闭的能力')
+    expect(prompt).toContain('受管浏览器（browser）')
+    expect(prompt).toContain('PPT 素材（ppt-materials）')
+
+    const dynamic = buildDynamicContext({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      userBrowserContext: { activeTabId: 'tab-1', title: 'Private', url: 'https://private.example.test', openedAt: Date.now() },
+      disabledToolGroups: ['browser'],
+    })
+    expect(dynamic).not.toContain('<user_browser_context>')
+  })
+
+  test('平台 overlay 同时注入给 Claude/Pi，但不复制两套完整核心提示词', () => {
+    const macPrompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      platform: 'darwin',
+      shellPath: '/bin/zsh',
+      agentCwd: '/Users/mac/.profer/agent-workspaces/profer/session-123',
+      projectCandidates: [{ rootPath: '/Users/mac/profer/profer-main', name: 'proma', type: 'git-repository' }],
+      isPiRuntime: true,
+    })
+    const winPrompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      platform: 'win32',
+      shellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      agentCwd: 'C:\\Users\\alice\\session-123',
+      projectCandidates: [{ rootPath: 'D:\\repo', name: 'repo', type: 'git-repository' }],
+      isPiRuntime: false,
+    })
+
+    expect(macPrompt).toContain('## 当前平台与项目路径（macOS）')
+    expect(macPrompt).toContain('当前执行环境是 POSIX shell')
+    expect(macPrompt).toContain('不要把其他操作系统的命令')
+    expect(macPrompt).toContain('/Users/mac/profer/profer-main')
+    expect(macPrompt).toContain('path + edits[].oldText/newText')
+    expect(winPrompt).toContain('## 当前平台与项目路径（Windows）')
+    expect(winPrompt).toContain('只使用运行时实际提供的 Windows shell 和路径格式')
+    expect(winPrompt).toContain('file_path + old_string/new_string')
+    expect(winPrompt).not.toContain('## 当前平台与项目路径（macOS）')
   })
 
   test('动态上下文只展示当前预设实际允许的 MCP，且不泄露命令和 URL', () => {
