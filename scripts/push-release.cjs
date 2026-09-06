@@ -13,8 +13,9 @@ const path = require('path');
 
 const VERSION = process.argv[2];
 const UNSIGNED_RELEASE = process.argv.includes('--unsigned');
+const ARTIFACTS_ONLY = process.argv.includes('--artifacts-only');
 if (!VERSION) {
-  console.error('用法: node scripts/push-release.cjs <版本号> [--unsigned]');
+  console.error('用法: node scripts/push-release.cjs <版本号> [--unsigned] [--artifacts-only]');
   process.exit(1);
 }
 
@@ -220,13 +221,18 @@ async function ensureGitHubRelease(assets) {
   // 必须先完成所有只读预检；随后才允许构建、上传或 Git/GitHub 写入。
   run(`node scripts/verify-release-preflight.cjs ${VERSION}`);
 
-  console.log(`[1/4] 执行发布验证门禁（Windows x64${UNSIGNED_RELEASE ? ' 未签名' : ' 签名'}正式包）...`);
+  console.log(`[1/4] ${ARTIFACTS_ONLY ? '校验已有本地产物' : '执行发布验证门禁'}（Windows x64${UNSIGNED_RELEASE ? ' 未签名' : ' 签名'}正式包）...`);
   if (!UNSIGNED_RELEASE) assertReleaseSigningConfiguration();
-  run('bun run typecheck');
-  run('bun test --isolate --timeout 30000');
-  fs.rmSync(path.join(OUT, 'win-unpacked'), { recursive: true, force: true });
-  run(`bun run ${UNSIGNED_RELEASE ? 'release:verify:windows:unsigned' : 'release:verify:windows'}`, ELECTRON);
-  // 两种模式都保留完整构建链、latest.yml 哈希、CLI 和运行时闭包门禁。
+  if (ARTIFACTS_ONLY) {
+    run(`bun run ${UNSIGNED_RELEASE ? 'verify:release-assets:unsigned' : 'verify:release-assets'}`, ELECTRON);
+    run('bun run verify:packaged-pi-runtime', ELECTRON);
+  } else {
+    run('bun run typecheck');
+    run('bun test --isolate --timeout 30000');
+    fs.rmSync(path.join(OUT, 'win-unpacked'), { recursive: true, force: true });
+    run(`bun run ${UNSIGNED_RELEASE ? 'release:verify:windows:unsigned' : 'release:verify:windows'}`, ELECTRON);
+  }
+  // 构建模式和已有产物模式都校验 latest.yml 哈希、CLI 和运行时闭包；已有产物模式不重复构建。
 
   const assetNames = UNSIGNED_RELEASE
     ? ['latest.yml', `Profer-Setup-${VERSION}.exe`, `Profer-Setup-${VERSION}.exe.blockmap`]
