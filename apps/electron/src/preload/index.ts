@@ -244,10 +244,6 @@ export interface ElectronAPI {
   windowClose: () => Promise<void>
   /** 窗口是否处于最大化状态 */
   windowIsMaximized: () => Promise<boolean>
-  /** 窗口是否处于原生全屏状态 */
-  windowIsFullScreen: () => Promise<boolean>
-  /** 订阅原生全屏状态切换 */
-  onWindowFullScreenChanged: (callback: (isFullScreen: boolean) => void) => () => void
   /** 订阅窗口最大化/还原事件 */
   onWindowResize: (callback: () => void) => () => void
 
@@ -832,8 +828,6 @@ export interface ElectronAPI {
   updateSessionCodexFastMode: (sessionId: string, enabled: boolean) => Promise<AgentSessionMeta>
   /** 切换当前会话的 ChatGPT Codex 推理档位（跨会话持久化）。 */
   updateSessionOpenAIThinkingLevel: (sessionId: string, level: AgentThinkingLevel | null) => Promise<AgentSessionMeta>
-  /** 更新会话「队列自动发送」开关（per-session 持久化到 meta，重启保留）。 */
-  updateAgentQueueAutoSend: (sessionId: string, enabled: boolean) => Promise<AgentSessionMeta>
   /** 查询某 Pi 模型可用的推理档位能力（renderer 思考档位菜单动态展示）。 */
   getPiReasoningCapability: (provider: ProviderType, modelId: string | undefined) => Promise<ReasoningCapability | undefined>
 
@@ -1066,6 +1060,12 @@ export interface ElectronAPI {
 
   /** 移动附加目录文件/目录（无工作区路径限制） */
   moveAttachedFile: (filePath: string, targetDir: string, access?: import('@profer/shared').FileAccessOptions) => Promise<void>
+
+  /** 删除附加目录文件/目录（无工作区路径限制） */
+  deleteAttachedFile: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<void>
+
+  /** 将附加目录文件/目录移入系统回收站（无工作区路径限制） */
+  moveAttachedToTrash: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<void>
 
   /** 检查路径类型（文件 or 目录），用于拖拽检测 */
   checkPathsType: (paths: string[]) => Promise<{ directories: string[]; files: string[] }>
@@ -1659,16 +1659,6 @@ const electronAPI: ElectronAPI = {
 
   windowIsMaximized: () => {
     return ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_MAXIMIZED)
-  },
-
-  windowIsFullScreen: () => {
-    return ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_FULLSCREEN)
-  },
-
-  onWindowFullScreenChanged: (callback: (isFullScreen: boolean) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, isFullScreen: boolean): void => callback(isFullScreen)
-    ipcRenderer.on(IPC_CHANNELS.WINDOW_FULLSCREEN_CHANGED, listener)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_FULLSCREEN_CHANGED, listener)
   },
 
   onWindowResize: (callback: () => void) => {
@@ -2464,10 +2454,6 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_SESSION_OPENAI_THINKING, sessionId, level)
   },
 
-  updateAgentQueueAutoSend: (sessionId: string, enabled: boolean) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_QUEUE_AUTO_SEND, { sessionId, enabled })
-  },
-
   getPiReasoningCapability: (provider: ProviderType, modelId: string | undefined) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PI_REASONING_CAPABILITY, provider, modelId)
   },
@@ -2808,6 +2794,14 @@ const electronAPI: ElectronAPI = {
 
   moveAttachedFile: (filePath: string, targetDir: string, access?: import('@profer/shared').FileAccessOptions) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.MOVE_ATTACHED_FILE, filePath, targetDir, access)
+  },
+
+  deleteAttachedFile: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_ATTACHED_FILE, filePath, access)
+  },
+
+  moveAttachedToTrash: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.MOVE_ATTACHED_TO_TRASH, filePath, access)
   },
 
   checkPathsType: (paths: string[]) => {

@@ -22,10 +22,10 @@ import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { leftSidebarWidthAtom } from '@/atoms/sidebar-atoms'
 import { sidebarCollapsedAtom } from '@/atoms/tab-atoms'
+import { detectIsWindows } from '@/lib/platform'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { usePanelAutoLayout } from '@/hooks/usePanelAutoLayout'
 import { cn } from '@/lib/utils'
-import { detectIsMac } from '@/lib/platform'
 
 const MIN_RIGHT_PANEL_WIDTH = 300
 const MAX_RIGHT_PANEL_WIDTH = 560
@@ -48,8 +48,6 @@ export interface AppShellProps {
 
 export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   const appMode = useAtomValue(appModeAtom)
-  const isMac = React.useMemo(() => detectIsMac(), [])
-  const [isNativeFullScreen, setIsNativeFullScreen] = React.useState(false)
   const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
@@ -86,29 +84,10 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   const filePanelActive = !isTeamWorkspace && showRightPanel
   // 统一自适应可见性：窗口 resize 监听 + 浏览器/文件面板可见性计算（挂载于此布局容器）
   usePanelAutoLayout({ filePanelActive })
+  const isWindows = React.useMemo(() => detectIsWindows(), [])
   // 团队工作区的默认 Agent 页仍展示文件主区；规划中心必须进入 MainArea，
   // 否则 TeamWorkspaceView 会覆盖其中的 PlanningView。
   const showTeamWorkspaceView = isTeamWorkspace && appMode === 'agent' && activeView !== 'agent-skills' && activeView !== 'planning'
-  const showMacGlobalChrome = isMac && activeView !== 'planning' && activeView !== 'agent-skills'
-
-  // 原生全屏下 macOS 不再需要为左侧栏保留全局 chrome 高度。
-  // 进入/退出全屏由主进程事件直接推送；resize 仅作为初始化/异常回退。
-  React.useEffect(() => {
-    if (!isMac) return
-    let cancelled = false
-    const syncNativeFullScreen = async (): Promise<void> => {
-      const next = await window.electronAPI.windowIsFullScreen()
-      if (!cancelled) setIsNativeFullScreen(next)
-    }
-    void syncNativeFullScreen()
-    const removeFullScreenListener = window.electronAPI.onWindowFullScreenChanged((next) => setIsNativeFullScreen(next))
-    const removeResizeListener = window.electronAPI.onWindowResize(() => { void syncNativeFullScreen() })
-    return () => {
-      cancelled = true
-      removeFullScreenListener()
-      removeResizeListener()
-    }
-  }, [isMac])
 
   // 窗口标题设为用户名
   React.useEffect(() => {
@@ -219,30 +198,27 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   return (
     <WindowControlsTemplateProvider>
     <AppShellProvider value={contextValue}>
-      {/* Mac 的 53px chrome 为 37px Tab 行保留上下各 8px，不属于左侧栏；Windows 保持原有页面内顶栏。 */}
+      {/* 只保留顶端 8px 的全局拖拽缝隙。
+          过去这里覆盖 50px 高的固定 drag-region；它会和 TabBar 内的 no-drag
+          控件重叠。Electron 的原生 app-region 命中并不总是遵循 CSS z-index，
+          尤其当皮肤为 TabBar 创建 backdrop-filter 合成层时，Tab、工具按钮会被
+          误判为窗口拖动区而不可点击。TabBar、侧栏和各独立视图已经各自提供
+          局部 drag region，因此全局层不能覆盖任何实际交互区域。 */}
       <div
-        className={cn('shell-bg h-screen w-screen flex flex-col overflow-clip bg-surface-shell', showMacGlobalChrome && 'mac-global-shell', isNativeFullScreen && 'native-fullscreen-shell')}
-        style={{ '--app-sidebar-column': `${(sidebarCollapsed ? 60 : clampedLeftSidebarWidth) + 8 + (isClassic ? 8 : 0)}px` } as React.CSSProperties}
-      >
-        {showMacGlobalChrome && (
-          <div className="mac-global-chrome flex h-[53px] flex-none min-w-0">
-            <div className="mac-global-sidebar-slot h-full flex-none titlebar-drag-region" />
-            <div className="mac-global-tab-slot min-w-0 flex-1">
-              <TabBar teamMode={isTeamWorkspace} variant="mac-global" />
-            </div>
-          </div>
+        className={cn(
+          'titlebar-drag-region fixed top-0 left-0 h-2 z-50',
+          isWindows ? 'right-[126px]' : 'right-0'
         )}
-        <div className="flex min-h-0 flex-1">
+      />
+
+      <div className="shell-bg h-screen w-screen flex overflow-clip bg-surface-shell">
         {/* 左侧边栏：可折叠，可拖拽调整宽度 */}
         <div
           className={cn(
-            isClassic ? (showMacGlobalChrome ? 'px-2 pb-2 pr-0' : 'p-2 pr-0') : '',
+            isClassic ? 'p-2 pr-0' : '',
             // 收起 rail 必须压过其右侧的分隔线；冷启动直接恢复收起状态时，
             // 分隔线处于更高层会裁掉 rail 最右侧，造成整列图标视觉上向左偏移。
             sidebarCollapsed ? 'relative z-[62] flex-none crt-sidebar' : 'relative z-[70] flex-none crt-sidebar',
-            // 原生全屏时把左侧卡片上沿对齐到右侧顶栏标记线；状态变化由 CSS 平滑过渡。
-            'native-fullscreen-sidebar',
-            isNativeFullScreen && 'native-fullscreen-active',
           )}
         >
           <LeftSidebar width={clampedLeftSidebarWidth} noTransition={isDraggingLeftSidebar} />
@@ -259,18 +235,18 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
         </div>
 
         {/* 中间容器 */}
-        <div className={cn('main-area-glass-host flex-1 min-w-0 p-2 relative z-[60]', showMacGlobalChrome && 'pt-0')}>
+        <div className="main-area-glass-host flex-1 min-w-0 p-2 relative z-[60]">
           {/* 团队工作区也必须挂载统一顶栏；否则团队页面与个人页面各自拥有一套入口，
               标签切换、关闭和拖拽排序会与团队 Agent 面板脱节。 */}
           {showTeamWorkspaceView ? (
             <div className="flex h-full min-h-0 flex-col">
-              {!showMacGlobalChrome && <TabBar teamMode />}
+              <TabBar teamMode />
               <div className="min-h-0 flex-1">
                 <TeamWorkspaceView />
               </div>
             </div>
           ) : (
-            <MainArea showTabBar={!isMac} />
+            <MainArea />
           )}
         </div>
 
@@ -282,9 +258,7 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
             className={cn(
               // 只让 SidePanel 自身展开。若同时动画化外层 padding，面板会在横向展开时
               // 从 top: 0 平移到 p-2 的最终基线，视觉上像从右上方斜着滑入。
-              filePanelVisible
-                ? cn('relative z-[70] flex items-stretch crt-sidebar p-2 pl-0', isMac && 'pt-0')
-                : 'relative z-[60] flex items-stretch crt-sidebar p-0'
+              filePanelVisible ? 'relative z-[70] flex items-stretch crt-sidebar p-2 pl-0' : 'relative z-[60] flex items-stretch crt-sidebar p-0'
             )}
           >
             <RightSidePanel width={clampedRightPanelWidth} />
@@ -300,7 +274,6 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
             )}
           </div>
         )}
-        </div>
       </div>
     </AppShellProvider>
     </WindowControlsTemplateProvider>

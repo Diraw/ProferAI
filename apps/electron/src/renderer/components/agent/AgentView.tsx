@@ -718,20 +718,12 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
   // setter 内的 `prev.has(sessionId)` 守卫避免写入 → atom 引用变化 → effect 自循环（React #185）。
   const [agentRuntime, setAgentRuntime] = useAtom(agentRuntimeAtom)
   const [runtimeSwitchInFlight, setRuntimeSwitchInFlight] = React.useState(false)
-  const [runtimeCapabilities, setRuntimeCapabilities] = React.useState<import('@profer/shared').AgentRuntimeCapabilities | null>(null)
   // state 渲染前的连续点击也必须串行化，不能仅依赖 disabled 的下一帧更新。
   const runtimeSwitchInFlightRef = React.useRef(false)
   // 已加载会话以 metadata 为唯一真相来源；历史缺省 runtime 仍按 Claude 回退。
   const sessionAgentRuntime: AgentRuntime = sessionMeta
     ? sessionMeta.agentRuntime ?? 'claude'
     : agentRuntime
-  React.useEffect(() => {
-    let cancelled = false
-    window.electronAPI.getAgentRuntimeCapabilities(sessionAgentRuntime)
-      .then((capabilities) => { if (!cancelled) setRuntimeCapabilities(capabilities) })
-      .catch(() => { if (!cancelled) setRuntimeCapabilities(null) })
-    return () => { cancelled = true }
-  }, [sessionAgentRuntime])
   // 当前 Pi 模型的推理档位能力（异步桥接，供思考档位菜单动态展示）。
   const [piReasoningCapability, setPiReasoningCapability] = React.useState<import('@profer/shared').ReasoningCapability | undefined>(undefined)
   React.useEffect(() => {
@@ -1064,7 +1056,7 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
       const parent = getFileParentPath(filePath)
       if (parent && !dirs.includes(parent)) dirs.push(parent)
     }
-    // 将工作区根目录加入候选，使 workspace-profile.md 等工作区资料可被相对路径解析
+    // 将工作区根目录加入候选，使 workspace 级别的文件（如 CLAUDE.md）可被相对路径解析
     if (sessionPath) {
       const wsRoot = sessionPath.replace(/[\\/][^\\/]+$/, '')
       if (wsRoot && !dirs.includes(wsRoot)) dirs.push(wsRoot)
@@ -2863,11 +2855,7 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
         <ModelSelector
           filterChannelIds={sessionAgentRuntime === 'pi' ? undefined : agentChannelIds}
           preferredProtocol={sessionAgentRuntime === 'pi' ? 'openai' : 'anthropic'}
-          // Pi supports both OpenAI and Anthropic wire protocols; preferredProtocol
-          // only controls ordering/labels and must not hide Claude channels.
-          strictProtocolFilter={sessionAgentRuntime !== 'pi'}
-          composerTool
-          tabletMode={tabletMode}
+          strictProtocolFilter
           externalSelectedModel={externalSelectedModel}
           onModelSelect={handleModelSelect}
         />
@@ -2883,7 +2871,7 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
         />
       ),
     },
-    { key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} /> },
+    { key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} composerTool tabletMode={tabletMode} /> },
     { key: 'preset', node: <PresetSelector sessionId={sessionId} persistedPresetId={sessionMeta?.presetId} workspaceSlug={sessionMeta?.workspaceId ? workspaces.find((w) => w.id === sessionMeta.workspaceId)?.slug : undefined} open={presetMenuOpen} onOpenChange={setPresetMenuOpen} onManagePresets={openWorkspacePresets} /> },
     {
       key: 'thinking',
@@ -3052,7 +3040,6 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
         <AgentMessages
           sessionId={sessionId}
           sessionModelId={agentModelId || undefined}
-          agentRuntime={sessionAgentRuntime}
           messagesLoaded={messagesLoaded}
           persistedSDKMessages={persistedSDKMessages}
           streaming={streaming}
@@ -3061,15 +3048,10 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
           sessionPath={sessionPath}
           attachedDirs={allAttachedDirs}
           stoppedByUser={stoppedByUser}
-          streamError={agentError}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
           onFork={handleFork}
-          // Pi/Claude 都可能实现不同的回退语义；当前由主进程 capability 契约决定，
-          // 暂时仅对已明确支持的 Claude 暴露按钮，避免 UI 先显示再失败。
-          onRewind={runtimeCapabilities?.supportsRewind
-            ? handleRewindRequest
-            : (runtimeCapabilities === null && sessionAgentRuntime === 'claude' ? handleRewindRequest : undefined)}
+          onRewind={handleRewindRequest}
           onCompact={handleCompact}
           tabletMode={tabletMode}
           onLoadEarlierHistory={handleLoadEarlierHistory}
@@ -3157,7 +3139,6 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
               items={queuedMessages}
               canSendNow={canSendQueuedNow}
               autoSend={autoSendEnabled}
-              agentRunning={streaming}
               onToggleAutoSend={handleToggleAutoSend}
               onSendNow={handleSendQueuedNow}
               onRecall={handleRecallQueuedMessage}

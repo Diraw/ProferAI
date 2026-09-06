@@ -3702,13 +3702,6 @@ export function registerIpcHandlers(): void {
     },
   )
 
-  // 队列「自动发送」开关 per-session 持久化（手动切换 / 自动由开到关均经此写入 meta）
-  ipcMain.handle(
-    AGENT_IPC_CHANNELS.UPDATE_QUEUE_AUTO_SEND,
-    (_e, input: { sessionId: string; enabled: boolean }): AgentSessionMeta =>
-      updateAgentSessionMeta(input.sessionId, { autoQueueSendEnabled: input.enabled }),
-  )
-
   // 查询某 Pi 模型可用的推理档位能力（renderer 思考档位菜单动态展示）
   ipcMain.handle(
     AGENT_IPC_CHANNELS.GET_PI_REASONING_CAPABILITY,
@@ -4957,6 +4950,46 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 删除附加目录文件/目录
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.DELETE_ATTACHED_FILE,
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<void> => {
+      const { rmSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+
+      const safePath = resolve(filePath)
+      const options = normalizeFileAccessOptions(access)
+      if (!isPathAllowed(safePath, options)) {
+        throw new Error('访问路径不在允许范围内')
+      }
+      try {
+        rmSync(safePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+        console.log(`[附加目录] 已删除: ${safePath}`)
+      } catch (err) {
+        throw new Error(await toFsErrorMessage(err, '删除', safePath))
+      }
+    }
+  )
+
+  // 将附加目录文件/目录移入系统回收站
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.MOVE_ATTACHED_TO_TRASH,
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<void> => {
+      const { resolve } = await import('node:path')
+      const safePath = resolve(filePath)
+      const options = normalizeFileAccessOptions(access)
+      if (!isPathAllowed(safePath, options)) {
+        throw new Error('访问路径不在允许范围内')
+      }
+      try {
+        await shell.trashItem(safePath)
+        console.log(`[附加目录] 已移入回收站: ${safePath}`)
+      } catch (err) {
+        throw new Error(await toFsErrorMessage(err, '移入回收站', safePath))
+      }
+    }
+  )
+
   // 检查路径类型（文件 or 目录），用于拖拽检测
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CHECK_PATHS_TYPE,
@@ -6091,9 +6124,16 @@ export function registerIpcHandlers(): void {
     IPC_CHANNELS.WINDOW_MAXIMIZE,
     async (event) => {
       const win = BrowserWindow.fromWebContents(event.sender)
-      if (win && !win.isDestroyed()) {
-        win.isMaximized() ? win.unmaximize() : win.maximize()
+      if (!win || win.isDestroyed()) return
+
+      // macOS 绿色按钮的原生语义是进入/退出独立全屏 Space，
+      // 不是把窗口手动拉到 display.workArea。自定义红绿灯也必须保持这个语义。
+      if (process.platform === 'darwin') {
+        win.setFullScreen(!win.isFullScreen())
+        return
       }
+
+      win.isMaximized() ? win.unmaximize() : win.maximize()
     }
   )
 
@@ -6112,11 +6152,6 @@ export function registerIpcHandlers(): void {
       return win && !win.isDestroyed() ? win.isMaximized() : false
     }
   )
-
-  ipcMain.handle(IPC_CHANNELS.WINDOW_IS_FULLSCREEN, async (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    return win && !win.isDestroyed() ? win.isFullScreen() : false
-  })
 
   // ===== 任务 / 日程（Planning）=====
 
