@@ -30,6 +30,26 @@ describe('Pi native retry classifier', () => {
   })
 
   test.each([
+    'Summarization failed: OpenAI 官方上游服务当前请求量较大，暂时无法及时响应',
+    'Summarization failed: 服务繁忙，请稍后重试',
+  ])('classifies localized summarization overload "%s" as retryable', (errorMessage) => {
+    expect(isRetryableAssistantError(failedAssistant(errorMessage))).toBe(true)
+  })
+
+  test('retries a localized summarization overload through Pi’s native retry loop', async () => {
+    let calls = 0
+    const result = await retryAssistantCall(async () => {
+      calls += 1
+      return calls === 1
+        ? failedAssistant('Summarization failed: OpenAI 官方上游服务当前请求量较大，暂时无法及时响应')
+        : { role: 'assistant', content: [], stopReason: 'stop' } as unknown as AssistantMessage
+    }, { enabled: true, maxRetries: 1, baseDelayMs: 0 }, undefined)
+
+    expect(calls).toBe(2)
+    expect(result.stopReason).toBe('stop')
+  })
+
+  test.each([
     'Upstream response stream was interrupted',
     'peer closed connection',
     'incomplete chunked read',

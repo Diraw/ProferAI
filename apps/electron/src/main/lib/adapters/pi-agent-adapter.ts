@@ -2128,6 +2128,22 @@ export class PiAgentAdapter implements AgentProviderAdapter {
             case 'auto_retry_end':
               for (const retry of mapPiNativeRetryEvent(event)) input.onRetry?.(retry)
               break
+            case 'summarization_retry_scheduled':
+              // Pi 0.84.3 会在摘要请求内部自动重试；转发退避状态，避免前端把压缩失败误显示成已终止。
+              input.onRetry?.({
+                status: 'starting',
+                attempt: event.attempt,
+                maxAttempts: event.maxAttempts,
+                delaySeconds: event.delayMs / 1_000,
+                reason: event.errorMessage,
+              })
+              break
+            case 'summarization_retry_attempt_start':
+              // 实际请求由 Pi 在退避后发起；保留 starting 状态直到 finished，避免闪烁。
+              break
+            case 'summarization_retry_finished':
+              input.onRetry?.({ status: 'cleared' })
+              break
             case 'tool_execution_update':
               queue.push({
                 type: 'tool_progress',
