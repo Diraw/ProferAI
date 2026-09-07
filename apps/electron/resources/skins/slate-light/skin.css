@@ -69,6 +69,14 @@
   --scroll-thumb-bg: hsl(18 20% 67% / 0.22);
   --scroll-thumb-hover: hsl(18 20% 67% / 0.35);
   --scroll-thumb-active: hsl(18 20% 67% / 0.45);
+
+  /* 热力图 0 级格：使用浅色实心填充，保持原有热力图层次。 */
+  --heatmap-empty-cell: 40 8% 82%;
+}
+
+/* 仅云朵舞者覆盖 0 级格；其他皮肤继续使用组件原有的 bg-muted。 */
+html.skin-slate-light .heatmap-empty-cell {
+  background-color: hsl(var(--heatmap-empty-cell));
 }
 
 /* ===== Skin Surface Contract v2 =====

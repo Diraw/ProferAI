@@ -200,7 +200,7 @@ export function UsageHeatmap({ workspaceId }: UsageHeatmapProps = {}): React.Rea
                 <Tooltip key={cell.date} delayDuration={200}>
                   <TooltipTrigger asChild>
                     <div
-                      className={`rounded-[2px] ${LEVEL_CLASSES[cell.level]} transition-colors hover:!opacity-80 hover:ring-1 hover:ring-primary/30`}
+                      className={`${cell.level === 0 ? 'heatmap-empty-cell' : ''} rounded-[2px] ${LEVEL_CLASSES[cell.level]} transition-colors hover:!opacity-80 hover:ring-1 hover:ring-primary/30`}
                       style={{ width: CELL, height: CELL }}
                     />
                   </TooltipTrigger>
@@ -220,7 +220,7 @@ export function UsageHeatmap({ workspaceId }: UsageHeatmapProps = {}): React.Rea
         {LEVEL_CLASSES.map((cls, i) => (
           <div
             key={i}
-            className={`rounded-[2px] ${cls}`}
+            className={`${i === 0 ? 'heatmap-empty-cell' : ''} rounded-[2px] ${cls}`}
             style={{ width: CELL, height: CELL }}
           />
         ))}
