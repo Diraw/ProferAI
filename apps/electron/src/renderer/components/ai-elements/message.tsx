@@ -22,7 +22,7 @@ import Markdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { ChevronDown, ChevronUp, Paperclip, FileText, Sparkles, Server, Download, MessageSquareText, Link2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Paperclip, FileText, Sparkles, Server, Download, MessageSquareText, Link2, Copy, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { shouldInspectMermaidCodeBlock, shouldRenderMermaidCodeBlock } from '@/lib/mermaid-detection'
 import { normalizeLatexDelimiters } from '@/lib/normalize-latex'
@@ -407,6 +407,39 @@ export function remarkWikilinks() {
   }
 }
 
+// ----- remarkTableSource：为 GFM 表格注入原始 Markdown 源码 -----
+// 通过 mdast 节点的 position（相对预处理后字符串的 offset）slice 出每个表格的精确源码，
+// 写入 data.hProperties，由 remark-rehype 透传给 table 组件，供「复制为 Markdown 源码」使用。
+
+interface MdastTableNode extends MdastParent {
+  type: 'table'
+  position?: { start?: { offset?: number }; end?: { offset?: number } }
+  data?: { hProperties?: Record<string, unknown> }
+}
+
+export function remarkTableSource(source: string): RemarkPluginFn {
+  return () => (tree: MdastParent) => {
+    const visit = (node: MdastNode): void => {
+      const generic = node as MdastGenericNode
+      if (generic.type === 'table') {
+        const table = generic as MdastTableNode
+        const start = table.position?.start?.offset
+        const end = table.position?.end?.offset
+        if (start != null && end != null && end > start) {
+          const raw = source.slice(start, end)
+          const data = table.data ?? {}
+          data.hProperties = { ...(data.hProperties ?? {}), 'data-table-source': raw }
+          table.data = data
+        }
+      }
+      if (generic.children) {
+        for (const child of generic.children) visit(child)
+      }
+    }
+    for (const child of tree.children ?? []) visit(child)
+  }
+}
+
 const BasePathsContext = React.createContext<string[] | undefined>(undefined)
 
 /** 双链（[[...]]）点击处理：由记忆面板等启用双链的宿主提供，跳到对应记忆文件 */
@@ -635,6 +668,116 @@ const MarkdownPre = React.memo(function MarkdownPre({
   return <CodeBlock>{preChildren}</CodeBlock>
 })
 
+// ===== MarkdownTable 表格渲染 + 复制 =====
+
+type TableFormat = 'markdown' | 'tsv'
+
+/** 从 react-markdown 渲染后的表格 children 提取二维纯文本（thead/tbody → tr → th/td） */
+function parseTableChildren(children: React.ReactNode): string[][] {
+  const rows: string[][] = []
+  React.Children.forEach(children, (section) => {
+    if (!React.isValidElement(section)) return
+    const sectionType = typeof section.type === 'string' ? section.type : ''
+    if (sectionType !== 'thead' && sectionType !== 'tbody') return
+    React.Children.forEach((section.props as { children?: React.ReactNode }).children, (row) => {
+      if (!React.isValidElement(row) || row.type !== 'tr') return
+      const cells: string[] = []
+      React.Children.forEach((row.props as { children?: React.ReactNode }).children, (cell) => {
+        if (!React.isValidElement(cell)) return
+        const cellType = typeof cell.type === 'string' ? cell.type : ''
+        if (cellType !== 'th' && cellType !== 'td') return
+        cells.push(extractText((cell.props as { children?: React.ReactNode }).children))
+      })
+      if (cells.length > 0) rows.push(cells)
+    })
+  })
+  return rows
+}
+
+/** 二维数组 → TSV（制表符分隔），单元格内换行折叠为空格 */
+function rowsToTsv(rows: string[][]): string {
+  return rows
+    .map((row) => row.map((cell) => cell.replace(/\s*\n\s*/g, ' ')).join('\t'))
+    .join('\n')
+}
+
+/** 二维数组 → Markdown 表格源码（兜底：无精确源码时用纯文本重建） */
+function rowsToMarkdown(rows: string[][]): string {
+  if (rows.length === 0) return ''
+  const header = rows[0]!
+  const escape = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+  const lines: string[] = [
+    `| ${header.map(escape).join(' | ')} |`,
+    `| ${header.map(() => '---').join(' | ')} |`,
+  ]
+  for (const row of rows.slice(1)) {
+    lines.push(`| ${Array.from({ length: header.length }, (_, i) => escape(row[i] ?? '')).join(' | ')} |`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * GFM 表格渲染器：在表格右上角提供复制操作条，支持 Markdown 源码 / TSV 两种格式切换。
+ * - Markdown：优先用 remarkTableSource 注入的精确源码（保留单元格内联格式），缺失时纯文本重建。
+ * - TSV：始终从渲染后的单元格纯文本提取，粘贴到 Excel/WPS 最干净。
+ */
+const MarkdownTable = React.memo(function MarkdownTable(
+  props: { children?: React.ReactNode }
+): React.ReactElement {
+  const children = props.children
+  const rawProps = props as unknown as Record<string, unknown>
+  const markdownSource =
+    (rawProps['data-table-source'] as string | undefined) ??
+    (rawProps.dataTableSource as string | undefined)
+
+  const [copied, setCopied] = React.useState(false)
+  const [format, setFormat] = React.useState<TableFormat>('markdown')
+
+  const tsvText = React.useMemo(() => rowsToTsv(parseTableChildren(children)), [children])
+  const markdownText = React.useMemo(
+    () => markdownSource || rowsToMarkdown(parseTableChildren(children)),
+    [markdownSource, children]
+  )
+
+  const handleCopy = React.useCallback(async () => {
+    const text = format === 'markdown' ? markdownText : tsvText
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (error) {
+      console.error('[MarkdownTable] 复制失败:', error)
+    }
+  }, [format, markdownText, tsvText])
+
+  return (
+    <div className="group/table relative my-3 before:absolute before:-top-8 before:inset-x-0 before:h-8 before:content-['']">
+      {/* 操作条：浮在表格顶部上方、右对齐，hover 时出现 */}
+      <div className="absolute -top-8 right-0 hidden items-center gap-0.5 rounded-md border border-border/60 bg-background/95 px-0.5 py-0.5 shadow-sm group-hover/table:flex">
+        <button
+          type="button"
+          onClick={() => setFormat((f) => (f === 'markdown' ? 'tsv' : 'markdown'))}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+          title={format === 'markdown' ? '复制为 Markdown 表格源码，点击切换为 TSV' : '复制为 TSV（制表符分隔），点击切换为 Markdown'}
+        >
+          {format === 'markdown' ? 'Markdown' : 'TSV'}
+        </button>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+        >
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          <span>{copied ? '已复制' : '复制'}</span>
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="my-0">{children}</table>
+      </div>
+    </div>
+  )
+})
+
 /** 行内代码 / 文件路径渲染器 */
 const MarkdownInlineCode = React.memo(function MarkdownInlineCode({
   children: codeChildren,
@@ -698,10 +841,22 @@ const MarkdownInlineCode = React.memo(function MarkdownInlineCode({
 /** 使用 react-markdown 渲染 assistant 消息内容，代码块使用 Shiki 语法高亮 */
 export const MessageResponse = React.memo(
   function MessageResponse({ children, className, basePath, basePaths, remarkPlugins }: MessageResponseProps): React.ReactElement {
-    // 合并内置 + 外部 remark 插件（保持引用稳定）
+    // 预处理后的 Markdown 文本（供 remarkTableSource 用 position 精确定位表格源码）
+    const processed = React.useMemo(
+      () => normalizeMarkdownEmphasisWhitespace(
+        normalizeLatexDelimiters(children.replace(/<!--PROMA_AUTOMATION:[\s\S]*?-->/g, '').trim())
+      ),
+      [children]
+    )
+
+    // 合并内置 + 外部 remark 插件（保持引用稳定），末尾追加表格源码标注插件
     const mergedRemarkPlugins = React.useMemo(
-      () => remarkPlugins ? [...REMARK_PLUGINS, ...remarkPlugins] : REMARK_PLUGINS,
-      [remarkPlugins]
+      () => {
+        const plugins = remarkPlugins ? [...REMARK_PLUGINS, ...remarkPlugins] : [...REMARK_PLUGINS]
+        plugins.push(remarkTableSource(processed))
+        return plugins
+      },
+      [remarkPlugins, processed]
     )
 
     // 稳定引用的 components 对象，避免 react-markdown 每帧重建组件映射
@@ -711,6 +866,7 @@ export const MessageResponse = React.memo(
       code: (props: React.HTMLAttributes<HTMLElement>) => (
         <MarkdownInlineCode {...props} basePath={basePath} basePaths={basePaths} />
       ),
+      table: MarkdownTable,
     }), [basePath, basePaths])
 
     return (
@@ -729,9 +885,7 @@ export const MessageResponse = React.memo(
           urlTransform={mentionUrlTransform}
           components={components}
         >
-          {normalizeMarkdownEmphasisWhitespace(
-            normalizeLatexDelimiters(children.replace(/<!--PROMA_AUTOMATION:[\s\S]*?-->/g, '').trim())
-          )}
+          {processed}
         </Markdown>
       </div>
     )
