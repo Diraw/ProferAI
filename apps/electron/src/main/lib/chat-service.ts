@@ -14,7 +14,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { WebContents } from 'electron'
-import { CHAT_IPC_CHANNELS } from '@profer/shared'
+import { CHAT_IPC_CHANNELS, resolveXaiCredentialMode } from '@profer/shared'
 import { pushChatStream } from './chat-stream-bus'
 import type { ChatSendInput, ChatMessage, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
 import {
@@ -270,6 +270,13 @@ export async function sendMessage(
   } else {
     try {
       apiKey = decryptApiKey(channelId)
+      if (channel.provider === 'xai' && resolveXaiCredentialMode(channel.credentialMode, apiKey) === 'oauth') {
+        pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
+          conversationId,
+          error: 'xAI 订阅 OAuth 当前仅支持 Pi Agent 实验模式；Chat 请配置 xAI API Key',
+        })
+        return
+      }
     } catch {
       pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
         conversationId,
@@ -662,6 +669,17 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
   const channel = channels.find((c) => c.id === channelId)
   if (!channel) {
     console.warn('[标题生成] 渠道不存在:', channelId)
+    return null
+  }
+
+  try {
+    const storedSecret = decryptApiKey(channelId)
+    if (channel.provider === 'xai' && resolveXaiCredentialMode(channel.credentialMode, storedSecret) === 'oauth') {
+      console.info('[标题生成] xAI 订阅 OAuth 不走 Chat API Key 标题生成')
+      return null
+    }
+  } catch {
+    console.warn('[标题生成] 解密 API Key 失败')
     return null
   }
 

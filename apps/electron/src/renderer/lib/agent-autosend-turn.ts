@@ -27,6 +27,8 @@ export interface AutoSendTurnState {
   turnVersion: number
   /** 已消费版本号 */
   consumedVersion: number
+  /** 当前会话是否允许在一轮结束后自动发送队首。 */
+  autoSendEnabled: boolean
   /** 当前队列消息数 */
   queuedCount: number
   /** live 消息未清空（上一轮执行还在 live，需等进入 persisted 再发） */
@@ -37,6 +39,8 @@ export interface AutoSendTurnState {
 }
 
 export function evaluateAutoSendTurn(state: AutoSendTurnState): AutoSendTurnDecision {
+  // 开关关闭时仍消费当前轮结束信号，避免之后重新开启时误用陈旧信号。
+  if (!state.autoSendEnabled) return 'consume'
   // 没有未消费的轮结束事件：避免仅因入队触发旧的轮结束信号。
   if (state.consumedVersion >= state.turnVersion) return 'idle'
   // live 未清空：暂时等待（不消费，等下次 effect 重跑）。

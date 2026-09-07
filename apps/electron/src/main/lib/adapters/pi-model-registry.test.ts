@@ -115,6 +115,43 @@ describe('Pi runtime 智谱团队版认证', () => {
   })
 })
 
+describe('Pi runtime xAI API Key provider', () => {
+  test('Given xAI API Key When buildModel Then 使用 Pi 内置 xai Responses 模型并隔离 runtime key', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-api-key',
+      apiKey: 'xai-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      baseUrl: 'https://api.x.ai/v1',
+      model: 'grok-4.6',
+    })
+
+    expect(result.model.provider).toBe('xai')
+    expect(result.model.api).toBe('openai-responses')
+    expect(result.model.id).toBe('grok-4.6')
+  })
+
+  test('Given xAI Responses 中转站的未知模型 When buildModel Then 在隔离 runtime 注册该模型并复用中转 Base URL', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-relay',
+      apiKey: 'relay-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      baseUrl: 'https://relay.example.com/v1/responses',
+      model: 'grok-4.6-relay',
+    })
+
+    expect(result.model.provider).toBe('xai')
+    expect(result.model.api).toBe('openai-responses')
+    expect(result.model.id).toBe('grok-4.6-relay')
+    expect(result.model.baseUrl).toBe('https://relay.example.com/v1')
+  })
+})
+
 describe('Pi runtime Ollama 双协议注册', () => {
   test('Given commercial Anthropic relay base URL When buildModel Then keep relay base without duplicating messages path', async () => {
     const sdk = await import('@earendil-works/pi-coding-agent')

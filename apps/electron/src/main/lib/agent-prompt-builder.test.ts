@@ -134,7 +134,8 @@ describe('buildSystemPrompt', () => {
     expect(piPrompt).not.toContain('mcp__agent-presets__preset_create')
     expect(piPrompt).not.toContain('用 `proma_task_create` 创建子任务')
     expect(claudePrompt).toContain('用 `proma_task_create` 创建子任务')
-    expect(claudePrompt).toContain('预设创建、修改、删除、设为默认和切换当前会话，必须由用户在设置页或会话工具栏执行')
+    expect(claudePrompt).toContain('写入口只在当前用户消息明确要求对应操作时按轮注册')
+    expect(claudePrompt).toContain('更新和设为默认先返回影响摘要，只有用户下一条消息明确确认后才提交')
     expect(claudePrompt).not.toContain('mcp__agent-presets__preset_create')
     expect(piPrompt).toContain('不要等待 SDK 自动落盘')
     expect(piPrompt).toContain('可以读取和写入')
@@ -178,6 +179,60 @@ describe('buildSystemPrompt', () => {
     expect(claudePrompt).not.toContain('`mcp__planning__create_todo`')
     expect(piPrompt).toContain('`expectedUpdatedAt`')
     expect(piPrompt).toContain('Todo 删除仍由用户在规划中心操作')
+  })
+
+  test('预设创建/复制提示词只描述主进程意图 gate 实际开放的入口', () => {
+    const createPrompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-create',
+      permissionMode: 'auto',
+      isPiRuntime: true,
+      allowedPresetOperations: ['create'],
+    })
+    expect(createPrompt).toContain('`mcp__agent-presets__preset_create` 创建工作区预设')
+    expect(createPrompt).not.toContain('`mcp__agent-presets__preset_copy` 复制为工作区预设')
+    expect(createPrompt).toContain('创建或复制不改变当前会话或默认预设')
+
+    const copyPrompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-copy',
+      permissionMode: 'auto',
+      isPiRuntime: false,
+      allowedPresetOperations: ['copy'],
+    })
+    expect(copyPrompt).toContain('`preset_copy` 复制为工作区预设')
+    expect(copyPrompt).not.toContain('`preset_create` 创建工作区预设')
+    expect(copyPrompt).not.toContain('mcp__agent-presets__preset_copy')
+
+    const switchPrompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-switch',
+      permissionMode: 'auto',
+      isPiRuntime: true,
+      allowedPresetOperations: ['switch'],
+    })
+    expect(switchPrompt).toContain('`mcp__agent-presets__preset_switch_session` 切换当前会话预设')
+    expect(switchPrompt).toContain('当前轮能力快照保持不变、下一轮才生效')
+    expect(switchPrompt).not.toContain('`mcp__agent-presets__preset_create` 创建工作区预设')
+  })
+
+  test('预设 Level 2 变更先提案后确认，确认轮只提交冻结提案', () => {
+    const updatePrompt = buildSystemPrompt({
+      workspaceName: 'Demo', workspaceSlug: 'demo-workspace', sessionId: 'session-update', permissionMode: 'auto',
+      isPiRuntime: false, allowedPresetOperations: ['propose_update'],
+    })
+    expect(updatePrompt).toContain('`preset_propose_update` 提议更新工作区预设')
+    expect(updatePrompt).not.toContain('`preset_commit_change` 提交已确认的预设变更')
+
+    const commitPrompt = buildSystemPrompt({
+      workspaceName: 'Demo', workspaceSlug: 'demo-workspace', sessionId: 'session-commit', permissionMode: 'auto',
+      isPiRuntime: true, allowedPresetOperations: ['commit_change'],
+    })
+    expect(commitPrompt).toContain('`mcp__agent-presets__preset_commit_change` 提交已确认的预设变更')
+    expect(commitPrompt).not.toContain('`mcp__agent-presets__preset_propose_update` 提议更新工作区预设')
   })
 
   test('极简预设 suppressPromptSections 隐藏任务图指南、委派策略与记忆体系段落', () => {
@@ -313,7 +368,7 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('mcp__team-memory__list_team_memories')
   })
 
-  test('单工具裁剪时 Prompt 不描述已关闭的具体入口', () => {
+  test('单工具裁剪时 Prompt 不描述已关闭的具体入口，但保留同组可用能力', () => {
     const prompt = buildSystemPrompt({
       workspaceName: 'Demo',
       workspaceSlug: 'demo-workspace',
@@ -326,8 +381,80 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('`BrowserPreviewOpen`')
     expect(prompt).not.toContain('`WebSearch`')
     expect(prompt).not.toContain('`WebFetch`')
-    expect(prompt).not.toContain('## Profer 受管浏览器')
-    expect(prompt).not.toContain('BrowserObserve')
+    expect(prompt).toContain('## Profer 受管浏览器')
+    expect(prompt).toContain('BrowserObserve')
+    expect(prompt).toContain('BrowserScreenshot')
+  })
+
+  test('Browser/Preview SOP 按实际可用工具精确拼装', () => {
+    const browserScreenshotDisabled = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['BrowserScreenshot'],
+    })
+    expect(browserScreenshotDisabled).toContain('## Profer 受管浏览器')
+    expect(browserScreenshotDisabled).toContain('BrowserObserve')
+    expect(browserScreenshotDisabled).toContain('BrowserPreviewOpen')
+    expect(browserScreenshotDisabled).not.toContain('BrowserScreenshot')
+    expect(browserScreenshotDisabled).not.toContain('用浏览器截图检查视觉结果')
+
+    const browserObserveDisabled = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['BrowserObserve'],
+    })
+    expect(browserObserveDisabled).toContain('## Profer 受管浏览器')
+    expect(browserObserveDisabled).toContain('BrowserScreenshot')
+    expect(browserObserveDisabled).not.toContain('BrowserObserve')
+    expect(browserObserveDisabled).not.toContain('先调用 `BrowserObserve`')
+
+    const inspectPreviewDisabled = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['inspect_preview'],
+    })
+    expect(inspectPreviewDisabled).toContain('open_file_preview')
+    expect(inspectPreviewDisabled).toContain('inspect_file_preview')
+    expect(inspectPreviewDisabled).not.toContain('通用文件可按需使用 `inspect_preview`')
+
+    const openPreviewDisabled = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['open_file_preview'],
+    })
+    expect(openPreviewDisabled).toContain('inspect_preview')
+    expect(openPreviewDisabled).toContain('inspect_file_preview')
+    expect(openPreviewDisabled).not.toContain('必须先用 `open_file_preview`')
+    expect(openPreviewDisabled).toContain('使用 `inspect_file_preview` 检查当前用户可见的 Profer PPTX 正式预览')
+
+    const inspectFilePreviewDisabled = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['inspect_file_preview'],
+    })
+    expect(inspectFilePreviewDisabled).toContain('inspect_preview')
+    expect(inspectFilePreviewDisabled).toContain('open_file_preview')
+    expect(inspectFilePreviewDisabled).not.toContain('inspect_file_preview')
+    expect(inspectFilePreviewDisabled).toContain('PPTX 必须先用 `open_file_preview` 打开 Profer 正式文件预览')
+
+    const allPreviewDisabled = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-123',
+      permissionMode: 'auto',
+      disabledTools: ['inspect_preview', 'open_file_preview', 'inspect_file_preview'],
+    })
+    expect(allPreviewDisabled).not.toContain('文件内容与视觉预览')
   })
 
   test('六类能力硬禁用时 Prompt 与动态浏览器上下文不暴露对应入口', () => {

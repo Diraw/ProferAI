@@ -158,7 +158,7 @@ export function AgentSkillsView(): React.ReactElement {
       .getWorkspaceMemorySummary(data.workspaceSlug)
       .then((mem) => {
         setMemoryCount(
-          (mem.claudeMd.exists ? 1 : 0) + (mem.autoMemory.fileCount ?? 0),
+          (mem.workspaceProfile.exists ? 1 : 0) + (mem.autoMemory.fileCount ?? 0),
         );
       })
       .catch(() => {});

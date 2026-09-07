@@ -20,6 +20,7 @@ import { useLeftSidebar } from "./left-sidebar/use-left-sidebar";
 import { SidebarRail } from "./left-sidebar/rail";
 import { ExpandedSidebar } from "./left-sidebar/expanded-sidebar";
 import { SidebarDialogs } from "./left-sidebar/sidebar-dialogs";
+import { MacTrafficLights } from "./MacTrafficLights";
 
 export type { LeftSidebarProps } from "./left-sidebar/types";
 import type { LeftSidebarProps } from "./left-sidebar/types";
@@ -50,11 +51,12 @@ export function LeftSidebar({
         flexShrink: sidebarCollapsed ? 0 : 1,
       }}
     >
+      {sidebarCollapsed ? <SidebarRail s={s} /> : <ExpandedSidebar s={s} />}
+
+      {/* 红绿灯必须最后渲染，确保位于左上拖拽层之上；只有这块区域退出窗口拖拽。 */}
       {s.isMac && (
         <MacTrafficLights classic={isClassic} collapsed={sidebarCollapsed} />
       )}
-
-      {sidebarCollapsed ? <SidebarRail s={s} /> : <ExpandedSidebar s={s} />}
       {/* 迁移/搜索对话框：双视图共享状态，必须只在外层渲染唯一实例，
           否则 Radix Portal 双实例同时打开会叠出双遮罩+双内容 */}
       <SidebarDialogs s={s} />

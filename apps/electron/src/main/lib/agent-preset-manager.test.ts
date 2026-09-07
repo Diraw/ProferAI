@@ -9,7 +9,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentPreset, AgentPresetConfig } from '@profer/shared'
+import type { AgentPreset, AgentPresetConfig, PresetReference } from '@profer/shared'
 import {
   listAgentPresets,
   getAgentPreset,
@@ -32,6 +32,10 @@ import {
   deleteGlobalAgentPreset,
   enableGlobalPresetInWorkspace,
   disableGlobalPresetInWorkspace,
+  setWorkspacePresetEnabled,
+  getPresetReferenceReport,
+  rebindAndDisableGlobalPresetScope,
+  type RebindAndDisableDependencies,
   setDefaultPresetReference,
   ensurePresetSystemReady,
   __setAgentPresetMigrationWorkspacesForTest,
@@ -46,6 +50,8 @@ import {
   AGENT_PRESET_TOOL_GROUPS,
   AGENT_PRESET_CAPABILITY_GROUPS,
   AGENT_PRESET_TOOL_NAMES,
+  getAgentPresetCapabilityTool,
+  getAgentPresetCapabilityTools,
 } from '@profer/shared'
 
 const WS_A = 'ws-a'
@@ -77,6 +83,16 @@ describe('Capability Registry', () => {
     const names = AGENT_PRESET_CAPABILITY_GROUPS.flatMap((group) => group.toolNames)
     expect(new Set(names).size).toBe(names.length)
     expect(new Set(AGENT_PRESET_TOOL_NAMES)).toEqual(new Set(names))
+  })
+
+  test('工具级 registry 元数据完整且按 runtime 可查询', () => {
+    const tools = getAgentPresetCapabilityTools()
+    expect(tools.length).toBe(AGENT_PRESET_TOOL_NAMES.length)
+    expect(tools.every((tool) => tool.label && tool.hint && tool.runtimes.length > 0)).toBe(true)
+    expect(tools.every((tool) => ['read', 'write', 'external', 'destructive'].includes(tool.risk))).toBe(true)
+    expect(getAgentPresetCapabilityTool('mcp__collaboration__delegate_agent')?.risk).toBe('write')
+    expect(getAgentPresetCapabilityTools('claude').length).toBe(tools.length)
+    expect(getAgentPresetCapabilityTools('pi').length).toBe(tools.length)
   })
 })
 
@@ -160,11 +176,26 @@ describe('全局预设与作用域引用', () => {
     expect(() => resolvePresetReference(reference, WS_A)).toThrow('解除当前工作区生效范围')
   })
 
-  test('禁用 builtin-meta 预设时清理当前工作区默认引用', () => {
+  test('禁用 builtin-meta 默认预设时自动改用首个仍启用的预设', () => {
     setDefaultPresetId(WS_A, BUILTIN_PRESET_CODE)
     disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_CODE, presetScope: 'builtin-meta' })
+    expect(getDefaultPresetId(WS_A)).toBe(BUILTIN_PRESET_STANDARD)
+    expect(JSON.parse(readFileSync(join(tmpDir, WS_A, 'agent-presets.json'), 'utf8')).defaultPresetReference).toMatchObject({
+      presetId: BUILTIN_PRESET_STANDARD,
+      presetScope: 'builtin-meta',
+    })
+  })
+
+  test('禁用 standard 默认预设时自动改用 code，供加号新建会话继承', () => {
+    disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_STANDARD, presetScope: 'builtin-meta' })
+    expect(getDefaultPresetId(WS_A)).toBe(BUILTIN_PRESET_CODE)
+  })
+
+  test('仅当工作区没有任何可用预设时才清空默认值', () => {
+    disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_STANDARD, presetScope: 'builtin-meta' })
+    disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_CODE, presetScope: 'builtin-meta' })
+    disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_MINIMAL, presetScope: 'builtin-meta' })
     expect(getDefaultPresetId(WS_A)).toBe('')
-    expect(JSON.parse(readFileSync(join(tmpDir, WS_A, 'agent-presets.json'), 'utf8')).defaultPresetReference).toBeUndefined()
   })
 
   test('全局预设尚未在当前工作区生效时仍可直接设为默认', () => {
@@ -175,6 +206,161 @@ describe('全局预设与作用域引用', () => {
     expect(() => setDefaultPresetReference(WS_A, reference)).not.toThrow()
     expect(getDefaultPresetId(WS_A)).toBe(preset.id)
     expect(listAgentPresets(WS_A).some((item) => item.id === preset.id)).toBe(true)
+  })
+
+  test('重新启用全局预设时清除工作区的显式禁用 override', () => {
+    __setAgentPresetMigrationWorkspacesForTest([WS_A])
+    const preset = createGlobalAgentPreset({ name: '可恢复范围', description: '' })
+    const reference = { presetId: preset.id, presetScope: 'user-global' as const }
+    disableGlobalPresetInWorkspace(WS_A, reference)
+    expect(listAgentPresets(WS_A).some((item) => item.id === preset.id)).toBe(false)
+
+    enableGlobalPresetInWorkspace(WS_A, reference)
+    expect(listAgentPresets(WS_A).find((item) => item.id === preset.id)?.enabledInWorkspace).toBe(true)
+  })
+
+  test('引用报告按 workspaceScopes 展示无对象引用的生效工作区', () => {
+    __setAgentPresetMigrationWorkspacesForTest([WS_A, WS_B])
+    const preset = createGlobalAgentPreset({ name: '范围报告', description: '' })
+    const reference = { presetId: preset.id, presetScope: 'user-global' as const }
+    enableGlobalPresetInWorkspace(WS_A, reference)
+    disableGlobalPresetInWorkspace(WS_B, reference)
+
+    expect(getPresetReferenceReport(reference)).toMatchObject({
+      workspaceScopes: [{ workspaceSlug: WS_A, workspaceName: WS_A }],
+      blockers: [],
+      totalCount: 0,
+      canDelete: true,
+    })
+    disableGlobalPresetInWorkspace(WS_A, reference)
+    expect(getPresetReferenceReport(reference).workspaceScopes).toEqual([])
+  })
+
+  test('解除全局范围时将 workspace 默认引用改绑后再移除作用域', () => {
+    __setAgentPresetMigrationWorkspacesForTest([WS_A])
+    const preset = createGlobalAgentPreset({ name: '默认范围', description: '' })
+    const reference = { presetId: preset.id, presetScope: 'user-global' as const }
+    setDefaultPresetReference(WS_A, reference)
+
+    expect(getPresetReferenceReport(reference).blockers).toEqual([
+      expect.objectContaining({ workspaceSlug: WS_A, reason: 'workspace-default', objectIds: [WS_A] }),
+    ])
+    expect(() => disableGlobalPresetInWorkspace(WS_A, reference)).not.toThrow()
+    expect(getDefaultPresetId(WS_A)).toBe(BUILTIN_PRESET_STANDARD)
+    expect(getPresetReferenceReport(reference)).toMatchObject({ workspaceScopes: [], blockers: [], canDelete: true })
+  })
+
+  test('Given no references When atomically disabling scope Then no replacement is required', () => {
+    __setAgentPresetMigrationWorkspacesForTest([WS_A])
+    const preset = createGlobalAgentPreset({ name: '无引用范围', description: '' })
+    const source = { presetId: preset.id, presetScope: 'user-global' as const }
+    const result = rebindAndDisableGlobalPresetScope(WS_A, source)
+
+    expect(result).toMatchObject({
+      workspaceSlug: WS_A,
+      source,
+      reboundDefaults: 0,
+      reboundSessions: 0,
+      reboundAutomations: 0,
+      scopeDisabled: true,
+    })
+    expect(getPresetReferenceReport(source).workspaceScopes).toEqual([])
+  })
+
+  test('Given mixed references When rebind succeeds Then all references move before scope removal', () => {
+    const preset = createGlobalAgentPreset({ name: '事务来源', description: '' })
+    const source = { presetId: preset.id, presetScope: 'user-global' as const }
+    const replacement = { presetId: 'standard', presetScope: 'builtin-meta' as const }
+    let defaultReference: PresetReference = source
+    let sessionReference: PresetReference = source
+    let automationReference: PresetReference | null = source
+    const calls: string[] = []
+    const dependencies: RebindAndDisableDependencies = {
+      getReport: () => ({
+        preset: source,
+        workspaceScopes: [{ workspaceSlug: WS_A, workspaceName: WS_A }],
+        blockers: [
+          { workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'workspace-default', objectIds: [WS_A], objectCount: 1, actions: ['rebind'] },
+          { workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'session', objectIds: ['session-1'], objectCount: 1, actions: ['rebind'] },
+          { workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'automation', objectIds: ['automation-1'], objectCount: 1, actions: ['rebind'] },
+        ],
+        totalCount: 3,
+        canDelete: false,
+      }),
+      getDefaultReference: () => defaultReference,
+      setDefaultReference: (_workspaceSlug, reference) => { calls.push(`default:${reference.presetId}`); defaultReference = reference },
+      getSessionReference: () => sessionReference,
+      rebindSession: (_id, reference) => { calls.push(`session:${reference.presetId}`); sessionReference = reference },
+      getAutomationReference: () => automationReference,
+      rebindAutomation: (_id, reference) => { calls.push(`automation:${reference?.presetId ?? 'default'}`); automationReference = reference },
+      disableScope: () => { calls.push('disable') },
+    }
+
+    const result = rebindAndDisableGlobalPresetScope(WS_A, source, replacement, dependencies)
+    expect(result).toMatchObject({ reboundDefaults: 1, reboundSessions: 1, reboundAutomations: 1, scopeDisabled: true })
+    expect(defaultReference).toEqual(replacement)
+    expect(sessionReference).toEqual(replacement)
+    expect(automationReference).toEqual(replacement)
+    expect(calls).toEqual(['default:standard', 'session:standard', 'automation:standard', 'disable'])
+  })
+
+  test('Given a mid-transaction failure When rebinding scope Then completed writes roll back and scope stays active', () => {
+    const preset = createGlobalAgentPreset({ name: '回滚来源', description: '' })
+    const source = { presetId: preset.id, presetScope: 'user-global' as const }
+    const replacement = { presetId: 'standard', presetScope: 'builtin-meta' as const }
+    let defaultReference: PresetReference = source
+    let sessionReference: PresetReference = source
+    let scopeDisabled = false
+    const dependencies: RebindAndDisableDependencies = {
+      getReport: () => ({
+        preset: source,
+        workspaceScopes: [{ workspaceSlug: WS_A, workspaceName: WS_A }],
+        blockers: [
+          { workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'workspace-default', objectIds: [WS_A], objectCount: 1, actions: ['rebind'] },
+          { workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'session', objectIds: ['session-1'], objectCount: 1, actions: ['rebind'] },
+          { workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'automation', objectIds: ['automation-1'], objectCount: 1, actions: ['rebind'] },
+        ],
+        totalCount: 3,
+        canDelete: false,
+      }),
+      getDefaultReference: () => defaultReference,
+      setDefaultReference: (_workspaceSlug, reference) => { defaultReference = reference },
+      getSessionReference: () => sessionReference,
+      rebindSession: (_id, reference) => { sessionReference = reference },
+      getAutomationReference: () => source,
+      rebindAutomation: () => { throw new Error('automation write failed') },
+      disableScope: () => { scopeDisabled = true },
+    }
+
+    expect(() => rebindAndDisableGlobalPresetScope(WS_A, source, replacement, dependencies)).toThrow('automation write failed')
+    expect(defaultReference).toEqual(source)
+    expect(sessionReference).toEqual(source)
+    expect(scopeDisabled).toBe(false)
+  })
+
+  test('Given references and an invalid replacement When disabling scope Then validation rejects before writes', () => {
+    const preset = createGlobalAgentPreset({ name: '校验来源', description: '' })
+    const source = { presetId: preset.id, presetScope: 'user-global' as const }
+    let writes = 0
+    const dependencies: RebindAndDisableDependencies = {
+      getReport: () => ({
+        preset: source,
+        workspaceScopes: [{ workspaceSlug: WS_A, workspaceName: WS_A }],
+        blockers: [{ workspaceSlug: WS_A, workspaceName: WS_A, status: 'active', reason: 'session', objectIds: ['session-1'], objectCount: 1, actions: ['rebind'] }],
+        totalCount: 1,
+        canDelete: false,
+      }),
+      getDefaultReference: () => source,
+      setDefaultReference: () => { writes += 1 },
+      getSessionReference: () => source,
+      rebindSession: () => { writes += 1 },
+      getAutomationReference: () => source,
+      rebindAutomation: () => { writes += 1 },
+      disableScope: () => { writes += 1 },
+    }
+
+    expect(() => rebindAndDisableGlobalPresetScope(WS_A, source, source, dependencies)).toThrow('替代预设不能与待解除作用域的预设相同')
+    expect(writes).toBe(0)
   })
 
   test('Given no legacy files When ready gate runs Then migration is idempotent', () => {
@@ -542,14 +728,14 @@ describe('自定义预设 CRUD', () => {
     expect(() => deleteAgentPreset(WS_A, BUILTIN_PRESET_CODE)).toThrow('内置预设不可修改或删除')
   })
 
-  test('删除自定义预设；默认引用清空', () => {
+  test('删除自定义默认预设时自动改用首个仍启用的预设', () => {
     const created = createAgentPreset(WS_A, { name: '临时', description: '' })
     setDefaultPresetId(WS_A, created.id)
     expect(getDefaultPresetId(WS_A)).toBe(created.id)
 
     deleteAgentPreset(WS_A, created.id)
     expect(listAgentPresets(WS_A).some((p) => p.id === created.id)).toBe(false)
-    expect(getDefaultPresetId(WS_A)).toBe('')
+    expect(getDefaultPresetId(WS_A)).toBe(BUILTIN_PRESET_STANDARD)
   })
 
   test('自定义预设可设为默认并在重读后保持', () => {
@@ -557,6 +743,13 @@ describe('自定义预设 CRUD', () => {
     expect(setDefaultPresetId(WS_A, created.id)).toBe(created.id)
     // 重新读配置（模拟重启）后仍是自定义默认
     expect(getDefaultPresetId(WS_A)).toBe(created.id)
+  })
+
+  test('停用工作区默认预设时自动改用首个仍启用的预设', () => {
+    const created = createAgentPreset(WS_A, { name: '临时默认', description: '' })
+    setDefaultPresetId(WS_A, created.id)
+    setWorkspacePresetEnabled(WS_A, created.id, false)
+    expect(getDefaultPresetId(WS_A)).toBe(BUILTIN_PRESET_STANDARD)
   })
 
   test('不存在预设的更新/删除抛错', () => {

@@ -185,6 +185,8 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   codexOAuthCredentials?: CodexOAuthCredentials
   /** Pi 运行中刷新 OAuth 后，将新凭据回写到 Profer 渠道存储。 */
   onCodexOAuthCredentialsRefreshed?: (credentials: CodexOAuthCredentials) => void | Promise<void>
+  /** xAI 认证模式；API Key 使用 Pi 内置 provider 的 runtime key。 */
+  xaiCredentialMode?: 'api-key' | 'oauth'
   /** xAI OAuth credential store 使用真实 expires 和 refresh，不读取 ~/.pi。 */
   xaiOAuthCredentials?: XaiOAuthCredentials
   /** Pi 运行中刷新 xAI OAuth 后，将新凭据回写到 Profer 渠道存储。 */
@@ -1732,7 +1734,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       supportsQueuedMessage: true,
       supportsBackgroundWakeup: false,
       supportsNativeMcp: false,
-      supportsSubAgents: true,
+      runtimeSupportsSubagents: true,
     }
   }
   private activeSessions = new Map<string, ActivePiSession>()

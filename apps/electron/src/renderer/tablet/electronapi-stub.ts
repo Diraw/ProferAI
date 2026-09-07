@@ -790,7 +790,7 @@ export function installElectronApiStub(): void {
       supportsQueuedMessage: true,
       supportsBackgroundWakeup: false,
       supportsNativeMcp: false,
-      supportsSubAgents: true,
+      runtimeSupportsSubagents: true,
     }),
     getWorkspaceHeatmapDaily: () => Promise.resolve([]),
     getAccountCapabilities: () => Promise.resolve({ membershipTier: 'free', canSelfConfig: true }),

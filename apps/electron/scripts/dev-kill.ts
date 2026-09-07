@@ -1,16 +1,16 @@
 /**
- * 跨平台清理残留的 electronmon / electron 进程
+ * 跨平台清理残留的 electronmon / Electron 开发进程
  * 替代 pkill（Windows 不支持）。
  *
- * Windows 上 electronmon 实际由 node.exe 承载；若只杀 electron.exe，监督进程会立刻
- * 拉起新的 Electron，导致移动端自定义端口等监听持续残留。清理时必须先结束本仓库的
- * electronmon node 进程树，且不能按所有 node.exe / Profer.exe 做宽泛匹配。
+ * Windows 上 electronmon 实际由 node.exe 承载；稳定开发模式下 Electron 由 bunx 直接启动。
+ * 清理时必须先结束当前仓库的 supervisor / Electron 进程树，且不能按所有 node.exe / Profer.exe 做宽泛匹配。
  *
  * 传入 --vite 时，额外清理占用 Vite 端口（5174）的残留进程。
  * 该清理仅应在 concurrently 拉起 dev:vite 之前跑一次（顶层 dev 脚本），
  * 不要在与 dev:vite 并发的 dev:electron 内部跑，否则会误杀本次刚启动的 vite。
  */
 import { execFileSync, execSync } from 'child_process'
+import { resolve } from 'path'
 
 const isWin = process.platform === 'win32'
 const killVite = process.argv.includes('--vite')
@@ -111,8 +111,52 @@ function killStaleVite(port: number): void {
   }
 }
 
-// 必须先杀监督者，否则下方的 electron.exe 清理会触发 electronmon 立即重启。
+/**
+ * 清理稳定开发模式直接启动的 Electron。
+ * macOS/Linux 的 Electron 命令行包含仓库内的 Electron.app 路径；Windows 由 electron.exe 承载，
+ * 但必须限定在当前仓库的命令行范围内，避免杀掉正式版 Profer。
+ */
+function killStaleElectron(): void {
+  if (isWin) {
+    try {
+      const workspace = resolve(process.cwd(), '../..').replace(/'/g, "''")
+      const command = [
+        `$workspace = '${workspace}'`,
+        'Get-CimInstance Win32_Process |',
+        "  Where-Object { $_.Name -eq 'electron.exe' -and $_.CommandLine -and $_.CommandLine.Contains($workspace) } |",
+        '  Select-Object -ExpandProperty ProcessId',
+      ].join(' ')
+      const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      for (const pid of new Set(output.split(/\s+/).filter((value) => /^\d+$/.test(value)))) {
+        try { execSync(`taskkill /F /T /PID ${pid} 2>nul`, { stdio: 'ignore' }) } catch { /* 已退出 */ }
+      }
+    } catch {
+      // PowerShell/CIM 不可用时由 supervisor 清理兜底。
+    }
+    return
+  }
+
+  try {
+    const output = execSync('ps -axo pid=,command=', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const workspace = resolve(process.cwd(), '../..')
+    for (const line of output.split('\n')) {
+      const match = line.trim().match(/^(\d+)\s+(.+)$/)
+      if (!match) continue
+      const [, pid, command] = match
+      if (command.includes(workspace) && /\/Electron\.app\/Contents\/MacOS\/Electron(?:\s|$)/.test(command)) {
+        try { execSync(`kill ${pid} 2>/dev/null`, { stdio: 'ignore' }) } catch { /* 已退出 */ }
+      }
+    }
+  } catch {
+    // ps/kill 不可用或没有残留进程，忽略。
+  }
+}
+
+// 先杀 supervisor，再杀 Electron，避免旧 supervisor 重新拉起窗口。
 killStaleElectronmon()
 kill(isWin ? 'electronmon.exe' : 'electronmon \\.')
-kill(isWin ? 'electron.exe' : 'electron.*dist/main')
+killStaleElectron()
 if (killVite) killStaleVite(VITE_PORT)

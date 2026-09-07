@@ -83,8 +83,8 @@ describe('normalizeAnthropicBaseUrlForSdk', () => {
 })
 
 describe('normalizeOpenAIBaseUrlForSdk', () => {
-  test('去除完整 /responses 端点，供 Pi runtime 重新拼接', () => {
-    expect(normalizeOpenAIBaseUrlForSdk('https://api.openai.com/v1/responses')).toBe('https://api.openai.com/v1')
+  test('去除 Responses 中转站完整端点，供 Pi runtime 重新拼接', () => {
+    expect(normalizeOpenAIBaseUrlForSdk('https://relay.example.com/grok/v1/responses')).toBe('https://relay.example.com/grok/v1')
   })
 
   test('去除完整 /chat/completions 端点', () => {
@@ -224,7 +224,7 @@ describe('resolveOpenAIChatCompletionsUrl', () => {
 })
 
 describe('resolveOpenAIResponsesUrl', () => {
-  test('协议根地址补全 /responses', () => {
+  test('Responses 中转站协议根地址补全 /responses', () => {
     expect(resolveOpenAIResponsesUrl('https://api.openai.com/v1', 'openai-responses')).toBe(
       'https://api.openai.com/v1/responses',
     )

@@ -22,6 +22,9 @@ import type {
   AgentImageGenerationCard,
   ProferEvent,
   PptMaterialItem,
+  AgentPresetCreateInput,
+  AgentPresetUpdateInput,
+  PresetReference,
 } from '@profer/shared'
 import type {
   CalendarEventListQuery,
@@ -33,7 +36,12 @@ import type {
   UpdateCalendarEventInput,
   UpdateTodoInput,
 } from '@profer/shared'
-import { filterDisabledTools, isAgentPresetToolGroupDisabled } from '@profer/shared'
+import {
+  AGENT_PRESET_SUPPRESS_KEYS,
+  AGENT_PRESET_TOOL_GROUPS,
+  filterDisabledTools,
+  isAgentPresetToolGroupDisabled,
+} from '@profer/shared'
 import {
   createAutomation,
   deleteAutomation,
@@ -50,6 +58,16 @@ import {
   listAgentPresets,
   getDefaultPresetId,
 } from '../agent-preset-manager'
+import {
+  copyWorkspacePresetFromAgent,
+  createWorkspacePresetFromAgent,
+  proposeAgentPresetUpdateFromAgent,
+  proposeAgentPresetDefaultFromAgent,
+  commitPendingAgentPresetChangeFromAgent,
+  summarizeAgentPreset,
+  switchSessionPresetFromAgent,
+  type AgentPresetMutationOperation,
+} from '../agent-preset-operations'
 import {
   createPlanningCalendarEvent,
   createPlanningTodo,
@@ -131,12 +149,29 @@ export interface PiBuiltinToolsContext {
   disabledToolGroups?: string[]
   /** 预设禁用的单个产品内置工具（短名，见 shared AGENT_PRESET_GROUP_TOOL_NAMES），与工具组叠加生效 */
   disabledTools?: string[]
+  /** 当前用户消息经 orchestrator 意图 gate 允许的受限预设操作。 */
+  allowedPresetOperations?: readonly AgentPresetMutationOperation[]
+  /** 当前 query 开始时冻结的预设引用，用于安全切换和并发校验。 */
+  currentPresetReference?: PresetReference
+  /** 仅由 orchestrator 注入的当前用户原文，供目标预设意图绑定。 */
+  presetOperationUserMessage?: string
+  /** 当前会话待确认的主进程提案。 */
+  pendingPresetChange?: import('../agent-preset-operations').PendingPresetChange
 }
 
 function jsonToolResult(payload: unknown): AgentToolResult<unknown> {
   return {
     content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
     details: payload,
+  } as AgentToolResult<unknown>
+}
+
+function jsonToolError(error: unknown): AgentToolResult<unknown> {
+  const payload = { error: error instanceof Error ? error.message : String(error) }
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    details: payload,
+    isError: true,
   } as AgentToolResult<unknown>
 }
 
@@ -434,42 +469,202 @@ export function buildPiTaskGraphTools(sdk: PiSdk, ctx: Pick<PiBuiltinToolsContex
  */
 export function buildPiAgentPresetTools(
   sdk: PiSdk,
-  ctx: Pick<PiBuiltinToolsContext, 'sessionId' | 'workspaceSlug'>,
+  ctx: Pick<PiBuiltinToolsContext, 'sessionId' | 'workspaceSlug' | 'triggeredBy' | 'allowedPresetOperations' | 'currentPresetReference' | 'presetOperationUserMessage' | 'pendingPresetChange'>,
 ): ToolDefinition[] {
-  // 预设变更是用户控制面。Agent 运行中只注册只读列表，避免模型通过
-  // preset_switch_session / preset_update 等路径改变本轮或下一轮能力门禁。
-  return [
+  const tools: ToolDefinition[] = [
     sdk.defineTool({
       name: 'mcp__agent-presets__preset_list',
       label: '列出 Agent 预设',
-      description: '列出全部 Agent 预设（内置 + 自定义），标注哪个是默认预设。',
+      description: '列出当前工作区可用的全部 Agent 预设，并标注默认预设。',
       parameters: Type.Object({}),
       async execute() {
         const presets = listAgentPresets(ctx.workspaceSlug)
         const defaultId = getDefaultPresetId(ctx.workspaceSlug)
         return jsonToolResult({
           defaultPresetId: defaultId,
-          presets: presets.map((p) => ({
-            id: p.id,
-            name: p.name,
-            description: p.description,
-            isBuiltin: p.isBuiltin,
-            isDefault: p.id === defaultId,
-            effort: p.effort ?? null,
-            permissionMode: p.permissionMode ?? null,
-            skillSlugs: p.skillSlugs ?? null,
-            mcpServerNames: p.mcpServerNames ?? null,
-            allowSubagents: p.allowSubagents ?? null,
-            basePresetId: p.basePresetId ?? null,
-            promptSections: p.promptSections ?? null,
-            suppressPromptSections: p.suppressPromptSections ?? null,
-            disabledToolGroups: p.disabledToolGroups ?? null,
-            disabledTools: p.disabledTools ?? null,
-          })),
+          presets: presets.map((preset) => summarizeAgentPreset(preset, defaultId)),
         })
       },
     }),
   ] as unknown as ToolDefinition[]
+
+  const source = ctx.triggeredBy ?? 'user'
+  const allowedOperations = ctx.allowedPresetOperations ?? []
+  if (source === 'user' && ctx.workspaceSlug && allowedOperations.includes('create')) {
+    tools.push(sdk.defineTool({
+      name: 'mcp__agent-presets__preset_create',
+      label: '创建 Agent 预设',
+      description: '仅当用户明确要求创建预设或把当前工作方式固化为预设时使用。只创建当前工作区自定义预设，不切换当前会话，不修改默认预设。',
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1 }),
+        description: Type.Optional(Type.String()),
+        promptSections: Type.Optional(Type.Array(Type.String())),
+        suppressPromptSections: Type.Optional(Type.Array(Type.String({ enum: [...AGENT_PRESET_SUPPRESS_KEYS] }))),
+        disabledToolGroups: Type.Optional(Type.Array(Type.String({ enum: [...AGENT_PRESET_TOOL_GROUPS] }))),
+        disabledTools: Type.Optional(Type.Array(Type.String())),
+        effort: Type.Optional(Type.Union([Type.Literal('low'), Type.Literal('medium'), Type.Literal('high'), Type.Literal('max')])),
+        permissionMode: Type.Optional(Type.Union([Type.Literal('auto'), Type.Literal('bypassPermissions'), Type.Literal('plan')])),
+        skillSlugs: Type.Optional(Type.Array(Type.String())),
+        mcpServerNames: Type.Optional(Type.Array(Type.String())),
+        allowSubagents: Type.Optional(Type.Boolean()),
+        basePresetId: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('code'), Type.Literal('minimal')])),
+      }),
+      async execute(_toolCallId, params) {
+        try {
+          const args = params as AgentPresetCreateInput
+          return jsonToolResult(createWorkspacePresetFromAgent(
+            { sessionId: ctx.sessionId, workspaceSlug: ctx.workspaceSlug, source, allowedOperations, userMessage: ctx.presetOperationUserMessage },
+            { ...args, description: args.description ?? '' },
+          ))
+        } catch (error) {
+          return jsonToolError(error)
+        }
+      },
+    }) as ToolDefinition)
+  }
+
+  if (source === 'user' && ctx.workspaceSlug && allowedOperations.includes('copy')) {
+    tools.push(sdk.defineTool({
+      name: 'mcp__agent-presets__preset_copy',
+      label: '复制 Agent 预设',
+      description: '仅当用户明确要求复制预设时使用。复制为当前工作区自定义预设，不切换当前会话，不修改默认预设。',
+      parameters: Type.Object({
+        fromId: Type.String({ minLength: 1, description: '源预设 ID；应先从 preset_list 的 presetReference 读取' }),
+        fromScope: Type.Union([
+          Type.Literal('builtin-meta'),
+          Type.Literal('user-global'),
+          Type.Literal('workspace'),
+        ], { description: '源预设作用域；应与 preset_list 返回值一致' }),
+        name: Type.Optional(Type.String({ minLength: 1 })),
+      }),
+      async execute(_toolCallId, params) {
+        try {
+          const args = params as {
+            fromId: string
+            fromScope: 'builtin-meta' | 'user-global' | 'workspace'
+            name?: string
+          }
+          return jsonToolResult(copyWorkspacePresetFromAgent(
+            { sessionId: ctx.sessionId, workspaceSlug: ctx.workspaceSlug, source, allowedOperations, userMessage: ctx.presetOperationUserMessage },
+            { presetId: args.fromId, presetScope: args.fromScope },
+            args.name,
+          ))
+        } catch (error) {
+          return jsonToolError(error)
+        }
+      },
+    }) as ToolDefinition)
+  }
+
+  if (source === 'user' && ctx.workspaceSlug && ctx.currentPresetReference && allowedOperations.includes('switch')) {
+    tools.push(sdk.defineTool({
+      name: 'mcp__agent-presets__preset_switch_session',
+      label: '切换当前会话预设',
+      description: '仅当当前用户消息明确要求切换本会话预设时使用。返回能力差异和审计 ID；当前轮能力不变，下一轮生效。',
+      parameters: Type.Object({
+        targetId: Type.String({ minLength: 1, description: '目标预设 ID；应先从 preset_list 的 presetReference 读取' }),
+        targetScope: Type.Union([
+          Type.Literal('builtin-meta'),
+          Type.Literal('user-global'),
+          Type.Literal('workspace'),
+        ], { description: '目标预设作用域；应与 preset_list 返回值一致' }),
+      }),
+      async execute(_toolCallId, params) {
+        try {
+          const args = params as {
+            targetId: string
+            targetScope: 'builtin-meta' | 'user-global' | 'workspace'
+          }
+          return jsonToolResult(switchSessionPresetFromAgent(
+            {
+              sessionId: ctx.sessionId,
+              workspaceSlug: ctx.workspaceSlug,
+              source,
+              allowedOperations,
+              currentPresetReference: ctx.currentPresetReference,
+              userMessage: ctx.presetOperationUserMessage,
+            },
+            { presetId: args.targetId, presetScope: args.targetScope },
+          ))
+        } catch (error) {
+          return jsonToolError(error)
+        }
+      },
+    }) as ToolDefinition)
+  }
+
+  if (source === 'user' && ctx.workspaceSlug && allowedOperations.includes('propose_update')) {
+    tools.push(sdk.defineTool({
+      name: 'mcp__agent-presets__preset_propose_update',
+      label: '提议更新 Agent 预设',
+      description: '仅生成当前工作区预设更新提案，不写盘；返回影响摘要后等待用户明确确认。',
+      parameters: Type.Object({
+        targetId: Type.String({ minLength: 1 }),
+        targetScope: Type.Literal('workspace'),
+        updates: Type.Record(Type.String(), Type.Unknown()),
+      }),
+      async execute(_toolCallId, params) {
+        try {
+          const args = params as { targetId: string; targetScope: 'workspace'; updates: AgentPresetUpdateInput }
+          return jsonToolResult(proposeAgentPresetUpdateFromAgent(
+            { sessionId: ctx.sessionId, workspaceSlug: ctx.workspaceSlug, source, allowedOperations, userMessage: ctx.presetOperationUserMessage },
+            { presetId: args.targetId, presetScope: args.targetScope },
+            args.updates,
+          ))
+        } catch (error) {
+          return jsonToolError(error)
+        }
+      },
+    }) as ToolDefinition)
+  }
+
+  if (source === 'user' && ctx.workspaceSlug && allowedOperations.includes('propose_default')) {
+    tools.push(sdk.defineTool({
+      name: 'mcp__agent-presets__preset_request_default_change',
+      label: '提议修改默认预设',
+      description: '仅生成工作区默认预设变更提案，不写盘；返回影响摘要后等待用户明确确认。',
+      parameters: Type.Object({
+        targetId: Type.String({ minLength: 1 }),
+        targetScope: Type.Union([Type.Literal('builtin-meta'), Type.Literal('user-global'), Type.Literal('workspace')]),
+      }),
+      async execute(_toolCallId, params) {
+        try {
+          const args = params as { targetId: string; targetScope: 'builtin-meta' | 'user-global' | 'workspace' }
+          return jsonToolResult(proposeAgentPresetDefaultFromAgent(
+            { sessionId: ctx.sessionId, workspaceSlug: ctx.workspaceSlug, source, allowedOperations, userMessage: ctx.presetOperationUserMessage },
+            { presetId: args.targetId, presetScope: args.targetScope },
+          ))
+        } catch (error) {
+          return jsonToolError(error)
+        }
+      },
+    }) as ToolDefinition)
+  }
+
+  if (source === 'user' && ctx.workspaceSlug && ctx.pendingPresetChange && allowedOperations.includes('commit_change')) {
+    tools.push(sdk.defineTool({
+      name: 'mcp__agent-presets__preset_commit_change',
+      label: '提交 Agent 预设变更',
+      description: '仅提交当前用户已明确确认的冻结预设提案；无参数，模型不能修改提案内容。',
+      parameters: Type.Object({}),
+      async execute() {
+        try {
+          return jsonToolResult(commitPendingAgentPresetChangeFromAgent({
+            sessionId: ctx.sessionId,
+            workspaceSlug: ctx.workspaceSlug,
+            source,
+            allowedOperations,
+            userMessage: ctx.presetOperationUserMessage,
+            pendingChange: ctx.pendingPresetChange,
+          }))
+        } catch (error) {
+          return jsonToolError(error)
+        }
+      },
+    }) as ToolDefinition)
+  }
+
+  return tools
 }
 
 // ===== Web 工具 =====

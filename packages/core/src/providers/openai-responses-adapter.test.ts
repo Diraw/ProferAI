@@ -25,6 +25,24 @@ function buildRequest() {
 }
 
 describe('OpenAIResponsesAdapter', () => {
+  test('Given xAI Chat 开启思考 When buildStreamRequest Then 使用 xAI Responses endpoint 和 reasoning effort', () => {
+    const request = new OpenAIResponsesAdapter('xai').buildStreamRequest({
+      baseUrl: 'https://api.x.ai/v1',
+      apiKey: 'xai-test-key',
+      modelId: 'grok-4.6',
+      history: [],
+      userMessage: '你好',
+      readImageAttachments: () => [],
+      thinkingEnabled: true,
+    })
+
+    const body = JSON.parse(request.body) as { model: string; reasoning?: { effort?: string } }
+    expect(request.url).toBe('https://api.x.ai/v1/responses')
+    expect(request.headers.Authorization).toBe('Bearer xai-test-key')
+    expect(body.model).toBe('grok-4.6')
+    expect(body.reasoning).toEqual({ effort: 'medium' })
+  })
+
   test('Given 基础输入 When buildStreamRequest Then 使用 /responses 和 input 格式', () => {
     const request = adapter.buildStreamRequest({
       baseUrl: 'https://api.openai.com/v1',

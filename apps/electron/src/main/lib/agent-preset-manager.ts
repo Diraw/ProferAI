@@ -41,7 +41,7 @@ import type {
 import { getAgentPresetMigrationPath, getGlobalAgentPresetsPath, getWorkspaceAgentPresetsPath, getAgentWorkspacesIndexPath, getAgentSessionsIndexPath, getAutomationsPath } from './config-paths'
 import { writeJsonFileAtomic, readJsonFileSafe } from './safe-file'
 import { AgentPresetError } from '@profer/shared'
-import type { AgentPresetScope, PresetReference, PresetReferenceReport, PresetWorkspaceReference, GlobalAgentPresetConfig } from '@profer/shared'
+import type { AgentPresetScope, PresetReference, PresetReferenceReport, PresetScopeRebindResult, PresetWorkspaceReference, GlobalAgentPresetConfig } from '@profer/shared'
 
 // ============================================================
 // 测试替身：允许测试把真实 ~/.profer 路径替换成临时基础目录
@@ -91,12 +91,16 @@ function getMigrationIndexPath(getPath: () => string, filename: string): string 
   return testBaseDirOverride ? join(testBaseDirOverride, filename) : getPath()
 }
 
-function getMigrationWorkspaces(): Array<{ id: string; slug: string; name: string }> {
+function listManagedWorkspaces(): Array<{ id: string; slug: string; name: string }> {
   if (testWorkspaceSlugs) return testWorkspaceSlugs.map((slug) => ({ id: slug, slug, name: slug }))
   return (require('./agent-workspace-manager') as typeof import('./agent-workspace-manager'))
     .listAgentWorkspaces()
     .filter((workspace) => !workspace.isDeleted)
     .map((workspace) => ({ id: workspace.id, slug: workspace.slug, name: workspace.name }))
+}
+
+function getMigrationWorkspaces(): Array<{ id: string; slug: string; name: string }> {
+  return listManagedWorkspaces()
 }
 
 function backupPresetMigrationFile(filePath: string, workspaceSlug: string, startedAt: string): void {
@@ -397,6 +401,28 @@ function withSuppressMapping(preset: AgentPreset): AgentPreset {
 /** 获取工作区默认预设 ID；空字符串表示用户未设置默认预设。 */
 export function getDefaultPresetId(workspaceSlug?: string): string {
   return readConfig(workspaceSlug).defaultPresetId
+}
+
+/** 当前默认预设停用时，按列表顺序选择首个仍可用的预设。 */
+function assignFallbackDefaultPreset(config: AgentPresetConfig, workspaceSlug: string, excludedPresetId: string): void {
+  const fallback = listAgentPresets(workspaceSlug).find(
+    (preset) => preset.id !== excludedPresetId && preset.enabledInWorkspace !== false,
+  )
+  if (!fallback) {
+    config.defaultPresetId = ''
+    config.defaultPresetExplicitlyCleared = true
+    delete config.defaultPresetReference
+    return
+  }
+  config.defaultPresetId = fallback.id
+  config.defaultPresetReference = referenceForPreset(fallback, workspaceSlug)
+  delete config.defaultPresetExplicitlyCleared
+}
+
+/** 获取带作用域的工作区默认引用；兼容旧配置中的裸 ID。 */
+export function getDefaultPresetReference(workspaceSlug: string): PresetReference {
+  const config = readConfig(workspaceSlug)
+  return config.defaultPresetReference ?? presetReferenceForId(workspaceSlug, config.defaultPresetId)
 }
 
 /** 设置或清除工作区默认预设；传空字符串清除默认值，不回退 standard。 */
@@ -754,47 +780,65 @@ function migratePresetReferencesInFile(filePath: string, transform: (value: Reco
   writeJsonFileAtomic(filePath, { ...data, [collectionKey]: migrated })
 }
 
-/** 查询 user-global 的有效工作区引用；副本 source 元数据不算 blocker。 */
+/**
+ * 查询预设的持久引用；副本 source 元数据不算 blocker。
+ *
+ * 已解除作用域、已归档会话和已暂停自动任务仍持有稳定引用，删除全局实体前也必须
+ * 改绑，否则对象恢复使用时会变成悬空引用。status 只描述预设在该工作区是否生效。
+ */
 export function getPresetReferenceReport(reference: PresetReference): PresetReferenceReport {
   const normalized = normalizePresetReference(reference)
   const preset = resolvePresetReference(normalized)
   const blockers: PresetWorkspaceReference[] = []
-  const { listAgentWorkspaces } = require('./agent-workspace-manager') as typeof import('./agent-workspace-manager')
   const { listAgentSessions } = require('./agent-session-manager') as typeof import('./agent-session-manager')
   const { listAutomations } = require('./automation-manager') as typeof import('./automation-manager')
-  const workspaces = listAgentWorkspaces().filter((workspace) => !workspace.isDeleted)
-  const workspaceScopes = (normalized.presetScope === 'user-global' || normalized.presetScope === 'builtin-meta')
+  const workspaces = listManagedWorkspaces()
+  const globalConfig = readGlobalConfig()
+  const configuredScopes = globalConfig.workspaceScopes?.[normalized.presetId]
+  const isGlobalReference = normalized.presetScope === 'user-global' || normalized.presetScope === 'builtin-meta'
+  const sessions = listAgentSessions(true)
+  const automations = listAutomations()
+  const workspaceScopes = isGlobalReference
     ? workspaces.filter((workspace) => {
-        const scopes = readGlobalConfig().workspaceScopes?.[normalized.presetId]
-        return scopes === undefined || scopes.includes(workspace.slug)
+        const workspaceConfig = readConfig(workspace.slug)
+        return !workspaceConfig.disabledGlobalPresetIds?.includes(normalized.presetId)
+          && (configuredScopes === undefined || configuredScopes.includes(workspace.slug))
       }).map((workspace) => ({ workspaceSlug: workspace.slug, workspaceName: workspace.name }))
     : []
+
   for (const workspace of workspaces) {
     const objects: Array<{ reason: PresetWorkspaceReference['reason']; id: string }> = []
     const workspaceConfig = readConfig(workspace.slug)
-    const configuredScopes = readGlobalConfig().workspaceScopes?.[normalized.presetId]
-    const globalScopeActive = normalized.presetScope !== 'user-global' || configuredScopes === undefined || configuredScopes.includes(workspace.slug)
-    if (!globalScopeActive) continue
+    const globalScopeActive = !isGlobalReference || (
+      !workspaceConfig.disabledGlobalPresetIds?.includes(normalized.presetId)
+      && (configuredScopes === undefined || configuredScopes.includes(workspace.slug))
+    )
     const defaultReference = workspaceConfig.defaultPresetReference ?? presetReferenceForId(workspace.slug, workspaceConfig.defaultPresetId)
     if (defaultReference.presetScope === normalized.presetScope && defaultReference.presetId === preset.id) objects.push({ reason: 'workspace-default', id: workspace.slug })
-    for (const session of listAgentSessions(true)) {
-      if (session.workspaceId !== workspace.id || session.archived) continue
+    for (const session of sessions) {
+      if (session.workspaceId !== workspace.id) continue
       const sessionReference = (session as AgentSessionMetaWithReference).presetReference
         ?? presetReferenceForId(workspace.slug, session.presetId)
       if (sessionReference.presetScope === normalized.presetScope && sessionReference.presetId === preset.id) objects.push({ reason: 'session', id: session.id })
     }
-    for (const automation of listAutomations()) {
-      if (automation.workspaceId !== workspace.id || !automation.active) continue
+    for (const automation of automations) {
+      if (automation.workspaceId !== workspace.id) continue
       const automationReference = (automation as AutomationWithReference).presetReference
         ?? presetReferenceForId(workspace.slug, automation.presetId)
       if (automationReference.presetScope === normalized.presetScope && automationReference.presetId === preset.id) objects.push({ reason: 'automation', id: automation.id })
     }
-    if (objects.length) {
-      for (const group of ['workspace-default', 'session', 'automation'] as const) {
-        const ids = objects.filter((item) => item.reason === group).map((item) => item.id)
-        if (!ids.length) continue
-        blockers.push({ workspaceSlug: workspace.slug, workspaceName: workspace.name, status: 'active', reason: group, objectIds: ids, objectCount: ids.length, actions: ['rebind', 'disable', 'inspect'] })
-      }
+    for (const group of ['workspace-default', 'session', 'automation'] as const) {
+      const ids = objects.filter((item) => item.reason === group).map((item) => item.id)
+      if (!ids.length) continue
+      blockers.push({
+        workspaceSlug: workspace.slug,
+        workspaceName: workspace.name,
+        status: globalScopeActive ? 'active' : 'inactive',
+        reason: group,
+        objectIds: ids,
+        objectCount: ids.length,
+        actions: ['rebind', 'disable', 'inspect'],
+      })
     }
   }
   return { preset: normalized, blockers, workspaceScopes, totalCount: blockers.reduce((sum, item) => sum + item.objectCount, 0), canDelete: blockers.length === 0 }
@@ -831,10 +875,9 @@ export function setDefaultPresetReference(workspaceSlug: string, reference: Pres
   return normalized
 }
 
-/** 直接解除用户全局预设在工作区的生效范围；保留已有引用，发送时由解析器报告失效。 */
+/** 全局预设尚未物化白名单时，默认对所有现存工作区生效。 */
 function listKnownWorkspaceSlugs(): string[] {
-  const { listAgentWorkspaces } = require('./agent-workspace-manager') as typeof import('./agent-workspace-manager')
-  return listAgentWorkspaces().filter((workspace) => !workspace.isDeleted).map((workspace) => workspace.slug)
+  return listManagedWorkspaces().map((workspace) => workspace.slug)
 }
 
 export function enableGlobalPresetInWorkspace(workspaceSlug: string, reference: PresetReference): void {
@@ -845,28 +888,47 @@ export function enableGlobalPresetInWorkspace(workspaceSlug: string, reference: 
   const scopes = config.workspaceScopes?.[normalized.presetId]
   const nextScopes = [...new Set([...(scopes ?? listKnownWorkspaceSlugs()), workspaceSlug])]
   writeGlobalConfig({ ...config, workspaceScopes: { ...(config.workspaceScopes ?? {}), [normalized.presetId]: nextScopes } })
+
+  // 迁移旧内置副本时可能在 workspace 配置中留下显式禁用 override；只扩大
+  // workspaceScopes 不能恢复它，因此启用操作必须同时清除该本地 override。
+  const workspaceConfig = readConfig(workspaceSlug)
+  const disabled = workspaceConfig.disabledGlobalPresetIds ?? []
+  if (disabled.includes(normalized.presetId)) {
+    workspaceConfig.disabledGlobalPresetIds = disabled.filter((id) => id !== normalized.presetId)
+    writeConfig(workspaceSlug, workspaceConfig)
+  }
 }
 
 export function disableGlobalPresetInWorkspace(workspaceSlug: string, reference: PresetReference): void {
   const normalized = normalizePresetReference(reference)
   if (normalized.presetScope !== 'user-global' && normalized.presetScope !== 'builtin-meta') throw new AgentPresetError('PRESET_READ_ONLY', '只有全局或元预设可以解除工作区范围')
   resolvePresetReference(normalized)
+  const report = getPresetReferenceReport(normalized)
+  const workspaceBlockers = report.blockers.filter((item) => item.workspaceSlug === workspaceSlug)
+  // 工作区默认是单一值，可以在同一事务边界内清空；会话/自动任务则必须由调用方
+  // 先显式改绑，避免范围移除后留下可恢复但无法解析的持久引用。
+  const blockers = workspaceBlockers.filter((item) => item.reason !== 'workspace-default')
+  if (blockers.length > 0) {
+    throw new AgentPresetError(
+      'PRESET_DELETE_BLOCKED',
+      '预设仍被当前工作区的会话或自动任务引用，请先完成改绑，再解除生效范围',
+      { ...report, blockers, totalCount: blockers.reduce((sum, item) => sum + item.objectCount, 0), canDelete: false },
+    )
+  }
+  const config = readConfig(workspaceSlug)
+  const defaultReference = config.defaultPresetReference
+  const defaultMatches = defaultReference
+    ? defaultReference.presetScope === normalized.presetScope && defaultReference.presetId === normalized.presetId
+    : config.defaultPresetId === normalized.presetId
+  if (defaultMatches) {
+    assignFallbackDefaultPreset(config, workspaceSlug, normalized.presetId)
+    writeConfig(workspaceSlug, config)
+  }
   const globalConfig = readGlobalConfig()
   const scopes = globalConfig.workspaceScopes?.[normalized.presetId]
   const activeScopes = scopes ?? listKnownWorkspaceSlugs()
   globalConfig.workspaceScopes = { ...(globalConfig.workspaceScopes ?? {}), [normalized.presetId]: activeScopes.filter((slug) => slug !== workspaceSlug) }
   writeGlobalConfig(globalConfig)
-  const config = readConfig(workspaceSlug)
-  const defaultReference = config.defaultPresetReference
-  const defaultMatches = defaultReference
-    ? (defaultReference.presetScope === normalized.presetScope && defaultReference.presetId === normalized.presetId)
-    : config.defaultPresetId === normalized.presetId
-  if (defaultMatches) {
-    config.defaultPresetId = ''
-    config.defaultPresetExplicitlyCleared = true
-    delete config.defaultPresetReference
-    writeConfig(workspaceSlug, config)
-  }
 }
 
 /** 会话预设改绑；同时写入兼容 presetId 和唯一 reference。 */
@@ -899,6 +961,133 @@ export function rebindAutomationPreset(automationId: string, reference: PresetRe
   const updated = updateAutomation({ id: automationId, presetId: preset.id, presetReference: normalized })
   if (!updated) throw new AgentPresetError('PRESET_NOT_FOUND', `自动任务不存在: ${automationId}`)
   return updated
+}
+
+export interface RebindAndDisableDependencies {
+  getReport(reference: PresetReference): PresetReferenceReport
+  getDefaultReference(workspaceSlug: string): PresetReference
+  setDefaultReference(workspaceSlug: string, reference: PresetReference): void
+  getSessionReference(sessionId: string, workspaceSlug: string): PresetReference
+  rebindSession(sessionId: string, reference: PresetReference): void
+  getAutomationReference(automationId: string, workspaceSlug: string): PresetReference | null
+  rebindAutomation(automationId: string, reference: PresetReference | null): void
+  disableScope(workspaceSlug: string, reference: PresetReference): void
+}
+
+const DEFAULT_REBIND_AND_DISABLE_DEPENDENCIES: RebindAndDisableDependencies = {
+  getReport(reference) { return getPresetReferenceReport(reference) },
+  getDefaultReference(workspaceSlug) {
+    const config = readConfig(workspaceSlug)
+    return config.defaultPresetReference ?? presetReferenceForId(workspaceSlug, config.defaultPresetId)
+  },
+  setDefaultReference(workspaceSlug, reference) { setDefaultPresetReference(workspaceSlug, reference) },
+  getSessionReference(sessionId, workspaceSlug) {
+    const { getAgentSessionMeta } = require('./agent-session-manager') as typeof import('./agent-session-manager')
+    const session = getAgentSessionMeta(sessionId)
+    if (!session) throw new AgentPresetError('PRESET_NOT_FOUND', `会话不存在: ${sessionId}`)
+    return (session as AgentSessionMetaWithReference).presetReference
+      ?? presetReferenceForId(workspaceSlug, session.presetId)
+  },
+  rebindSession(sessionId, reference) { rebindAgentSessionPreset(sessionId, reference) },
+  getAutomationReference(automationId, workspaceSlug) {
+    const { getAutomation } = require('./automation-manager') as typeof import('./automation-manager')
+    const automation = getAutomation(automationId)
+    if (!automation) throw new AgentPresetError('PRESET_NOT_FOUND', `自动任务不存在: ${automationId}`)
+    return (automation as AutomationWithReference).presetReference
+      ?? (automation.presetId ? presetReferenceForId(workspaceSlug, automation.presetId) : null)
+  },
+  rebindAutomation(automationId, reference) { rebindAutomationPreset(automationId, reference) },
+  disableScope(workspaceSlug, reference) { disableGlobalPresetInWorkspace(workspaceSlug, reference) },
+}
+
+function samePresetReference(left: PresetReference, right: PresetReference): boolean {
+  return left.presetId === right.presetId
+    && left.presetScope === right.presetScope
+    && left.workspaceSlug === right.workspaceSlug
+}
+
+/**
+ * 主进程补偿事务：基于最新引用报告改绑一个工作区中的全部持久引用，最后解除来源预设作用域。
+ * 任一步失败时逆序恢复已经完成的写入；来源作用域始终最后修改。
+ */
+export function rebindAndDisableGlobalPresetScope(
+  workspaceSlug: string,
+  sourceReference: PresetReference,
+  replacementReference?: PresetReference,
+  dependencies: RebindAndDisableDependencies = DEFAULT_REBIND_AND_DISABLE_DEPENDENCIES,
+): PresetScopeRebindResult {
+  const source = normalizePresetReference(sourceReference)
+  if (source.presetScope !== 'user-global' && source.presetScope !== 'builtin-meta') {
+    throw new AgentPresetError('PRESET_READ_ONLY', '只有全局或元预设可以解除工作区范围')
+  }
+  resolvePresetReference(source, workspaceSlug)
+  const report = dependencies.getReport(source)
+  const blockers = report.blockers.filter((item) => item.workspaceSlug === workspaceSlug)
+  const requiresReplacement = blockers.some((item) => item.reason === 'workspace-default' || item.reason === 'session' || item.reason === 'automation')
+  const replacement = replacementReference
+    ? normalizePresetReference(replacementReference, workspaceSlug)
+    : undefined
+  if (requiresReplacement && !replacement) {
+    throw new AgentPresetError('PRESET_DELETE_BLOCKED', '当前工作区仍有预设引用，必须选择替代预设', { ...report, blockers })
+  }
+  if (replacement) {
+    if (samePresetReference(source, replacement)) throw new AgentPresetError('PRESET_SCOPE_MISMATCH', '替代预设不能与待解除作用域的预设相同')
+    resolvePresetReference(replacement, workspaceSlug)
+  }
+
+  const rollback: Array<() => void> = []
+  let reboundDefaults = 0
+  let reboundSessions = 0
+  let reboundAutomations = 0
+  try {
+    for (const blocker of blockers) {
+      if (blocker.reason === 'workspace-default') {
+        const previousReference = dependencies.getDefaultReference(workspaceSlug)
+        dependencies.setDefaultReference(workspaceSlug, replacement!)
+        rollback.push(() => { dependencies.setDefaultReference(workspaceSlug, previousReference) })
+        reboundDefaults += 1
+      } else if (blocker.reason === 'session') {
+        for (const sessionId of blocker.objectIds) {
+          const previousReference = dependencies.getSessionReference(sessionId, workspaceSlug)
+          dependencies.rebindSession(sessionId, replacement!)
+          rollback.push(() => { dependencies.rebindSession(sessionId, previousReference) })
+          reboundSessions += 1
+        }
+      } else if (blocker.reason === 'automation') {
+        for (const automationId of blocker.objectIds) {
+          const previousReference = dependencies.getAutomationReference(automationId, workspaceSlug)
+          dependencies.rebindAutomation(automationId, replacement!)
+          rollback.push(() => { dependencies.rebindAutomation(automationId, previousReference) })
+          reboundAutomations += 1
+        }
+      }
+    }
+    dependencies.disableScope(workspaceSlug, source)
+  } catch (error) {
+    const rollbackFailures: string[] = []
+    for (const restore of rollback.reverse()) {
+      try { restore() } catch (rollbackError) {
+        rollbackFailures.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError))
+      }
+    }
+    if (rollbackFailures.length > 0) {
+      throw new AgentPresetError('PRESET_WRITE_FAILED', '预设作用域改绑失败，且部分回滚未完成', {
+        cause: error instanceof Error ? error.message : String(error),
+        rollbackFailures,
+      })
+    }
+    throw error
+  }
+
+  return {
+    workspaceSlug,
+    source,
+    ...(replacement ? { replacement } : {}),
+    reboundDefaults,
+    reboundSessions,
+    reboundAutomations,
+    scopeDisabled: true,
+  }
 }
 
 export function deleteGlobalAgentPreset(reference: PresetReference): void {
@@ -1036,6 +1225,17 @@ export function copyAgentPreset(workspaceSlug: string | undefined, fromId: strin
   })
 }
 
+/** 恢复工作区自定义预设的原始快照；仅供主进程补偿事务使用。 */
+export function restoreAgentPresetSnapshot(workspaceSlug: string, snapshot: AgentPreset): void {
+  assertNotBuiltin(snapshot.id)
+  const config = readConfig(workspaceSlug)
+  const index = config.presets.findIndex((preset) => preset.id === snapshot.id)
+  if (index === -1) throw new AgentPresetError('PRESET_NOT_FOUND', `预设不存在: ${snapshot.id}`)
+  const { enabledInWorkspace: _enabledInWorkspace, ...storedSnapshot } = snapshot
+  config.presets[index] = { ...storedSnapshot, scope: 'workspace', workspaceSlug }
+  writeConfig(workspaceSlug, config)
+}
+
 /** 更新工作区自定义预设；内置预设拒绝。字段省略=不修改，null=清除，空数组=有效值（skillSlugs 空数组=禁用全部 skill）。 */
 export function updateAgentPreset(workspaceSlug: string | undefined, presetId: string, updates: AgentPresetUpdateInput): AgentPreset {
   assertNotBuiltin(presetId)
@@ -1102,15 +1302,13 @@ export function setWorkspacePresetEnabled(workspaceSlug: string, presetId: strin
   if (enabled) disabled.delete(presetId)
   else disabled.add(presetId)
   config.disabledWorkspacePresetIds = [...disabled]
-  if (config.defaultPresetId === presetId && !enabled) {
-    config.defaultPresetId = ''
-    config.defaultPresetExplicitlyCleared = true
-    delete config.defaultPresetReference
+  if (!enabled && config.defaultPresetId === presetId) {
+    assignFallbackDefaultPreset(config, workspaceSlug, presetId)
   }
   writeConfig(workspaceSlug, config)
 }
 
-/** 删除工作区自定义预设；内置预设拒绝；若删除默认预设则清空默认值。 */
+/** 删除工作区自定义预设；内置预设拒绝；若删除默认预设则改用首个仍可用预设。 */
 export function deleteAgentPreset(workspaceSlug: string | undefined, presetId: string): void {
   assertNotBuiltin(presetId)
   const config = readConfig(workspaceSlug)
@@ -1118,11 +1316,9 @@ export function deleteAgentPreset(workspaceSlug: string | undefined, presetId: s
   if (index === -1) throw new Error(`预设不存在: ${presetId}`)
 
   config.presets.splice(index, 1)
-  // 被删预设正作为默认：清空默认值，由新会话/发送前选择器要求用户主动选择。
   if (config.defaultPresetId === presetId) {
-    config.defaultPresetId = ''
-    config.defaultPresetExplicitlyCleared = true
-    delete config.defaultPresetReference
+    if (!workspaceSlug) throw new AgentPresetError('PRESET_WORKSPACE_REQUIRED', '删除默认预设需要工作区')
+    assignFallbackDefaultPreset(config, workspaceSlug, presetId)
   }
   writeConfig(workspaceSlug, config)
 }

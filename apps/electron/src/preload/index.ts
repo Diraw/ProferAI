@@ -9,7 +9,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, LARK_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, CHANGELOG_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, SYNC_IPC_CHANNELS, TEAM_IPC_CHANNELS, SKILL_MARKETPLACE_IPC_CHANNELS, SKILL_MASTER_IPC_CHANNELS, GLOBAL_SKILL_IPC_CHANNELS, PPT_MATERIAL_IPC_CHANNELS, TEAM_FILE_IPC_CHANNELS, TEAM_MEMORY_IPC_CHANNELS, SSE_IPC_CHANNELS, KNOWLEDGE_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, type Todo, type CalendarEvent, type TodoListQuery, type CalendarEventListQuery, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type PlanningAgentOperation, type PlanningChange, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type CreatePlanningTagInput, type UpdatePlanningTagInput, type SnoozePlanningReminderInput, type StartTodoAgentInput, type StartTodoAgentResult, type TodoAgentSessionActivation, type TeamMemoryApiResult, type TeamMemoryDocument, type TeamMemoryRevision, type ChangelogEntry, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult } from '@profer/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, NOTIFICATION_SOUND_IPC_CHANNELS, DESKTOP_NOTIFICATION_IPC_CHANNELS } from '../types'
 import type { CustomNotificationSound } from '../types'
-import type { PresetReference, PresetReferenceReport, LarkCliStatus, LarkCliOperationResult, LarkLoginStartResult, LarkLoginEvent, LarkMcpCredentialsInput, LarkMcpSetupResult, LarkMcpStatus } from '@profer/shared'
+import type { PresetReference, PresetReferenceReport, PresetScopeRebindResult, LarkCliStatus, LarkCliOperationResult, LarkLoginStartResult, LarkLoginEvent, LarkMcpCredentialsInput, LarkMcpSetupResult, LarkMcpStatus } from '@profer/shared'
 import type {
   RuntimeStatus,
   GitRepoStatus,
@@ -244,8 +244,12 @@ export interface ElectronAPI {
   windowClose: () => Promise<void>
   /** 窗口是否处于最大化状态 */
   windowIsMaximized: () => Promise<boolean>
+  /** macOS 窗口是否处于原生全屏状态 */
+  windowIsFullScreen: () => Promise<boolean>
   /** 订阅窗口最大化/还原事件 */
   onWindowResize: (callback: () => void) => () => void
+  /** 订阅 macOS 原生全屏状态变化 */
+  onWindowFullScreenChanged: (callback: (isFullScreen: boolean) => void) => () => void
 
   // ===== 渠道管理相关 =====
 
@@ -289,6 +293,8 @@ export interface ElectronAPI {
 
   /** 获取构建目标 */
   getBuildTarget: () => Promise<'oss' | 'commercial'>
+  /** 在已保存的 xAI 渠道上启动订阅 OAuth 登录。 */
+  loginXaiOAuth: (channelId: string) => Promise<Channel>
 
   // ===== 对话管理相关 =====
 
@@ -585,6 +591,7 @@ export interface ElectronAPI {
   setDefaultAgentPresetReference: (workspaceSlug: string, reference: PresetReference) => Promise<PresetReference>
   enableGlobalPresetInWorkspace: (workspaceSlug: string, reference: PresetReference) => Promise<void>
   disableGlobalPresetInWorkspace: (workspaceSlug: string, reference: PresetReference) => Promise<void>
+  rebindAndDisableGlobalPresetScope: (workspaceSlug: string, source: PresetReference, replacement?: PresetReference) => Promise<PresetScopeRebindResult>
   setWorkspacePresetEnabled: (workspaceSlug: string, presetId: string, enabled: boolean) => Promise<void>
   rebindAgentSessionPresetReference: (sessionId: string, reference: PresetReference) => Promise<AgentSessionMeta>
   rebindAutomationPresetReference: (automationId: string, reference: PresetReference | null) => Promise<import('@profer/shared').Automation>
@@ -689,6 +696,9 @@ export interface ElectronAPI {
 
   /** 中止 Agent 执行 */
   stopAgent: (sessionId: string) => Promise<void>
+
+  /** 更新指定会话的队列自动发送开关 */
+  updateAgentQueueAutoSend: (sessionId: string, enabled: boolean) => Promise<import('@profer/shared').AgentSessionMeta>
 
   // ===== Agent 队列消息 =====
 
@@ -1661,6 +1671,16 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_MAXIMIZED)
   },
 
+  windowIsFullScreen: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.WINDOW_IS_FULL_SCREEN)
+  },
+
+  onWindowFullScreenChanged: (callback: (isFullScreen: boolean) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, isFullScreen: boolean): void => callback(isFullScreen)
+    ipcRenderer.on(IPC_CHANNELS.WINDOW_FULL_SCREEN_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_FULL_SCREEN_CHANGED, handler)
+  },
+
   onWindowResize: (callback: () => void) => {
     const handler = (): void => callback()
     window.addEventListener('resize', handler)
@@ -1721,6 +1741,10 @@ const electronAPI: ElectronAPI = {
 
   getBuildTarget: () => {
     return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.GET_BUILD_TARGET)
+  },
+
+  loginXaiOAuth: (channelId: string) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.XAI_LOGIN, channelId)
   },
 
   // 对话管理
@@ -2095,6 +2119,7 @@ const electronAPI: ElectronAPI = {
   setDefaultAgentPresetReference: (workspaceSlug: string, reference: PresetReference) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.SET_DEFAULT_REFERENCE, workspaceSlug, reference),
   enableGlobalPresetInWorkspace: (workspaceSlug: string, reference: PresetReference) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.ENABLE_GLOBAL_IN_WORKSPACE, workspaceSlug, reference),
   disableGlobalPresetInWorkspace: (workspaceSlug: string, reference: PresetReference) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.DISABLE_GLOBAL_IN_WORKSPACE, workspaceSlug, reference),
+  rebindAndDisableGlobalPresetScope: (workspaceSlug: string, source: PresetReference, replacement?: PresetReference) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.REBIND_AND_DISABLE_GLOBAL_SCOPE, workspaceSlug, source, replacement),
   setWorkspacePresetEnabled: (workspaceSlug: string, presetId: string, enabled: boolean) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.SET_WORKSPACE_ENABLED, workspaceSlug, presetId, enabled),
   rebindAgentSessionPresetReference: (sessionId: string, reference: PresetReference) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.REBIND_SESSION_REFERENCE, sessionId, reference),
   rebindAutomationPresetReference: (automationId: string, reference: PresetReference | null) => ipcRenderer.invoke(AGENT_PRESET_IPC_CHANNELS.REBIND_AUTOMATION_REFERENCE, automationId, reference),
@@ -2255,6 +2280,10 @@ const electronAPI: ElectronAPI = {
 
   stopAgent: (sessionId: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP_AGENT, sessionId)
+  },
+
+  updateAgentQueueAutoSend: (sessionId: string, enabled: boolean) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_QUEUE_AUTO_SEND, sessionId, enabled)
   },
 
   // Agent 队列消息

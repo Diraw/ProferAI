@@ -36,18 +36,19 @@ import type {
   AgentThinkingLevel,
   ErrorCode,
 } from '@profer/shared'
-import { normalizeAgentRuntime } from '@profer/shared'
+import { isAgentEnabledForChannel, normalizeAgentRuntime } from '@profer/shared'
 import {
-  PROFER_DEFAULT_PERMISSION_MODE,
   SAFE_TOOLS,
   THINKING_SIGNATURE_ERROR_CODE,
   THINKING_SIGNATURE_ERROR_MESSAGE,
   THINKING_SIGNATURE_ERROR_TITLE,
   resolveAgentSdkModelId,
-  AGENT_PRESET_TOOL_GROUP_SUPPRESS_MAP,
   AGENT_PRESET_CAPABILITY_GROUPS,
+  createEffectiveAgentPresetPolicy,
+  withLoadedMcpServerNames,
+  isEffectiveAgentPresetMcpServerAllowed,
 } from '@profer/shared'
-import type { PermissionRequest, ProferPermissionMode, AskUserRequest, ExitPlanModeRequest, AgentPresetSuppressKey } from '@profer/shared'
+import type { PermissionRequest, ProferPermissionMode, AskUserRequest, ExitPlanModeRequest, EffectiveAgentPresetPolicy } from '@profer/shared'
 import { AgentEventBus } from './agent-event-bus'
 import {
   decryptApiKey,
@@ -57,6 +58,7 @@ import {
   canSelfConfig,
   persistCodexOAuthCredentials,
   resolveCodexOAuthCredentials,
+  persistXaiOAuthCredentials,
 } from './channel-manager'
 import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
 import { resolveRuntimeCredentials } from './agent-runtime-credentials'
@@ -65,6 +67,13 @@ import { injectMemoryArchiveMcpServer } from './memory-archive-agent-tools'
 import { injectTeamMemoryMcpServer } from './team-memory-agent-tools'
 import { injectTaskGraphMcpServer } from './task-graph-agent-tools'
 import { injectAgentPresetMcpServer } from './agent-preset-tools'
+import {
+  clearPendingPresetChange,
+  evaluateAgentPresetOperationIntents,
+  getPendingPresetChange,
+  isPresetChangeCancellation,
+  isPresetChangeConfirmation,
+} from './agent-preset-operations'
 import {
   delegationLinkFromResult,
   delegationToGraphEvents,
@@ -268,12 +277,7 @@ export class AgentOrchestrator {
   private runCompletions = new Map<string, { token: string; promise: Promise<void>; resolve: () => void }>()
 
   /** 当前运行实际加载的预设能力；队列消息必须跟随它，而不是盲信运行中途刚切换的会话元数据。 */
-  private activePresetPolicies = new Map<string, {
-    skillSlugs?: string[]
-    disabledToolGroups: Set<string>
-    disabledTools?: string[]
-    loadedMcpServerNames: Set<string>
-  }>()
+  private activePresetPolicies = new Map<string, EffectiveAgentPresetPolicy>()
 
   /** 删除期间禁止同一会话从 UI、队列或 headless 路径重新进入。 */
   private deletingSessions = new Set<string>()
@@ -869,6 +873,19 @@ export class AgentOrchestrator {
       return
     }
 
+    if (channel.provider === 'xai' && (agentRuntime !== 'pi' || !isAgentEnabledForChannel(channel))) {
+      reportPreflightError({
+        code: 'invalid_request',
+        title: agentRuntime !== 'pi' ? 'xAI 仅支持 Pi Agent' : 'xAI Agent 尚未开启',
+        message: agentRuntime !== 'pi'
+          ? 'xAI 当前仅支持 Pi Agent 运行时，请先切换 Agent 内核为 Pi。'
+          : 'xAI Agent 仍处于实验阶段，请先在 xAI 渠道设置中开启“启用实验性 Agent”。',
+        actions: [{ key: 's', label: '打开渠道设置', action: 'open_channel_settings' }],
+        canRetry: false,
+      })
+      return
+    }
+
     console.info('[Agent 编排] 请求路由:', {
       sessionId,
       requestSource: 'agent-message',
@@ -1093,15 +1110,13 @@ export class AgentOrchestrator {
       const sessionPreset = presetSessionMeta?.presetReference
         ? getAgentPresetByReference(presetSessionMeta.presetReference, workspaceSlug)
         : getAgentPresetByReference(presetReferenceForId(workspaceSlug, presetSessionMeta?.presetId), workspaceSlug)
-      // 方案 3：预设禁用的产品内置工具组（注入时直接不注册）；allowSubagents=false 等价禁用协作工具
-      const disabledToolGroups = new Set<string>(sessionPreset.disabledToolGroups ?? [])
-      if (sessionPreset.allowSubagents === false) disabledToolGroups.add('collaboration')
+      // 先把已解析预设转换为本轮冻结的有效策略；allowSubagents=false 等价禁用协作工具。
       const pptDecision = evaluatePptCapability({
         userMessage,
         active: presetSessionMeta?.pptCapabilityActive === true,
         hasActiveDeckProject: presetSessionMeta?.pptCapabilityActive === true,
       })
-      const pptCapabilityActive = !disabledToolGroups.has('ppt-materials') && pptDecision.active
+      const pptCapabilityActive = !sessionPreset.disabledToolGroups?.includes('ppt-materials') && pptDecision.active
       if (presetSessionMeta && pptCapabilityActive !== (presetSessionMeta.pptCapabilityActive === true)) {
         try {
           updateAgentSessionMeta(sessionId, { pptCapabilityActive })
@@ -1109,23 +1124,46 @@ export class AgentOrchestrator {
           // 会话可能在并发删除；本轮仍使用已计算的 gate 结果。
         }
       }
+      const presetOperationSource = input.triggeredBy ?? 'user'
+      const pendingPresetChange = getPendingPresetChange(sessionId)
+      const userConfirmedPresetChange = presetOperationSource === 'user'
+        && pendingPresetChange !== undefined
+        && isPresetChangeConfirmation(userMessage)
+      if (presetOperationSource === 'user' && pendingPresetChange && isPresetChangeCancellation(userMessage)) {
+        clearPendingPresetChange(sessionId)
+      }
+      const allowedPresetOperations = presetOperationSource === 'user'
+        ? [
+            ...evaluateAgentPresetOperationIntents(userMessage),
+            ...(userConfirmedPresetChange ? ['commit_change' as const] : []),
+          ]
+        : []
+      const currentPresetReference = presetSessionMeta?.presetReference
+        ?? presetReferenceForId(workspaceSlug, presetSessionMeta?.presetId)
+      const presetPolicy = createEffectiveAgentPresetPolicy(
+        sessionPreset,
+        currentPresetReference,
+        {
+          permissionMode: input.permissionModeOverride,
+          pptCapabilityActive,
+          runtimeSupportsSubagents: this.adapter.getRuntimeCapabilities?.(agentRuntime)?.runtimeSupportsSubagents
+            ?? this.adapter.getCapabilities?.().runtimeSupportsSubagents
+            ?? false,
+        },
+      )
+      const disabledToolGroups = new Set(presetPolicy.disabledToolGroups)
+      const disabledTools = presetPolicy.disabledTools ? [...presetPolicy.disabledTools] : undefined
       // Claude 原生工具不经过 in-process MCP，必须通过 SDK disallowedTools 同步硬禁用。
       const disabledClaudeTools = [
         ...AGENT_PRESET_CAPABILITY_GROUPS
-          .filter((group) => disabledToolGroups.has(group.id))
+          .filter((group) => presetPolicy.disabledToolGroups.includes(group.id))
           .flatMap((group) => group.toolNames),
-        ...(sessionPreset.disabledTools ?? []),
+        ...(disabledTools ?? []),
       ].filter((name) => name === 'WebSearch' || name === 'WebFetch')
         .filter((name, index, names) => names.indexOf(name) === index)
-      const disabledTools = sessionPreset.disabledTools
-      const mcpServers = this.buildMcpServers(workspaceSlug, sessionPreset.mcpServerNames)
+      const mcpServers = this.buildMcpServers(workspaceSlug, presetPolicy.allowedMcpServerNames ? [...presetPolicy.allowedMcpServerNames] : undefined)
       // 先建立运行策略快照，再执行异步 MCP 注入，避免初始化期间的队列消息失去预设过滤。
-      this.activePresetPolicies.set(sessionId, {
-        ...(sessionPreset.skillSlugs !== undefined && { skillSlugs: sessionPreset.skillSlugs.map(normalizeDefaultSkillSlug) }),
-        disabledToolGroups: new Set(disabledToolGroups),
-        ...(disabledTools !== undefined && { disabledTools: [...disabledTools] }),
-        loadedMcpServerNames: new Set(Object.keys(mcpServers)),
-      })
+      this.activePresetPolicies.set(sessionId, withLoadedMcpServerNames(presetPolicy, Object.keys(mcpServers)))
       if (!disabledToolGroups.has('automation')) {
         await injectAutomationMcpServer(
           sdk,
@@ -1172,7 +1210,15 @@ export class AgentOrchestrator {
       if (!disabledToolGroups.has('task-graph')) {
         await injectTaskGraphMcpServer(sdk, mcpServers, { sessionId }, disabledTools)
       }
-      await injectAgentPresetMcpServer(sdk, mcpServers, { sessionId })
+      await injectAgentPresetMcpServer(sdk, mcpServers, {
+        sessionId,
+        workspaceSlug,
+        source: presetOperationSource,
+        allowedOperations: allowedPresetOperations,
+        currentPresetReference,
+        userMessage,
+        pendingChange: userConfirmedPresetChange ? pendingPresetChange : undefined,
+      })
       if (agentRuntime === 'claude' && !disabledToolGroups.has('automation')) {
         await injectPlanningMcpServer(sdk, mcpServers, {
           sessionId,
@@ -1255,7 +1301,7 @@ export class AgentOrchestrator {
       // 合并外部注入的自定义 MCP 服务器（如飞书群聊工具），同样受当前预设白名单约束。
       if (customMcpServers) {
         const customEntries = Object.entries(customMcpServers)
-          .filter(([name]) => sessionPreset.mcpServerNames === undefined || sessionPreset.mcpServerNames.includes(name))
+          .filter(([name]) => isEffectiveAgentPresetMcpServerAllowed(presetPolicy, name))
           // 外部 MCP 不得覆盖 Profer 已注册的内置 MCP（如 automation/planning/team-memory）。
           .filter(([name]) => !Object.prototype.hasOwnProperty.call(mcpServers, name))
         Object.assign(mcpServers, Object.fromEntries(customEntries))
@@ -1268,9 +1314,7 @@ export class AgentOrchestrator {
       // 队列消息复用当前 SDK 运行时，必须使用本轮真正加载的能力快照；会话内切换预设只影响下一轮。
       const activePresetPolicy = this.activePresetPolicies.get(sessionId)
       if (activePresetPolicy) {
-        activePresetPolicy.loadedMcpServerNames = new Set(Object.keys(mcpServers))
-        activePresetPolicy.disabledToolGroups = new Set(disabledToolGroups)
-        activePresetPolicy.disabledTools = disabledTools ? [...disabledTools] : undefined
+        this.activePresetPolicies.set(sessionId, withLoadedMcpServerNames(activePresetPolicy, Object.keys(mcpServers)))
       }
 
       // 11. 构建动态上下文和最终 prompt
@@ -1291,7 +1335,7 @@ export class AgentOrchestrator {
         enrichedMessage = `${referencedSessionsBlock}\n\n${enrichedMessage}`
         console.log(`[Agent 编排] 注入 referenced_sessions: ${mentionedSessionIds?.length ?? 0} sessions`)
       }
-      const allowedSkillSlugs = sessionPreset.skillSlugs?.map(normalizeDefaultSkillSlug)
+      const allowedSkillSlugs = presetPolicy.allowedSkillSlugs?.map(normalizeDefaultSkillSlug)
       const allowedMentionedSkills = mentionedSkills?.filter((slug) =>
         allowedSkillSlugs === undefined || allowedSkillSlugs.includes(normalizeDefaultSkillSlug(slug)),
       ) ?? []
@@ -1332,7 +1376,7 @@ ${enrichedMessage}`
       // 权限模式只属于当前 session；新会话默认完全自动模式。
       const appSettings = getSettings()
       // Agent 预设：会话绑定的预设可覆盖权限模式与推理档位，并在系统提示词后追加预设专属段（sessionPreset 已在步骤 10 解析）。
-      const initialPermissionMode: ProferPermissionMode = permissionModeOverride ?? sessionPreset.permissionMode ?? PROFER_DEFAULT_PERMISSION_MODE
+      const initialPermissionMode: ProferPermissionMode = presetPolicy.permissionMode
       // 受管浏览器允许读取的根目录 = 会话工作目录 + 会话/工作区已授权目录（后者含工作区根与 workspace-files）。
       const browserAllowedRoots = [
         ...new Set(
@@ -1370,6 +1414,10 @@ ${enrichedMessage}`
               }),
               permissionMode: initialPermissionMode,
               triggeredBy: input.triggeredBy,
+              allowedPresetOperations,
+              currentPresetReference,
+              presetOperationUserMessage: userMessage,
+              pendingPresetChange: userConfirmedPresetChange ? pendingPresetChange : undefined,
               disabledToolGroups: [...disabledToolGroups],
               disabledTools,
               pptCapabilityActive,
@@ -1676,23 +1724,19 @@ ${enrichedMessage}`
         workspaceSlug,
         sessionId,
         permissionMode: initialPermissionMode,
-        presetName: sessionPreset.name,
+        presetName: presetPolicy.preset.name,
+        allowedPresetOperations,
         // 方案 3：工具组禁用同步隐藏提示词段落，自动映射来自 shared 唯一事实表
         // （task-graph→task-graph、memory→memory、collaboration→subagents、automation→automation）
-        suppressSections: [
-          ...(sessionPreset.suppressPromptSections ?? []),
-            ...[...disabledToolGroups]
-            .map((g) => AGENT_PRESET_TOOL_GROUP_SUPPRESS_MAP[g as keyof typeof AGENT_PRESET_TOOL_GROUP_SUPPRESS_MAP])
-              .filter((v): v is AgentPresetSuppressKey => typeof v === 'string'),
-        ],
+        suppressSections: [...presetPolicy.suppressPromptSections],
         claudeAvailable,
         deepSeekSubagentModel: modelRouting.subagentModel,
         isPiRuntime: agentRuntime === 'pi',
         isTeamWorkspace: workspace?.type === 'team',
         teamMemoryAvailable: workspace?.type === 'team' && !disabledToolGroups.has('memory'),
         disabledToolGroups: [...disabledToolGroups].filter((group): group is import('@profer/shared').AgentPresetToolGroup => AGENT_PRESET_CAPABILITY_GROUPS.some((item) => item.id === group)),
-        disabledTools,
-        pptCapabilityActive,
+        disabledTools: disabledTools ? [...disabledTools] : undefined,
+        pptCapabilityActive: presetPolicy.pptCapabilityActive,
         platform: process.platform,
         shellPath: piRuntimeEnv.shellPath
           ?? process.env.SHELL
@@ -1713,7 +1757,7 @@ ${enrichedMessage}`
         : baseSystemPrompt
       const systemPromptAppend = compressedSystemPrompt +
         attachedDirectoriesPrompt +
-        (sessionPreset.promptSections?.length ? `\n\n${sessionPreset.promptSections.join('\n\n')}` : '') +
+        (presetPolicy.preset.promptSections?.length ? `\n\n${presetPolicy.preset.promptSections.join('\n\n')}` : '') +
         (automationContext ? `\n\n## 定时任务执行上下文\n\n${automationContext}` : '')
       const piSystemPrompt = systemPromptAppend
       const queryOptions: AgentQueryInput & Record<string, unknown> = {
@@ -1728,6 +1772,11 @@ ${enrichedMessage}`
           apiKey: runtimeCredentials.apiKey,
           baseUrl: runtimeCredentials.baseUrl,
           provider: channel.provider,
+          ...(runtimeCredentials.xaiCredentialMode && { xaiCredentialMode: runtimeCredentials.xaiCredentialMode }),
+          ...(runtimeCredentials.xaiOAuthCredentials && {
+            xaiOAuthCredentials: runtimeCredentials.xaiOAuthCredentials,
+            onXaiOAuthCredentialsRefreshed: (credentials: import('@profer/shared').XaiOAuthCredentials) => persistXaiOAuthCredentials(channelId, credentials),
+          }),
           channelId,
           channelName: channel.name,
           permissionMode: initialPermissionMode,
@@ -1741,7 +1790,7 @@ ${enrichedMessage}`
             // 预设 effort 覆盖全局档位（与 Claude 侧 effort 级联一致）；undefined 跟随全局
             {
               agentThinking: !(appSettings.agentThinking?.type === 'disabled'),
-              agentEffort: sessionPreset.effort ?? appSettings.agentEffort,
+              agentEffort: presetPolicy.effort ?? appSettings.agentEffort,
             },
             channel.provider,
           ),
@@ -1749,8 +1798,8 @@ ${enrichedMessage}`
           ...(runtimeSkills && {
             additionalSkillPaths: [getRuntimeSkillsPath(runtimeSkills)],
           }),
-          ...(sessionPreset.skillSlugs !== undefined && {
-            skillSlugs: sessionPreset.skillSlugs,
+          ...(presetPolicy.allowedSkillSlugs !== undefined && {
+            skillSlugs: [...presetPolicy.allowedSkillSlugs],
           }),
           ...(piCustomTools && { customTools: piCustomTools }),
           ...(sessionMeta?.codexFastMode && { codexFastMode: true }),
@@ -1791,8 +1840,8 @@ ${enrichedMessage}`
           ],
         }),
         // 预设 Skill 白名单（Claude SDK 原生 skills 过滤：未列出的 skill 对模型隐藏且 Skill 工具拒绝；[] = 0 skill）
-        ...(sessionPreset.skillSlugs !== undefined && {
-          skills: sessionPreset.skillSlugs,
+        ...(presetPolicy.allowedSkillSlugs !== undefined && {
+          skills: [...presetPolicy.allowedSkillSlugs],
         }),
         // 合并附加目录：用户当次输入 + 会话级 + 工作区级（详见 collectAttachedDirectories）
         ...(allAdditionalDirectories.length > 0 && {
@@ -1804,7 +1853,7 @@ ${enrichedMessage}`
         ...(appSettings.agentThinking && {
           thinking: appSettings.agentThinking,
         }),
-        effort: sessionPreset.effort ?? appSettings.agentEffort ?? 'high',
+        effort: presetPolicy.effort ?? appSettings.agentEffort ?? 'high',
         ...(appSettings.agentMaxBudgetUsd != null &&
           appSettings.agentMaxBudgetUsd > 0 && {
           maxBudgetUsd: appSettings.agentMaxBudgetUsd,
@@ -3270,17 +3319,17 @@ ${enrichedMessage}`
     const activePolicy = this.activePresetPolicies.get(sessionId)
     const userBrowserContext = browserController.getUserContext(sessionId)
     let enrichedText = userBrowserContext
-      ? `${buildDynamicContext({ userBrowserContext, mcpServerNames: activePolicy ? [...activePolicy.loadedMcpServerNames] : undefined, disabledToolGroups: activePolicy ? [...activePolicy.disabledToolGroups].filter((group): group is import('@profer/shared').AgentPresetToolGroup => AGENT_PRESET_CAPABILITY_GROUPS.some((item) => item.id === group)) : undefined, disabledTools: activePolicy?.disabledTools })}\n\n${text}`
+      ? `${buildDynamicContext({ userBrowserContext, mcpServerNames: activePolicy?.loadedMcpServerNames ? [...activePolicy.loadedMcpServerNames] : undefined, disabledToolGroups: activePolicy ? [...activePolicy.disabledToolGroups] : undefined, disabledTools: activePolicy?.disabledTools })}\n\n${text}`
       : text
     const referencedSessionsBlock = buildReferencedSessionsPrompt(sessionId, mentionedSessionIds, workspaceId)
     if (referencedSessionsBlock) {
       enrichedText = `${referencedSessionsBlock}\n\n${enrichedText}`
     }
     const allowedMentionedSkills = mentionedSkills?.filter((slug) =>
-      activePolicy?.skillSlugs === undefined || activePolicy.skillSlugs.includes(normalizeDefaultSkillSlug(slug)),
+      activePolicy?.allowedSkillSlugs === undefined || activePolicy.allowedSkillSlugs.map(normalizeDefaultSkillSlug).includes(normalizeDefaultSkillSlug(slug)),
     ) ?? []
     const allowedMentionedMcpServers = mentionedMcpServers?.filter((name) =>
-      activePolicy?.loadedMcpServerNames.has(name),
+      activePolicy?.loadedMcpServerNames?.includes(name) === true,
     ) ?? []
     const toolLines: string[] = []
     for (const slug of allowedMentionedSkills) {

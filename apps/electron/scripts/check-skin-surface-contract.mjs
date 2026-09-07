@@ -84,6 +84,11 @@ for (const id of directories) {
     const tokens = parseTokens(css)
     const missing = REQUIRED_TOKENS.filter((token) => !tokens.has(token) || !tokens.get(token))
     if (missing.length) errors.push(`缺少 ${missing.length} 个 v2 token：${missing.join(', ')}`)
+    // Markdown 代码块统一使用深色背景；浅色皮肤若把 code-fg 绑定到正文前景色，
+    // 会生成深色背景 + 深色文字，导致内置文件预览中的代码几乎不可读。
+    if (manifest?.tone === 'light' && tokens.get('code-fg') === 'var(--foreground)') {
+      errors.push('--code-fg 不能在浅色皮肤中复用 var(--foreground)')
+    }
     for (const [token, value] of tokens) {
       if (!value || /[{}]/.test(value)) errors.push(`--${token} 值无效`)
     }

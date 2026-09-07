@@ -75,25 +75,137 @@ function createPiSdkStub(): {
 }
 
 describe('Pi Profer in-process tool bridges', () => {
-  test('Given Pi runtime When building preset tools Then only the read-only preset_list is exposed', () => {
+  test('Given no explicit preset mutation intent When building Pi preset tools Then only preset_list is exposed', () => {
     const { sdk, tools } = createPiSdkStub()
-    buildPiAgentPresetTools(sdk, { sessionId: 'pi-preset-test', workspaceSlug: 'pi-test-ws' })
-    expect(tools.length).toBe(1)
-    expect(tools.map((t) => t.name)).toEqual(['mcp__agent-presets__preset_list'])
-  })
-
-  test('Given preset mutation tool names When building Pi preset tools Then they are not registered', () => {
-    const { sdk, tools } = createPiSdkStub()
-    buildPiAgentPresetTools(sdk, { sessionId: 'pi-preset-test', workspaceSlug: 'pi-test-ws' })
-    expect(tools.map((tool) => tool.name)).not.toContain('mcp__agent-presets__preset_create')
-    expect(tools.map((tool) => tool.name)).not.toContain('mcp__agent-presets__preset_update')
-    expect(tools.map((tool) => tool.name)).not.toContain('mcp__agent-presets__preset_switch_session')
-  })
-
-  test('Given preset mutation names When Pi builds preset tools Then mutation tools are absent', () => {
-    const { sdk, tools } = createPiSdkStub()
-    buildPiAgentPresetTools(sdk, { sessionId: 'pi-derive-test', workspaceSlug: 'pi-derive-ws' })
+    buildPiAgentPresetTools(sdk, {
+      sessionId: 'pi-preset-test',
+      workspaceSlug: 'pi-test-ws',
+      triggeredBy: 'user',
+      allowedPresetOperations: [],
+    })
     expect(tools.map((tool) => tool.name)).toEqual(['mcp__agent-presets__preset_list'])
+  })
+
+  test('Given explicit create or copy intent When building Pi preset tools Then only that operation is exposed', () => {
+    const create = createPiSdkStub()
+    buildPiAgentPresetTools(create.sdk, {
+      sessionId: 'pi-preset-test',
+      workspaceSlug: 'pi-test-ws',
+      triggeredBy: 'user',
+      allowedPresetOperations: ['create'],
+    })
+    expect(create.tools.map((tool) => tool.name)).toEqual([
+      'mcp__agent-presets__preset_list',
+      'mcp__agent-presets__preset_create',
+    ])
+
+    const copy = createPiSdkStub()
+    buildPiAgentPresetTools(copy.sdk, {
+      sessionId: 'pi-preset-test',
+      workspaceSlug: 'pi-test-ws',
+      triggeredBy: 'user',
+      allowedPresetOperations: ['copy'],
+    })
+    expect(copy.tools.map((tool) => tool.name)).toEqual([
+      'mcp__agent-presets__preset_list',
+      'mcp__agent-presets__preset_copy',
+    ])
+  })
+
+  test('Given explicit switch intent and frozen reference When building Pi tools Then switch is exposed', () => {
+    const { sdk, tools } = createPiSdkStub()
+    buildPiAgentPresetTools(sdk, {
+      sessionId: 'pi-preset-switch',
+      workspaceSlug: 'pi-test-ws',
+      triggeredBy: 'user',
+      allowedPresetOperations: ['switch'],
+      currentPresetReference: { presetId: 'minimal', presetScope: 'builtin-meta' },
+      presetOperationUserMessage: '切换到标准预设',
+    })
+    expect(tools.map((tool) => tool.name)).toEqual([
+      'mcp__agent-presets__preset_list',
+      'mcp__agent-presets__preset_switch_session',
+    ])
+  })
+
+  test('Given explicit update or default intent When building Pi preset tools Then only the matching proposal tool is exposed', () => {
+    const update = createPiSdkStub()
+    buildPiAgentPresetTools(update.sdk, {
+      sessionId: 'pi-preset-update', workspaceSlug: 'pi-test-ws', triggeredBy: 'user',
+      allowedPresetOperations: ['propose_update'], presetOperationUserMessage: '请修改研究预设',
+    })
+    expect(update.tools.map((tool) => tool.name)).toEqual([
+      'mcp__agent-presets__preset_list', 'mcp__agent-presets__preset_propose_update',
+    ])
+
+    const defaultChange = createPiSdkStub()
+    buildPiAgentPresetTools(defaultChange.sdk, {
+      sessionId: 'pi-preset-default', workspaceSlug: 'pi-test-ws', triggeredBy: 'user',
+      allowedPresetOperations: ['propose_default'], presetOperationUserMessage: '把研究预设设为默认',
+    })
+    expect(defaultChange.tools.map((tool) => tool.name)).toEqual([
+      'mcp__agent-presets__preset_list', 'mcp__agent-presets__preset_request_default_change',
+    ])
+  })
+
+  test('Given a pending proposal and confirmation When building Pi preset tools Then only commit is exposed', () => {
+    const { sdk, tools } = createPiSdkStub()
+    buildPiAgentPresetTools(sdk, {
+      sessionId: 'pi-preset-commit', workspaceSlug: 'pi-test-ws', triggeredBy: 'user',
+      allowedPresetOperations: ['commit_change'], presetOperationUserMessage: '确认',
+      pendingPresetChange: {
+        proposalId: 'proposal-1', kind: 'default', sessionId: 'pi-preset-commit', workspaceSlug: 'pi-test-ws',
+        target: { presetId: 'standard', presetScope: 'builtin-meta' },
+        currentDefault: { presetId: 'minimal', presetScope: 'builtin-meta' },
+        proposalAuditEventId: 'audit-1', createdAt: Date.now(),
+      },
+    })
+    expect(tools.map((tool) => tool.name)).toEqual([
+      'mcp__agent-presets__preset_list', 'mcp__agent-presets__preset_commit_change',
+    ])
+  })
+
+  test('Given automation, delegation, or no workspace When building Pi preset tools Then mutation tools stay absent', () => {
+    for (const context of [
+      { sessionId: 'auto', workspaceSlug: 'pi-test-ws', triggeredBy: 'automation' as const, allowedPresetOperations: ['create', 'copy'] as const },
+      { sessionId: 'child', workspaceSlug: 'pi-test-ws', triggeredBy: 'delegation' as const, allowedPresetOperations: ['create', 'copy'] as const },
+      { sessionId: 'no-workspace', triggeredBy: 'user' as const, allowedPresetOperations: ['create', 'copy'] as const },
+    ]) {
+      const { sdk, tools } = createPiSdkStub()
+      buildPiAgentPresetTools(sdk, context)
+      expect(tools.map((tool) => tool.name)).toEqual(['mcp__agent-presets__preset_list'])
+    }
+  })
+
+  test('Given any allowed intent When building Pi preset tools Then unconfirmed high-risk mutation tools are absent', () => {
+    const { sdk, tools } = createPiSdkStub()
+    buildPiAgentPresetTools(sdk, {
+      sessionId: 'pi-preset-test',
+      workspaceSlug: 'pi-test-ws',
+      triggeredBy: 'user',
+      allowedPresetOperations: ['create', 'copy', 'switch'],
+      currentPresetReference: { presetId: 'minimal', presetScope: 'builtin-meta' },
+      presetOperationUserMessage: '切换到标准预设',
+    })
+    const names = tools.map((tool) => tool.name)
+    expect(names).not.toContain('mcp__agent-presets__preset_update')
+    expect(names).not.toContain('mcp__agent-presets__preset_delete')
+    expect(names).not.toContain('mcp__agent-presets__preset_set_default')
+    expect(names).toContain('mcp__agent-presets__preset_switch_session')
+  })
+
+  test('Given orchestrator-approved create intent When building all Pi builtin tools Then create reaches the final tool set', async () => {
+    const { sdk, tools } = createPiSdkStub()
+    await buildPiBuiltinTools(sdk, {
+      sessionId: 'pi-preset-integration',
+      channelId: 'ch-1',
+      workspaceId: 'ws-1',
+      workspaceSlug: 'pi-test-ws',
+      triggeredBy: 'user',
+      allowedPresetOperations: ['create'],
+    })
+    expect(tools.map((tool) => tool.name)).toContain('mcp__agent-presets__preset_create')
+    expect(tools.map((tool) => tool.name)).not.toContain('mcp__agent-presets__preset_copy')
   })
 
   test('Given Pi runtime When building memory tools without a workspace Then it does not expose personal memory search', () => {
@@ -323,7 +435,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
     }
   })
 
-  test('Given all four groups disabled Then only preset tools survive (minimal preset can still switch back)', async () => {
+  test('Given all four groups disabled Then only preset list survives without explicit mutation intent', async () => {
     const { sdk, tools } = createPiSdkStub()
     await buildPiBuiltinTools(sdk, { ...baseCtx, disabledToolGroups: ['task-graph', 'memory', 'collaboration', 'automation'] })
     for (const [group, prefix] of Object.entries(GROUP_PREFIXES)) {

@@ -25,7 +25,8 @@ export interface AgentRuntimeCapabilities {
   supportsQueuedMessage: boolean
   supportsBackgroundWakeup: boolean
   supportsNativeMcp: boolean
-  supportsSubAgents: boolean
+  /** Runtime 理论上具备子 Agent 能力；不代表当前会话已经获准使用。 */
+  runtimeSupportsSubagents: boolean
 }
 
 /** 默认 runtime。Pi 完成执行链路与灰度前，产品默认始终保持 Claude。 */
@@ -133,6 +134,8 @@ export interface AgentProviderAdapter {
   stopTask?(sessionId: string, taskId: string, expectedType?: 'agent' | 'shell'): Promise<void>
   /** Runtime 的静态/当前实现能力快照；未提供时由路由层按适配器方法降级推断。 */
   getCapabilities?(): Omit<AgentRuntimeCapabilities, 'runtime' | 'available'>
+  /** Router 可按目标 runtime 读取静态能力；普通 adapter 通常不需要实现。 */
+  getRuntimeCapabilities?(runtime: AgentRuntime): AgentRuntimeCapabilities
   /** 错误处理辅助函数（Provider 特化逻辑由 Adapter 提供） */
   errorHelpers: AgentErrorHelpers
   /**

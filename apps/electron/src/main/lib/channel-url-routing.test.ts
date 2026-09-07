@@ -54,6 +54,10 @@ describe('渠道 Chat/Agent URL 路由', () => {
     expect(agentUrl).toBe('https://cn.clawnode.cn/v1')
   })
 
+  test('Given xAI 渠道没有单独 Agent URL When Pi runtime 请求 Then 复用 xAI Responses Base URL', () => {
+    expect(inferAgentBaseUrl('xai', 'https://api.x.ai/v1')).toBe('https://api.x.ai/v1')
+  })
+
   test('Given Ollama Chat Base URL When 推导 Agent URL Then 使用服务根地址', () => {
     expect(inferAgentBaseUrl('ollama', 'http://127.0.0.1:11434')).toBe('http://127.0.0.1:11434')
     expect(inferAgentBaseUrl('ollama', 'http://127.0.0.1:11434/v1/')).toBe('http://127.0.0.1:11434')

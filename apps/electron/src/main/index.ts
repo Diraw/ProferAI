@@ -467,6 +467,19 @@ function createWindow(): void {
   })
   // 主界面默认放大到 110%；使用 webContents 缩放，避免 CSS zoom 破坏有限布局区域。
   mainWindow.webContents.setZoomFactor(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR)
+  // 开发版将 renderer Console 直接镜像到 supervisor 日志，白屏/模块加载失败可无需手动打开 DevTools 即定位。
+  if (!app.isPackaged) {
+    mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      const severity = ['verbose', 'info', 'warning', 'error'][level] ?? String(level)
+      console.log(`[renderer:${severity}] ${sourceId}:${line} ${message}`)
+    })
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      console.error(`[renderer:did-fail-load] mainFrame=${isMainFrame} code=${errorCode} ${errorDescription}: ${validatedURL}`)
+    })
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      console.error(`[renderer:process-gone] reason=${details.reason} exitCode=${details.exitCode}`)
+    })
+  }
   // 原生 traffic lights 不支持调整尺寸，改由 renderer 中的可控按钮替代。
   if (isMac) mainWindow.setWindowButtonVisibility(false)
   // Windows 开发运行时的 Electron 壳不会稳定继承 BrowserWindow 构造参数中的图标；
@@ -606,6 +619,14 @@ function createWindow(): void {
   }
   mainWindow.on('resize', scheduleWindowStateSave)
   mainWindow.on('move', scheduleWindowStateSave)
+  if (process.platform === 'darwin') {
+    const notifyFullScreenChanged = (): void => {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      mainWindow.webContents.send('window:full-screen-changed', mainWindow.isFullScreen())
+    }
+    mainWindow.on('enter-full-screen', notifyFullScreenChanged)
+    mainWindow.on('leave-full-screen', notifyFullScreenChanged)
+  }
   // 将 file:// 或 Windows 绝对路径转为系统路径
   const toSystemPath = (u: string): string | null => {
     if (u.startsWith('file:///')) {

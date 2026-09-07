@@ -8,6 +8,8 @@
 /**
  * 支持的 AI 供应商类型
  */
+export type XaiCredentialMode = 'api-key' | 'oauth'
+
 export type ProviderType =
   | 'anthropic'
   | 'anthropic-compatible'
@@ -57,7 +59,7 @@ export const PROVIDER_DEFAULT_URLS: Record<ProviderType, string> = {
   xiaomi: 'https://api.xiaomimimo.com/anthropic',
   'xiaomi-token-plan': 'https://token-plan-cn.xiaomimimo.com/anthropic',
   'openai-codex': '',
-  xai: '',
+  xai: 'https://api.x.ai/v1',
   ollama: 'http://127.0.0.1:11434',
   custom: ''
 }
@@ -104,7 +106,7 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
   xiaomi: '小米 MiMo (API)',
   'xiaomi-token-plan': '小米 MiMo Token Plan',
   'openai-codex': 'ChatGPT 订阅 (Codex)',
-  xai: 'xAI 订阅 (Grok)',
+  xai: 'xAI / Grok',
   ollama: 'Ollama 本地模型',
   custom: 'OpenAI 兼容格式',
 }
@@ -136,6 +138,20 @@ export const AGENT_COMPATIBLE_PROVIDERS: ReadonlySet<ProviderType> = new Set<Pro
  */
 export function isAgentCompatibleProvider(provider: ProviderType): boolean {
   return AGENT_COMPATIBLE_PROVIDERS.has(provider)
+}
+
+/** 解析 xAI 渠道的认证模式；历史渠道按密文内容兼容识别。 */
+export function resolveXaiCredentialMode(mode: XaiCredentialMode | undefined, secret: string): XaiCredentialMode {
+  // 结构化 OAuth 凭据优先，避免坏配置把 refresh token 当作 API Key 发到 Chat。
+  if (parseXaiCredentials(secret)) return 'oauth'
+  return mode === 'oauth' ? 'oauth' : 'api-key'
+}
+
+/** xAI API Key 模式可使用 Pi 原生 provider；订阅 OAuth 仅在显式实验开关开启时进入 Agent。 */
+export function isAgentEnabledForChannel(channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled'>): boolean {
+  if (!channel.enabled) return false
+  if (channel.provider === 'xai') return channel.agentExperimentalEnabled === true
+  return isAgentCompatibleProvider(channel.provider)
 }
 
 
@@ -293,6 +309,10 @@ export interface Channel {
   provider: ProviderType
   /** API Base URL（Chat 模式 / OpenAI 兼容端点） */
   baseUrl: string
+  /** xAI 认证模式；缺失时兼容识别历史 OAuth 渠道。 */
+  credentialMode?: XaiCredentialMode
+  /** xAI Agent 实验开关；仅对 xAI 渠道生效，默认关闭。 */
+  agentExperimentalEnabled?: boolean
   /** Agent 模式 Anthropic 兼容端点（为空则自动推导） */
   agentBaseUrl?: string
   /** 加密后的 API Key（base64 编码） */
@@ -320,6 +340,8 @@ export interface ChannelCreateInput {
   name: string
   provider: ProviderType
   baseUrl: string
+  credentialMode?: XaiCredentialMode
+  agentExperimentalEnabled?: boolean
   agentBaseUrl?: string
   /** 明文 API Key，主进程会加密后存储 */
   apiKey: string
@@ -334,6 +356,8 @@ export interface ChannelUpdateInput {
   name?: string
   provider?: ProviderType
   baseUrl?: string
+  credentialMode?: XaiCredentialMode
+  agentExperimentalEnabled?: boolean
   agentBaseUrl?: string
   /** 明文 API Key，为空字符串表示不更新 */
   apiKey?: string
@@ -437,6 +461,8 @@ export const CHANNEL_IPC_CHANNELS = {
   GET_COMMERCIAL_MODE: 'channel:get-commercial-mode',
   /** 获取构建目标（oss/commercial） */
   GET_BUILD_TARGET: 'channel:get-build-target',
+  /** 在已保存的 xAI 渠道上启动订阅 OAuth 登录，并由主进程加密保存凭据。 */
+  XAI_LOGIN: 'channel:xai-login',
   /** 获取账号能力（商业模式+自配权限+账号类型） */
   GET_ACCOUNT_CAPABILITIES: 'channel:get-account-capabilities',
   /** 查询订阅 Plan 额度 */

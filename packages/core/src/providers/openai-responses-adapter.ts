@@ -252,6 +252,12 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       bodyObj.tools = toResponsesTools(input.tools)
     }
 
+    // xAI Responses 使用与 OpenAI 相同的 reasoning 对象；Chat 当前只有思考开关，
+    // 统一选择 medium，避免把订阅 OAuth 或其他 provider 专用字段带入请求。
+    if (this.providerType === 'xai' && input.thinkingEnabled) {
+      bodyObj.reasoning = { effort: 'medium' }
+    }
+
     if (input.continuationMessages && input.continuationMessages.length > 0) {
       appendContinuationMessages(bodyObj.input as ResponsesInputItem[], input.continuationMessages)
     }

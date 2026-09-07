@@ -75,12 +75,15 @@ proma-v2/
 ## 常用命令
 
 ```bash
-# 开发模式（推荐 - 自动启动 Vite + Electron + 热重载）
+# 开发模式（推荐 - Vite HMR；Electron 只启动一次，不因代码变化抢焦点重启）
 bun run dev
 
-# 手动开发模式（调试时更稳定）
+# 手动开发模式（需要分别查看 Vite / Electron 日志时）
 # 终端 1: cd apps/electron && bun run dev:vite
 # 终端 2: cd apps/electron && bun run dev:electron
+
+# 说明：renderer 修改即时由 Vite HMR 生效；main/preload 仍会持续构建到 dist，
+# 但不会自动重启 Electron。修改 main/preload 后需手动重新执行 bun run dev 才加载新代码。
 
 # 构建并运行
 bun run electron:start
@@ -367,7 +370,7 @@ bun run generate:icons    # 生成应用图标
 
 - **主进程/Preload**：esbuild (`--bundle --platform=node --format=cjs --external:electron --external:@anthropic-ai/claude-agent-sdk`)
 - **渲染进程**：Vite + React 插件 + Tailwind CSS + HMR
-- **开发热重载**：渲染进程 Vite HMR 即时生效；主进程/Preload 通过 electronmon 监听 dist 文件变化自动重启
+- **开发热重载**：渲染进程通过 Vite HMR 即时生效；主进程/Preload 持续 watch 构建到 dist，但默认不自动重启 Electron，避免窗口反复抢焦点。修改 main/preload 后手动重启开发版。
 - **打包分发**：electron-builder（配置见 `electron-builder.yml`）
 
 ### 重要：打包配置注意事项

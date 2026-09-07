@@ -6,6 +6,7 @@ function baseState(overrides: Partial<AutoSendTurnState> = {}): AutoSendTurnStat
   return {
     turnVersion: 0,
     consumedVersion: 0,
+    autoSendEnabled: true,
     queuedCount: 0,
     liveMessagesPending: false,
     streaming: false,
@@ -68,6 +69,16 @@ describe('evaluateAutoSendTurn 轮结束自动发送决策', () => {
     expect(evaluateAutoSendTurn(baseState({ turnVersion: 1, consumedVersion: 0, queuedCount: 1, streaming: true }))).toBe('consume')
     expect(evaluateAutoSendTurn(baseState({ turnVersion: 1, consumedVersion: 0, queuedCount: 1, stoppedByUser: true }))).toBe('consume')
     expect(evaluateAutoSendTurn(baseState({ turnVersion: 1, consumedVersion: 0, queuedCount: 1, canSendQueuedNow: false }))).toBe('consume')
+  })
+
+  test('关闭自动发送时优先消费当前轮结束信号', () => {
+    expect(evaluateAutoSendTurn(baseState({
+      turnVersion: 1,
+      consumedVersion: 1,
+      autoSendEnabled: false,
+      queuedCount: 1,
+      liveMessagesPending: true,
+    }))).toBe('consume')
   })
 
   test('无未消费版本（consumed >= turnVersion）→ idle', () => {

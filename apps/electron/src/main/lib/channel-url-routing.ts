@@ -20,6 +20,7 @@ const PI_NATIVE_BASE_URL_PROVIDERS = new Set<ProviderType>([
   'qwen',
   'google',
   'custom',
+  'xai',
 ])
 
 function isOfficialDeepSeekV1Url(baseUrl?: string): boolean {
@@ -61,6 +62,11 @@ export function inferAgentBaseUrl(provider: ProviderType, baseUrl?: string, agen
 export function normalizeChannelForCurrentSchema(channel: Channel): { channel: Channel; changed: boolean } {
   let changed = false
   let next: Channel = { ...channel }
+
+  if (next.provider === 'xai' && !next.baseUrl?.trim()) {
+    next = { ...next, baseUrl: PROVIDER_DEFAULT_URLS.xai }
+    changed = true
+  }
 
   if (next.provider === 'deepseek') {
     if (hasAnthropicPath(next.baseUrl)) {

@@ -10,7 +10,7 @@ import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Plus, Pencil, Trash2, Server, RefreshCw, ChevronDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { PROVIDER_LABELS, isAgentCompatibleProvider } from '@profer/shared'
+import { PROVIDER_LABELS, isAgentCompatibleProvider, isAgentEnabledForChannel } from '@profer/shared'
 import type { Channel, OfficialChannelHealth, ProviderType } from '@profer/shared'
 import { getChannelLogo } from '@/lib/model-logo'
 import { agentChannelIdAtom, agentModelIdAtom, agentChannelIdsAtom } from '@/atoms/agent-atoms'
@@ -126,7 +126,7 @@ export function ChannelSettings(): React.ReactElement {
   React.useEffect(() => {
     if (loading) return
     const derivedIds = channels
-      .filter((c) => c.enabled && isAgentCompatibleProvider(c.provider))
+      .filter((c) => isAgentEnabledForChannel(c))
       .map((c) => c.id)
     const currentIds = agentChannelIdsRef.current
     const unchanged =
@@ -217,7 +217,7 @@ export function ChannelSettings(): React.ReactElement {
       const savedChannel = await window.electronAPI.updateChannel(channel.id, { enabled: !channel.enabled })
       await syncAgentChannelEligibility(
         savedChannel,
-        savedChannel.enabled && isAgentCompatibleProvider(savedChannel.provider),
+        isAgentEnabledForChannel(savedChannel),
       )
       await loadChannels()
     } catch (error) {
@@ -426,7 +426,7 @@ function ChannelRow({ channel, onEdit, onDelete, onToggle, commercialMode, canSe
   const controls = (
     <div className="flex items-center gap-2.5" onClick={(event) => event.stopPropagation()}>
       {/* Agent Core 兼容性标签 */}
-      <AgentCoreChips provider={channel.provider} />
+      <AgentCoreChips channel={channel} />
 
       {/* 操作按钮 */}
         {!isOfficial && (!commercialMode || canSelfConfig) && (
@@ -506,8 +506,10 @@ function ChannelRow({ channel, onEdit, onDelete, onToggle, commercialMode, canSe
 
 // ===== Agent Core 兼容性标签 =====
 
-function AgentCoreChips({ provider }: { provider: string }): React.ReactElement {
-  const supportsClaude = isAgentCompatibleProvider(provider as ProviderType)
+function AgentCoreChips({ channel }: { channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled'> }): React.ReactElement {
+  const supportsClaude = isAgentCompatibleProvider(channel.provider)
+  const isExperimentalXai = channel.provider === 'xai'
+  const agentEnabled = isAgentEnabledForChannel(channel)
 
   return (
     <span className="flex items-center gap-1 shrink-0">
@@ -516,8 +518,8 @@ function AgentCoreChips({ provider }: { provider: string }): React.ReactElement 
           Claude
         </span>
       )}
-      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-        Pi
+      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${isExperimentalXai ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'}`}>
+        {isExperimentalXai ? (agentEnabled ? 'Pi 实验' : 'Pi 实验未启用') : 'Pi'}
       </span>
     </span>
   )

@@ -323,6 +323,12 @@ export const agentSessionMessageQueueAtom = atom<Map<string, AgentQueuedMessage[
  * read：返回当前 session 的数组（空数组兜底）
  * write：接受新数组或 updater 函数，写回时空数组转为 delete，避免 Map 长期残留空 entry
  */
+/**
+ * 每会话「队列自动发送」开关的运行时缓存：true 表示当前轮次结束后自动发送队首。
+ * 权威值持久化在会话 meta；此 atom 仅缓存当前渲染进程中的会话状态。
+ */
+export const agentQueueAutoSendMapAtom = atom<Map<string, boolean>>(new Map())
+
 export const agentMessageQueueAtomFamily = atomFamily((sessionId: string) =>
   atom(
     (get) => get(agentSessionMessageQueueAtom).get(sessionId) ?? [],

@@ -30,7 +30,7 @@ function createAdapter(calls: string[], errorPrefix = '', capabilities?: Partial
       supportsQueuedMessage: false,
       supportsBackgroundWakeup: false,
       supportsNativeMcp: false,
-      supportsSubAgents: false,
+      runtimeSupportsSubagents: false,
       ...capabilities,
     }) } : {}),
     errorHelpers: {

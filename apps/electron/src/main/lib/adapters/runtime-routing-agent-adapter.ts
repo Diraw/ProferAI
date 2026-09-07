@@ -89,7 +89,7 @@ export class RuntimeRoutingAgentAdapter implements AgentProviderAdapter {
       supportsQueuedMessage: Boolean(adapter?.sendQueuedMessage),
       supportsBackgroundWakeup: runtime === 'claude',
       supportsNativeMcp: runtime === 'claude',
-      supportsSubAgents: runtime === 'claude' || Boolean(adapter),
+      runtimeSupportsSubagents: runtime === 'claude' || Boolean(adapter),
     }
     return {
       runtime,

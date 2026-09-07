@@ -32,7 +32,7 @@ import { Input } from '@/components/ui/input'
 import {
   PROVIDER_DEFAULT_URLS,
   PROVIDER_LABELS,
-  isAgentCompatibleProvider,
+  isAgentEnabledForChannel,
 } from '@profer/shared'
 import type {
   Channel,
@@ -78,7 +78,7 @@ interface ChannelFormProps {
 const CN_PROVIDERS: ProviderType[] = ['deepseek', 'qwen', 'zhipu', 'doubao', 'kimi-api', 'kimi-coding', 'zhipu-coding', 'minimax', 'xiaomi', 'xiaomi-token-plan']
 
 /** 境外供应商 */
-const GLOBAL_PROVIDERS: ProviderType[] = ['anthropic', 'openai', 'google', 'anthropic-compatible', 'ollama', 'custom']
+const GLOBAL_PROVIDERS: ProviderType[] = ['anthropic', 'openai', 'google', 'xai', 'anthropic-compatible', 'ollama', 'custom']
 
 /** 所有可选供应商 */
 const PROVIDER_OPTIONS: ProviderType[] = [...CN_PROVIDERS, ...GLOBAL_PROVIDERS]
@@ -115,7 +115,7 @@ const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = {
   xiaomi: '/v1/messages',
   'xiaomi-token-plan': '/v1/messages',
   'openai-codex': '',
-  xai: '',
+  xai: '/responses',
   ollama: '/v1/chat/completions',
   custom: '/chat/completions',
 }
@@ -189,6 +189,8 @@ function getPresetModelsForProvider(provider: ProviderType): ChannelModel[] {
         { id: 'glm-5.2', name: 'GLM-5.2', enabled: true },
         { id: 'glm-5.1', name: 'GLM-5.1', enabled: false },
       ]
+    case 'xai':
+      return [{ id: 'grok-4.6', name: 'Grok 4.6', enabled: true }]
     case 'minimax':
       return [
         { id: 'MiniMax-M3', name: 'MiniMax-M3', enabled: true },
@@ -211,8 +213,8 @@ function getPresetModelsForProvider(provider: ProviderType): ChannelModel[] {
 /** auto-save 防抖延迟 */
 const AUTO_SAVE_DELAY = 600
 
-function isAgentEligibleChannel(channel: Pick<Channel, 'provider' | 'enabled'>): boolean {
-  return channel.enabled && isAgentCompatibleProvider(channel.provider)
+function isAgentEligibleChannel(channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled'>): boolean {
+  return isAgentEnabledForChannel(channel)
 }
 
 export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCancel }: ChannelFormProps): React.ReactElement {
@@ -222,9 +224,19 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const [name, setName] = React.useState(channel?.name ?? '')
   const [provider, setProvider] = React.useState<ProviderType>(channel?.provider ?? 'anthropic')
   const [baseUrl, setBaseUrl] = React.useState(channel?.baseUrl ?? PROVIDER_DEFAULT_URLS.anthropic)
+  const [credentialMode, setCredentialMode] = React.useState<'api-key' | 'oauth'>(channel?.credentialMode ?? 'api-key')
+  const [oauthConfigured, setOauthConfigured] = React.useState(channel?.provider === 'xai' && channel.credentialMode === 'oauth')
+  const [agentExperimentalEnabled, setAgentExperimentalEnabled] = React.useState(channel?.agentExperimentalEnabled === true)
   const [agentBaseUrl, setAgentBaseUrl] = React.useState(channel?.agentBaseUrl ?? '')
   const [apiKey, setApiKey] = React.useState('')
   const [showApiKey, setShowApiKey] = React.useState(false)
+  const [oauthLoggingIn, setOauthLoggingIn] = React.useState(false)
+  const handleCredentialModeChange = (value: string): void => {
+    const nextMode = value as 'api-key' | 'oauth'
+    setCredentialMode(nextMode)
+    setOauthConfigured(nextMode === 'oauth' && channel?.provider === 'xai' && channel.credentialMode === 'oauth')
+    if (nextMode === 'oauth') setApiKey('')
+  }
   const [models, setModels] = React.useState<ChannelModel[]>(channel?.models ?? [])
   const [enabled, setEnabled] = React.useState(channel?.enabled ?? true)
 
@@ -253,6 +265,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 编辑模式下加载明文 API Key */
   React.useEffect(() => {
+    if (isEdit && channel && !apiKeyLoaded && channel.provider === 'xai' && channel.credentialMode === 'oauth') {
+      setApiKeyLoaded(true)
+      return
+    }
     if (isEdit && channel && !apiKeyLoaded) {
       window.electronAPI.decryptApiKey(channel.id).then((key) => {
         setApiKey(key)
@@ -285,7 +301,12 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         provider: currentProvider,
         baseUrl: currentBaseUrl,
         agentBaseUrl: currentAgentBaseUrl.trim(),
-        apiKey: currentApiKey || undefined,
+        ...((currentProvider !== 'xai' || credentialMode === 'api-key'
+          ? (credentialMode === 'api-key' && (currentApiKey.trim() || channel?.credentialMode !== 'oauth'))
+          : oauthConfigured)
+          ? (currentProvider === 'xai' ? { credentialMode, agentExperimentalEnabled } : {})
+          : {}),
+        apiKey: currentProvider === 'xai' && credentialMode === 'oauth' ? undefined : (currentApiKey || undefined),
         models: currentModels,
         enabled: currentEnabled,
       })
@@ -299,7 +320,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       console.error('[模型配置表单] auto-save 失败:', error)
       toast.error('自动保存失败，请检查后手动重试', { id: 'auto-save-error' })
     }
-  }, [isEdit, channel, onAgentEligibilityChange])
+  }, [isEdit, channel, credentialMode, oauthConfigured, agentExperimentalEnabled, onAgentEligibilityChange])
 
   /** 触发防抖 auto-save */
   const scheduleAutoSave = React.useCallback((
@@ -334,7 +355,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   React.useEffect(() => {
     scheduleAutoSave(models, name, provider, baseUrl, agentBaseUrl, apiKey, enabled)
     return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current) }
-  }, [models, name, provider, baseUrl, agentBaseUrl, apiKey, enabled, scheduleAutoSave])
+  }, [models, name, provider, baseUrl, agentBaseUrl, credentialMode, oauthConfigured, agentExperimentalEnabled, apiKey, enabled, scheduleAutoSave])
 
   // 切换供应商时自动更新 Base URL 与名称，Anthropic 兼容渠道自动添加预设模型
   const handleProviderChange = (newProvider: string): void => {
@@ -346,6 +367,9 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     }
     setProvider(p)
     setBaseUrl(PROVIDER_DEFAULT_URLS[p])
+    setCredentialMode('api-key')
+    setOauthConfigured(false)
+    setAgentExperimentalEnabled(false)
     setAgentBaseUrl('')
     setTestResult(null)
     setFetchResult(null)
@@ -384,6 +408,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 从供应商 API 拉取可用模型列表 */
   const handleFetchModels = async (): Promise<void> => {
+    if (provider === 'xai' && credentialMode === 'oauth') return
     if ((provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()) return
 
     setFetchingModels(true)
@@ -413,6 +438,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 测试连接（直接使用表单当前值，无需先保存） */
   const handleTest = async (): Promise<void> => {
+    if (provider === 'xai' && credentialMode === 'oauth') return
     if ((provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()) return
 
     setTesting(true)
@@ -434,7 +460,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 执行创建渠道 */
   const doCreate = React.useCallback(async (): Promise<Channel | null> => {
-    if (!name.trim() || (provider !== 'ollama' && !apiKey.trim())) return null
+    if (!name.trim() || (provider !== 'ollama' && !(provider === 'xai' && credentialMode === 'oauth') && !apiKey.trim())) return null
 
     setSaving(true)
     try {
@@ -443,11 +469,15 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         provider,
         baseUrl,
         agentBaseUrl: agentBaseUrl.trim() || undefined,
+        ...(provider === 'xai' && { credentialMode, agentExperimentalEnabled }),
         apiKey,
         models,
         enabled,
       }
-      const savedChannel = await window.electronAPI.createChannel(input)
+      let savedChannel = await window.electronAPI.createChannel(input)
+      if (provider === 'xai' && credentialMode === 'oauth') {
+        savedChannel = await window.electronAPI.loginXaiOAuth(savedChannel.id)
+      }
       if (isAgentEligibleChannel(savedChannel)) {
         await onAgentEligibilityChange?.(savedChannel, true)
       }
@@ -460,7 +490,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     } finally {
       setSaving(false)
     }
-  }, [name, provider, baseUrl, agentBaseUrl, apiKey, models, enabled, onAgentEligibilityChange])
+  }, [name, provider, baseUrl, agentBaseUrl, credentialMode, agentExperimentalEnabled, apiKey, models, enabled, onAgentEligibilityChange])
 
   /** 创建渠道（仅新建模式） */
   const handleCreate = async (): Promise<void> => {
@@ -552,7 +582,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
           <Button
             size="sm"
             onClick={handleCreate}
-            disabled={saving || !name.trim() || (!isEdit && provider !== 'ollama' && !apiKey.trim())}
+            disabled={saving || !name.trim() || (!isEdit && provider !== 'ollama' && !(provider === 'xai' && credentialMode === 'oauth') && !apiKey.trim())}
           >
             {saving && <Loader2 size={14} className="animate-spin" />}
             <span>创建</span>
@@ -577,6 +607,18 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             placeholder="例如: My Anthropic"
             required
           />
+          {provider === 'xai' && (
+            <SettingsSelect
+              label="xAI 认证方式"
+              value={credentialMode}
+              onValueChange={handleCredentialModeChange}
+              options={[
+                { value: 'api-key', label: 'xAI API Key（Chat + Pi Agent 实验）' },
+                { value: 'oauth', label: 'Grok/X 订阅 OAuth（Pi Agent 实验）' },
+              ]}
+              description="API Key 由 xAI API 计费；订阅 OAuth 使用 SuperGrok 或 X Premium。"
+            />
+          )}
           <SettingsInput
             label="Base URL"
             value={baseUrl}
@@ -591,13 +633,13 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
           {/* API Key + 测试连接同行 */}
           <div className="px-4 py-3 space-y-2">
             <div className="flex items-center justify-between">
-              <div className="text-sm font-medium text-foreground">API Key{provider === 'ollama' ? '（可选）' : ''}</div>
+              <div className="text-sm font-medium text-foreground">{provider === 'xai' && credentialMode === 'oauth' ? 'Grok/X 订阅' : `API Key${provider === 'ollama' ? '（可选）' : ''}`}</div>
               <Button
                 variant="outline"
                 size="sm"
                 type="button"
                 onClick={handleTest}
-                disabled={testing || (provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()}
+                disabled={testing || (provider === 'xai' && credentialMode === 'oauth') || (provider !== 'ollama' && !(provider === 'xai' && credentialMode === 'oauth') && !apiKey.trim()) || !baseUrl.trim()}
                 className="h-7 text-xs"
               >
                 {testing ? (
@@ -608,7 +650,26 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                 <span>测试连接</span>
               </Button>
             </div>
-            <div className="relative">
+            {provider === 'xai' && credentialMode === 'oauth' ? (
+              <Button type="button" variant="outline" className="w-full" disabled={oauthLoggingIn} onClick={async () => {
+                if (!channel) return
+                setOauthLoggingIn(true)
+                try {
+                  const updated = await window.electronAPI.loginXaiOAuth(channel.id)
+                  setOauthConfigured(true)
+                  setApiKey('')
+                  setModels(updated.models)
+                  toast.success('xAI 订阅登录成功')
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : 'xAI 订阅登录失败')
+                } finally {
+                  setOauthLoggingIn(false)
+                }
+              }}>
+                {oauthLoggingIn ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+                <span>{oauthLoggingIn ? '等待浏览器授权...' : '登录 Grok/X 订阅'}</span>
+              </Button>
+            ) : <div className="relative">
               <Input
                 type={showApiKey ? 'text' : 'password'}
                 value={apiKey}
@@ -625,7 +686,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               >
                 {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
-            </div>
+            </div>}
+            {provider === 'xai' && credentialMode === 'oauth' && (
+              <div className="text-xs text-muted-foreground">OAuth 凭据只保存在本机加密存储中，Chat 需要单独配置 xAI API Key。</div>
+            )}
             {testResult && (
               <div className={cn(
                 'flex items-center gap-1.5 text-xs',
@@ -636,6 +700,14 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               </div>
             )}
           </div>
+          {provider === 'xai' && (
+            <SettingsToggle
+              label="启用实验性 Agent"
+              description="开启后该 xAI 渠道才会出现在 Agent 模型选择中，默认关闭。"
+              checked={agentExperimentalEnabled}
+              onCheckedChange={setAgentExperimentalEnabled}
+            />
+          )}
           <SettingsToggle
             label="启用此配置"
             description="关闭后该配置的模型不会在选择列表中出现"
@@ -693,7 +765,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             size="sm"
             type="button"
             onClick={handleFetchModels}
-            disabled={fetchingModels || (provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()}
+            disabled={fetchingModels || (provider !== 'ollama' && !(provider === 'xai' && credentialMode === 'oauth') && !apiKey.trim()) || !baseUrl.trim()}
             className="h-7 text-xs"
           >
             {fetchingModels ? (
@@ -838,7 +910,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             <AlertDialogCancel onClick={handleDiscard}>放弃编辑</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleSaveAndClose}
-              disabled={saving || !name.trim() || (!isEdit && provider !== 'ollama' && !apiKey.trim())}
+              disabled={saving || !name.trim() || (!isEdit && provider !== 'ollama' && !(provider === 'xai' && credentialMode === 'oauth') && !apiKey.trim())}
             >
               {saving ? <><Loader2 size={14} className="animate-spin" /> 保存中...</> : '保存并关闭'}
             </AlertDialogAction>

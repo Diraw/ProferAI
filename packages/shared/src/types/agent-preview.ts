@@ -31,6 +31,47 @@ export interface AgentPreviewImage {
   page?: number
 }
 
+/** 用户可见的正式 PPTX viewer 加载完成后回传给主进程的状态。 */
+export interface AgentFilePreviewReport {
+  requestId: string
+  sessionId: string
+  filePath: string
+  revision: string
+  status: 'ready' | 'error'
+  slideCount?: number
+  currentSlide?: number
+  scale?: number
+  error?: string
+}
+
+/** Agent 请求从当前正式 PPTX viewer 观察页面时使用的载荷。 */
+export interface AgentFilePreviewInspectRequest {
+  requestId: string
+  sessionId: string
+  filePath: string
+  revision: string
+  scope: InspectPreviewScope
+  page?: number
+}
+
+export interface AgentFilePreviewPageImage extends AgentPreviewImage {
+  page: number
+}
+
+/** 当前正式 PPTX viewer 返回的页级视觉观察结果。 */
+export interface AgentFilePreviewInspectResult {
+  requestId: string
+  sessionId: string
+  filePath: string
+  revision: string
+  slideCount: number
+  currentSlide?: number
+  scale?: number
+  images: AgentFilePreviewPageImage[]
+  warnings?: string[]
+  error?: string
+}
+
 /** 主进程与隐藏 renderer 之间的受控任务载荷，不直接暴露给模型。 */
 export interface AgentPreviewRenderTask {
   id: string

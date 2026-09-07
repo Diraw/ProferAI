@@ -56,6 +56,7 @@ import { GlobalPresetScopePanel } from "./GlobalPresetScopePanel";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import type {
   AgentWorkspace,
+  PresetReference,
   PresetReferenceReport,
   PresetWorkspaceReference,
 } from "@profer/shared";
@@ -251,6 +252,25 @@ function PickList({
   );
 }
 
+interface PendingPresetDisable {
+  preset: AgentPreset;
+  reference: PresetReference;
+  report: PresetReferenceReport;
+}
+
+function presetReference(preset: AgentPreset, workspaceSlug: string): PresetReference {
+  const scope = preset.scope ?? (preset.isBuiltin ? "builtin-meta" : "user-global");
+  return {
+    presetId: preset.id,
+    presetScope: scope,
+    ...(scope === "workspace" ? { workspaceSlug } : {}),
+  };
+}
+
+function presetReferenceKey(preset: AgentPreset): string {
+  return `${preset.scope ?? (preset.isBuiltin ? "builtin-meta" : "user-global")}:${preset.id}`;
+}
+
 interface AgentPresetSettingsProps {
   workspaceSlug?: string;
   search?: string;
@@ -303,6 +323,10 @@ export function AgentPresetSettings({
   const [globalDeleteReport, setGlobalDeleteReport] =
     React.useState<PresetReferenceReport | null>(null);
   const [globalDeleteBusy, setGlobalDeleteBusy] = React.useState(false);
+  const [pendingPresetDisable, setPendingPresetDisable] =
+    React.useState<PendingPresetDisable | null>(null);
+  const [replacementPresetKey, setReplacementPresetKey] = React.useState("");
+  const [presetDisableBusy, setPresetDisableBusy] = React.useState(false);
   // 导出/导入文件操作的结果提示（头部按钮下方展示，几秒后自动消失）
   const [fileNotice, setFileNotice] = React.useState("");
   const [fileBusy, setFileBusy] = React.useState(false);
@@ -636,6 +660,29 @@ export function AgentPresetSettings({
   const handleTogglePreset = React.useCallback(
     async (preset: AgentPreset, enabled: boolean) => {
       if (!workspaceSlug) return;
+      const reference = !enabled && preset.scope !== "workspace"
+        ? presetReference(preset, workspaceSlug)
+        : null;
+      if (reference) {
+        try {
+          const report = await window.electronAPI.getPresetReferenceReport(reference);
+          const hasPersistentObjectReferences = report.blockers.some(
+            (blocker) =>
+              blocker.workspaceSlug === workspaceSlug &&
+              (blocker.reason === "session" || blocker.reason === "automation"),
+          );
+          if (hasPersistentObjectReferences) {
+            setReplacementPresetKey("");
+            setPendingPresetDisable({ preset, reference, report });
+            return;
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "读取预设引用失败";
+          toast.error(message);
+          return;
+        }
+      }
+
       const busyId = preset.id;
       if (enabled) {
         const counterpart = presets.find(
@@ -677,23 +724,21 @@ export function AgentPresetSettings({
             preset.id,
             enabled,
           );
+        } else if (enabled) {
+          await window.electronAPI.enableGlobalPresetInWorkspace(
+            workspaceSlug,
+            reference ?? presetReference(preset, workspaceSlug),
+          );
         } else {
-          const reference = {
-            presetId: preset.id,
-            presetScope:
-              preset.scope ??
-              (preset.isBuiltin ? "builtin-meta" : "user-global"),
-          } as const;
-          if (enabled)
-            await window.electronAPI.enableGlobalPresetInWorkspace(
-              workspaceSlug,
-              reference,
-            );
-          else
-            await window.electronAPI.disableGlobalPresetInWorkspace(
-              workspaceSlug,
-              reference,
-            );
+          await window.electronAPI.disableGlobalPresetInWorkspace(
+            workspaceSlug,
+            reference ?? presetReference(preset, workspaceSlug),
+          );
+        }
+        if (!enabled && defaultPresetId === preset.id) {
+          setDefaultPresetId(
+            await window.electronAPI.getDefaultAgentPreset(workspaceSlug),
+          );
         }
         bumpCapabilities((v) => v + 1);
       } catch (err) {
@@ -720,8 +765,63 @@ export function AgentPresetSettings({
       setWorkspacePresets,
       workspacePresets,
       workspaceSlug,
+      defaultPresetId,
     ],
   );
+
+  const replacementCandidates = React.useMemo(
+    () =>
+      pendingPresetDisable
+        ? presets.filter(
+            (candidate) =>
+              candidate.id !== pendingPresetDisable.preset.id &&
+              candidate.enabledInWorkspace !== false,
+          )
+        : [],
+    [pendingPresetDisable, presets],
+  );
+
+  const confirmPresetDisable = React.useCallback(async () => {
+    if (!pendingPresetDisable || !workspaceSlug || !replacementPresetKey) return;
+    const replacement = replacementCandidates.find(
+      (candidate) => presetReferenceKey(candidate) === replacementPresetKey,
+    );
+    if (!replacement) {
+      toast.error("请选择有效的替代预设");
+      return;
+    }
+
+    setPresetDisableBusy(true);
+    setToggleBusy((previous) => new Set(previous).add(pendingPresetDisable.preset.id));
+    try {
+      await window.electronAPI.rebindAndDisableGlobalPresetScope(
+        workspaceSlug,
+        pendingPresetDisable.reference,
+        presetReference(replacement, workspaceSlug),
+      );
+      setPendingPresetDisable(null);
+      setReplacementPresetKey("");
+      await reload();
+      bumpCapabilities((v) => v + 1);
+      toast.success(`已将相关引用改绑到「${replacement.name}」，并关闭「${pendingPresetDisable.preset.name}」`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "改绑并关闭预设失败");
+    } finally {
+      setPresetDisableBusy(false);
+      setToggleBusy((previous) => {
+        const next = new Set(previous);
+        next.delete(pendingPresetDisable.preset.id);
+        return next;
+      });
+    }
+  }, [
+    bumpCapabilities,
+    pendingPresetDisable,
+    reload,
+    replacementPresetKey,
+    replacementCandidates,
+    workspaceSlug,
+  ]);
 
   const handleCopyToWorkspace = React.useCallback(
     async (preset: AgentPreset) => {
@@ -751,9 +851,11 @@ export function AgentPresetSettings({
     async (preset: AgentPreset) => {
       if (!workspaceSlug || globalMode) return;
       try {
+        if (defaultPresetId === preset.id || preset.enabledInWorkspace === false)
+          return;
         const id = await window.electronAPI.setDefaultAgentPreset(
           workspaceSlug,
-          defaultPresetId === preset.id ? "" : preset.id,
+          preset.id,
         );
         setDefaultPresetId(id);
         bumpCapabilities((v) => v + 1);
@@ -1094,13 +1196,20 @@ export function AgentPresetSettings({
                               提升为全局
                             </Button>
                           )}
-                        {!globalMode && preset.scope === "workspace" && (
+                        {!globalMode && (
                           <Button
                             size="icon"
                             variant="ghost"
                             className="size-8"
+                            disabled={isDefault || preset.enabledInWorkspace === false}
                             onClick={() => void handleSetDefault(preset)}
-                            title={isDefault ? "取消默认" : "设为默认"}
+                            title={
+                              isDefault
+                                ? "当前默认"
+                                : preset.enabledInWorkspace === false
+                                  ? "请先启用此预设"
+                                  : "设为默认"
+                            }
                           >
                             <Star
                               className={cn(
@@ -1423,8 +1532,10 @@ export function AgentPresetSettings({
                     const groupDisabled = form.disabledToolGroups.includes(
                       group.value,
                     );
-                    const groupTools =
-                      AGENT_PRESET_GROUP_TOOL_NAMES[group.value];
+                    const groupDefinition = AGENT_PRESET_CAPABILITY_GROUPS.find(
+                      (candidate) => candidate.id === group.value,
+                    );
+                    const groupTools = groupDefinition?.toolNames ?? AGENT_PRESET_GROUP_TOOL_NAMES[group.value];
                     return (
                       <div key={group.value} className="flex flex-col gap-1.5">
                         <label className="flex cursor-pointer items-center justify-between gap-2 select-none">
@@ -1461,30 +1572,23 @@ export function AgentPresetSettings({
                               / {groupTools.length}）
                             </summary>
                             <div className="flex flex-wrap gap-1.5 pt-1.5">
-                              {groupTools.map((toolName) => {
-                                const checked =
-                                  form.disabledTools.includes(toolName);
+                              {(groupDefinition?.tools ?? []).map((tool) => {
+                                const checked = form.disabledTools.includes(tool.name);
                                 return (
                                   <button
-                                    key={toolName}
+                                    key={tool.name}
                                     type="button"
-                                    onClick={() => toggleDisabledTool(toolName)}
-                                    title={
-                                      checked
-                                        ? `已禁用 ${toolName}`
-                                        : `禁用 ${toolName}`
-                                    }
+                                    onClick={() => toggleDisabledTool(tool.name)}
+                                    title={`${tool.label}：${tool.hint}；风险：${tool.risk}`}
                                     className={cn(
-                                      "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[10px] transition-colors",
+                                      "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors",
                                       checked
                                         ? "border-destructive/60 bg-destructive/10 text-destructive"
                                         : "border-border/80 text-foreground/70 hover:bg-foreground/[0.04]",
                                     )}
                                   >
-                                    {checked && (
-                                      <Check size={10} strokeWidth={3} />
-                                    )}
-                                    <span>{toolName}</span>
+                                    {checked && <Check size={10} strokeWidth={3} />}
+                                    <span>{tool.label}</span>
                                   </button>
                                 );
                               })}
@@ -1543,6 +1647,73 @@ export function AgentPresetSettings({
             </ul>
           </div>
         )}
+      <Dialog
+        open={pendingPresetDisable !== null}
+        onOpenChange={(open) => {
+          if (!open && !presetDisableBusy) {
+            setPendingPresetDisable(null);
+            setReplacementPresetKey("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>关闭预设前需要改绑引用</DialogTitle>
+            <DialogDescription>
+              「{pendingPresetDisable?.preset.name ?? ""}」仍被当前工作区的会话或自动任务使用。请选择替代预设，系统会一次性改绑这些引用后再关闭原预设。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+              当前工作区共有 {pendingPresetDisable?.report.blockers
+                .filter((blocker) => blocker.workspaceSlug === workspaceSlug && (blocker.reason === "session" || blocker.reason === "automation"))
+                .reduce((count, blocker) => count + blocker.objectCount, 0) ?? 0} 个会话/自动任务引用。
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium">替代预设</label>
+              <Select
+                value={replacementPresetKey}
+                onValueChange={setReplacementPresetKey}
+                disabled={presetDisableBusy}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="选择替代预设…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {replacementCandidates.map((candidate) => (
+                    <SelectItem key={presetReferenceKey(candidate)} value={presetReferenceKey(candidate)}>
+                      {candidate.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {replacementCandidates.length === 0 && (
+                <p className="text-xs text-destructive">
+                  当前工作区没有其他可用预设，请先启用或创建一个替代预设。
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={presetDisableBusy}
+              onClick={() => {
+                setPendingPresetDisable(null);
+                setReplacementPresetKey("");
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={presetDisableBusy || !replacementPresetKey}
+              onClick={() => void confirmPresetDisable()}
+            >
+              {presetDisableBusy ? "改绑中…" : "改绑并关闭"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         open={pendingGlobalDelete !== null}
         onOpenChange={(open) => {

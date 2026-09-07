@@ -26,8 +26,14 @@ export * from './ppt-material'
 
 // Agent 相关类型
 export * from './agent'
+export * from './agent-preview'
 export * from './global-skill'
 export * from './browser'
+export * from './pi-harness'
+export * from './ppt-deck'
+
+// Lark 集成相关类型
+export * from './lark'
 
 // 推理 profile 相关类型
 export * from './reasoning-profile'
@@ -50,6 +56,7 @@ export * from './changelog'
 // 系统提示词相关类型
 export * from './system-prompt'
 export * from './agent-preset'
+export * from './agent-preset-policy'
 
 // Chat 工具（function calling）相关类型
 export * from './chat-tool'

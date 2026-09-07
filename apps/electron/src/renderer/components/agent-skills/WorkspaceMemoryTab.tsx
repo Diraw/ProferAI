@@ -220,7 +220,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
   /** 底层写入：把指定内容写回目标文件并刷新摘要，供手动保存与自动保存复用 */
   const persistTarget = React.useCallback(async (target: SelectedMemoryFile, text: string): Promise<void> => {
     if (target.kind === 'claude') {
-      await window.electronAPI.writeWorkspaceClaudeMd(workspaceSlug, text)
+      await window.electronAPI.writeWorkspaceProfile(workspaceSlug, text)
     } else if (target.kind === 'archive') {
       await window.electronAPI.writeWorkspaceMemoryArchiveFile(workspaceSlug, target.relativePath, text)
     } else {
@@ -229,7 +229,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
     const nextSummary = await refreshSummaryAndTree()
     let nextAbsolute: string
     if (target.kind === 'claude') {
-      nextAbsolute = nextSummary.claudeMd.path
+      nextAbsolute = nextSummary.workspaceProfile.path
     } else if (target.kind === 'archive') {
       nextAbsolute = joinArchivePath(nextSummary, target.relativePath)
     } else {
@@ -287,12 +287,12 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
     setLoadingFile(true)
     try {
       const currentSummary = knownSummary ?? summary ?? await window.electronAPI.getWorkspaceMemorySummary(workspaceSlug)
-      const file = await window.electronAPI.readWorkspaceClaudeMd(workspaceSlug)
+      const file = await window.electronAPI.readWorkspaceProfile(workspaceSlug)
       setSelected({
         kind: 'claude',
         relativePath: 'CLAUDE.md',
         title: 'CLAUDE.md',
-        absolutePath: currentSummary.claudeMd.path,
+        absolutePath: currentSummary.workspaceProfile.path,
       })
       setEditText(file.content ?? '')
       setIsDirty(false)
@@ -423,7 +423,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
           window.electronAPI.getWorkspaceMemorySummary(workspaceSlug),
           window.electronAPI.listWorkspaceAutoMemoryFiles(workspaceSlug),
           window.electronAPI.listWorkspaceMemoryArchiveFiles(workspaceSlug),
-          window.electronAPI.readWorkspaceClaudeMd(workspaceSlug),
+          window.electronAPI.readWorkspaceProfile(workspaceSlug),
         ])
         if (cancelled) return
         setSummary(nextSummary)
@@ -433,7 +433,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
           kind: 'claude',
           relativePath: 'CLAUDE.md',
           title: 'CLAUDE.md',
-          absolutePath: nextSummary.claudeMd.path,
+          absolutePath: nextSummary.workspaceProfile.path,
         })
         setEditText(claudeFile.content ?? '')
         setIsDirty(false)
@@ -535,7 +535,7 @@ export function WorkspaceMemoryTab({ workspaceSlug, search }: WorkspaceMemoryTab
             <div className="mt-1 text-xs text-muted-foreground">规则负责约束，主题负责积累；搜索框可直接查找记忆正文。</div>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
-            <MemorySummaryButton label="项目指令" value={summary.claudeMd.exists ? formatBytes(summary.claudeMd.size) : '未创建'} active={selected?.kind === 'claude'} onClick={() => void openClaude(summary)} />
+            <MemorySummaryButton label="工作区资料" value={summary.workspaceProfile.exists ? formatBytes(summary.workspaceProfile.size) : '未创建'} active={selected?.kind === 'claude'} onClick={() => void openClaude(summary)} />
             <MemorySummaryButton label="自动记忆" value={`${summary.autoMemory.fileCount} 文件`} active={selected?.kind === 'auto'} onClick={() => void openAutoFile(AUTO_MEMORY_INDEX, summary)} />
             <MemorySummaryButton label="长期经验" value={`${archiveFiles.filter((node) => node.type === 'file').length} 主题`} active={selected?.kind === 'archive'} onClick={() => {
               const first = archiveFiles.find((node) => node.type === 'file')

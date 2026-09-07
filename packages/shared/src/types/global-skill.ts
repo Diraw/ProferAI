@@ -2,8 +2,18 @@
 
 export type GlobalSkillType = 'builtin-meta' | 'user-global'
 export type SkillScope = 'global' | 'workspace'
-export type SkillSourceStatus = 'available' | 'unknown-legacy'
-export type WorkspaceOverrideReason = 'user-disabled' | 'replaced-by-workspace-copy' | 'legacy-meta-copy'
+export type SkillSourceStatus =
+  | 'available'
+  | 'unknown-legacy'
+  | 'modified-legacy-copy'
+  | 'preserved-legacy-disabled-copy'
+  | 'uncertain-legacy-copy'
+export type WorkspaceOverrideReason =
+  | 'user-disabled'
+  | 'replaced-by-workspace-copy'
+  | 'legacy-meta-copy'
+  | 'modified-legacy-copy'
+  | 'preserved-legacy-disabled-copy'
 
 export interface GlobalSkillSource {
   sourceSkillId: string

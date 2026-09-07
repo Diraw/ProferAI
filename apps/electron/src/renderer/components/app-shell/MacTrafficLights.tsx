@@ -67,7 +67,7 @@ export function MacTrafficLights({ classic = false, collapsed = false, className
             pointerEvents: 'auto',
           } as React.CSSProperties}
           className={cn(
-            'mac-traffic-light-hitbox group pointer-events-auto flex shrink-0 cursor-pointer items-center justify-center rounded-full',
+            'mac-traffic-light-hitbox titlebar-no-drag group pointer-events-auto flex shrink-0 cursor-pointer items-center justify-center rounded-full',
             collapsed ? 'size-3.5' : 'size-5',
             'hover:bg-black/[0.05] active:bg-black/[0.1] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring',
           )}

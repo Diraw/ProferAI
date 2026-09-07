@@ -1,6 +1,7 @@
-import type { Channel, ProviderType } from '@profer/shared'
+import type { Channel, ProviderType, XaiOAuthCredentials } from '@profer/shared'
+import { resolveXaiCredentialMode } from '@profer/shared'
 import { getTeamAuthWithRefresh } from './auth-service'
-import { decryptApiKey, isCommercialMode, resolveChannelAgentBaseUrl } from './channel-manager'
+import { decryptApiKey, isCommercialMode, resolveChannelAgentBaseUrl, resolveXaiOAuthCredentials } from './channel-manager'
 import { isCommercialBuild } from './build-target'
 import { isOfficialManagedChannel } from './official-channel'
 
@@ -11,6 +12,10 @@ export interface ResolvedRuntimeCredentials {
   provider: ProviderType
   /** 官方团队渠道使用 Bearer token，不能按普通 API key 处理。 */
   forceBearerAuth: boolean
+  /** xAI 订阅模式的完整 OAuth 凭据，交给 Pi 原生 credential store。 */
+  xaiOAuthCredentials?: XaiOAuthCredentials
+  /** xAI API Key / OAuth；其他 provider 不设置。 */
+  xaiCredentialMode?: 'api-key' | 'oauth'
 }
 
 export type ResolveRuntimeCredentialsResult =
@@ -22,7 +27,7 @@ export type ResolveRuntimeCredentialsResult =
  * 渠道存在性/启用性仍由 Orchestrator 的既有 preflight 负责，避免改变产品错误优先级。
  */
 export async function resolveRuntimeCredentials(
-  channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl'>,
+  channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode'>,
 ): Promise<ResolveRuntimeCredentialsResult> {
   const isOfficialChannel = isOfficialManagedChannel(channel)
   const forceBearerAuth = (isCommercialBuild() || isCommercialMode()) && isOfficialChannel
@@ -42,10 +47,38 @@ export async function resolveRuntimeCredentials(
   }
 
   try {
+    const decryptedSecret = decryptApiKey(channel.id)
+    if (channel.provider === 'xai') {
+      const credentialMode = resolveXaiCredentialMode(channel.credentialMode, decryptedSecret)
+      if (credentialMode === 'oauth') {
+        const credentials = await resolveXaiOAuthCredentials(channel.id)
+        return {
+          ok: true,
+          credentials: {
+            apiKey: credentials.access,
+            baseUrl: resolveChannelAgentBaseUrl(channel),
+            provider: channel.provider,
+            forceBearerAuth: false,
+            xaiCredentialMode: credentialMode,
+            xaiOAuthCredentials: credentials,
+          },
+        }
+      }
+      return {
+        ok: true,
+        credentials: {
+          apiKey: decryptedSecret,
+          baseUrl: resolveChannelAgentBaseUrl(channel),
+          provider: channel.provider,
+          forceBearerAuth: false,
+          xaiCredentialMode: credentialMode,
+        },
+      }
+    }
     return {
       ok: true,
       credentials: {
-        apiKey: decryptApiKey(channel.id),
+        apiKey: decryptedSecret,
         baseUrl: resolveChannelAgentBaseUrl(channel),
         provider: channel.provider,
         forceBearerAuth: false,

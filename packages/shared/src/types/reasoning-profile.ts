@@ -52,7 +52,7 @@ export interface ReasoningEncoding {
 }
 
 export interface ReasoningProfile {
-  id: 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'kimi-k3' | 'glm-5.2' | 'glm-5.3' | 'openai-reasoning-standard' | 'openai-reasoning-max'
+  id: 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'kimi-k3' | 'glm-5.2' | 'glm-5.3' | 'grok-4.6' | 'openai-reasoning-standard' | 'openai-reasoning-max'
   levels: readonly AgentThinkingLevel[]
   defaultLevel: AgentThinkingLevel
   normalize(level: AgentThinkingLevel | undefined): AgentThinkingLevel
@@ -159,6 +159,15 @@ const OPENAI_STANDARD_EFFORT_MAP: ReasoningEffortMap = {
 const OPENAI_MAX_EFFORT_MAP: ReasoningEffortMap = {
   ...OPENAI_STANDARD_EFFORT_MAP,
   max: 'max',
+}
+
+const GROK_46_LEVELS = ['off', 'low', 'medium', 'high', 'xhigh'] as const satisfies readonly AgentThinkingLevel[]
+const GROK_46_EFFORT_MAP: ReasoningEffortMap = {
+  off: 'none',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
 }
 
 function normalizeDeepSeekV4Level(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
@@ -272,6 +281,16 @@ const GLM_52_PROFILE: ReasoningProfile = {
   },
 }
 
+const GROK_46_PROFILE: ReasoningProfile = {
+  id: 'grok-4.6',
+  levels: GROK_46_LEVELS,
+  defaultLevel: 'high',
+  normalize: normalizeOpenAIStandardLevel,
+  encodings: {
+    'openai-responses': { kind: 'openai-reasoning-effort', effortMap: GROK_46_EFFORT_MAP },
+  },
+}
+
 const OPENAI_STANDARD_PROFILE: ReasoningProfile = {
   id: 'openai-reasoning-standard',
   levels: OPENAI_STANDARD_LEVELS,
@@ -300,6 +319,7 @@ export const REASONING_PROFILES: readonly ReasoningProfile[] = [
   K3_PROFILE,
   GLM_52_PROFILE,
   GLM_53_PROFILE,
+  GROK_46_PROFILE,
   OPENAI_STANDARD_PROFILE,
   OPENAI_MAX_PROFILE,
 ]
@@ -322,7 +342,9 @@ export function resolveReasoningProfile(input: ResolveReasoningProfileInput): Re
           ? GLM_53_PROFILE
           : modelId === 'glm-5.2'
             ? GLM_52_PROFILE
-            : isOpenAITransport && isOpenAIReasoningModel
+            : modelId === 'grok-4.6'
+              ? GROK_46_PROFILE
+              : isOpenAITransport && isOpenAIReasoningModel
               ? /^gpt-5\.6(?:-|$)/.test(modelId) ? OPENAI_MAX_PROFILE : OPENAI_STANDARD_PROFILE
               : undefined
 

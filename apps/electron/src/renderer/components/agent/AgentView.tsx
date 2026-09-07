@@ -2490,8 +2490,9 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
       map.set(sessionId, false)
       return map
     })
-    // 1.6.2 开关状态 per-session 持久化：手动停止 → 写 meta false（重启保留）
-    window.electronAPI.updateAgentQueueAutoSend(sessionId, false).catch(console.error)
+    // 1.6.2 开关状态 per-session 持久化：手动停止 → 写 meta false（重启保留）。
+    // 持久化是旁路操作，不能阻断真正的停止请求；兼容旧 preload 未暴露该方法的情况。
+    void Promise.resolve().then(() => window.electronAPI.updateAgentQueueAutoSend?.(sessionId, false)).catch(console.error)
     setStreamingStates((prev) => {
       const current = prev.get(sessionId)
       if (!current || (!current.running && !current.backgroundWaiting)) return prev
@@ -2519,7 +2520,7 @@ export function AgentView({ sessionId, tabletMode = false, hideAgentHeader = fal
       map.set(sessionId, next)
       return map
     })
-    window.electronAPI.updateAgentQueueAutoSend(sessionId, next).catch(console.error)
+    void Promise.resolve().then(() => window.electronAPI.updateAgentQueueAutoSend?.(sessionId, next)).catch(console.error)
   }, [sessionId, setAutoSendMap, sessionMeta?.autoQueueSendEnabled])
 
   /** 手动发送 /compact 命令 */

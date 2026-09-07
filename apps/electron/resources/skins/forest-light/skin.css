@@ -84,7 +84,8 @@
   --overlay-foreground: var(--foreground);
   --message-surface: var(--content-area);
   --message-user-surface: var(--secondary);
-  --code-fg: var(--foreground);
+  /* 代码块使用深色背景，不能复用浅色页面正文前景色。 */
+  --code-fg: 215 28% 92%;
   --blockquote-surface: var(--muted);
   --table-header-surface: var(--muted);
   --diff-addition-bg: 142 65% 45% / 0.18;

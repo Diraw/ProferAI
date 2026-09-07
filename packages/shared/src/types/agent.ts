@@ -674,6 +674,8 @@ export type ProferEvent =
   // 与 run_idle 的区别：run_idle 表示 active 所有权释放（可能无结果），run_completed 表示本轮有确定结束。
   // 平板靠它拿到真实 startedAt/stoppedByUser，替代用 Date.now() 伪造 startedAt 的旧路。
   | { type: 'run_completed'; sessionId: string; stoppedByUser?: boolean; startedAt?: number; resultSubtype?: string; resultErrors?: string[]; backgroundTasksPending?: boolean }
+  | { type: 'preview_requested'; requestId: string; sessionId: string; filePath: string; revision: string; basePaths?: string[]; readOnly: boolean }
+  | { type: 'preview_inspection_requested'; request: import('./agent-preview').AgentFilePreviewInspectRequest }
 
 /** 外部入口触发 Agent 运行的来源 */
 export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'bridge' | 'delegation' | 'automation'
@@ -1002,8 +1004,8 @@ export interface SkillMeta {
   copiedAt?: string
   /** 被该工作区副本替换的全局 Skill ID */
   replacementForSkillId?: string
-  /** 来源状态，unknown-legacy 表示迁移无法可靠匹配 */
-  sourceStatus?: 'available' | 'deleted' | 'unknown-legacy'
+  /** 来源状态，unknown-legacy 表示迁移无法可靠匹配。 */
+  sourceStatus?: import('./global-skill').SkillSourceStatus | 'deleted'
   /** 当前实际用于工作区加载的来源层 */
   actualSource?: 'workspace' | 'global' | 'none'
   /** 是否有可用更新（源 Skill 版本 > importSource.sourceVersion） */
@@ -1125,8 +1127,8 @@ export interface WorkspaceMemoryFileSummary {
 
 /** 工作区记忆摘要 */
 export interface WorkspaceMemorySummary {
-  /** 工作区级 CLAUDE.md */
-  claudeMd: WorkspaceMemoryFileSummary
+  /** Profer 工作区资料；旧 CLAUDE.md 仅作为兼容读取来源。 */
+  workspaceProfile: WorkspaceMemoryFileSummary
   /** SDK auto memory 目录 */
   autoMemory: {
     /** 绝对目录路径 */
@@ -1743,6 +1745,12 @@ export const AGENT_IPC_CHANNELS = {
   RETRY_IMAGE_GENERATION: 'agent:retry-image-generation',
   /** 刷新 renderer 后重新绑定并回放仍在运行的 Agent 流 */
   RESTORE_ACTIVE_STREAMS: 'agent:restore-active-streams',
+  /** renderer → main：读取授权文件当前 SHA-256，供 viewer 加载前后校验 revision。 */
+  FILE_PREVIEW_REVISION: 'agent:file-preview-revision',
+  /** renderer → main：当前用户可见的正式 PPTX viewer 已 ready/error。 */
+  FILE_PREVIEW_REPORT: 'agent:file-preview-report',
+  /** renderer → main：同一正式 PPTX viewer 的页级观察结果。 */
+  FILE_PREVIEW_INSPECTION_RESULT: 'agent:file-preview-inspection-result',
   /** 更新会话标题 */
   UPDATE_TITLE: 'agent:update-title',
   /** 更新会话模型选择 */
@@ -1848,6 +1856,8 @@ export const AGENT_IPC_CHANNELS = {
   // 后台任务管理
   /** 获取任务输出 */
   GET_TASK_OUTPUT: 'agent:get-task-output',
+  /** 获取 Claude/Pi runtime 能力快照 */
+  GET_RUNTIME_CAPABILITIES: 'agent:get-runtime-capabilities',
   /** 停止任务 */
   STOP_TASK: 'agent:stop-task',
 
@@ -1897,6 +1907,10 @@ export const AGENT_IPC_CHANNELS = {
   RENAME_SKILL_ENTRY: 'agent:rename-skill-entry',
   /** 获取工作区记忆摘要 */
   GET_WORKSPACE_MEMORY_SUMMARY: 'agent:get-workspace-memory-summary',
+  /** 读取 Profer 工作区资料 */
+  READ_WORKSPACE_PROFILE: 'agent:read-workspace-profile',
+  /** 写入 Profer 工作区资料 */
+  WRITE_WORKSPACE_PROFILE: 'agent:write-workspace-profile',
   /** 读取工作区 CLAUDE.md */
   READ_WORKSPACE_CLAUDE_MD: 'agent:read-workspace-claude-md',
   /** 写入工作区 CLAUDE.md */

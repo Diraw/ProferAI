@@ -14,6 +14,7 @@
  */
 
 import type { AgentEffort, ProferPermissionMode } from "./agent";
+import type { AgentRuntime } from "./agent-provider";
 
 /** 预设实体作用域；builtin-meta 由 Profer 维护且只读。 */
 export type AgentPresetScope = "builtin-meta" | "user-global" | "workspace";
@@ -36,7 +37,16 @@ export type PresetErrorCode =
   | "PRESET_UNKNOWN_REFERENCE"
   | "PRESET_DELETE_BLOCKED"
   | "PRESET_WRITE_FAILED"
+  | "PRESET_INVALID_BASE"
   | "PRESET_CONCURRENT_UPDATE";
+
+export type AgentPresetMigrationStatus = 'builtin-corrupt' | 'invalid-base';
+
+export interface AgentPresetMigrationDiagnostic {
+  presetId?: string;
+  status: string;
+  reason: string;
+}
 
 export interface PresetWorkspaceReference {
   workspaceSlug: string;
@@ -56,6 +66,17 @@ export interface PresetReferenceReport {
   workspaceScopes: Array<{ workspaceSlug: string; workspaceName: string }>;
   totalCount: number;
   canDelete: boolean;
+}
+
+/** 在一个工作区内改绑全部持久引用并解除全局预设作用域的结果。 */
+export interface PresetScopeRebindResult {
+  workspaceSlug: string;
+  source: PresetReference;
+  replacement?: PresetReference;
+  reboundDefaults: number;
+  reboundSessions: number;
+  reboundAutomations: number;
+  scopeDisabled: true;
 }
 
 /** Manager/API 返回的结构化预设错误。 */
@@ -81,139 +102,169 @@ export const AGENT_PRESET_SUPPRESS_KEYS = [
 export type AgentPresetSuppressKey =
   (typeof AGENT_PRESET_SUPPRESS_KEYS)[number];
 
+export type AgentPresetCapabilityRisk = 'read' | 'write' | 'external' | 'destructive';
+
+/** 单个产品工具的可发现性和风险元数据。名称使用 Claude/Pi 共用的逻辑短名。 */
+export interface AgentPresetCapabilityTool {
+  name: string;
+  label: string;
+  hint: string;
+  risk: AgentPresetCapabilityRisk;
+  runtimes: readonly AgentRuntime[];
+}
+
 export interface AgentPresetCapabilityGroup<Id extends string = string> {
   id: Id;
   label: string;
   hint: string;
-  /** 该组拥有的工具短名；Claude 使用裸名，Pi 使用带 server 前缀的名字。 */
+  /** 该组的完整工具元数据；toolNames 由此派生，禁止另行维护。 */
+  tools: readonly AgentPresetCapabilityTool[];
+  /** 兼容已有调用方的工具短名索引。 */
   toolNames: readonly string[];
   /** 组禁用时需要自动隐藏的内置提示词段。 */
   suppressPromptSection?: AgentPresetSuppressKey;
 }
 
+const ALL_AGENT_RUNTIMES: readonly AgentRuntime[] = ['claude', 'pi'];
+
+function capabilityTool(
+  name: string,
+  label: string,
+  hint: string,
+  risk: AgentPresetCapabilityRisk = 'read',
+  runtimes: readonly AgentRuntime[] = ALL_AGENT_RUNTIMES,
+): AgentPresetCapabilityTool {
+  return { name, label, hint, risk, runtimes };
+}
+
+function capabilityGroup<const Id extends string>(input: {
+  id: Id;
+  label: string;
+  hint: string;
+  tools: readonly AgentPresetCapabilityTool[];
+  suppressPromptSection?: AgentPresetSuppressKey;
+}): AgentPresetCapabilityGroup<Id> {
+  return {
+    ...input,
+    toolNames: input.tools.map((tool) => tool.name),
+  };
+}
+
 /**
- * 统一能力注册表：能力元数据只维护在 shared，业务实现仍留在各自 Runtime 模块。
+ * 统一能力注册表：工具级元数据只维护在 shared，业务实现仍留在各自 Runtime 模块。
  * UI、schema、Claude/Pi 注入和单工具裁剪都从这里派生，避免多份清单漂移。
  */
 export const AGENT_PRESET_CAPABILITY_GROUPS = [
-  {
-    id: "task-graph",
-    label: "任务图",
-    hint: "子任务图工具",
-    toolNames: ["proma_task_create", "proma_task_update"],
-    suppressPromptSection: "task-graph",
-  },
-  {
-    id: "memory",
-    label: "长期记忆",
-    hint: "Auto Memory 与 memory-archive",
-    toolNames: [
-      "search_memory",
-      "list_team_memories",
-      "read_team_memory",
-      "search_team_memories",
-      "create_team_memory",
-      "update_team_memory",
+  capabilityGroup({
+    id: 'task-graph', label: '任务图', hint: '子任务图工具', suppressPromptSection: 'task-graph',
+    tools: [
+      capabilityTool('proma_task_create', '创建任务', '创建结构化任务图节点', 'write'),
+      capabilityTool('proma_task_update', '更新任务', '更新任务状态或依赖', 'write'),
     ],
-    suppressPromptSection: "memory",
-  },
-  {
-    id: "collaboration",
-    label: "协作子 Agent",
-    hint: "委派与协作工具（等价禁止委派）",
-    toolNames: [
-      "list_available_agent_models",
-      "delegate_agent",
-      "delegate_agents",
-      "wait_for_delegations",
-      "list_delegations",
-      "get_delegation_results",
-      "stop_delegation",
-      "stop_delegations",
-      "answer_delegation_question",
-      "continue_delegation",
+  }),
+  capabilityGroup({
+    id: 'memory', label: '长期记忆', hint: 'Auto Memory 与 memory-archive', suppressPromptSection: 'memory',
+    tools: [
+      capabilityTool('search_memory', '搜索个人记忆', '检索工作区长期记忆索引'),
+      capabilityTool('list_team_memories', '列出团队记忆', '列出当前团队共享记忆'),
+      capabilityTool('read_team_memory', '读取团队记忆', '读取一条团队共享记忆'),
+      capabilityTool('search_team_memories', '搜索团队记忆', '检索团队共享记忆'),
+      capabilityTool('create_team_memory', '创建团队记忆', '写入一条团队共享记忆', 'write'),
+      capabilityTool('update_team_memory', '更新团队记忆', '修改一条团队共享记忆', 'write'),
     ],
-    suppressPromptSection: "subagents",
-  },
-  {
-    id: "automation",
-    label: "自动化与规划",
-    hint: "定时任务、规划 Todo 与本地日程工具",
-    toolNames: [
-      "list_automations",
-      "get_automation",
-      "create_automation",
-      "update_automation",
-      "delete_automation",
-      "run_automation_now",
-      "list_todos",
-      "get_todo",
-      "create_todo",
-      "update_todo",
-      "list_calendar_events",
-      "get_calendar_event",
-      "create_calendar_event",
-      "update_calendar_event",
-      "delete_calendar_event",
+  }),
+  capabilityGroup({
+    id: 'collaboration', label: '协作子 Agent', hint: '委派与协作工具（等价禁止委派）', suppressPromptSection: 'subagents',
+    tools: [
+      capabilityTool('list_available_agent_models', '列出协作模型', '查看当前可用协作模型'),
+      capabilityTool('delegate_agent', '委派子 Agent', '创建一个协作子 Agent', 'write'),
+      capabilityTool('delegate_agents', '批量委派子 Agent', '批量创建协作子 Agent', 'write'),
+      capabilityTool('wait_for_delegations', '等待协作结果', '等待一个或多个子 Agent 完成', 'write'),
+      capabilityTool('list_delegations', '列出协作会话', '查看当前协作子 Agent'),
+      capabilityTool('get_delegation_results', '读取协作结果', '读取已完成协作结果'),
+      capabilityTool('stop_delegation', '停止协作会话', '停止一个协作子 Agent', 'destructive'),
+      capabilityTool('stop_delegations', '批量停止协作会话', '停止多个协作子 Agent', 'destructive'),
+      capabilityTool('answer_delegation_question', '回答协作问题', '代答子 Agent 的阻塞问题', 'write'),
+      capabilityTool('continue_delegation', '继续协作会话', '向已结束子 Agent 追加指令', 'write'),
     ],
-    suppressPromptSection: "automation",
-  },
-  {
-    id: "browser",
-    label: "受管浏览器",
-    hint: "网页访问、交互与标签页工具",
-    toolNames: [
-      "BrowserObserve",
-      "BrowserNavigate",
-      "BrowserWaitFor",
-      "BrowserClick",
-      "BrowserFill",
-      "BrowserDomAction",
-      "BrowserExecuteJavaScript",
-      "BrowserPress",
-      "BrowserScreenshot",
-      "BrowserPreviewOpen",
-      "BrowserListTabs",
-      "BrowserNewTab",
-      "BrowserSelectTab",
-      "BrowserCloseTab",
+  }),
+  capabilityGroup({
+    id: 'automation', label: '自动化与规划', hint: '定时任务、规划 Todo 与本地日程工具', suppressPromptSection: 'automation',
+    tools: [
+      capabilityTool('list_automations', '列出定时任务', '查看启用或暂停的定时任务'),
+      capabilityTool('get_automation', '读取定时任务', '读取任务详情与运行历史'),
+      capabilityTool('create_automation', '创建定时任务', '创建持久化无人值守任务', 'external'),
+      capabilityTool('update_automation', '修改定时任务', '修改任务提示词或调度', 'external'),
+      capabilityTool('delete_automation', '删除定时任务', '删除持久化定时任务', 'destructive'),
+      capabilityTool('run_automation_now', '立即运行定时任务', '立即触发一次定时任务', 'external'),
+      capabilityTool('list_todos', '列出待办', '查看规划中心待办'),
+      capabilityTool('get_todo', '读取待办', '读取待办最新记录'),
+      capabilityTool('create_todo', '创建待办', '在规划中心创建待办', 'write'),
+      capabilityTool('update_todo', '更新待办', '更新规划中心待办', 'write'),
+      capabilityTool('list_calendar_events', '列出日程', '查看本地规划中心日程'),
+      capabilityTool('get_calendar_event', '读取日程', '读取日程最新记录'),
+      capabilityTool('create_calendar_event', '创建日程', '在规划中心创建本地日程', 'write'),
+      capabilityTool('update_calendar_event', '更新日程', '更新本地规划中心日程', 'write'),
+      capabilityTool('delete_calendar_event', '删除日程', '删除本地规划中心日程', 'destructive'),
     ],
-  },
-  {
-    id: "clipboard",
-    label: "系统剪贴板",
-    hint: "读取和写入系统剪贴板文本",
-    toolNames: ["clipboard_read_text", "clipboard_write_text"],
-  },
-  {
-    id: "preview",
-    label: "文件预览",
-    hint: "通用文件预览与 PPTX 正式预览检查",
-    toolNames: ["inspect_preview", "open_file_preview", "inspect_file_preview"],
-  },
-  {
-    id: "image",
-    label: "图片",
-    hint: "图片生成、编辑与本地图片输出",
-    toolNames: ["generate_image", "send_local_image"],
-  },
-  {
-    id: "web",
-    label: "网页搜索",
-    hint: "WebSearch 与 WebFetch",
-    toolNames: ["WebSearch", "WebFetch"],
-  },
-  {
-    id: "ppt-materials",
-    label: "PPT 素材",
-    hint: "开放许可素材、视觉计划与交付审计",
-    toolNames: [
-      "search_open_materials",
-      "download_open_material",
-      "plan_ppt_visuals",
-      "audit_ppt_delivery",
+  }),
+  capabilityGroup({
+    id: 'browser', label: '受管浏览器', hint: '网页访问、交互与标签页工具',
+    tools: [
+      capabilityTool('BrowserObserve', '观察页面', '读取当前页面结构'),
+      capabilityTool('BrowserNavigate', '打开网页', '导航到公开网页', 'external'),
+      capabilityTool('BrowserWaitFor', '等待页面', '等待页面条件出现', 'external'),
+      capabilityTool('BrowserClick', '点击页面', '点击页面控件', 'external'),
+      capabilityTool('BrowserFill', '填写页面', '填写输入框或编辑器', 'external'),
+      capabilityTool('BrowserDomAction', '操作页面元素', '通过固定选择器操作页面', 'external'),
+      capabilityTool('BrowserExecuteJavaScript', '执行页面脚本', '在当前页面执行用户目标所需脚本', 'external'),
+      capabilityTool('BrowserPress', '发送按键', '向当前页面发送按键', 'external'),
+      capabilityTool('BrowserScreenshot', '截取页面', '截取当前浏览器页面', 'external'),
+      capabilityTool('BrowserPreviewOpen', '预览本地网页', '打开授权目录中的 HTML 预览', 'read'),
+      capabilityTool('BrowserListTabs', '列出标签页', '查看当前浏览器标签页'),
+      capabilityTool('BrowserNewTab', '新建标签页', '新建浏览器标签页', 'external'),
+      capabilityTool('BrowserSelectTab', '切换标签页', '切换当前工作标签页', 'external'),
+      capabilityTool('BrowserCloseTab', '关闭标签页', '关闭浏览器标签页', 'destructive'),
     ],
-  },
+  }),
+  capabilityGroup({
+    id: 'clipboard', label: '系统剪贴板', hint: '读取和写入系统剪贴板文本',
+    tools: [
+      capabilityTool('clipboard_read_text', '读取剪贴板', '读取系统剪贴板文本'),
+      capabilityTool('clipboard_write_text', '写入剪贴板', '写入系统剪贴板文本', 'write'),
+    ],
+  }),
+  capabilityGroup({
+    id: 'preview', label: '文件预览', hint: '通用文件预览与 PPTX 正式预览检查',
+    tools: [
+      capabilityTool('inspect_preview', '检查文件预览', '读取授权文件的内容或视觉预览'),
+      capabilityTool('open_file_preview', '打开正式预览', '在用户可见 viewer 中打开文件', 'external'),
+      capabilityTool('inspect_file_preview', '检查页级预览', '读取用户可见 viewer 的页级结果'),
+    ],
+  }),
+  capabilityGroup({
+    id: 'image', label: '图片', hint: '图片生成、编辑与本地图片输出',
+    tools: [
+      capabilityTool('generate_image', '生成图片', '生成或编辑图片', 'external'),
+      capabilityTool('send_local_image', '输出本地图片', '把授权目录中的图片发送到当前回复', 'external'),
+    ],
+  }),
+  capabilityGroup({
+    id: 'web', label: '网页搜索', hint: 'WebSearch 与 WebFetch',
+    tools: [
+      capabilityTool('WebSearch', '搜索网页', '搜索当前网页信息', 'external'),
+      capabilityTool('WebFetch', '读取网页', '抓取公开网页内容', 'external'),
+    ],
+  }),
+  capabilityGroup({
+    id: 'ppt-materials', label: 'PPT 素材', hint: '开放许可素材、视觉计划与交付审计',
+    tools: [
+      capabilityTool('search_open_materials', '搜索开放素材', '搜索开放许可素材', 'external'),
+      capabilityTool('download_open_material', '下载开放素材', '下载开放许可素材到授权目录', 'external'),
+      capabilityTool('plan_ppt_visuals', '规划 PPT 视觉素材', '为 PPT 生成视觉素材规划', 'write'),
+      capabilityTool('audit_ppt_delivery', '审计 PPT 交付', '检查 PPT 素材交付结果'),
+    ],
+  }),
 ] as const satisfies readonly AgentPresetCapabilityGroup[];
 
 export type AgentPresetToolGroup =
@@ -232,6 +283,28 @@ export const AGENT_PRESET_GROUP_TOOL_NAMES = Object.fromEntries(
 /** 全部可裁剪单工具短名（disabledTools 校验用） */
 export const AGENT_PRESET_TOOL_NAMES: readonly string[] =
   AGENT_PRESET_CAPABILITY_GROUPS.flatMap((group) => [...group.toolNames]);
+
+/** 从统一 registry 查询单个逻辑工具的元数据。 */
+export function getAgentPresetCapabilityTool(
+  toolName: string,
+): AgentPresetCapabilityTool | undefined {
+  const shortName = toolName.split('__').at(-1) ?? toolName;
+  for (const group of AGENT_PRESET_CAPABILITY_GROUPS) {
+    const tool = group.tools.find((candidate) => candidate.name === shortName);
+    if (tool) return tool;
+  }
+  return undefined;
+}
+
+/** 返回某个 runtime 实际声明支持的工具元数据；调用方仍需执行会话级门禁。 */
+export function getAgentPresetCapabilityTools(
+  runtime?: AgentRuntime,
+): readonly AgentPresetCapabilityTool[] {
+  const tools = AGENT_PRESET_CAPABILITY_GROUPS.flatMap((group) => [...group.tools]);
+  return runtime === undefined
+    ? tools
+    : tools.filter((tool) => tool.runtimes.includes(runtime));
+}
 
 /** 按 disabledTools 短名过滤工具定义（Claude/Pi 注册点共用）。 */
 export function filterDisabledTools<T extends { name: string }>(
@@ -311,6 +384,11 @@ export interface AgentPreset {
    * 内置预设升级会自动传导到派生预设，无需手动同步。
    */
   basePresetId?: string;
+  /** 稳定的跨作用域基座引用；basePresetId 仅保留旧版内置基座兼容。 */
+  basePresetReference?: PresetReference;
+  /** 旧配置迁移诊断；invalid-base 预设不可在 runtime 中解析。 */
+  migrationStatus?: AgentPresetMigrationStatus;
+  migrationReason?: string;
   /** 创建时间戳 */
   createdAt: number;
   /** 更新时间戳 */
@@ -331,6 +409,8 @@ export interface AgentPresetConfig {
   disabledGlobalPresetIds?: string[];
   /** 当前工作区显式关闭的工作区预设 ID。 */
   disabledWorkspacePresetIds?: string[];
+  /** 工作区旧预设迁移的持久诊断，供后续人工修复与审计。 */
+  migrationDiagnostics?: AgentPresetMigrationDiagnostic[];
 }
 
 /** 全局用户预设配置文件。 */
@@ -621,6 +701,9 @@ export const AGENT_PRESET_IPC_CHANNELS = {
   SET_DEFAULT_REFERENCE: "agent:set-default-preset-reference",
   ENABLE_GLOBAL_IN_WORKSPACE: "agent:enable-global-preset-in-workspace",
   DISABLE_GLOBAL_IN_WORKSPACE: "agent:disable-global-preset-in-workspace",
+  /** 主进程补偿事务：改绑该工作区全部引用后解除全局预设作用域。 */
+  REBIND_AND_DISABLE_GLOBAL_SCOPE:
+    "agent:rebind-and-disable-global-preset-scope",
   SET_WORKSPACE_ENABLED: "agent:set-workspace-preset-enabled",
   REBIND_SESSION_REFERENCE: "agent:rebind-session-preset-reference",
   REBIND_AUTOMATION_REFERENCE: "agent:rebind-automation-preset-reference",

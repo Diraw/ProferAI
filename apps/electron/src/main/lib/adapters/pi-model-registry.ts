@@ -484,15 +484,18 @@ export async function buildModel(
       : buildCodexModelWithRuntimeKey(sdk, input)
   }
   if (input.provider === 'xai') {
-    if (!input.xaiOAuthCredentials) {
-      throw new Error('xAI OAuth 凭据缺失，请重新登录')
+    if (input.xaiOAuthCredentials || input.xaiCredentialMode === 'oauth') {
+      if (!input.xaiOAuthCredentials) {
+        throw new Error('xAI OAuth 凭据缺失，请重新登录')
+      }
+      return buildXaiOAuthModel(sdk, {
+        channelId: input.channelId,
+        model: input.model,
+        xaiOAuthCredentials: input.xaiOAuthCredentials,
+        onXaiOAuthCredentialsRefreshed: input.onXaiOAuthCredentialsRefreshed,
+      })
     }
-    return buildXaiOAuthModel(sdk, {
-      channelId: input.channelId,
-      model: input.model,
-      xaiOAuthCredentials: input.xaiOAuthCredentials,
-      onXaiOAuthCredentialsRefreshed: input.onXaiOAuthCredentialsRefreshed,
-    })
+    return buildXaiApiKeyModel(sdk, input)
   }
   const providerName = `profer-${input.provider}-${input.sessionId}`
   const resolvedApiKey = resolvePiApiKey(input.provider, input.apiKey)
@@ -684,11 +687,52 @@ export async function listXaiModels(): Promise<{ id: string; name: string }[]> {
 }
 
 /**
- * 为 xAI（Grok/X 订阅）OAuth 渠道构建 Pi 内置模型。
+ * 为 xAI API Key 渠道构建隔离的 Responses provider。
  *
- * xAI 的 device-code token 不等同于 xAI API key，必须注入内存 CredentialStore
- * 并使用内置 `xai` provider，不能退回 registerProvider() 的 API key 路径。
+ * API Key 渠道既可以直连官方 xAI，也可以指向返回任意模型 ID 的 Responses 中转站。
+ * 因此不能只依赖 Pi 内置 xai catalog：已知模型复用 catalog 能力，未知模型在当前
+ * runtime 注册保守元数据；API key 仍只写入当前 runtime 的 credential store。
  */
+async function buildXaiApiKeyModel(sdk: PiSdk, input: PiAgentQueryOptions) {
+  const apiKey = input.apiKey.trim()
+  if (!apiKey) throw new Error('xAI API Key 缺失，请在渠道设置中填写 API Key')
+
+  const modelRuntime = await sdk.ModelRuntime.create(createIsolatedModelRuntimeOptions())
+  await modelRuntime.setRuntimeApiKey('xai', apiKey)
+
+  const resolvedModelId = stripAgentSdkContextSuffix(input.model) ?? 'grok-4.6'
+  const { getModels } = await loadPiAiCompat()
+  const xaiModels = [...getModels('xai')]
+  const catalogModel = findCatalogModelById(xaiModels, resolvedModelId)
+  const baseUrl = normalizeOpenAIBaseUrlForSdk(input.baseUrl ?? catalogModel?.baseUrl ?? '')
+  if (!baseUrl) throw new Error('xAI Responses 渠道缺少 Base URL')
+
+  const reasoningCapabilities = compilePiReasoningCapabilities('openai-responses', resolvedModelId)
+  const modelConfig = {
+    id: resolvedModelId,
+    name: catalogModel?.name ?? resolvedModelId,
+    api: 'openai-responses' as const,
+    reasoning: catalogModel?.reasoning ?? true,
+    thinkingLevelMap: reasoningCapabilities?.thinkingLevelMap ?? catalogModel?.thinkingLevelMap,
+    compat: reasoningCapabilities?.compat ?? catalogModel?.compat,
+    input: catalogModel ? [...catalogModel.input] : ['text', 'image'] as ('text' | 'image')[],
+    cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
+    contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
+  }
+
+  modelRuntime.registerProvider('xai', {
+    name: 'xAI / Grok',
+    api: 'openai-responses',
+    baseUrl,
+    models: [modelConfig],
+  })
+
+  const model = modelRuntime.getModel('xai', resolvedModelId)
+  if (!model) throw new Error(`xAI Responses 模型注册失败: ${resolvedModelId}`)
+  return { modelRuntime, model }
+}
+
 export async function buildXaiOAuthModel(sdk: PiSdk, input: XaiModelInput) {
   if (!input.xaiOAuthCredentials || !input.channelId) {
     throw new Error('xAI OAuth 凭据或渠道标识缺失，请重新登录')

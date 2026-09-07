@@ -2,7 +2,7 @@
 
 > 设计日期：2026-09-07（GMT+8）
 > 目标仓库：`/Users/mac/profer/profer-main`
-> 设计状态：已确认，待进入实现
+> 设计状态：已实现，xAI API Key 支持官方与 Responses 中转站
 
 ## 1. 目标与边界
 
@@ -11,7 +11,7 @@
 - Chat：正式支持，优先保证聊天质量、流式输出、图片输入和推理档位。
 - Agent：实验性支持，默认不进入普通 Agent 渠道选择；用户显式开启后才可使用。
 - 模型：动态拉取为主，预置 `grok-4.6` 作为模型列表不可用时的兜底。
-- 协议：优先使用 xAI Responses API；Agent 协议和模型目录复用 Pi 原生 `xai` provider。
+- 协议：xAI API Key 统一使用 Responses API；官方地址和 Responses 中转站只通过 Base URL 区分。Agent 使用 Pi 的 `openai-responses` transport；订阅 OAuth 继续使用 Pi 原生 `xai` provider。
 
 本设计明确不新增 `xai-api` provider，也不重新实现 Grok 的 Agent 协议、SSE 解析、工具调用或 OAuth 刷新。
 
@@ -79,15 +79,16 @@ credentialMode?: 'api-key' | 'oauth'
 
 OAuth `xai` 渠道不应被 Chat 的通用 API Key 适配器误用。首版建议：
 
-- API Key 模式进入 Chat 模型列表并可直接使用。
+- API Key 模式进入 Chat 模型列表并可直接使用，Base URL 可填写官方 xAI 或 Responses 中转站地址。
 - OAuth 模式保留现有 Agent/Pi 路径；Chat 如尚无安全的 Pi Chat bridge，则继续使用本地兜底标题，不把 OAuth token 伪装成 API Key。
+- 不增加 `apiProtocol` 字段：xAI API Key 固定走 Responses，不支持仅有 Chat Completions 协议的中转站。
 
 ### 3.3 Agent 路径
 
 Agent 不新增 Grok 运行时，直接复用 Pi：
 
 - OAuth：保留现有 `buildXaiOAuthModel()`、串行 refresh 和凭据回写。
-- API Key：新增 `buildXaiApiKeyModel()`，创建隔离 `ModelRuntime`，执行 `setRuntimeApiKey('xai', apiKey)`，从 Pi 内置 `xai` catalog 解析所选模型。
+- API Key：新增 `buildXaiApiKeyModel()`，创建隔离 `ModelRuntime`，执行 `setRuntimeApiKey('xai', apiKey)`，使用 `openai-responses` transport。已知 Grok 模型复用 Pi catalog；Responses 中转站的未知模型在当前 runtime 注册保守元数据。
 - 两种模式最终都使用 Pi 的模型、工具调用、压缩、重试、恢复和流式协议实现。
 
 由于 Profer 当前的 Agent 渠道资格由 `isAgentCompatibleProvider()` 自动派生，不能直接把 `xai` 加入该集合，否则 OAuth 和 API Key 都会无条件进入普通 Agent 选择。应增加单独的显式资格判断，例如：
@@ -110,13 +111,13 @@ agentExperimentalEnabled?: boolean
 
 ### 模型列表
 
-- API Key 模式：调用 `GET {baseUrl}/models`，复用 OpenAI model response 解析。
+- API Key 模式：调用 `GET {baseUrl}/models`，复用 OpenAI model response 解析；官方 xAI 和 Responses 中转站使用同一套路径推导。
 - 列表结果按模型 ID 稳定排序，保留用户已手动添加的模型。
 - `/models` 失败时：
   - 编辑已有渠道：保留现有模型，不覆盖用户选择。
   - 新建渠道：提供预置 `grok-4.6`，标记为预置/未验证。
   - 连接测试仍返回失败，不得因有预置模型而显示连接成功。
-- Agent 模型选择优先使用 Pi `getModels('xai')` 的 catalog；用户从 API `/models` 拉取的模型如果不在 Pi catalog 中，需要通过通用模型注册能力补充元数据，不能静默改用其他模型。
+- Agent 模型选择优先使用 Pi `getModels('xai')` 的 catalog；用户从 API `/models` 拉取的模型如果不在 Pi catalog 中，由隔离 runtime 按 `openai-responses` 注册保守元数据，不能静默改用其他模型。
 
 ### 上下文与推理
 
@@ -269,9 +270,9 @@ agentExperimentalEnabled?: boolean
    - Then xAI 不出现在普通 Agent 渠道列表中。
 
 8. **Pi API Key Agent**
-   - Given xAI API Key 渠道开启实验开关
+   - Given xAI API Key 渠道开启实验开关，Base URL 可以是官方地址或 Responses 中转站
    - When 创建 Pi Agent 会话
-   - Then 使用隔离 runtime key 和 Pi 内置 `xai` provider，不创建新的 Grok 协议适配器。
+   - Then 使用隔离 runtime key 和 `openai-responses` transport；未知中转模型在当前 runtime 注册，不创建新的 Grok 协议适配器。
 
 9. **工具续接**
    - Given Responses 流返回一个或多个 function call

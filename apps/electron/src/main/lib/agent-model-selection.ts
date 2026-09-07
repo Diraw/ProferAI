@@ -5,6 +5,7 @@
  */
 
 import { getChannelById } from './channel-manager'
+import { isAgentEnabledForChannel } from '@profer/shared'
 import type { ProviderType } from '@profer/shared'
 
 export interface AvailableAgentModel {
@@ -36,8 +37,8 @@ export function assertEnabledModelForChannel(input: {
   }
 
   const channel = getChannelById(input.channelId)
-  if (!channel || !channel.enabled) {
-    throw new Error(`${input.purpose}引用的渠道不存在或未启用: ${input.channelId}`)
+  if (!channel || !isAgentEnabledForChannel(channel)) {
+    throw new Error(`${input.purpose}引用的渠道不存在、未启用或未开放 Agent: ${input.channelId}`)
   }
 
   const model = channel.models.find((item) => item.id === modelId && item.enabled)
@@ -57,8 +58,8 @@ export function listEnabledAgentModelsForChannel(
   }
 
   const channel = getChannelById(channelId)
-  if (!channel || !channel.enabled) {
-    throw new Error(`${purpose}引用的渠道不存在或未启用: ${channelId}`)
+  if (!channel || !isAgentEnabledForChannel(channel)) {
+    throw new Error(`${purpose}引用的渠道不存在、未启用或未开放 Agent: ${channelId}`)
   }
 
   return {

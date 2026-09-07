@@ -32,6 +32,7 @@ const adapterRegistry = new Map<ProviderType, ProviderAdapter>([
   ['anthropic-compatible', new AnthropicAdapter('anthropic-compatible')],
   ['openai', new OpenAIAdapter()],
   ['openai-responses', new OpenAIResponsesAdapter()],
+  ['xai', new OpenAIResponsesAdapter('xai')],
   ['deepseek', new OpenAIAdapter('deepseek')],   // DeepSeek Chat 使用 OpenAI 兼容协议，Agent 单独使用 Anthropic 兼容入口
   ['kimi-api', new AnthropicAdapter('kimi-api')],       // Kimi API 的 Anthropic 协议端点
   ['kimi-coding', new AnthropicAdapter('kimi-coding')], // Kimi Coding Plan 订阅制（强制 User-Agent）

@@ -23,7 +23,7 @@ import type {
   ProviderType,
   XaiOAuthCredentials,
 } from '@profer/shared'
-import { PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, isCodexCredentialExpired, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
+import { PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, isAgentEnabledForChannel, isCodexCredentialExpired, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { normalizeBaseUrl, normalizeAnthropicProviderUrl, normalizeOpenAIBaseUrlForSdk, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
@@ -117,8 +117,17 @@ function readConfig(): ChannelsConfig {
     const raw = readFileSync(configPath, 'utf-8')
     const parsed = JSON.parse(raw) as ChannelsConfig
     const normalized = normalizeConfigForCurrentSchema(parsed)
-    const presetUpdated = applyPresetModelCandidateUpdates(normalized.config)
-    if (normalized.changed || presetUpdated.changed) {
+    const channelsWithCredentialModes = normalized.config.channels.map((channel) => {
+      if (channel.provider !== 'xai' || channel.credentialMode) return channel
+      try {
+        return { ...channel, credentialMode: resolveXaiCredentialMode(undefined, decryptKey(channel.apiKey)) }
+      } catch {
+        return channel
+      }
+    })
+    const credentialModeChanged = channelsWithCredentialModes.some((channel, index) => channel !== normalized.config.channels[index])
+    const presetUpdated = applyPresetModelCandidateUpdates({ ...normalized.config, channels: channelsWithCredentialModes })
+    if (normalized.changed || credentialModeChanged || presetUpdated.changed) {
       try {
         writeFileSync(configPath, JSON.stringify(presetUpdated.config, null, 2), 'utf-8')
         console.log('[渠道管理] 已应用渠道配置迁移或预设模型更新')
@@ -446,10 +455,7 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
       if (settings.agentChannelIds && settings.agentChannelIds.length > 0) {
         // 静默跳过
       } else {
-        const agentCapableChannels = config.channels.filter((c) => {
-          const { isAgentCompatibleProvider } = require('@profer/shared')
-          return isAgentCompatibleProvider(c.provider)
-        })
+        const agentCapableChannels = config.channels.filter((c) => isAgentEnabledForChannel(c))
         const agentIds = agentCapableChannels.map((c) => c.id)
         const firstAgent = agentCapableChannels[0]
         const firstModel = firstAgent?.models?.find((m) => m.enabled)
@@ -555,6 +561,8 @@ export function createChannel(input: ChannelCreateInput): Channel {
     name: input.name,
     provider: input.provider,
     baseUrl: input.baseUrl,
+    ...(input.provider === 'xai' && input.credentialMode ? { credentialMode: input.credentialMode } : {}),
+    ...(input.provider === 'xai' && input.agentExperimentalEnabled ? { agentExperimentalEnabled: true } : {}),
     agentBaseUrl: input.agentBaseUrl,
     apiKey: encryptApiKey(input.apiKey),
     models: input.models,
@@ -605,6 +613,8 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
       input.provider !== undefined ||
       input.baseUrl !== undefined ||
       input.agentBaseUrl !== undefined ||
+      input.credentialMode !== undefined ||
+      input.agentExperimentalEnabled !== undefined ||
       input.apiKey !== undefined ||
       input.models !== undefined
     if (hasStructuralChange) {
@@ -619,12 +629,29 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
   }
 
   const existing = config.channels[index]!
+  const targetProvider = input.provider ?? existing.provider
+  if (targetProvider === 'xai') {
+    const existingSecret = existing.provider === 'xai' ? decryptKey(existing.apiKey) : ''
+    const targetMode = input.credentialMode ?? existing.credentialMode
+    if (targetMode === 'oauth' && !parseXaiCredentials(input.apiKey ?? existingSecret)) {
+      throw new Error('xAI OAuth 渠道必须先完成订阅登录')
+    }
+    if (targetMode === 'api-key'
+      && existing.provider === 'xai'
+      && resolveXaiCredentialMode(existing.credentialMode, existingSecret) === 'oauth'
+      && !input.apiKey?.trim()) {
+      throw new Error('从 xAI 订阅切换到 API Key 前，请填写新的 xAI API Key')
+    }
+  }
 
   const rawUpdated: Channel = {
     ...existing,
     name: input.name ?? existing.name,
     provider: input.provider ?? existing.provider,
     baseUrl: input.baseUrl ?? existing.baseUrl,
+    ...(input.provider === 'xai'
+      ? { credentialMode: input.credentialMode ?? existing.credentialMode, agentExperimentalEnabled: input.agentExperimentalEnabled ?? existing.agentExperimentalEnabled }
+      : { credentialMode: undefined, agentExperimentalEnabled: undefined }),
     agentBaseUrl: input.agentBaseUrl !== undefined ? input.agentBaseUrl : existing.agentBaseUrl,
     apiKey: input.apiKey ? encryptApiKey(input.apiKey) : existing.apiKey,
     models: input.models ?? existing.models,
@@ -751,7 +778,7 @@ export function persistXaiOAuthCredentials(channelId: string, credentials: XaiOA
   if (!channel || channel.provider !== 'xai') {
     throw new Error(`xAI 渠道不存在或类型不匹配: ${channelId}`)
   }
-  updateChannel(channelId, { apiKey: serializeXaiCredentials(credentials) })
+  updateChannel(channelId, { apiKey: serializeXaiCredentials(credentials), credentialMode: 'oauth' })
   rememberXaiOAuthCredentials(channelId, credentials, true)
 }
 
@@ -794,7 +821,12 @@ export async function resolveChannelRuntimeApiKey(channelId: string): Promise<st
   }
 
   if (channel.provider === 'openai-codex') return resolveCodexAccessToken(channelId)
-  if (channel.provider === 'xai') return resolveXaiAccessToken(channelId)
+  if (channel.provider === 'xai') {
+    const secret = decryptKey(channel.apiKey)
+    return resolveXaiCredentialMode(channel.credentialMode, secret) === 'oauth'
+      ? resolveXaiAccessToken(channelId)
+      : secret
+  }
   return decryptApiKey(channelId)
 }
 
@@ -812,6 +844,9 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
   }
 
   const apiKey = decryptKey(channel.apiKey)
+  if (channel.provider === 'xai' && resolveXaiCredentialMode(channel.credentialMode, apiKey) === 'oauth') {
+    return { success: false, message: 'xAI 订阅 OAuth 不支持 API Key 连接测试，请使用 Pi Agent 实验模式' }
+  }
   const proxyUrl = await getEffectiveProxyUrl()
 
   try {
@@ -828,6 +863,7 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
         return await testAnthropicCompatible(channel.baseUrl, apiKey, proxyUrl, channel.provider)
       case 'openai':
       case 'openai-responses':
+      case 'xai':
       case 'opencode-go-openai':
       case 'deepseek':
       case 'zhipu':
@@ -1540,6 +1576,7 @@ export async function testChannelDirect(input: FetchModelsInput): Promise<Channe
         return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider)
       case 'openai':
       case 'openai-responses':
+      case 'xai':
       case 'opencode-go-openai':
       case 'deepseek':
       case 'zhipu':
@@ -1584,6 +1621,7 @@ export async function fetchModels(input: FetchModelsInput): Promise<FetchModelsR
         return await fetchOllamaModels(input.baseUrl, input.apiKey, proxyUrl)
       case 'openai':
       case 'openai-responses':
+      case 'xai':
       case 'opencode-go-openai':
       case 'deepseek':
       case 'zhipu':

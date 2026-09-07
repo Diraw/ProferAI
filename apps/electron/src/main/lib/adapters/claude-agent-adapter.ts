@@ -745,7 +745,7 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
       supportsQueuedMessage: true,
       supportsBackgroundWakeup: true,
       supportsNativeMcp: true,
-      supportsSubAgents: true,
+      runtimeSupportsSubagents: true,
     }
   }
 
