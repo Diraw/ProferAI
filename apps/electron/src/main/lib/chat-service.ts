@@ -26,7 +26,7 @@ import {
 import type { ImageAttachmentData, ContinuationMessage } from '@profer/core'
 import { listChannels, decryptApiKey, isCommercialMode, canSelfConfig } from './channel-manager'
 import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
-import { appendMessage, appendBranchTail, updateConversationMeta, getConversationMessages } from './conversation-manager'
+import { appendMessage, appendBranchTail, updateConversationMeta, getConversationBranch } from './conversation-manager'
 import { readAttachmentAsBase64, isImageAttachment } from './attachment-service'
 import { extractTextFromAttachment, isDocumentAttachment } from './document-parser'
 import { getFetchFn } from './proxy-fetch'
@@ -287,7 +287,9 @@ export async function sendMessage(
   }
 
   // 3. 先读取历史消息（在追加用户消息之前，避免 adapter 重复发送当前消息）
-  const fullHistory = getConversationMessages(conversationId)
+  //    关键：发送上下文只取当前 activePath 对应的线性消息流，绝不混入其他分支——否则
+  //    模型会看到「另一条分支的历史」（PR #121 review by Yuan-lai-ru-ci & Copilot）。
+  const fullHistory = getConversationBranch(conversationId)
 
   // 4. 追加用户消息到 JSONL（用 appendBranchTail 自动按 activePath 接链 + 字段 parentId）
   //    重发 / 编辑后重发：user 节点已由 forkBranchAt 创建，这里不能再追加，否则会多出一条重复的 user 消息。

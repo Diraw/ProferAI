@@ -1559,7 +1559,11 @@ export async function handleRemoteCommand(
       const conversationId = parsed.conversationId as string
       const anchorId = parsed.anchorId as string
       const payload = (parsed.payload ?? {}) as Parameters<typeof forkBranchAt>[2]
-      if (!conversationId || !anchorId || !payload?.content) return { ok: false, error: '缺少 conversationId / anchorId / payload.content' }
+      // PR #121 review by Copilot：必须用 typeof 判断 content，不能用 truthy——空字符串
+      // 是合法的"只更新附件/引用而内容为空"的编辑分叉场景，!payload?.content 会误判缺失。
+      if (!conversationId || !anchorId || !payload || typeof payload.content !== 'string') {
+        return { ok: false, error: '缺少 conversationId / anchorId / payload.content' }
+      }
       try {
         return { ok: true, data: forkBranchAt(conversationId, anchorId, payload) }
       } catch (error) {
