@@ -117,7 +117,29 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
       toast.error(`以下文件超过 100MB，Chat 附件暂不支持，已跳过：${formatFileNames(oversized)}`)
     }
 
+    // 按 filename + size 去重：已在附件列表中的视为重复，跳过不入 atom。
+    // 同批次内同名同大小的也折叠成一条（一次性选两次同名文件不应产生两条）。
+    const existingKeys = new Set(pendingAttachments.map((a) => `${a.filename}:${a.size}`))
+    const duplicateFiles: File[] = []
+    const newFiles: File[] = []
     for (const file of okFiles) {
+      const key = `${file.name}:${file.size}`
+      if (existingKeys.has(key)) {
+        duplicateFiles.push(file)
+      } else {
+        newFiles.push(file)
+        existingKeys.add(key)
+      }
+    }
+
+    if (duplicateFiles.length > 0) {
+      toast.info(
+        `已跳过重复文件：${formatFileNames(duplicateFiles.map((f) => f.name))}`,
+        { id: 'chat-attach-skip-dup' }
+      )
+    }
+
+    for (const file of newFiles) {
       try {
         const base64 = await fileToBase64(file)
 
@@ -147,7 +169,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
         console.error('[ChatInput] 添加附件失败:', error)
       }
     }
-  }, [setPendingAttachments])
+  }, [setPendingAttachments, pendingAttachments])
 
   /** 通过 IPC 打开文件选择对话框 */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
@@ -165,12 +187,22 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
       }
 
       const oversized: string[] = []
+      // 按 filename + size 去重（与 addFilesAsAttachments 共用「替换」语义）
+      const existingKeys = new Set(pendingAttachments.map((a) => `${a.filename}:${a.size}`))
+      const duplicateFiles: string[] = []
 
       for (const fileInfo of result.files) {
         if (fileInfo.size > MAX_ATTACHMENT_SIZE) {
           oversized.push(fileInfo.filename)
           continue
         }
+        const key = `${fileInfo.filename}:${fileInfo.size}`
+        if (existingKeys.has(key)) {
+          duplicateFiles.push(fileInfo.filename)
+          continue
+        }
+        existingKeys.add(key)
+
         const previewUrl = fileInfo.mediaType.startsWith('image/')
           ? `data:${fileInfo.mediaType};base64,${fileInfo.data}`
           : undefined
@@ -192,13 +224,20 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
         setPendingAttachments((prev) => [...prev, pendingAttachment])
       }
 
+      if (duplicateFiles.length > 0) {
+        toast.info(
+          `已跳过重复文件：${formatFileNames(duplicateFiles)}`,
+          { id: 'chat-attach-skip-dup' }
+        )
+      }
+
       if (oversized.length > 0) {
         toast.error(`以下文件超过 100MB，Chat 附件暂不支持，已跳过：${formatFileNames(oversized)}`)
       }
     } catch (error) {
       console.error('[ChatInput] 文件选择对话框失败:', error)
     }
-  }, [setPendingAttachments])
+  }, [setPendingAttachments, pendingAttachments])
 
   /** 将一张下载的开放许可素材加入当前对话附件。 */
   const handleSelectMaterial = React.useCallback(async (material: PptMaterialItem): Promise<void> => {
