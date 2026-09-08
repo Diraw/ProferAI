@@ -390,8 +390,10 @@ function edgePath(from: LayoutNode, to: LayoutNode): string {
   return `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`
 }
 
-// module 级缓存：避免重复拉取同一 message 的完整 content
-const messageContentCache = new Map<string, string>()
+// module 级缓存：避免重复拉取同一 message 的完整 content。
+// key = conversationId → messageId → content；嵌套结构避免跨对话的 messageId 撞车，
+// 例如 conversationA 与 conversationB 中都存在 id="u-1" 的 user message 时互不覆盖。
+const messageContentCache = new Map<string, Map<string, string>>()
 
 const ContentPreview = React.memo(function ContentPreview({
   messageId,
@@ -402,7 +404,7 @@ const ContentPreview = React.memo(function ContentPreview({
   conversationId: string
   compact?: boolean
 }): React.ReactElement {
-  const cached = messageContentCache.get(messageId)
+  const cached = messageContentCache.get(conversationId)?.get(messageId)
   const [content, setContent] = React.useState<string | null>(cached ?? null)
   const [loading, setLoading] = React.useState(cached === undefined)
 
@@ -421,7 +423,13 @@ const ContentPreview = React.memo(function ContentPreview({
         const full = api.getMessageContent ? await api.getMessageContent(conversationId, messageId) : null
         if (cancelled) return
         const value = full ?? ''
-        messageContentCache.set(messageId, value)
+        // 嵌套 Map 写入：外层按 conversationId 隔离，内层按 messageId 寻址
+        let inner = messageContentCache.get(conversationId)
+        if (!inner) {
+          inner = new Map<string, string>()
+          messageContentCache.set(conversationId, inner)
+        }
+        inner.set(messageId, value)
         setContent(value)
       } catch {
         if (cancelled) return

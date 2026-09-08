@@ -7,7 +7,12 @@
  * - 旧式 sidecar（已废弃，仅历史数据兼容读取）：~/.proma/conversations/{id}.discarded.jsonl
  *
  * 消息结构：所有消息通过 parentId 形成一棵/多棵 DAG；每一时刻对话有一个 active 路径
- * (activePath: string[]) 表示主视图当前展示的 root→leaf 链。
+ * (activePath: string[]) 表示主视图当前展示的「root→leaf 全段」消息链：
+ * - 必须以某条 parentId=null 的根消息开始
+ * - 整链必须连续（每条消息的 parentId 都严格指向链中前一条）
+ * - 必须从根延伸到当前选中叶节点，不能跳过中间节点
+ * - 入库前由 setActivePath 校验，非 root→leaf 一律抛错；删除类操作后由
+ *   deleteAndFixActivePath 等函数归一化兜底，所有写入路径统一契约。
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, createReadStream } from 'node:fs'
@@ -817,8 +822,13 @@ export function getConversationBranch(conversationId: string): ChatMessage[] {
 /**
  * 设置当前对话的 activePath
  *
- * 安全检查：必须构成自某条 parentId=null 根开始的合法链（不允许跳父、不允许节点不存在）。
- * 失败时抛错。
+ * 严格约束（PR #121 review by Yuan-lai-ru-ci）：
+ * - 路径必须构成自某条 parentId=null 根开始的合法链
+ * - 不允许跳过父节点、不允许节点不存在、不允许从中间节点开始
+ * - 失败时抛错
+ *
+ * 之前的实现允许从中间节点开始（分支展示场景），但 shared/types/chat.ts 的
+ * activePath 注释又要求 root→leaf，两边矛盾；本版统一为「严格 root→leaf」语义。
  */
 export function setActivePath(conversationId: string, path: string[]): void {
   const messages = readAllMessagesFresh(conversationId)
@@ -834,7 +844,7 @@ export function setActivePath(conversationId: string, path: string[]): void {
     if (!msg) throw new Error(`activePath 包含不存在的消息 id=${id}`)
     if (i === 0) {
       if (msg.parentId !== null) {
-        // 也允许从中间节点开始（分支展示），不强求根
+        throw new Error(`activePath 必须从 parentId=null 的根消息开始，但 ${id} 的 parentId=${msg.parentId}`)
       }
     } else {
       if (msg.parentId !== prev!.id) throw new Error(`activePath 链不连续：${prev!.id} → ${id}`)
@@ -1009,7 +1019,8 @@ export function isOnActiveBranch(conversationId: string, messageId: string): boo
  * - 只沿 target 向下递归收集 descendant，不会动到 target.parentId 的其它兄弟分支
  * - activePath 中所有已被删除的 id 都会被过滤掉，并按链连续性二次截断
  *   - 若 target 在 activePath 上，截断到 target 之前（保证链合法）
- *   - 若 activePath 被清空，自动退回到 target.parent（仍存在）或首条 parentId=null 的根
+ *   - 若 activePath 被清空，退回到 remaining 中第一条 parentId=null 的根
+ *     （为了与 setActivePath 的「严格 root→leaf」契约一致，不能再用 target.parent 这种中间节点兜底）
  *
  * @returns 更新后的 active path 上的消息（= getConversationBranch 结果），用于前端 setMessages
  */
@@ -1068,7 +1079,8 @@ export function deleteMessageFromTree(conversationId: string, messageId: string)
       const m = byIdNew.get(id)
       if (!m) break
       if (prev === null) {
-        // 第一个节点：只要存在即可（允许从中间节点开始展示）
+        // 第一个节点作为锚点。前提：输入 activePath 已满足「root→leaf」契约
+        // （由 setActivePath 入口校验保证），这里不再二次断言；后续按 parent 链连续性追加。
         truncated.push(id)
         prev = id
       } else if (m.parentId === prev) {
@@ -1081,15 +1093,11 @@ export function deleteMessageFromTree(conversationId: string, messageId: string)
     }
 
     if (truncated.length === 0) {
-      // 整条 activePath 都没了：退回到 target.parent（若存在）或首条 parentId=null 的根
-      let fallback: string[] = []
-      if (target.parentId && byIdNew.has(target.parentId)) {
-        fallback = [target.parentId]
-      } else {
-        const root = remaining.find((m) => m.parentId === null)
-        if (root) fallback = [root.id]
-      }
-      updateConversationMeta(conversationId, { activePath: fallback })
+      // 整条 activePath 都没了：统一退到 remaining 中第一条 parentId=null 的根。
+      // 为遵守 setActivePath 的「严格 root→leaf」契约，不能再退到 target.parent
+      // （target.parent 是中间节点、违反约定）；不再合法时唯一兜底就是根。
+      const root = remaining.find((m) => m.parentId === null)
+      if (root) updateConversationMeta(conversationId, { activePath: [root.id] })
     } else if (truncated.length !== meta.activePath.length) {
       updateConversationMeta(conversationId, { activePath: truncated })
     }
@@ -1147,4 +1155,3 @@ export function deleteDiscardedSegments(conversationId: string): void {
     }
   }
 }
-
