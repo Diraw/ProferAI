@@ -42,6 +42,7 @@ import { fileToBase64, formatFileNames } from '@/lib/file-utils'
 import { MAX_ATTACHMENT_SIZE } from '@profer/shared'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { toast } from 'sonner'
+import { dedupPendingAgainst, formatDuplicateSummary } from './dedup-helpers'
 
 interface ChatInputProps {
   /** 当前对话 ID */
@@ -97,9 +98,15 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   const canSend = (content.trim().length > 0 || pendingAttachments.length > 0) && selectedModel !== null && !streaming
 
   /**
-   * 将文件列表添加为附件
+   * 将文件列表添加为附件（race-free 去重）
    *
-   * File → base64 → saveAttachment IPC → 创建 blob URL → 添加到 atom
+   * 设计要点（原 PR #122 review 反馈）：
+   * 不能先读 pendingAttachments 闭包快照判重，再异步写——快速重复拖入或两入口
+   * 并发时两次调用读到同一旧快照，会重复入 atom。
+   *
+   * 修法：把判重与写入都放进 setPendingAttachments(prev => ...) 的 prev 回调内，
+   * 由 React/Jotai 序列化执行 prev 回调，每次回调拿到的 prev 都是链上最新值，
+   * 从根上消除"读陈旧快照"的竞态。判重逻辑复用 dedup-helpers 的纯函数。
    */
   const addFilesAsAttachments = React.useCallback(async (files: File[]): Promise<void> => {
     const oversized: string[] = []
@@ -117,39 +124,64 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
       toast.error(`以下文件超过 100MB，Chat 附件暂不支持，已跳过：${formatFileNames(oversized)}`)
     }
 
-    for (const file of okFiles) {
-      try {
-        const base64 = await fileToBase64(file)
+    if (okFiles.length === 0) return
 
-        // 通过 IPC 保存到本地（需要当前对话 ID，但附件保存时可能还没对话）
-        // 这里先不保存到磁盘，等发送时再保存
-        // 创建 blob URL 用于预览
-        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
+    // 并行准备所有 base64 + PendingAttachment（异步仍不可避免，但仅此处有 race）
+    // 下面是 catch + map forEach 收集成功的 Attachment，失败的文件静默忽略（沿袭旧行为）
+    const prepared = (
+      await Promise.all(
+        okFiles.map(async (file): Promise<{ name: string; size: number; attachment: PendingAttachment } | null> => {
+          try {
+            const base64 = await fileToBase64(file)
 
-        const pendingAttachment: PendingAttachment = {
-          id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          filename: file.name,
-          mediaType: file.type || 'application/octet-stream',
-          localPath: '', // 发送时填充
-          size: file.size,
-          previewUrl,
-          // 临时存储 base64 数据（通过扩展字段）
+            // 创建 blob URL 仅用于图片本地预览
+            const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined
+
+            const pendingAttachment: PendingAttachment = {
+              id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              filename: file.name,
+              mediaType: file.type || 'application/octet-stream',
+              localPath: '', // 发送时填充
+              size: file.size,
+              previewUrl,
+            }
+
+            // 将 base64 数据存储在 window 临时缓存中
+            if (!window.__pendingAttachmentData) {
+              window.__pendingAttachmentData = new Map<string, string>()
+            }
+            window.__pendingAttachmentData.set(pendingAttachment.id, base64)
+
+            return { name: file.name, size: file.size, attachment: pendingAttachment }
+          } catch (error) {
+            console.error('[ChatInput] 添加附件失败:', error)
+            return null
+          }
+        })
+      )
+    ).filter((item): item is { name: string; size: number; attachment: PendingAttachment } => item !== null)
+
+    if (prepared.length === 0) return
+
+    // 原子判重 + 写入：把 prev 回调内同步完成判重 + 拼接写入
+    setPendingAttachments((prev) => {
+      const result = dedupPendingAgainst(
+        prev,
+        prepared.map((p) => ({ fileLike: { name: p.name, size: p.size }, item: p.attachment })),
+      )
+
+      if (result.duplicateNames.length > 0) {
+        const summary = formatDuplicateSummary(result.duplicateNames)
+        if (summary) {
+          toast.info(`已跳过重复文件：${summary}`, { id: 'chat-attach-skip-dup' })
         }
-
-        // 将 base64 数据存储在 window 临时缓存中
-        if (!window.__pendingAttachmentData) {
-          window.__pendingAttachmentData = new Map<string, string>()
-        }
-        window.__pendingAttachmentData.set(pendingAttachment.id, base64)
-
-        setPendingAttachments((prev) => [...prev, pendingAttachment])
-      } catch (error) {
-        console.error('[ChatInput] 添加附件失败:', error)
       }
-    }
+
+      return result.accepted.length > 0 ? [...prev, ...result.accepted] : prev
+    })
   }, [setPendingAttachments])
 
-  /** 通过 IPC 打开文件选择对话框 */
+  /** 通过 IPC 打开文件选择对话框（race-free 去重） */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
     try {
       const result = await window.electronAPI.openFileDialog()
@@ -164,13 +196,16 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
         toast.warning(`以下文件无法读取，已跳过：${formatFileNames(skippedFiles.map((f) => f.filename))}`)
       }
 
+      // 构建候选（包含 oversized 冗余检查，防御 IPC 未来不再预分大文件）
       const oversized: string[] = []
+      const candidates: Array<{ name: string; size: number; attachment: PendingAttachment }> = []
 
       for (const fileInfo of result.files) {
         if (fileInfo.size > MAX_ATTACHMENT_SIZE) {
           oversized.push(fileInfo.filename)
           continue
         }
+
         const previewUrl = fileInfo.mediaType.startsWith('image/')
           ? `data:${fileInfo.mediaType};base64,${fileInfo.data}`
           : undefined
@@ -189,12 +224,31 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
         }
         window.__pendingAttachmentData.set(pendingAttachment.id, fileInfo.data)
 
-        setPendingAttachments((prev) => [...prev, pendingAttachment])
+        candidates.push({ name: fileInfo.filename, size: fileInfo.size, attachment: pendingAttachment })
       }
 
       if (oversized.length > 0) {
         toast.error(`以下文件超过 100MB，Chat 附件暂不支持，已跳过：${formatFileNames(oversized)}`)
       }
+
+      if (candidates.length === 0) return
+
+      // 原子判重 + 写入：复用同一 dedup helper，与 addFilesAsAttachments 走同一条 race-free 路径
+      setPendingAttachments((prev) => {
+        const result = dedupPendingAgainst(
+          prev,
+          candidates.map((c) => ({ fileLike: { name: c.name, size: c.size }, item: c.attachment })),
+        )
+
+        if (result.duplicateNames.length > 0) {
+          const summary = formatDuplicateSummary(result.duplicateNames)
+          if (summary) {
+            toast.info(`已跳过重复文件：${summary}`, { id: 'chat-attach-skip-dup' })
+          }
+        }
+
+        return result.accepted.length > 0 ? [...prev, ...result.accepted] : prev
+      })
     } catch (error) {
       console.error('[ChatInput] 文件选择对话框失败:', error)
     }
