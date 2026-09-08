@@ -104,3 +104,5 @@ tablet-app/dist/
 
 # local Profer Team Server deployment (keep separate repo)
 server/
+
+.workbuddy
