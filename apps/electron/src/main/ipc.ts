@@ -177,6 +177,12 @@ import {
   createConversation,
   appendMessage,
   getConversationMessages,
+  getConversationBranch,
+  setActivePath,
+  getBranchTree,
+  forkBranchAt,
+  appendBranchTail,
+  getMessageContent,
   getRecentMessages,
   updateConversationMeta,
   deleteConversation,
@@ -1813,7 +1819,7 @@ export function registerIpcHandlers(): void {
       if (!Array.isArray(itemIds) || itemIds.length < 1 || itemIds.length > 10 || itemIds.some((id) => typeof id !== 'string' || id.length > 160)) throw new Error('资料引用数量或标识无效')
       const { resolveKnowledgeReferences } = require('./lib/knowledge-item-service')
       const references = resolveKnowledgeReferences(itemIds)
-      const message: ChatMessage = { id: randomUUID(), role: 'user', content: '', createdAt: Date.now(), knowledgeReferences: references }
+      const message: ChatMessage = { id: randomUUID(), parentId: null, role: 'user', content: '', createdAt: Date.now(), knowledgeReferences: references }
       appendMessage(conversationId, message)
       return message
     },
@@ -1835,7 +1841,7 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 从指定消息开始截断（包含该消息）
+  // 从指定消息开始截断（包含该消息）— 已废弃，仅保留兼容入口
   ipcMain.handle(
     CHAT_IPC_CHANNELS.TRUNCATE_MESSAGES_FROM,
     async (
@@ -1844,11 +1850,58 @@ export function registerIpcHandlers(): void {
       messageId: string,
       preserveFirstMessageAttachments?: boolean,
     ): Promise<ChatMessage[]> => {
+      console.warn('[IPC] TRUNCATE_MESSAGES_FROM 已废弃，请改用 forkBranchAt + setActivePath。')
       return truncateMessagesFrom(
         conversationId,
         messageId,
         preserveFirstMessageAttachments ?? false,
       )
+    }
+  )
+
+  // 获取当前激活分支（线性消息流）
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.GET_BRANCH,
+    async (_, conversationId: string): Promise<ChatMessage[]> => {
+      return getConversationBranch(conversationId)
+    }
+  )
+
+  // 设置激活分支
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.SET_ACTIVE_PATH,
+    async (_, conversationId: string, path: string[]) => {
+      setActivePath(conversationId, path)
+      return getConversationBranch(conversationId)
+    }
+  )
+
+  // 获取全量分支树快照
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.GET_BRANCH_TREE,
+    async (_, conversationId: string) => {
+      return getBranchTree(conversationId)
+    }
+  )
+
+  // 在 anchorId 的兄弟位置 fork 一条新 user message（用于重发/编辑重发）
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.FORK_BRANCH_AT,
+    async (
+      _,
+      conversationId: string,
+      anchorId: string,
+      payload: { role: 'user'; content: string; attachments?: ChatMessage['attachments']; knowledgeReferences?: ChatMessage['knowledgeReferences'] },
+    ): Promise<ChatMessage> => {
+      return forkBranchAt(conversationId, anchorId, payload)
+    }
+  )
+
+  // 按 ID 取单条消息的完整 content（BranchTreeView hover popover 用）
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.GET_MESSAGE_CONTENT,
+    async (_, conversationId: string, messageId: string): Promise<string | null> => {
+      return getMessageContent(conversationId, messageId)
     }
   )
 

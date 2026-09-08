@@ -38,6 +38,7 @@ import type {
   KnowledgeSearchResult,
   RecentMessagesResult,
   MessageSearchResult,
+  BranchTreeSnapshot,
   AgentSessionMeta,
   AgentRuntime,
   AgentThinkingLevel,
@@ -350,12 +351,39 @@ export interface ElectronAPI {
   /** 删除指定消息 */
   deleteMessage: (conversationId: string, messageId: string) => Promise<ChatMessage[]>
 
-  /** 从指定消息开始截断（包含该消息） */
+  /**
+   * @deprecated 已被分支模型取代。保留仅供旧调用方使用。
+   * 从指定消息开始截断（包含该消息）
+   */
   truncateMessagesFrom: (
     conversationId: string,
     messageId: string,
     preserveFirstMessageAttachments?: boolean,
   ) => Promise<ChatMessage[]>
+
+  /** 获取当前对话的"激活分支"线性消息流（root→leaf） */
+  getBranch: (conversationId: string) => Promise<ChatMessage[]>
+
+  /** 设置对话的激活分支消息 ID 序列，返回设置后的分支线性消息流 */
+  setActivePath: (conversationId: string, path: string[]) => Promise<ChatMessage[]>
+
+  /** 获取对话全量分支树快照 */
+  getBranchTree: (conversationId: string) => Promise<BranchTreeSnapshot>
+
+  /** 在指定 anchor 的兄弟位置 fork 一条新 user message */
+  forkBranchAt: (
+    conversationId: string,
+    anchorId: string,
+    payload: {
+      role: 'user'
+      content: string
+      attachments?: ChatMessage['attachments']
+      knowledgeReferences?: ChatMessage['knowledgeReferences']
+    },
+  ) => Promise<ChatMessage>
+
+  /** 按 ID 取单条消息的完整 content（BranchTreeView hover 用） */
+  getMessageContent: (conversationId: string, messageId: string) => Promise<string | null>
 
   /** 更新上下文分隔线 */
   updateContextDividers: (conversationId: string, dividers: string[]) => Promise<ConversationMeta>
@@ -1830,6 +1858,35 @@ const electronAPI: ElectronAPI = {
       messageId,
       preserveFirstMessageAttachments,
     )
+  },
+
+  getBranch: (conversationId: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_BRANCH, conversationId)
+  },
+
+  setActivePath: (conversationId: string, path: string[]) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SET_ACTIVE_PATH, conversationId, path)
+  },
+
+  getBranchTree: (conversationId: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_BRANCH_TREE, conversationId)
+  },
+
+  forkBranchAt: (
+    conversationId: string,
+    anchorId: string,
+    payload: {
+      role: 'user'
+      content: string
+      attachments?: ChatMessage['attachments']
+      knowledgeReferences?: ChatMessage['knowledgeReferences']
+    },
+  ) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.FORK_BRANCH_AT, conversationId, anchorId, payload)
+  },
+
+  getMessageContent: (conversationId: string, messageId: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_MESSAGE_CONTENT, conversationId, messageId)
   },
 
   updateContextDividers: (conversationId: string, dividers: string[]) => {
