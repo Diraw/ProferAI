@@ -117,6 +117,8 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
       toast.error(`以下文件超过 100MB，Chat 附件暂不支持，已跳过：${formatFileNames(oversized)}`)
     }
 
+    // 仅在文件成功加入附件列表后再提示成功 toast，避免「已添加 N 个」与实际不符。
+    const addedFiles: string[] = []
     for (const file of okFiles) {
       try {
         const base64 = await fileToBase64(file)
@@ -143,9 +145,15 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
         window.__pendingAttachmentData.set(pendingAttachment.id, base64)
 
         setPendingAttachments((prev) => [...prev, pendingAttachment])
+        addedFiles.push(file.name)
       } catch (error) {
         console.error('[ChatInput] 添加附件失败:', error)
       }
+    }
+
+    // 用固定 id 让连续添加走「替换」而非「堆叠」语义，与 settings/ChannelForm 的去重写法保持一致
+    if (addedFiles.length > 0) {
+      toast.success(`已添加附件：${formatFileNames(addedFiles)}`, { id: 'chat-attach-add' })
     }
   }, [setPendingAttachments])
 
