@@ -93,6 +93,30 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   const [isDragOver, setIsDragOver] = React.useState(false)
   const [knowledgePickerOpen, setKnowledgePickerOpen] = React.useState(false)
   const [materialPickerOpen, setMaterialPickerOpen] = React.useState(false)
+  const stagedAttachmentDataRef = React.useRef(new Map<string, { base64: string; previewUrl?: string }>())
+
+  // 异步准备附件时先暂存资源；只有真正进入 state 的附件才写入全局缓存。
+  // 被判重/准备失败的候选会在这里回收，避免 base64 和 blob URL 成为孤儿资源。
+  React.useEffect(() => {
+    const currentIds = new Set(pendingAttachments.map((attachment) => attachment.id))
+    for (const [id, staged] of stagedAttachmentDataRef.current) {
+      if (currentIds.has(id)) {
+        if (!window.__pendingAttachmentData) window.__pendingAttachmentData = new Map<string, string>()
+        window.__pendingAttachmentData.set(id, staged.base64)
+        stagedAttachmentDataRef.current.delete(id)
+      } else {
+        if (staged.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(staged.previewUrl)
+        stagedAttachmentDataRef.current.delete(id)
+      }
+    }
+  }, [pendingAttachments])
+
+  React.useEffect(() => () => {
+    for (const staged of stagedAttachmentDataRef.current.values()) {
+      if (staged.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(staged.previewUrl)
+    }
+    stagedAttachmentDataRef.current.clear()
+  }, [])
 
   // 图片附件可以单独作为一轮消息发送，便于先让模型基于已选素材制作 PPT。
   const canSend = (content.trim().length > 0 || pendingAttachments.length > 0) && selectedModel !== null && !streaming
@@ -146,11 +170,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
               previewUrl,
             }
 
-            // 将 base64 数据存储在 window 临时缓存中
-            if (!window.__pendingAttachmentData) {
-              window.__pendingAttachmentData = new Map<string, string>()
-            }
-            window.__pendingAttachmentData.set(pendingAttachment.id, base64)
+            stagedAttachmentDataRef.current.set(pendingAttachment.id, { base64, previewUrl })
 
             return { name: file.name, size: file.size, attachment: pendingAttachment }
           } catch (error) {
@@ -163,23 +183,18 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
 
     if (prepared.length === 0) return
 
-    // 原子判重 + 写入：把 prev 回调内同步完成判重 + 拼接写入
+    const candidates = prepared.map((p) => ({ fileLike: { name: p.name, size: p.size }, item: p.attachment }))
+    // Toast 是事件副作用，不能放进可能被 React 重放的 state updater。
+    // 判重写入仍在 updater 内完成；这里的提示基于当前快照，重复候选即使并发时
+    // 被 updater 再次过滤，也只会少提示而不会重复入 atom。
+    const duplicateSummary = formatDuplicateSummary(dedupPendingAgainst(pendingAttachments, candidates).duplicateNames)
+    if (duplicateSummary) toast.info(`已跳过重复文件：${duplicateSummary}`, { id: 'chat-attach-skip-dup' })
+
     setPendingAttachments((prev) => {
-      const result = dedupPendingAgainst(
-        prev,
-        prepared.map((p) => ({ fileLike: { name: p.name, size: p.size }, item: p.attachment })),
-      )
-
-      if (result.duplicateNames.length > 0) {
-        const summary = formatDuplicateSummary(result.duplicateNames)
-        if (summary) {
-          toast.info(`已跳过重复文件：${summary}`, { id: 'chat-attach-skip-dup' })
-        }
-      }
-
+      const result = dedupPendingAgainst(prev, candidates)
       return result.accepted.length > 0 ? [...prev, ...result.accepted] : prev
     })
-  }, [setPendingAttachments])
+  }, [pendingAttachments, setPendingAttachments])
 
   /** 通过 IPC 打开文件选择对话框（race-free 去重） */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
@@ -219,11 +234,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
           previewUrl,
         }
 
-        if (!window.__pendingAttachmentData) {
-          window.__pendingAttachmentData = new Map<string, string>()
-        }
-        window.__pendingAttachmentData.set(pendingAttachment.id, fileInfo.data)
-
+        stagedAttachmentDataRef.current.set(pendingAttachment.id, { base64: fileInfo.data })
         candidates.push({ name: fileInfo.filename, size: fileInfo.size, attachment: pendingAttachment })
       }
 
@@ -233,26 +244,19 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
 
       if (candidates.length === 0) return
 
+      const candidateItems = candidates.map((c) => ({ fileLike: { name: c.name, size: c.size }, item: c.attachment }))
+      const duplicateSummary = formatDuplicateSummary(dedupPendingAgainst(pendingAttachments, candidateItems).duplicateNames)
+      if (duplicateSummary) toast.info(`已跳过重复文件：${duplicateSummary}`, { id: 'chat-attach-skip-dup' })
+
       // 原子判重 + 写入：复用同一 dedup helper，与 addFilesAsAttachments 走同一条 race-free 路径
       setPendingAttachments((prev) => {
-        const result = dedupPendingAgainst(
-          prev,
-          candidates.map((c) => ({ fileLike: { name: c.name, size: c.size }, item: c.attachment })),
-        )
-
-        if (result.duplicateNames.length > 0) {
-          const summary = formatDuplicateSummary(result.duplicateNames)
-          if (summary) {
-            toast.info(`已跳过重复文件：${summary}`, { id: 'chat-attach-skip-dup' })
-          }
-        }
-
+        const result = dedupPendingAgainst(prev, candidateItems)
         return result.accepted.length > 0 ? [...prev, ...result.accepted] : prev
       })
     } catch (error) {
       console.error('[ChatInput] 文件选择对话框失败:', error)
     }
-  }, [setPendingAttachments])
+  }, [pendingAttachments, setPendingAttachments])
 
   /** 将一张下载的开放许可素材加入当前对话附件。 */
   const handleSelectMaterial = React.useCallback(async (material: PptMaterialItem): Promise<void> => {
