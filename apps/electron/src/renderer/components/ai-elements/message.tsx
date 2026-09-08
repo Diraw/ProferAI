@@ -673,7 +673,7 @@ const MarkdownPre = React.memo(function MarkdownPre({
 type TableFormat = 'markdown' | 'tsv'
 
 /** 从 react-markdown 渲染后的表格 children 提取二维纯文本（thead/tbody → tr → th/td） */
-function parseTableChildren(children: React.ReactNode): string[][] {
+export function parseTableChildren(children: React.ReactNode): string[][] {
   const rows: string[][] = []
   React.Children.forEach(children, (section) => {
     if (!React.isValidElement(section)) return
@@ -695,14 +695,14 @@ function parseTableChildren(children: React.ReactNode): string[][] {
 }
 
 /** 二维数组 → TSV（制表符分隔），单元格内换行折叠为空格 */
-function rowsToTsv(rows: string[][]): string {
+export function rowsToTsv(rows: string[][]): string {
   return rows
     .map((row) => row.map((cell) => cell.replace(/\s*\n\s*/g, ' ')).join('\t'))
     .join('\n')
 }
 
 /** 二维数组 → Markdown 表格源码（兜底：无精确源码时用纯文本重建） */
-function rowsToMarkdown(rows: string[][]): string {
+export function rowsToMarkdown(rows: string[][]): string {
   if (rows.length === 0) return ''
   const header = rows[0]!
   const escape = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ')
@@ -733,25 +733,44 @@ const MarkdownTable = React.memo(function MarkdownTable(
   const [copied, setCopied] = React.useState(false)
   const [format, setFormat] = React.useState<TableFormat>('markdown')
 
-  const tsvText = React.useMemo(() => rowsToTsv(parseTableChildren(children)), [children])
+  const rows = React.useMemo(() => parseTableChildren(children), [children])
+  const tsvText = React.useMemo(() => rowsToTsv(rows), [rows])
   const markdownText = React.useMemo(
-    () => markdownSource || rowsToMarkdown(parseTableChildren(children)),
-    [markdownSource, children]
+    () => markdownSource || rowsToMarkdown(rows),
+    [markdownSource, rows]
+  )
+
+  const copiedResetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // 卸载时清理复制复位定时器，避免延迟 setState 作用于已卸载组件
+  React.useEffect(
+    () => () => {
+      if (copiedResetTimerRef.current !== null) {
+        clearTimeout(copiedResetTimerRef.current)
+      }
+    },
+    []
   )
 
   const handleCopy = React.useCallback(async () => {
     const text = format === 'markdown' ? markdownText : tsvText
     try {
       await navigator.clipboard.writeText(text)
+      if (copiedResetTimerRef.current !== null) {
+        clearTimeout(copiedResetTimerRef.current)
+      }
       setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      copiedResetTimerRef.current = setTimeout(() => {
+        copiedResetTimerRef.current = null
+        setCopied(false)
+      }, 2000)
     } catch (error) {
       console.error('[MarkdownTable] 复制失败:', error)
     }
   }, [format, markdownText, tsvText])
 
   return (
-    <div className="group/table relative my-3 before:absolute before:-top-8 before:inset-x-0 before:h-8 before:content-['']">
+    <div className="group/table relative my-3 before:absolute before:block before:-top-8 before:inset-x-0 before:h-8 before:content-['']">
       {/* 操作条：浮在表格顶部上方、右对齐，hover 时出现 */}
       <div className="absolute -top-8 right-0 hidden items-center gap-0.5 rounded-md border border-border/60 bg-background/95 px-0.5 py-0.5 shadow-sm group-hover/table:flex">
         <button
