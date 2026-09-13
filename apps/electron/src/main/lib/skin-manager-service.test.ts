@@ -16,7 +16,7 @@ process.env.PROFER_CONFIG_DIR = configRoot
 const { installSkinFromFolder } = await import('./skin-manager-service')
 
 /** 写入一个最小可安装皮肤包；返回包根目录。 */
-function writePackage(id: string, options: { css?: string; assetName?: string } = {}): string {
+function writePackage(id: string, options: { css?: string; assetName?: string; previewBytes?: number } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'profer-skin-package-'))
   writeFileSync(
     join(root, 'manifest.json'),
@@ -32,6 +32,9 @@ function writePackage(id: string, options: { css?: string; assetName?: string } 
   if (assetName) {
     mkdirSync(join(root, 'assets'), { recursive: true })
     writeFileSync(join(root, 'assets', assetName), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  }
+  if (options.previewBytes !== undefined) {
+    writeFileSync(join(root, 'preview.png'), Buffer.alloc(options.previewBytes, 0x89))
   }
   return root
 }
@@ -68,6 +71,31 @@ describe('皮肤安装的 Windows 保留设备名防护', () => {
       const result = installSkinFromFolder(root)
       expect(result.ok).toBe(true)
       expect(result.skin?.id).toBe('fine-skin')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('皮肤预览图体积上限', () => {
+  test('Given preview.png 超过 2 MB When installing Then it is rejected', () => {
+    // 预览图位于包根目录（不是 assets/），旧实现只受整包 5 MB 约束
+    const root = writePackage('oversized-preview-skin', { previewBytes: 3 * 1024 * 1024 })
+    try {
+      const result = installSkinFromFolder(root)
+      expect(result.ok).toBe(false)
+      expect(result.message).toContain('预览图不能超过 2 MB')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('Given preview.png 在限额内 When installing Then it is accepted', () => {
+    const root = writePackage('normal-preview-skin', { previewBytes: 64 * 1024 })
+    try {
+      const result = installSkinFromFolder(root)
+      expect(result.ok).toBe(true)
+      expect(result.skin?.id).toBe('normal-preview-skin')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

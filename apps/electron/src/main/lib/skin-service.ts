@@ -32,9 +32,43 @@ let skinsRegistryCache: SkinInfo[] | null = null
 /** 皮肤处理后的 CSS 磁盘持久化缓存目录（按文件 mtime 签名失效，避免冷启动重复 base64 编码） */
 const getSkinCssDiskCacheDir = (): string => join(getConfigDir(), 'skin-cache')
 
-/** 皮肤预览图 data URL 缓存（每张最多 ~2MB，数量上限 32） */
-const SKIN_PREVIEW_CACHE = new Map<string, string>()
+/**
+ * 皮肤预览图 data URL 缓存。
+ *
+ * 与 CSS 缓存同口径：条目的签名会带上 preview 文件的 mtime+size，文件被替换/新增后自动失效。
+ * 旧实现不带签名，命中一次空结果就永久缓存 null —— 用户手工往皮肤目录补一张 preview.*
+ * 后必须重启应用或触发皮肤增删才能看到，而目录结构是公开文档里的推荐做法。
+ */
+const SKIN_PREVIEW_CACHE = new Map<string, { value: string; signature: string }>()
 const SKIN_PREVIEW_CACHE_MAX = 32
+
+/** 预览缓存写入 + 简易 LRU（Map 迭代序 = 插入序，超出上限淘汰最旧） */
+function setPreviewCache(skinId: string, value: string, signature: string): void {
+  SKIN_PREVIEW_CACHE.delete(skinId)
+  SKIN_PREVIEW_CACHE.set(skinId, { value, signature })
+  while (SKIN_PREVIEW_CACHE.size > SKIN_PREVIEW_CACHE_MAX) {
+    const oldest = SKIN_PREVIEW_CACHE.keys().next().value
+    if (oldest === undefined) break
+    SKIN_PREVIEW_CACHE.delete(oldest)
+  }
+}
+
+/**
+ * 计算预览文件签名（首个命中的扩展名 + mtime + size）。
+ *
+ * 返回 null 表示当前无预览文件；返回 `ext:...` 时用冒号前的扩展名定位文件。
+ */
+function previewSignature(dir: string): string | null {
+  for (const ext of PREVIEW_PRIORITY) {
+    try {
+      const stat = statSync(join(dir, `preview${ext}`))
+      if (stat.isFile()) return `${ext}:${stat.mtimeMs}:${stat.size}`
+    } catch {
+      // 该扩展名不存在，继续尝试下一个
+    }
+  }
+  return null
+}
 
 /** 简易 LRU：读命中后重新插入到末尾（Map 迭代序 = 插入序），超出上限淘汰最旧 */
 function cacheGet(cache: Map<string, string>, key: string): string | undefined {
@@ -558,29 +592,29 @@ export function handleProferSkinRequest(request: Request): Promise<Response> | R
   return net.fetch(pathToFileURL(target).toString())
 }
 
-/** 读取皮肤预览图为 data URL；无 preview 文件返回 null（内存缓存；不存在时统一返回 null） */
+/** 读取皮肤预览图为 data URL；无 preview 文件返回 null（缓存按预览文件 mtime+size 失效） */
 export function getSkinPreview(skinId: string): string | null {
-  const cached = cacheGet(SKIN_PREVIEW_CACHE, skinId)
-  if (cached !== undefined) {
-    return cached === '' ? null : cached
-  }
   const dir = findSkinDir(skinId)
   if (!dir) return null
-  for (const ext of PREVIEW_PRIORITY) {
-    const previewPath = join(dir, `preview${ext}`)
-    if (!existsSync(previewPath)) continue
-    try {
-      const buf = readFileSync(previewPath)
-      const mime = PREVIEW_MIME[ext] ?? 'application/octet-stream'
-      const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
-      cacheSet(SKIN_PREVIEW_CACHE, skinId, dataUrl, SKIN_PREVIEW_CACHE_MAX)
-      return dataUrl
-    } catch (err) {
-      console.warn('[皮肤] 读取 preview 失败:', skinId, err)
-      return null
-    }
+  const signature = previewSignature(dir) ?? ''
+  const cached = SKIN_PREVIEW_CACHE.get(skinId)
+  if (cached && cached.signature === signature) {
+    // 空串表示“已查过、无预览”，对外统一返回 null
+    return cached.value === '' ? null : cached.value
   }
-  // 无 preview 文件：用空串占位缓存（表示“已查过、无预览”），对外统一返回 null
-  cacheSet(SKIN_PREVIEW_CACHE, skinId, '', SKIN_PREVIEW_CACHE_MAX)
-  return null
+  if (!signature) {
+    setPreviewCache(skinId, '', '')
+    return null
+  }
+  const ext = signature.slice(0, signature.indexOf(':'))
+  try {
+    const buf = readFileSync(join(dir, `preview${ext}`))
+    const mime = PREVIEW_MIME[ext] ?? 'application/octet-stream'
+    const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+    setPreviewCache(skinId, dataUrl, signature)
+    return dataUrl
+  } catch (err) {
+    console.warn('[皮肤] 读取 preview 失败:', skinId, err)
+    return null
+  }
 }
