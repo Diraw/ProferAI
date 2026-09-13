@@ -204,7 +204,7 @@ export interface ElectronAPI {
 
   // ===== Pi 受管浏览器（主进程 WebContentsView） =====
   openAgentBrowser: (sessionId: string) => Promise<import('@profer/shared').BrowserViewState>
-  listAgentBrowserTabs: (sessionId: string) => Promise<import('@profer/shared').BrowserViewState>
+  listAgentBrowserTabs: (sessionId: string) => Promise<import('@profer/shared').BrowserTabListResult>
   createAgentBrowserTab: (input: import('@profer/shared').BrowserCreateTabInput) => Promise<import('@profer/shared').BrowserViewState>
   selectAgentBrowserTab: (input: import('@profer/shared').BrowserTabInput) => Promise<import('@profer/shared').BrowserViewState>
   closeAgentBrowserTab: (input: import('@profer/shared').BrowserTabInput) => Promise<import('@profer/shared').BrowserViewState | null>

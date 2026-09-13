@@ -70,3 +70,53 @@ export function isPartialSDKMessage(message: SDKMessage): boolean {
 export function isPlanModeMcpTool(toolName: string): boolean {
   return toolName.startsWith('mcp__')
 }
+
+/** 受管浏览器是 Pi-native 工具，名称不带 mcp__ 前缀，必须显式识别。 */
+export function isBrowserToolName(toolName: string): boolean {
+  return toolName.startsWith('Browser')
+}
+
+/**
+ * 计划模式下允许的只读浏览器工具。
+ *
+ * 这份白名单是唯一事实源：编排层 canUseTool 与单测共用它，避免两处规则漂移。
+ * 其余 Browser* 操作（导航、点击、填表、新建/关闭标签、执行脚本等）在计划模式下必须拒绝。
+ */
+export const PLAN_MODE_READ_ONLY_BROWSER_TOOLS: ReadonlySet<string> = new Set([
+  'BrowserObserve',
+  'BrowserScreenshot',
+  'BrowserListTabs',
+  'BrowserPreviewOpen',
+])
+
+/** 浏览器工具权限决策（与 SDK PermissionResult 的 allow/deny 语义一致）。 */
+export interface BrowserToolPermissionDecision {
+  behavior: 'allow' | 'deny'
+  message?: string
+}
+
+/**
+ * 计划模式下的受管浏览器权限判定。
+ *
+ * 调用点必须在通用权限 switch **之前**：该 switch 的每个分支都会 return，
+ * 放在其后会变成不可达代码（这正是本次修复的缺陷）。
+ * 非 plan 模式由通用分派继续处理，保持 auto / bypassPermissions 既有行为不变。
+ */
+export function resolvePlanModeBrowserPermission(toolName: string): BrowserToolPermissionDecision {
+  if (PLAN_MODE_READ_ONLY_BROWSER_TOOLS.has(toolName)) return { behavior: 'allow' }
+  return {
+    behavior: 'deny',
+    message: '计划模式下只能观察受管浏览器，请在计划获批后再进行网页交互。',
+  }
+}
+
+/**
+ * 把已按预设 policy 过滤过的 skill mentions 转成 Pi query / queue 选项片段。
+ *
+ * Pi adapter 已支持 `skillMentions` 正文内联展开；编排层此前没有透传，
+ * 导致显式 `/skill:xxx` 只能依赖 catalog 描述。空数组不产生字段，
+ * 未显式引用 Skill 时保持既有 query 形态不变。
+ */
+export function buildPiSkillMentionOptions(allowedSkillSlugs: readonly string[]): { skillMentions?: string[] } {
+  return allowedSkillSlugs.length > 0 ? { skillMentions: [...allowedSkillSlugs] } : {}
+}

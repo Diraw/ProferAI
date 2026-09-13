@@ -176,10 +176,13 @@ import { injectPptDeliveryMcpServer } from './ppt-delivery-agent-tools'
 import { browserController } from './browser-controller'
 import {
   applySdkCredentials,
+  buildPiSkillMentionOptions,
+  isBrowserToolName,
   isPartialSDKMessage,
   isPlanModeMarkdownPath,
   isPlanModeMcpTool,
   releaseActiveSession,
+  resolvePlanModeBrowserPermission,
   shouldPreInterruptQueuedMessage,
   tryAcquireActiveSession,
   tryReserveQueuedMessage,
@@ -1559,8 +1562,6 @@ ${enrichedMessage}`
         'CronDelete',
         'RemoteTrigger',
       ])
-      // Pi-native 浏览器工具不是 MCP：必须显式分类，避免被通用 mcp__ 调研放行规则遗漏。
-      const PLAN_MODE_READ_ONLY_BROWSER_TOOLS = new Set(['BrowserObserve', 'BrowserScreenshot', 'BrowserListTabs', 'BrowserPreviewOpen'])
 
       /** Plan 模式是否已被 Agent 进入（初始 plan 模式时天然为 true，其他模式需 EnterPlanMode 触发） */
       let planModeEntered = initialPermissionMode === 'plan'
@@ -1655,6 +1656,19 @@ ${enrichedMessage}`
           })
         }
 
+        // ── 受管浏览器：计划模式只读门禁 ──
+        // 必须在通用权限 switch 之前：该 switch 的每个分支都会 return，
+        // 放在其后会变成不可达代码，导致计划模式下 Browser 白名单从未生效。
+        // 非 plan 模式不在这里处理，直接交给下面 switch，保持 auto / bypassPermissions 既有行为。
+        // 受管浏览器对所有 Agent 会话开放；主进程仍隔离网页，并拒绝私网、下载、弹窗和网页权限，
+        // 页面内容始终视为不可信输入。
+        if (currentMode === 'plan' && isBrowserToolName(toolName)) {
+          const decision = resolvePlanModeBrowserPermission(toolName)
+          return decision.behavior === 'allow'
+            ? { behavior: 'allow' as const, updatedInput: input }
+            : { behavior: 'deny' as const, message: decision.message ?? '计划模式下不允许进行网页交互。' }
+        }
+
         // ── 普通工具的权限分派 ──
 
         switch (currentMode) {
@@ -1710,20 +1724,6 @@ ${enrichedMessage}`
 
           default:
             return { behavior: 'allow' as const, updatedInput: input }
-        }
-
-        // 所有 Pi 会话均可使用受管浏览器。主进程仍隔离网页，并拒绝私网、下载、弹窗和网页权限；
-        // 页面内容始终视为不可信输入。计划模式仅允许只读浏览器操作。
-        if (toolName.startsWith('Browser')) {
-          if (currentMode === 'plan') {
-            return PLAN_MODE_READ_ONLY_BROWSER_TOOLS.has(toolName)
-              ? { behavior: 'allow' as const, updatedInput: input }
-              : {
-                  behavior: 'deny' as const,
-                  message: '计划模式下只能观察受管浏览器，请在计划获批后再进行网页交互。',
-                }
-          }
-          return { behavior: 'allow' as const, updatedInput: input }
         }
       }
 
@@ -1843,6 +1843,8 @@ ${enrichedMessage}`
           ...(presetPolicy.allowedSkillSlugs !== undefined && {
             skillSlugs: [...presetPolicy.allowedSkillSlugs],
           }),
+          // 用户显式 /skill: 引用：Pi adapter 会把对应 Skill 正文内联进本轮 prompt。
+          ...buildPiSkillMentionOptions(allowedMentionedSkills),
           ...(piCustomTools && { customTools: piCustomTools }),
           ...(sessionMeta?.codexFastMode && { codexFastMode: true }),
           ...(userMessage.trim() === '/compact' && { compactRequest: true }),
@@ -3422,6 +3424,8 @@ ${enrichedMessage}`
 
       await this.adapter.sendQueuedMessage(sessionId, sdkMessage, {
         interrupt: opts?.interrupt,
+        // 队列消息复用同一轮已按预设 policy 过滤的 skill mentions，保持与主轮一致的正文展开能力。
+        ...buildPiSkillMentionOptions(allowedMentionedSkills),
       })
       // 消息已注入 Agent 会话（Pi interrupt 路径 reservation 已消费）。
       // 即使 run 在 await 期间已停止/被替换，本条消息仍必须持久化到同一会话文件，

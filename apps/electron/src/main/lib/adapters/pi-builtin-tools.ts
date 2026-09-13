@@ -1450,7 +1450,7 @@ function buildBrowserTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefiniti
     sdk.defineTool({
       name: 'BrowserListTabs',
       label: '列出浏览器标签',
-      description: 'List all tabs in the current in-app browser session, including the user-visible tab and Agent working tab. Use tabId when intentionally operating another tab.',
+      description: 'List tabs that already exist in the current in-app browser session, including the user-visible tab and Agent working tab. This is a read-only query: when no browser session exists it returns exists=false without creating a session, opening a tab, or showing the browser panel. Use the returned tabId when intentionally operating another tab.',
       parameters: Type.Object({}),
       async execute() { return jsonToolResult(await browserController.listTabs(ctx.sessionId)) },
     }),

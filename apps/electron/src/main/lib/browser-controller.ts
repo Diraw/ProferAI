@@ -1,5 +1,5 @@
 import { app, BrowserWindow, View, WebContentsView, session as electronSession, clipboard as electronClipboard, type Session } from 'electron'
-import type { BrowserDownloadBlockedEvent, BrowserExecutionSource, BrowserOperationStatus, BrowserTraceAction, BrowserTraceItem, BrowserTranslateResult, BrowserViewLayout, BrowserViewState, BrowserTabState } from '@profer/shared'
+import type { BrowserDownloadBlockedEvent, BrowserExecutionSource, BrowserOperationStatus, BrowserTraceAction, BrowserTraceItem, BrowserTranslateResult, BrowserViewLayout, BrowserViewState, BrowserTabListResult, BrowserTabState } from '@profer/shared'
 import { AGENT_IPC_CHANNELS, promoteMru, removeMruId, selectMruFallbackId } from '@profer/shared'
 import { assertSafeBrowserDestination, assertSafeBrowserUrl } from './browser-policy'
 import { createAuthorizedPreviewUrl, isAuthorizedPreviewProtocol } from './browser-preview-service'
@@ -753,10 +753,33 @@ export class BrowserController {
     }
   }
 
-  listTabs(sessionId: string): BrowserViewState {
-    const browserSession = this.getOrCreateSession(sessionId)
-    this.assertRiskDisclaimerAcknowledged()
-    return structuredClone(this.buildState(browserSession))
+  /**
+   * 列出当前会话**已经存在**的标签页。
+   *
+   * 这是严格只读查询：没有会话时返回 exists=false 的空结果，绝不创建 session / tab、
+   * 不检查风险告知、也不向 renderer 广播状态。模型即使误用 BrowserListTabs，
+   * 也不会凭空产生空白标签或打开浏览器面板。
+   */
+  listTabs(sessionId: string): BrowserTabListResult {
+    const browserSession = this.sessions.get(sessionId)
+    if (!browserSession) {
+      return { sessionId, exists: false, activeTabId: null, agentTabId: null, tabs: [] }
+    }
+    return structuredClone({
+      sessionId,
+      exists: true,
+      // activeTabId 理论上始终有效；标签被销毁的窗口期内仍要给出可判定的空值。
+      activeTabId: browserSession.tabs.has(browserSession.activeTabId) ? browserSession.activeTabId : null,
+      agentTabId: browserSession.agentTabId,
+      tabs: [...browserSession.tabs.values()].map((tab) => ({
+        tabId: tab.tabId,
+        url: tab.state.url,
+        title: tab.state.title,
+        loading: tab.state.loading,
+        zoomFactor: tab.zoomFactor,
+        openedByAgent: tab.openedByAgent,
+      })),
+    })
   }
 
   setZoom(sessionId: string, tabId: string, zoomFactor: number): BrowserViewState {

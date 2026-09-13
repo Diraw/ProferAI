@@ -130,6 +130,7 @@ import type {
   Automation,
   CreateAutomationInput,
   UpdateAutomationInput,
+  BrowserTabListResult,
   BrowserViewState,
   BrowserViewLayout,
   BrowserNavigateInput,
@@ -2904,7 +2905,7 @@ export function registerIpcHandlers(): void {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     await browserController.close(sessionId)
   })
-  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, async (event, sessionId: string): Promise<BrowserViewState> => {
+  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, async (event, sessionId: string): Promise<BrowserTabListResult> => {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     return browserController.listTabs(sessionId)
   })

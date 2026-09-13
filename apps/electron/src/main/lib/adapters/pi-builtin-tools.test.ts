@@ -543,4 +543,24 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
     expect(names.some((n) => n.startsWith('mcp__task-graph__'))).toBe(false)
     expect(names).not.toContain('mcp__collaboration__delegate_agent')
   })
+
+  test('Given 没有浏览器会话 When BrowserListTabs 执行 Then 返回 exists=false 且不创建标签', async () => {
+    const { sdk, tools } = createPiSdkStub()
+    const sessionId = 'browser-list-tabs-contract'
+    await buildPiBuiltinTools(sdk, { ...baseCtx, sessionId, agentCwd: 'C:/safe/session', allowedRoots: ['C:/safe/attached'] })
+
+    const listTabs = tools.find((tool) => tool.name === 'BrowserListTabs')
+    expect(listTabs).toBeDefined()
+    expect(listTabs!.description).toContain('read-only')
+
+    const result = await listTabs!.execute!('call-1', {}) as {
+      details?: { sessionId?: string; exists?: boolean; activeTabId?: string | null; agentTabId?: string | null; tabs?: unknown[] }
+    }
+
+    expect(result.details?.sessionId).toBe(sessionId)
+    expect(result.details?.exists).toBe(false)
+    expect(result.details?.activeTabId).toBeNull()
+    expect(result.details?.agentTabId).toBeNull()
+    expect(result.details?.tabs).toEqual([])
+  })
 })
