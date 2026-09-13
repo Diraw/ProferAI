@@ -1,3 +1,4 @@
+import { PluginSidebarEntries } from '@/components/plugins/PluginEntries'
 /**
  * expanded-sidebar.tsx — 展开态完整侧边栏
  *
@@ -176,6 +177,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
         </div>
       )}
 
+      <PluginSidebarEntries />
       {/* Chat 模式 active 视图：置顶 + 对话历史，结构与 Agent active 视图保持一致 */}
       {mode === 'chat' && viewMode === 'active' ? (
         <div className="flex-1 flex flex-col min-h-0">

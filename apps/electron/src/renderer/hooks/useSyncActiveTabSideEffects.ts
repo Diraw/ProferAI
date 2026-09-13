@@ -44,6 +44,14 @@ export function useSyncActiveTabSideEffects(): SyncActiveTabSideEffects {
         return
       }
 
+      if (newActiveTab.type === 'plugin') {
+        setAppMode('scratch')
+        setCurrentConversationId(null)
+        setCurrentAgentSessionId(null)
+        setCurrentAgentWorkspaceId(null)
+        return
+      }
+
       if (newActiveTab.type === 'chat') {
         setAppMode('chat')
         setCurrentConversationId(newActiveTab.sessionId)

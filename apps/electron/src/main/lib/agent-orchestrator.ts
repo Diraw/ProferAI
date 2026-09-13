@@ -1,3 +1,5 @@
+import { routePluginModel } from './plugins/plugin-routing'
+import { buildPluginAgentTools } from './plugins/plugin-agent-tools'
 /**
  * AgentOrchestrator — Agent 编排层
  *
@@ -717,11 +719,10 @@ export class AgentOrchestrator {
    * 通过 EventBus 分发 AgentEvent，通过 callbacks 发送控制信号。
    */
   async sendMessage(input: AgentSendInput, callbacks: SessionCallbacks): Promise<void> {
+    const agentRuntime = normalizeAgentRuntime(input.agentRuntime ?? getAgentSessionMeta(input.sessionId)?.agentRuntime)
     const {
       sessionId,
       userMessage,
-      channelId,
-      modelId,
       workspaceId,
       additionalDirectories,
       customMcpServers,
@@ -731,7 +732,7 @@ export class AgentOrchestrator {
       mentionedSessionIds,
       automationContext,
     } = input
-    const agentRuntime = normalizeAgentRuntime(input.agentRuntime ?? getAgentSessionMeta(sessionId)?.agentRuntime)
+    let { channelId, modelId } = input
     // Pi/Claude 的错误结构和可恢复语义不同；Router 必须按本次请求 runtime 提供 helper。
     const errorHelpers = this.adapter.getErrorHelpers?.(agentRuntime) ?? this.adapter.errorHelpers
     const stderrChunks: string[] = []
@@ -759,6 +760,8 @@ export class AgentOrchestrator {
       callbacks.onComplete([], { startedAt: input.startedAt })
       return
     }
+    input = routePluginModel(`agent:${sessionId}`, input, agentRuntime)
+    ;({ channelId, modelId } = input)
     let resolveCompletion!: () => void
     const completion = new Promise<void>((resolve) => {
       resolveCompletion = resolve
@@ -1300,6 +1303,12 @@ export class AgentOrchestrator {
         })
       }
 
+      const pluginTools = await buildPluginAgentTools(sdk, mcpServers, (server, tool) =>
+        isEffectiveAgentPresetMcpServerAllowed(presetPolicy, server)
+        && !disabledTools?.includes(tool)
+        && !disabledTools?.includes(`mcp__${server}__${tool}`),
+      )
+
       // 合并外部注入的自定义 MCP 服务器（如飞书群聊工具），同样受当前预设白名单约束。
       if (customMcpServers) {
         const customEntries = Object.entries(customMcpServers)
@@ -1425,7 +1434,7 @@ ${enrichedMessage}`
               pptCapabilityActive,
             })
             const mcpTools = await buildPiMcpTools(mcpServers)
-            return [...builtin.tools, ...mcpTools]
+            return [...builtin.tools, ...mcpTools, ...pluginTools]
           })()
         : undefined
       // 注册到 Map，支持运行中动态切换

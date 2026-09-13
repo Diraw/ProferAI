@@ -37,6 +37,11 @@ import { Badge } from '@/components/ui/badge'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { VersionHistory } from './VersionHistory'
+import { pluginSystemEnabledAtom } from '@/atoms/plugin-system'
+import {
+  INITIAL_PLUGIN_UNLOCK_CLICK_STATE,
+  advancePluginUnlockClick,
+} from '@/lib/plugin-unlock'
 
 /** 从 package.json 构建时由 Vite define 注入 */
 declare const __APP_VERSION__: string
@@ -454,6 +459,33 @@ function ShellEnvironmentCard(): React.ReactElement | null {
 }
 
 export function AboutSettings(): React.ReactElement {
+  const pluginSystemEnabled = useAtomValue(pluginSystemEnabledAtom)
+  const setPluginSystemEnabled = useSetAtom(pluginSystemEnabledAtom)
+  const unlockClickStateRef = React.useRef(INITIAL_PLUGIN_UNLOCK_CLICK_STATE)
+  const unlockPendingRef = React.useRef(false)
+
+  const handleVersionClick = React.useCallback((): void => {
+    if (pluginSystemEnabled || unlockPendingRef.current) return
+
+    const result = advancePluginUnlockClick(unlockClickStateRef.current, Date.now())
+    unlockClickStateRef.current = result.state
+    if (!result.unlocked) return
+
+    unlockPendingRef.current = true
+    window.electronAPI.updateSettings({ pluginSystemEnabled: true })
+      .then(() => {
+        setPluginSystemEnabled(true)
+        toast.success('插件已启用')
+      })
+      .catch((error: unknown) => {
+        console.error('[插件] 启用入口失败:', error)
+        toast.error('插件启用失败，请重试')
+      })
+      .finally(() => {
+        unlockPendingRef.current = false
+      })
+  }, [pluginSystemEnabled, setPluginSystemEnabled])
+
   return (
     <div className="space-y-8">
       <SettingsSection
@@ -462,7 +494,18 @@ export function AboutSettings(): React.ReactElement {
       >
         <SettingsCard>
           <SettingsRow label="版本">
-            <span className="text-sm text-muted-foreground font-mono">{APP_VERSION}</span>
+            {pluginSystemEnabled ? (
+              <span className="font-mono text-sm text-muted-foreground">{APP_VERSION}</span>
+            ) : (
+              <button
+                type="button"
+                onClick={handleVersionClick}
+                aria-label={`Profer 版本 ${APP_VERSION}`}
+                className="select-none rounded-sm font-mono text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                {APP_VERSION}
+              </button>
+            )}
           </SettingsRow>
         </SettingsCard>
 

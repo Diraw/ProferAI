@@ -9,7 +9,7 @@
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { useAtomValue } from 'jotai'
-import { BookOpen, Bot, FileText, MessageSquare, StickyNote, X, Clock, Pencil, Check } from 'lucide-react'
+import { Blocks, BookOpen, Bot, FileText, MessageSquare, StickyNote, X, Clock, Pencil, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TabType, TabMinimapItem } from '@/atoms/tab-atoms'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
@@ -183,7 +183,9 @@ export function TabBarItem({
         ? <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         : type === 'tutorial'
           ? <BookOpen className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-          : null
+          : type === 'plugin'
+            ? <Blocks className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+            : null
   // 状态优先于聚焦态；所有边框都直接应用到 Tab 本体，确保完整贴合圆角。
   const stateBorderClass = isStreaming === 'completed'
     ? 'topbar-tab-status-completed'

@@ -1,3 +1,4 @@
+import type { ProferPluginTaskReference, ProferPluginRoutingState } from '@profer/plugin-api'
 /**
  * Preload 脚本
  *
@@ -8,6 +9,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, LARK_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, CHANGELOG_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, SYNC_IPC_CHANNELS, TEAM_IPC_CHANNELS, SKILL_MARKETPLACE_IPC_CHANNELS, SKILL_MASTER_IPC_CHANNELS, GLOBAL_SKILL_IPC_CHANNELS, TEAM_FILE_IPC_CHANNELS, TEAM_MEMORY_IPC_CHANNELS, SSE_IPC_CHANNELS, KNOWLEDGE_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, type Todo, type CalendarEvent, type TodoListQuery, type CalendarEventListQuery, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type PlanningAgentOperation, type PlanningChange, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type CreatePlanningTagInput, type UpdatePlanningTagInput, type SnoozePlanningReminderInput, type StartTodoAgentInput, type StartTodoAgentResult, type TodoAgentSessionActivation, type TeamMemoryApiResult, type TeamMemoryDocument, type TeamMemoryRevision, type ChangelogEntry, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult } from '@profer/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, NOTIFICATION_SOUND_IPC_CHANNELS, DESKTOP_NOTIFICATION_IPC_CHANNELS } from '../types'
+import { PROFER_PLUGIN_IPC_CHANNELS, type ProferInstalledPlugin, type ProferPluginOperationResult, type ProferPluginViewLayout } from '@profer/plugin-api'
 import type { CustomNotificationSound } from '../types'
 import type { PresetReference, PresetReferenceReport, PresetScopeRebindResult, LarkCliStatus, LarkCliOperationResult, LarkLoginStartResult, LarkLoginEvent, LarkMcpCredentialsInput, LarkMcpSetupResult, LarkMcpStatus } from '@profer/shared'
 import type {
@@ -450,6 +452,25 @@ export interface ElectronAPI {
   openUserSkinsFolder: () => Promise<void>
   openSkinTemplateFolder: () => Promise<void>
   refreshSkins: () => Promise<import('../types').SkinInfo[]>
+
+  // ===== 第三方插件管理 =====
+  setPluginCredential: (pluginId: string, id: string, secret: string | null) => Promise<void>
+  authorizePlugin: (pluginId: string) => Promise<boolean>
+  revokePluginPermissions: (pluginId: string) => Promise<void>
+  activatePluginPage: (pluginId: string, pageId: string, reference?: ProferPluginTaskReference) => Promise<void>
+  getPluginRouting: (key: string) => Promise<ProferPluginRoutingState>
+  setPluginRouting: (key: string, pluginId: string | null) => Promise<void>
+  onPluginRoutingChanged: (callback: (event: { key: string; state: ProferPluginRoutingState }) => void) => () => void
+  listPlugins: () => Promise<ProferInstalledPlugin[]>
+  selectPluginPackage: (kind: 'zip' | 'folder') => Promise<string | null>
+  installPlugin: (sourcePath: string, replace?: boolean) => Promise<ProferPluginOperationResult>
+  setPluginEnabled: (pluginId: string, enabled: boolean) => Promise<ProferPluginOperationResult>
+  removePlugin: (pluginId: string) => Promise<ProferPluginOperationResult>
+  openPluginsFolder: () => Promise<void>
+  setPluginViewLayout: (layout: ProferPluginViewLayout) => Promise<void>
+  hidePluginView: (pluginId: string, pageId: string) => Promise<void>
+  closePluginView: (pluginId: string, pageId: string) => Promise<void>
+  onPluginsChanged: (callback: () => void) => () => void
 
   /** 通知主进程 renderer 已完成首屏初始化 */
   notifyRendererReady: () => void
@@ -1966,6 +1987,33 @@ const electronAPI: ElectronAPI = {
   openUserSkinsFolder: () => ipcRenderer.invoke(SKIN_IPC_CHANNELS.OPEN_USER_FOLDER),
   openSkinTemplateFolder: () => ipcRenderer.invoke(SKIN_IPC_CHANNELS.OPEN_TEMPLATE_FOLDER),
   refreshSkins: () => ipcRenderer.invoke(SKIN_IPC_CHANNELS.REFRESH),
+
+  // 第三方插件管理
+  setPluginCredential: (pluginId, id, secret) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.SET_CREDENTIAL, pluginId, id, secret),
+  authorizePlugin: (pluginId) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.AUTHORIZE, pluginId),
+  revokePluginPermissions: (pluginId) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.REVOKE, pluginId),
+  activatePluginPage: (pluginId, pageId, reference) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.ACTIVATE, pluginId, pageId, reference),
+  getPluginRouting: (key) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.ROUTING_GET, key),
+  setPluginRouting: (key, pluginId) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.ROUTING_SET, key, pluginId),
+  onPluginRoutingChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: { key: string; state: ProferPluginRoutingState }): void => callback(value)
+    ipcRenderer.on(PROFER_PLUGIN_IPC_CHANNELS.ROUTING_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(PROFER_PLUGIN_IPC_CHANNELS.ROUTING_CHANGED, listener) }
+  },
+  listPlugins: () => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.LIST),
+  selectPluginPackage: (kind: 'zip' | 'folder') => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.SELECT_PACKAGE, kind),
+  installPlugin: (sourcePath: string, replace = false) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.INSTALL, sourcePath, replace),
+  setPluginEnabled: (pluginId: string, enabled: boolean) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.SET_ENABLED, pluginId, enabled),
+  removePlugin: (pluginId: string) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.REMOVE, pluginId),
+  openPluginsFolder: () => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.OPEN_FOLDER),
+  setPluginViewLayout: (layout: ProferPluginViewLayout) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.SET_VIEW_LAYOUT, layout),
+  hidePluginView: (pluginId: string, pageId: string) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.HIDE_VIEW, pluginId, pageId),
+  closePluginView: (pluginId: string, pageId: string) => ipcRenderer.invoke(PROFER_PLUGIN_IPC_CHANNELS.CLOSE_VIEW, pluginId, pageId),
+  onPluginsChanged: (callback: () => void) => {
+    const listener = () => callback()
+    ipcRenderer.on(PROFER_PLUGIN_IPC_CHANNELS.CHANGED, listener)
+    return () => ipcRenderer.removeListener(PROFER_PLUGIN_IPC_CHANNELS.CHANGED, listener)
+  },
 
   // 应用设置
   notifyRendererReady: () => { ipcRenderer.send(SETTINGS_IPC_CHANNELS.RENDERER_READY) },

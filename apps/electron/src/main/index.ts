@@ -81,6 +81,8 @@ function registerProtocolsAndHandlers(): void {
     // 皮肤 assets 稳定协议：skin.css 中 url(assets/...) 被替换为 profer-skin://<skinId>/assets/...，
     // 由主进程按需读取（P2：替代 base64 内联，移除大图 IPC 传输与编码开销）
     { scheme: 'profer-skin', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+    // 第三方插件页面资源。具体 handler 注册在每个插件独立 Session 上，主会话不处理该协议。
+    { scheme: 'profer-plugin', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false, stream: true } },
   ])
 
   // Windows: 禁用 LCD 次像素抗锯齿（ClearType），改用灰度 AA。
@@ -112,6 +114,8 @@ import { INTRO_FLUID_FRAGMENT_SHADER, INTRO_FLUID_VERTEX_SHADER } from '../share
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
 import { disposeAgentPreviewRenderer } from './lib/agent-preview-renderer'
+import { pluginViewManager } from './lib/plugins/plugin-view-manager'
+import { registerPluginIpcHandlers } from './lib/plugins/plugin-ipc'
 
 // 处理 EPIPE 错误：当 stdout/stderr 管道被关闭时（如 electronmon 重启），忽略写入错误
 // 这在开发环境热重载时经常发生，不影响应用功能
@@ -592,6 +596,7 @@ function createWindow(): void {
     splashShown = true
     rendererReady = false
     browserController.hideAll()
+    pluginViewManager.hideAll()
     if (startupSplashWindow && !startupSplashWindow.isDestroyed()) startupSplashWindow.close()
     startupSplashWindow = null
     mainWindow.show()
@@ -713,9 +718,11 @@ function createWindow(): void {
     mainWindow = null
     setMainWindow(null)
     browserController.dispose()
+    pluginViewManager.dispose()
   })
 
   setMainWindow(mainWindow)
+  pluginViewManager.setOwnerWindow(mainWindow)
 }
 
 function sendToMainWindow(channel: string, data?: unknown): void {
@@ -781,6 +788,7 @@ async function bootstrap(): Promise<void> {
 
   // Register IPC handlers
   registerIpcHandlers()
+  registerPluginIpcHandlers()
 
   // 远程服务（remote-service）：显式启动参数 PROFER_REMOTE=1 兼容保留；
   // 设置页开启「启用移动端连接」后，下次启动自动恢复监听（正式版与开发版一致）。
@@ -1047,6 +1055,7 @@ function handleBootstrapFailure(err: unknown): void {
 
   try {
     registerIpcHandlers()
+    registerPluginIpcHandlers()
     createWindow()
   } catch (fallbackErr) {
     console.error('[启动] 降级窗口创建也失败:', fallbackErr)
@@ -1072,6 +1081,7 @@ app.on('before-quit', () => {
   disposeLarkCliService()
   disposeLarkMcpService()
   browserController.dispose()
+  pluginViewManager.dispose()
   disposeAgentPreviewRenderer()
   stopAllGenerations()
   // 最后兜底：扫描并强杀所有孤儿 claude-agent-sdk 子进程（Issue #357）

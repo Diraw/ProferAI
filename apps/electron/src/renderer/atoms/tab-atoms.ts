@@ -27,7 +27,7 @@ export { getFileBaseName }
 // ===== 类型定义 =====
 
 /** 标签页类型（Settings 不作为 Tab，保留独立视图） */
-export type TabType = 'chat' | 'agent' | 'scratch' | 'preview' | 'tutorial'
+export type TabType = 'chat' | 'agent' | 'scratch' | 'preview' | 'tutorial' | 'plugin'
 
 /** Scratch Pad 专用的固定 sessionId */
 export const SCRATCH_PAD_ID = '__scratch-pad__'
@@ -48,10 +48,13 @@ export interface TabItem {
   id: string
   /** 标签页类型 */
   type: TabType
-  /** Chat conversationId 或 Agent sessionId */
+  /** Chat conversationId 或 Agent sessionId；插件页使用稳定 page key */
   sessionId: string
   /** 标签页显示标题 */
   title: string
+  /** 插件页归属，仅 type=plugin 时存在。 */
+  pluginId?: string
+  pluginPageId?: string
 }
 
 /** Tab 持久化数据（保存到 settings.json） */
@@ -212,8 +215,36 @@ function isSessionTab(tab: TabItem): boolean {
   return tab.type === 'chat' || tab.type === 'agent'
 }
 
+export function isPluginTab(tab: TabItem): boolean {
+  return tab.type === 'plugin' && !!tab.pluginId && !!tab.pluginPageId
+}
+
+export function createPluginTabId(pluginId: string, pageId: string): string {
+  return `__plugin__:${pluginId}:${pageId}`
+}
+
+export function openPluginTab(
+  tabs: TabItem[],
+  input: { pluginId: string; pageId: string; title: string },
+): { tabs: TabItem[]; activeTabId: string } {
+  const id = createPluginTabId(input.pluginId, input.pageId)
+  const existing = tabs.find((tab) => tab.id === id)
+  if (existing) return { tabs, activeTabId: id }
+  const scratchTab = tabs.find((tab) => tab.id === SCRATCH_PAD_ID) ?? createScratchPadTab()
+  const nextTabs = tabs.some((tab) => tab.id === SCRATCH_PAD_ID) ? [...tabs] : [scratchTab, ...tabs]
+  const pluginTab: TabItem = {
+    id,
+    type: 'plugin',
+    sessionId: id,
+    title: input.title,
+    pluginId: input.pluginId,
+    pluginPageId: input.pageId,
+  }
+  return { tabs: [...nextTabs, pluginTab], activeTabId: id }
+}
+
 function getPersistentTabs(tabs: TabItem[]): TabItem[] {
-  return tabs.filter((tab) => tab.id !== SCRATCH_PAD_ID && tab.id !== TUTORIAL_TAB_ID && !isPreviewTab(tab))
+  return tabs.filter((tab) => isSessionTab(tab))
 }
 
 export function getPersistableTabState(
@@ -226,7 +257,9 @@ export function getPersistableTabState(
     ? persistentTabs.find((tab) => tab.sessionId === activeTab.sessionId && tab.type === 'agent')?.id
       ?? persistentTabs.at(-1)?.id
       ?? null
-    : activeTabId
+    : activeTab && isSessionTab(activeTab)
+      ? activeTab.id
+      : persistentTabs.at(-1)?.id ?? null
 
   return {
     tabs: persistentTabs,
@@ -238,10 +271,15 @@ export function getPersistableTabState(
  * restore 提示存在时，切回带预览的会话会一并重建其预览 Tab 并回到上次视图。 */
 export function openTab(
   tabs: TabItem[],
-  item: { type: TabType; sessionId: string; title: string },
+  item: { type: TabType; sessionId: string; title: string; pluginId?: string; pluginPageId?: string },
   restore?: OpenTabRestore,
 ): { tabs: TabItem[]; activeTabId: string } {
   const scratchTab = tabs.find((t) => t.id === SCRATCH_PAD_ID) ?? createScratchPadTab()
+
+  if (item.type === 'plugin') {
+    if (item.pluginId && item.pluginPageId) return openPluginTab(tabs, { pluginId: item.pluginId, pageId: item.pluginPageId, title: item.title })
+    return { tabs, activeTabId: SCRATCH_PAD_ID }
+  }
 
   if (item.type === 'scratch') {
     return {

@@ -1,3 +1,4 @@
+import { PluginSidebarEntries } from '@/components/plugins/PluginEntries'
 /**
  * rail.tsx — 折叠态（mini rail）
  *
@@ -107,6 +108,7 @@ export function SidebarRail({ s }: { s: SidebarModel }): React.ReactElement {
 
         <div className="my-3 h-px w-8 bg-border/70" />
 
+        <PluginSidebarEntries collapsed />
         {/* 高频操作 */}
         <div className="flex flex-col items-center gap-1.5">
           <Tooltip>
