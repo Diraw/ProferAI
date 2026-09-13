@@ -163,6 +163,7 @@ describe('Pi 会话分叉', () => {
     const forked = await manager.forkAgentSession({
       sessionId: 'pi-source-session',
       upToMessageUuid: 'assistant-1',
+      explorationSourceLabel: '方案 A 的探索',
     })
 
     expect(forked.id).not.toBe('pi-source-session')
@@ -182,6 +183,9 @@ describe('Pi 会话分叉', () => {
       sdkSessionId: 'pi-fork-session',
       piEntryBindings: { 'assistant-1': 'entry-keep' },
       forkSourceDir: join(tempHome, 'config', 'agent-workspaces', 'workspace-a', 'pi-source-session'),
+      explorationParentSessionId: 'pi-source-session',
+      explorationSourceMessageId: 'assistant-1',
+      explorationSourceLabel: '方案 A 的探索',
     })
   })
 

@@ -795,6 +795,14 @@ export interface AgentSessionMeta {
   attachedFiles?: string[]
   /** 分叉来源：源会话的 Profer 工作目录（SDK session 文件在此目录的项目空间中，首次 resume 后清除） */
   forkSourceDir?: string
+  /** Pi `/tree` 探索分支所属的主线会话；仅探索分支设置，普通 fork 保持 undefined。 */
+  explorationParentSessionId?: string
+  /** Pi `/tree` 探索分支的 assistant 分叉锚点。 */
+  explorationSourceMessageId?: string
+  /** 用户可读的分叉来源，用于重新打开探索分支时恢复上下文提示。 */
+  explorationSourceLabel?: string
+  /** 探索分支的首条新增用户消息已触发过一次标题初始化，防止后续对话覆盖该名称。 */
+  explorationTitleInitializedAt?: number
   /** 分叉来源：源会话的 SDK session ID（用于 rewind 时读取源会话的 file-history-snapshot 和备份文件） */
   forkSourceSdkSessionId?: string
   /** 回退后的 resume 截断点：下次发消息时传给 SDK resumeSessionAt（消费后清除） */
@@ -1353,6 +1361,8 @@ export interface ForkSessionInput {
   upToMessageUuid?: string
   /** 目标模型 ID。省略时继承源会话模型；传入时必须属于源会话同一渠道且已启用 */
   modelId?: string
+  /** 标记为 Pi `/tree` 探索分支，并持久化其在主线中的来源，供关闭后重新打开。 */
+  explorationSourceLabel?: string
 }
 
 /** 快照回退输入（同一会话内回退到指定点） */

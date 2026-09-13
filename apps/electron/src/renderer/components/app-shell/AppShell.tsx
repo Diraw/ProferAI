@@ -16,7 +16,7 @@ import { TeamWorkspaceView } from '@/components/agent/TeamWorkspaceView'
 import { WindowControlsTemplateProvider } from '@/components/WindowControlsTemplate'
 import { AppShellProvider, type AppShellContextType } from '@/contexts/AppShellContext'
 import { appModeAtom } from '@/atoms/app-mode'
-import { agentSidePanelOpenAtom, agentSidePanelWidthAtom, currentAgentSessionIdAtom, agentWorkspacesAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
+import { agentSidePanelOpenAtom, agentSidePanelWidthAtom, currentAgentSessionIdAtom, agentWorkspacesAtom, currentAgentWorkspaceIdAtom, agentDiffPanelTabAtom } from '@/atoms/agent-atoms'
 import { panelVisibilityAtom } from '@/atoms/panel-layout-atoms'
 import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
@@ -28,14 +28,11 @@ import { usePanelAutoLayout } from '@/hooks/usePanelAutoLayout'
 import { cn } from '@/lib/utils'
 
 const MIN_RIGHT_PANEL_WIDTH = 300
+const MIN_EXPLORATION_PANEL_WIDTH = 480
 const MAX_RIGHT_PANEL_WIDTH = 560
 
 const MIN_LEFT_SIDEBAR_WIDTH = 300
 const MAX_LEFT_SIDEBAR_WIDTH = 420
-
-function clampRightPanelWidth(width: number): number {
-  return Math.max(MIN_RIGHT_PANEL_WIDTH, Math.min(MAX_RIGHT_PANEL_WIDTH, width))
-}
 
 function clampLeftSidebarWidth(width: number): number {
   return Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(MAX_LEFT_SIDEBAR_WIDTH, width))
@@ -52,6 +49,7 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
   const filePanelVisible = useAtomValue(panelVisibilityAtom).filePanel
+  const activeRightPanelTab = useAtomValue(agentDiffPanelTabAtom).get(currentSessionId ?? '') ?? 'session'
   const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtom)
 
   // 聚焦右侧面板（profer:focus-right-panel 事件，来自快捷键/全局提示）
@@ -105,7 +103,14 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   // 右侧面板可拖拽宽度
   const [rightPanelWidth, setRightPanelWidth] = useAtom(agentSidePanelWidthAtom)
   const dragging = React.useRef(false)
-  const clampedRightPanelWidth = clampRightPanelWidth(rightPanelWidth)
+  const rightPanelMinimumWidth = activeRightPanelTab.startsWith('exploration:')
+    ? MIN_EXPLORATION_PANEL_WIDTH
+    : MIN_RIGHT_PANEL_WIDTH
+  const clampCurrentRightPanelWidth = React.useCallback(
+    (width: number) => Math.max(rightPanelMinimumWidth, Math.min(MAX_RIGHT_PANEL_WIDTH, width)),
+    [rightPanelMinimumWidth],
+  )
+  const clampedRightPanelWidth = clampCurrentRightPanelWidth(rightPanelWidth)
 
   React.useEffect(() => {
     if (clampedRightPanelWidth !== rightPanelWidth) {
@@ -126,7 +131,7 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
       rafId = requestAnimationFrame(() => {
         rafId = 0
         const delta = startX - ev.clientX
-        const newWidth = clampRightPanelWidth(startWidth + delta)
+        const newWidth = clampCurrentRightPanelWidth(startWidth + delta)
         setRightPanelWidth(newWidth)
       })
     }
@@ -140,7 +145,7 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
 
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
-  }, [clampedRightPanelWidth, setRightPanelWidth])
+  }, [clampCurrentRightPanelWidth, clampedRightPanelWidth, setRightPanelWidth])
 
   // 左侧边栏可拖拽宽度
   const [leftSidebarWidth, setLeftSidebarWidth] = useAtom(leftSidebarWidthAtom)

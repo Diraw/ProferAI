@@ -7,8 +7,9 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { X, FolderOpen, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart, MessageSquarePlus, Trash2 } from 'lucide-react'
+import { X, FolderOpen, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart, MessageSquarePlus, Trash2, GitMerge, Split } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { toast } from 'sonner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   AlertDialog,
@@ -29,6 +30,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
+import { markdownToHtml } from '@/lib/markdown-rich-text'
+import { buildExplorationReferenceDraft, getLatestExplorationConclusion } from '@/lib/exploration-session'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { panelVisibilityAtom } from '@/atoms/panel-layout-atoms'
 import { FileBrowser, FileDropZone, FileTypeIcon, FileSearchBar, computeRevealAncestors, isPathUnderRoot, computeTreeRowLayout, AncestorGuides, STICKY_ROW_BASE_CLASS, canBeSticky } from '@/components/file-browser'
@@ -50,12 +53,23 @@ import {
   agentFileChangesCurrentRunAtom,
   fileBrowserAutoRevealAtom,
   agentSelectedWorktreeAtom,
+  agentSessionsAtom,
+  agentSideExplorationMapAtom,
+  agentSDKMessagesCacheAtom,
+  liveMessagesMapAtom,
+  agentSessionDraftsAtom,
+  agentSessionDraftHtmlAtom,
+  getExplorationSessionIdFromSidePanelTab,
+  getExplorationSidePanelTab,
+  type AgentExplorationBranchTab,
+  type AgentSidePanelTab,
 } from '@/atoms/agent-atoms'
 import { previewFileMapAtom } from '@/atoms/preview-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import { detectIsWindows } from '@/lib/platform'
 import { getFileBaseName, getFileParentPath, getLastPathSegments } from '@/lib/file-utils'
-import type { FileEntry, AgentPendingFile } from '@profer/shared'
+import type { FileEntry, AgentPendingFile, AgentSessionMeta, SDKMessage } from '@profer/shared'
+import { AgentView } from './AgentView'
 
 function getMediaTypeFromFilename(filename: string): string {
   const ext = filename.split('.').pop()?.toLowerCase() ?? ''
@@ -82,11 +96,93 @@ function getMovedPath(filePath: string, targetDir: string): string {
   return appendPath(targetDir, getFileBaseName(filePath))
 }
 
+function SideAgentSessionContent({ children }: { children: React.ReactNode }): React.ReactElement {
+  return <div className="min-h-0 flex-1 overflow-hidden animate-in fade-in-0 slide-in-from-right-1 duration-150 motion-reduce:animate-none">{children}</div>
+}
+
+function ExplorationBringBackAction({
+  parentSessionId,
+  branch,
+  sessions,
+}: {
+  parentSessionId: string
+  branch: AgentExplorationBranchTab
+  sessions: AgentSessionMeta[]
+}): React.ReactElement {
+  const messageCache = useAtomValue(agentSDKMessagesCacheAtom)
+  const liveMessages = useAtomValue(liveMessagesMapAtom).get(branch.sessionId) ?? []
+  const [loadedMessages, setLoadedMessages] = React.useState<SDKMessage[]>([])
+  const parentDrafts = useAtomValue(agentSessionDraftsAtom)
+  const parentDraftHtml = useAtomValue(agentSessionDraftHtmlAtom)
+  const setParentDrafts = useSetAtom(agentSessionDraftsAtom)
+  const setParentDraftHtml = useSetAtom(agentSessionDraftHtmlAtom)
+  const branchMessages = React.useMemo(() => {
+    if (loadedMessages.length > 0) return loadedMessages
+    return messageCache.get(branch.sessionId) ?? []
+  }, [branch.sessionId, loadedMessages, messageCache])
+  const conclusion = React.useMemo(
+    () => getLatestExplorationConclusion([...branchMessages, ...liveMessages], branch.sourceMessageId),
+    [branchMessages, branch.sourceMessageId, liveMessages],
+  )
+
+  React.useEffect(() => {
+    if (conclusion || branchMessages.some((message) => (message as { uuid?: unknown }).uuid === branch.sourceMessageId)) return
+    const api = window.electronAPI as unknown as {
+      getAgentSessionSDKMessages?: (id: string) => Promise<unknown>
+    }
+    let cancelled = false
+    void (api.getAgentSessionSDKMessages?.(branch.sessionId) ?? Promise.resolve([]))
+      .then((messages) => {
+        if (cancelled || !Array.isArray(messages)) return
+        setLoadedMessages(messages as SDKMessage[])
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [branch.sessionId, branch.sourceMessageId, branchMessages, conclusion])
+
+  const handleBringBack = React.useCallback(() => {
+    if (!conclusion) {
+      toast.info('探索分支还没有可带回的 Agent 结论')
+      return
+    }
+    const title = sessions.find((item) => item.id === branch.sessionId)?.title || '探索分支'
+    const reference = buildExplorationReferenceDraft(branch.sessionId, title)
+    const currentDraft = parentDrafts.get(parentSessionId)?.trim() ?? ''
+    const currentHtml = parentDraftHtml.get(parentSessionId) || markdownToHtml(parentDrafts.get(parentSessionId) ?? '')
+    if (currentDraft.includes(`&session:${branch.sessionId}`)) {
+      toast.info('该探索分支已经在主线草稿中')
+      return
+    }
+    setParentDrafts((previous) => {
+      const next = new Map(previous)
+      next.set(parentSessionId, currentDraft ? `${currentDraft}\n\n${reference.markdown}` : reference.markdown)
+      return next
+    })
+    setParentDraftHtml((previous) => {
+      const next = new Map(previous)
+      next.set(parentSessionId, currentHtml ? `${currentHtml}<p></p>${reference.html}` : reference.html)
+      return next
+    })
+    toast.success('已添加探索引用', { description: '探索 Tab 保持打开；主会话发送后 Agent 会读取该标记。' })
+  }, [branch.sessionId, conclusion, parentDraftHtml, parentDrafts, parentSessionId, sessions, setParentDraftHtml, setParentDrafts])
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="ghost" size="icon" className="size-7 active:scale-[0.96]" onClick={handleBringBack} disabled={!conclusion} aria-label="添加探索引用">
+          <GitMerge className="size-3.5" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{conclusion ? '将探索后新增内容作为会话引用添加到主线草稿' : '完成一轮新的探索回复后即可添加引用'}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 interface SidePanelProps {
   sessionId: string
   sessionPath: string | null
-  activeTab: 'session' | 'workspace' | 'changes'
-  onTabChange: (tab: 'session' | 'workspace' | 'changes') => void
+  activeTab: AgentSidePanelTab
+  onTabChange: (tab: AgentSidePanelTab) => void
   width?: number
 }
 
@@ -94,6 +190,14 @@ const filePanelActionButtonClass = 'h-6 w-6 flex-shrink-0 rounded-md text-muted-
 
 export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, width = 280 }: SidePanelProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
+  const sessions = useAtomValue(agentSessionsAtom)
+  const explorationMap = useAtomValue(agentSideExplorationMapAtom)
+  const setExplorationMap = useSetAtom(agentSideExplorationMapAtom)
+  const explorationBranches = explorationMap.get(sessionId) ?? []
+  const activeExplorationSessionId = getExplorationSessionIdFromSidePanelTab(activeTab)
+  const activeExplorationBranch = activeExplorationSessionId
+    ? explorationBranches.find((branch) => branch.sessionId === activeExplorationSessionId) ?? null
+    : null
   const isClassic = interfaceVariant === 'classic'
 
   // 显示状态（B）= 展开意图 A（agentSidePanelOpenAtom）且窗口宽度足够。
@@ -107,6 +211,35 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
     if (isOpen) setEverOpened(true)
   }, [isOpen])
   const isWindows = React.useMemo(() => detectIsWindows(), [])
+
+  // 删除/归档后清理右侧悬挂的探索 Tab；关闭 Tab 只影响展示，不删除持久化会话。
+  React.useEffect(() => {
+    const validSessionIds = new Set(sessions.map((session) => session.id))
+    const remaining = explorationBranches.filter((branch) => validSessionIds.has(branch.sessionId))
+    if (remaining.length === explorationBranches.length) return
+    setExplorationMap((previous) => {
+      const current = previous.get(sessionId) ?? []
+      const nextBranches = current.filter((branch) => validSessionIds.has(branch.sessionId))
+      const next = new Map(previous)
+      if (nextBranches.length > 0) next.set(sessionId, nextBranches)
+      else next.delete(sessionId)
+      return next
+    })
+    if (activeExplorationSessionId && !validSessionIds.has(activeExplorationSessionId)) onTabChange('session')
+  }, [activeExplorationSessionId, explorationBranches, onTabChange, sessionId, sessions, setExplorationMap])
+
+  const handleCloseExplorationTab = React.useCallback((branchSessionId: string): void => {
+    setExplorationMap((previous) => {
+      const branches = previous.get(sessionId) ?? []
+      const nextBranches = branches.filter((branch) => branch.sessionId !== branchSessionId)
+      if (nextBranches.length === branches.length) return previous
+      const next = new Map(previous)
+      if (nextBranches.length > 0) next.set(sessionId, nextBranches)
+      else next.delete(sessionId)
+      return next
+    })
+    if (activeExplorationSessionId === branchSessionId) onTabChange('session')
+  }, [activeExplorationSessionId, onTabChange, sessionId, setExplorationMap])
 
   // 收起右侧边栏时，若焦点仍停留在面板内的控件上，把焦点移出回输入框，
   // 避免焦点悬空在 `opacity-0/pointer-events-none` 的隐藏面板里，导致后续方向导航/确认落空。
@@ -573,6 +706,10 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   basePathsRef.current = [sessionPath, workspaceFilesPath, ...fileAccessPathsMemo].filter(Boolean) as string[]
   const hasSessionAttachedItems = attachedDirs.length > 0 || attachedFiles.length > 0
   const hasWorkspaceAttachedItems = wsAttachedDirs.length > 0 || wsAttachedFiles.length > 0
+  const explorationTabs = explorationBranches.map((branch) => ({
+    id: getExplorationSidePanelTab(branch.sessionId) as `exploration:${string}`,
+    label: sessions.find((session) => session.id === branch.sessionId)?.title ?? '探索分支',
+  }))
 
   return (
     <div
@@ -601,9 +738,25 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
           isOpen ? 'opacity-100 visible' : 'opacity-0 pointer-events-none invisible',
         )}
         >
-          <DiffPanelTabBar activeTab={activeTab} onTabChange={onTabChange} onClose={() => setAgentPanelOpen(false)} />
+          <DiffPanelTabBar
+            activeTab={activeTab}
+            onTabChange={onTabChange}
+            explorationTabs={explorationTabs}
+            activeTabAction={activeExplorationBranch ? (
+              <ExplorationBringBackAction parentSessionId={sessionId} branch={activeExplorationBranch} sessions={sessions} />
+            ) : undefined}
+            onClose={() => {
+              const branchSessionId = getExplorationSessionIdFromSidePanelTab(activeTab)
+              if (branchSessionId) handleCloseExplorationTab(branchSessionId)
+              else setAgentPanelOpen(false)
+            }}
+          />
 
-          {activeTab === 'changes' ? (
+          {activeExplorationBranch ? (
+            <SideAgentSessionContent>
+              <AgentView sessionId={activeExplorationBranch.sessionId} embedded />
+            </SideAgentSessionContent>
+          ) : activeTab === 'changes' ? (
             sessionPath ? (
               <DiffChangesList
                 key={sessionId}

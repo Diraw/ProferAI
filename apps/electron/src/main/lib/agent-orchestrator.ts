@@ -566,21 +566,41 @@ export class AgentOrchestrator {
   }
 
   /**
-   * 流完成后自动生成标题
+   * 流开始后自动生成标题。
    *
-   * 如果会话标题仍为默认值，自动调用标题生成并通过回调通知。
+   * 默认会话沿用首条消息自动命名；Pi 探索分支则在首条新增用户消息时命名一次，
+   * 避免把 fork 前复制的历史误当成分支自己的首条消息，也避免后续 turn 覆盖标题。
    */
   private async autoGenerateTitle(sessionId: string, userMessage: string, channelId: string, modelId: string, callbacks: SessionCallbacks): Promise<void> {
     try {
       const meta = getAgentSessionMeta(sessionId)
-      if (!meta || meta.title !== DEFAULT_SESSION_TITLE) return
+      if (!meta) return
 
-      const title = await this.generateTitle({
-        userMessage,
-        channelId,
-        modelId,
-      })
+      const isDefaultSessionTitle = meta.title === DEFAULT_SESSION_TITLE
+      const isFirstExplorationMessage = Boolean(
+        meta.explorationParentSessionId && !meta.explorationTitleInitializedAt,
+      )
+      if (!isDefaultSessionTitle && !isFirstExplorationMessage) return
+
+      // 分支的历史已由 Pi fork 复制；先持久化守卫，避免同一分支并发发送时重复请求标题。
+      const explorationTitleInitializedAt = isFirstExplorationMessage ? Date.now() : undefined
+      if (explorationTitleInitializedAt) {
+        updateAgentSessionMeta(sessionId, { explorationTitleInitializedAt })
+      }
+
+      const title = await this.generateTitle({ userMessage, channelId, modelId })
+        ?? (isFirstExplorationMessage ? createFallbackTitle(userMessage) : null)
       if (!title) return
+
+      // 标题请求是异步的；期间用户可能手动重命名，不能覆盖用户决定。
+      const latestMeta = getAgentSessionMeta(sessionId)
+      const canApplyDefaultTitle = isDefaultSessionTitle && latestMeta?.title === DEFAULT_SESSION_TITLE
+      const canApplyExplorationTitle = Boolean(
+        isFirstExplorationMessage
+        && latestMeta?.title === meta.title
+        && latestMeta.explorationTitleInitializedAt === explorationTitleInitializedAt,
+      )
+      if (!latestMeta || (!canApplyDefaultTitle && !canApplyExplorationTitle)) return
 
       updateAgentSessionMeta(sessionId, { title })
       callbacks.onTitleUpdated(title)

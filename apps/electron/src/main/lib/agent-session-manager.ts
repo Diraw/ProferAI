@@ -803,7 +803,7 @@ function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
  */
 export function updateAgentSessionMeta(
   id: string,
-  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
+  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
 ): AgentSessionMeta {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)
@@ -1323,17 +1323,24 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
     )
     const branchCheckpoints = adoptInheritedCheckpoints(sourceMeta.id, newMeta.id, inheritedCheckpoints)
 
+    const explorationMeta = input.explorationSourceLabel ? {
+      explorationParentSessionId: sourceMeta.id,
+      explorationSourceMessageId: targetUuid,
+      explorationSourceLabel: input.explorationSourceLabel,
+    } : {}
     updateAgentSessionMeta(newMeta.id, {
       sdkSessionId: forkedManager.getSessionId(),
       piSessionFile,
       piEntryBindings: branchBindings,
       ...(Object.keys(branchCheckpoints).length > 0 && { piFileCheckpoints: branchCheckpoints }),
       forkSourceDir: sourceDir,
+      ...explorationMeta,
     })
     newMeta.sdkSessionId = forkedManager.getSessionId()
     newMeta.piSessionFile = piSessionFile
     newMeta.piEntryBindings = branchBindings
     if (Object.keys(branchCheckpoints).length > 0) newMeta.piFileCheckpoints = branchCheckpoints
+    Object.assign(newMeta, explorationMeta)
 
     if (sourceDir && destDir) copyForkWorkspaceFiles(sourceDir, destDir)
     await copyForkStoredSDKMessages({
@@ -1700,6 +1707,9 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     return forkPiAgentSession(sourceMeta, input)
   }
 
+  if (input.explorationSourceLabel) {
+    throw new Error('探索分支目前仅支持 Pi Agent 会话')
+  }
   if (!sourceMeta.sdkSessionId) {
     throw new Error('该会话没有 SDK session，无法分叉')
   }

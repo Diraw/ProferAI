@@ -133,6 +133,8 @@ interface AgentMessagesProps {
   historyMoreAvailable?: boolean
   /** 移动端：正在补拉更早消息（防抖 + 顶部状态）。 */
   historyLoadingEarlier?: boolean
+  /** 嵌入在右侧探索分支时关闭探索入口，避免无限嵌套。 */
+  explorationEnabled?: boolean
 }
 
 /** 空状态引导 — 使用 WelcomeEmptyState */
@@ -509,7 +511,7 @@ function AgentRunningIndicator({ startedAt }: { startedAt?: number }): React.Rea
   )
 }
 
-export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onFork, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier }: AgentMessagesProps): React.ReactElement {
+export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onFork, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
   const setMinimapCache = useSetAtom(tabMinimapCacheAtom)
   const channels = useAtomValue(channelsAtom)
@@ -937,7 +939,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
         <StickyUserMessage userMessages={allUserMessagesData} />
       )}
     </Conversation>
-      <AgentHistorySelectionLayer sessionId={sessionId} rootRef={historySelectionRootRef} />
+      <AgentHistorySelectionLayer sessionId={sessionId} rootRef={historySelectionRootRef} explorationEnabled={explorationEnabled && agentRuntime === 'pi'} />
     </div>
     </BasePathsProvider>
     </FileAccessSessionProvider>

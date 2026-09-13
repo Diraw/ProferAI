@@ -535,6 +535,8 @@ export function buildHistoricalTaskSubjects(allMessages: SDKMessage[]): Map<stri
 
 export interface AssistantTurnRendererProps {
   turn: AssistantTurn
+  /** 当前 Agent session；嵌入右侧探索分支时不能依赖全局父 session。 */
+  sessionId?: string
   /** 所有消息（全局，供工具结果查找跨 turn 的结果） */
   allMessages: SDKMessage[]
   /** 跨 turn 历史 TaskCreate id → subject 映射（由父组件 useMemo 算一次后传入） */
@@ -560,10 +562,11 @@ export interface AssistantTurnRendererProps {
   showThinking?: boolean
 }
 
-export function AssistantTurnRenderer({ turn, allMessages, historicalTaskSubjects, basePath, onFork, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true }: AssistantTurnRendererProps): React.ReactElement | null {
+export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessages, historicalTaskSubjects, basePath, onFork, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true }: AssistantTurnRendererProps): React.ReactElement | null {
   const channels = useAtomValue(channelsAtom)
   const processGroupsKeepExpanded = useAtomValue(agentProcessGroupsKeepExpandedAtom)
-  const sessionId = useAtomValue(currentAgentSessionIdAtom)
+  const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
+  const sessionId = sessionIdProp ?? currentSessionId
   const setAgentInterruptionMap = useSetAtom(agentInterruptionMapAtom)
   // 收集所有 assistant 消息的内容块，保留 parent_tool_use_id 关联
   interface EnrichedBlock {
@@ -1367,6 +1370,8 @@ export interface MessageGroupRendererProps {
   historicalTaskSubjects: Map<string, string>
   basePath?: string
   basePaths?: string[]
+  /** 当前 Agent session；嵌入右侧探索分支时不能依赖全局父 session。 */
+  sessionId?: string
   onFork?: (upToMessageUuid: string) => void
   onRewind?: (assistantMessageUuid: string) => void
   /** 错误重试回调（仅当 turn 含错误消息时使用） */
@@ -1456,7 +1461,7 @@ export function getGroupPreview(group: MessageGroup): string {
   return texts.join(' ').slice(0, 200)
 }
 
-export function MessageGroupRenderer({ group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {
+function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
 
   if (group.type === 'user') {
@@ -1479,9 +1484,16 @@ export function MessageGroupRenderer({ group, allMessages, historicalTaskSubject
   }
 
   // assistant-turn
+  const mainlineAssistants = group.assistantMessages.filter((message) => !message.parent_tool_use_id)
+  const forkMessageId = mainlineAssistants.at(-1)?.uuid
   return (
-    <div data-message-id={groupId} data-message-role="assistant">
+    <div
+      data-message-id={groupId}
+      data-message-role="assistant"
+      {...(forkMessageId ? { 'data-message-fork-id': forkMessageId } : {})}
+    >
       <AssistantTurnRenderer
+        sessionId={sessionId}
         turn={group}
         allMessages={allMessages}
         historicalTaskSubjects={historicalTaskSubjects}
@@ -1499,3 +1511,58 @@ export function MessageGroupRenderer({ group, allMessages, historicalTaskSubject
     </div>
   )
 }
+
+/** 判断两个 group 是否引用了相同的消息/工具结果。 */
+function sameMessageGroup(previous: MessageGroup, next: MessageGroup): boolean {
+  if (previous === next) return true
+  if (previous.type !== next.type) return false
+  if (previous.type === 'user') {
+    return next.type === 'user' && previous.message === next.message
+  }
+  if (previous.type === 'system') {
+    return next.type === 'system' && previous.message === next.message
+  }
+  if (next.type !== 'assistant-turn') return false
+  if (previous.assistantMessages.length !== next.assistantMessages.length) return false
+  for (let index = 0; index < previous.assistantMessages.length; index++) {
+    if (previous.assistantMessages[index] !== next.assistantMessages[index]) return false
+  }
+  if (previous.turnMessages.length !== next.turnMessages.length) return false
+  for (let index = 0; index < previous.turnMessages.length; index++) {
+    if (previous.turnMessages[index] !== next.turnMessages[index]) return false
+  }
+  return previous.model === next.model
+    && previous.createdAt === next.createdAt
+    && previous.startsAfterWake === next.startsAfterWake
+}
+
+/**
+ * 流式消息数组会在每个 chunk 更新，但历史 group 的底层消息引用不变。
+ * 只比较当前 group 与其依赖，避免每个 chunk 重新执行整段历史 Markdown/工具渲染。
+ */
+function sameStringMap(previous: Map<string, string>, next: Map<string, string>): boolean {
+  if (previous === next || previous.size !== next.size) return previous === next
+  for (const [key, value] of previous) {
+    if (next.get(key) !== value) return false
+  }
+  return true
+}
+
+export const MessageGroupRenderer = React.memo(MessageGroupRendererView, (prev, next) => {
+  if (!sameMessageGroup(prev.group, next.group)) return false
+  // 历史 turn 的工具结果都在 turnMessages 内；不因全局数组每个 chunk 换引用而重渲染。
+  if (prev.isStreaming || next.isStreaming) {
+    if (prev.allMessages.length !== next.allMessages.length) return false
+    if (prev.allMessages.at(-1) !== next.allMessages.at(-1)) return false
+  }
+  if (!sameStringMap(prev.historicalTaskSubjects, next.historicalTaskSubjects)) return false
+  if (prev.basePath !== next.basePath || prev.sessionId !== next.sessionId) return false
+  if (prev.basePaths !== next.basePaths) return false
+  if (prev.isStreaming !== next.isStreaming || prev.stoppedByUser !== next.stoppedByUser) return false
+  if (prev.sessionModelId !== next.sessionModelId || prev.showThinking !== next.showThinking) return false
+  return prev.onFork === next.onFork
+    && prev.onRewind === next.onRewind
+    && prev.onRetry === next.onRetry
+    && prev.onRetryInNewSession === next.onRetryInNewSession
+    && prev.onCompact === next.onCompact
+})

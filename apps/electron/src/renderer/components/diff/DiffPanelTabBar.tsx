@@ -6,17 +6,21 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { PanelRightClose } from 'lucide-react'
+import { PanelRightClose, Split } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { agentDiffUnseenChangesAtom, currentAgentSessionIdAtom } from '@/atoms/agent-atoms'
+import { agentDiffUnseenChangesAtom, currentAgentSessionIdAtom, type AgentSidePanelTab } from '@/atoms/agent-atoms'
 
-type DiffPanelTab = 'session' | 'workspace' | 'changes'
+type DiffPanelTab = AgentSidePanelTab
 
 interface DiffPanelTabBarProps {
   activeTab: DiffPanelTab
   onTabChange: (tab: DiffPanelTab) => void
+  /** 当前父会话已打开的探索分支，按最近打开顺序追加在文件 Tab 后。 */
+  explorationTabs?: Array<{ id: `exploration:${string}`; label: string }>
+  /** 当前探索 Tab 的紧凑动作。 */
+  activeTabAction?: React.ReactNode
   onClose?: () => void
 }
 
@@ -25,7 +29,7 @@ interface PreviousTabState {
   activeTab: DiffPanelTab
 }
 
-export function DiffPanelTabBar({ activeTab, onTabChange, onClose }: DiffPanelTabBarProps): React.ReactElement {
+export function DiffPanelTabBar({ activeTab, onTabChange, explorationTabs = [], activeTabAction, onClose }: DiffPanelTabBarProps): React.ReactElement {
   const unseenMap = useAtomValue(agentDiffUnseenChangesAtom)
   const setUnseenMap = useSetAtom(agentDiffUnseenChangesAtom)
   const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
@@ -111,7 +115,27 @@ export function DiffPanelTabBar({ activeTab, onTabChange, onClose }: DiffPanelTa
             文件改动
           </span>
         </button>
-        {/* 右侧关闭按钮（常驻，三个 tab 下都可见） */}
+        {explorationTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => onTabChange(tab.id)}
+            className={cn(
+              'flex min-w-0 max-w-[160px] shrink-0 items-center gap-1 px-3 h-[40px] text-xs whitespace-nowrap overflow-hidden text-ellipsis transition-colors select-none cursor-pointer',
+              'border-t border-l border-r',
+              isClassic ? 'rounded-t-lg' : 'rounded-none',
+              activeTab === tab.id
+                ? isClassic ? 'bg-content-area text-foreground border-border/50' : 'app-tab-active text-foreground border-border/80'
+                : isClassic ? 'text-muted-foreground border-transparent hover:text-foreground hover:bg-muted/50' : 'app-tab-inactive text-muted-foreground border-transparent hover:text-foreground',
+            )}
+            title={tab.label}
+          >
+            <Split className="size-3 shrink-0" />
+            <span className="truncate">{tab.label}</span>
+          </button>
+        ))}
+        {activeTabAction && <div className="ml-1 flex shrink-0 items-center titlebar-no-drag">{activeTabAction}</div>}
+        {/* 右侧关闭按钮（常驻，文件与探索 Tab 下都可见） */}
         {onClose && (
           <Tooltip>
             <TooltipTrigger asChild>

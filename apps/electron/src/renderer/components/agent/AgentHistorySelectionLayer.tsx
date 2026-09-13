@@ -6,9 +6,11 @@
  */
 
 import * as React from 'react'
-import { useSetAtom } from 'jotai'
+import { useAtomValue, useSetAtom } from 'jotai'
 import { toast } from 'sonner'
+import { agentDiffPanelTabAtom, agentSessionsAtom, agentSideExplorationMapAtom, agentSidePanelOpenAtom, getExplorationSidePanelTab } from '@/atoms/agent-atoms'
 import { quotedSelectionMapAtom } from '@/atoms/preview-atoms'
+import type { QuotedSelection } from '@/atoms/preview-atoms'
 import { SelectionActionPopover } from '@/components/selection/SelectionActionPopover'
 import { SELECTION_ACTION_POPOVER_SELECTOR } from '@/lib/quoted-selection'
 
@@ -27,6 +29,8 @@ interface AgentHistorySelection {
 interface AgentHistorySelectionLayerProps {
   sessionId: string
   rootRef: React.RefObject<HTMLDivElement>
+  /** 嵌入的探索分支自身不能继续创建没有容器承载的二级探索。 */
+  explorationEnabled?: boolean
 }
 
 function getElementFromNode(node: Node | null): Element | null {
@@ -82,9 +86,16 @@ function getRoleLabel(role?: string): string {
 export function AgentHistorySelectionLayer({
   sessionId,
   rootRef,
+  explorationEnabled = true,
 }: AgentHistorySelectionLayerProps): React.ReactElement {
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
+  const agentSessions = useAtomValue(agentSessionsAtom)
+  const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setSideExplorationMap = useSetAtom(agentSideExplorationMapAtom)
+  const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtom)
+  const setSidePanelTabMap = useSetAtom(agentDiffPanelTabAtom)
   const [selection, setSelection] = React.useState<AgentHistorySelection | null>(null)
+  const openExplorationPendingRef = React.useRef(false)
   const pointerSelectingRef = React.useRef(false)
   const pointerUpYRef = React.useRef<number | null>(null)
   const captureTimerRef = React.useRef<number | null>(null)
@@ -140,7 +151,9 @@ export function AgentHistorySelectionLayer({
     const role = sameMessage
       ? (startMessageEl.getAttribute('data-message-role') as AgentHistorySelection['messageRole'] | null)
       : null
-    const messageId = sameMessage ? startMessageEl.getAttribute('data-message-id') ?? undefined : undefined
+    const messageId = sameMessage
+      ? startMessageEl.getAttribute('data-message-fork-id') ?? startMessageEl.getAttribute('data-message-id') ?? undefined
+      : undefined
 
     setSelection({
       text,
@@ -242,6 +255,58 @@ export function AgentHistorySelectionLayer({
     toast.success('已添加到 Agent 引用')
   }, [clearSelection, selection, sessionId, setQuotedSelectionMap])
 
+  const handleOpenExplorationBranch = React.useCallback(async (): Promise<void> => {
+    if (!selection || openExplorationPendingRef.current) return
+    if (selection.messageRole !== 'assistant' || !selection.messageId) {
+      toast.info('请在一条已完成的 Agent 回复中选择内容，再从该节点探索')
+      return
+    }
+    const parentSession = agentSessions.find((item) => item.id === sessionId)
+    if (!parentSession?.piEntryBindings?.[selection.messageId]) {
+      toast.warning('这个回复没有可用的 Pi 分叉节点，暂时无法从这里探索')
+      return
+    }
+
+    openExplorationPendingRef.current = true
+    try {
+      const sourceLabel = selection.text.slice(0, 80)
+      const branch = await window.electronAPI.forkAgentSession({
+        sessionId,
+        upToMessageUuid: selection.messageId,
+        explorationSourceLabel: sourceLabel,
+      })
+      const quotedSelection: QuotedSelection = {
+        text: selection.text,
+        filePath: selection.sourceLabel,
+        sourceType: 'agent-history',
+        sourceLabel: selection.sourceLabel,
+        messageId: selection.messageId,
+        messageRole: selection.messageRole,
+        capturedAt: Date.now(),
+      }
+      setAgentSessions((prev) => prev.some((item) => item.id === branch.id) ? prev : [branch, ...prev])
+      setQuotedSelectionMap((prev) => new Map(prev).set(branch.id, quotedSelection))
+      setSideExplorationMap((prev) => {
+        const next = new Map(prev)
+        const branches = prev.get(sessionId) ?? []
+        if (!branches.some((item) => item.sessionId === branch.id)) {
+          next.set(sessionId, [...branches, { sessionId: branch.id, sourceMessageId: selection.messageId!, sourceLabel }])
+        }
+        return next
+      })
+      setSidePanelOpen(true)
+      setSidePanelTabMap((prev) => new Map(prev).set(sessionId, getExplorationSidePanelTab(branch.id)))
+      window.getSelection()?.removeAllRanges()
+      clearSelection()
+      toast.success('已创建探索分支', { description: '它继承此回复之前的完整上下文；结论可带回主线。' })
+    } catch (error) {
+      console.error('[AgentHistorySelectionLayer] 创建探索分支失败:', error)
+      toast.error('创建探索分支失败', { description: error instanceof Error ? error.message : undefined })
+    } finally {
+      openExplorationPendingRef.current = false
+    }
+  }, [agentSessions, clearSelection, selection, sessionId, setAgentSessions, setQuotedSelectionMap, setSideExplorationMap, setSidePanelOpen, setSidePanelTabMap])
+
   return (
     <>
       {selection && (
@@ -250,6 +315,9 @@ export function AgentHistorySelectionLayer({
           y={selection.y}
           direction={selection.direction}
           onAddToAgent={handleAddToAgent}
+          {...(explorationEnabled && selection.messageRole === 'assistant' && selection.messageId
+            ? { onOpenExplorationBranch: handleOpenExplorationBranch }
+            : {})}
         />
       )}
     </>

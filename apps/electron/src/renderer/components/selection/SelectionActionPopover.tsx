@@ -1,11 +1,13 @@
 import * as React from 'react'
-import { Quote } from 'lucide-react'
+import { MessageSquarePlus, Quote } from 'lucide-react'
 
 interface SelectionActionPopoverProps {
   x: number
   y: number
   direction?: 'up' | 'down'
   onAddToAgent: () => void
+  /** 从当前 assistant 回复节点创建右侧探索分支。 */
+  onOpenExplorationBranch?: () => void | Promise<void>
 }
 
 export interface AvoidRect {
@@ -61,6 +63,7 @@ export function SelectionActionPopover({
   y,
   direction = 'up',
   onAddToAgent,
+  onOpenExplorationBranch,
 }: SelectionActionPopoverProps): React.ReactElement {
   const rootRef = React.useRef<HTMLDivElement>(null)
   // direction 'up' 向上展开（按钮底部贴锚点）；'down' 向下展开（按钮顶部贴锚点）。
@@ -100,6 +103,16 @@ export function SelectionActionPopover({
           <Quote className="size-4 rotate-180 -translate-y-[3px]" />
           为 Agent 引用
         </button>
+        {onOpenExplorationBranch && (
+          <button
+            type="button"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors hover:bg-muted"
+            onClick={() => { void onOpenExplorationBranch() }}
+          >
+            <MessageSquarePlus className="size-4" />
+            探索此分支
+          </button>
+        )}
       </div>
     </div>
   )
