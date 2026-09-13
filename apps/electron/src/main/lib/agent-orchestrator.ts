@@ -169,6 +169,7 @@ import { injectClaudeClipboardMcpServer } from './claude-clipboard-tools'
 import { evaluatePptCapability } from './ppt-capability-gate'
 import { injectAgentImageOutputMcpServer } from './agent-image-output-tools'
 import { injectAgentGptImageMcpServer, isAgentGptImageAvailable } from './agent-gpt-image-tools'
+import { injectAgentSkinMcpServer } from './agent-skin-tools'
 import { injectAgentPreviewMcpServer } from './agent-preview-tools'
 import { agentFilePreviewSessionManager } from './agent-file-preview-session'
 import { injectPptDeliveryMcpServer } from './ppt-delivery-agent-tools'
@@ -1270,6 +1271,13 @@ export class AgentOrchestrator {
             agentCwd,
             allowedRoots: imageOutputAllowedRoots,
             onGenerationUpdate: emitImageGenerationUpdate,
+          }, disabledTools)
+        }
+        if (agentRuntime === 'claude') {
+          await injectAgentSkinMcpServer(sdk, mcpServers, {
+            agentCwd,
+            allowedRoots: imageOutputAllowedRoots,
+            workspaceSlug,
           }, disabledTools)
         }
       }

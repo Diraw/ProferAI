@@ -28,10 +28,11 @@ describe('Agent local image output tool', () => {
 
   test('Given a safe image result When formatting tool output Then it returns a structured image without exposing an internal marker', () => {
     const formatted = formatAgentImageOutputToolResult({
-      image: { localPath: 'C:/safe/image.png', absolutePath: 'C:/safe/image.png', filename: 'image.png', mediaType: 'image/png' },
+      image: { localPath: 'C:/safe/image.png', relativePath: '.context/agent-output-images/image.png', absolutePath: 'C:/safe/image.png', filename: 'image.png', mediaType: 'image/png' },
     })
 
     expect(formatted.content[0]!.text).not.toContain('IMAGE_ATTACHMENT')
+    expect(formatted.content[0]!.text).toContain('.context/agent-output-images/image.png')
     expect(formatted.details).toMatchObject({ image: { filename: 'image.png', mediaType: 'image/png' } })
   })
 })

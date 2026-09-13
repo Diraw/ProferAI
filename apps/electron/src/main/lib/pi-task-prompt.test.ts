@@ -51,6 +51,7 @@ const ALL_TOOLS = [
   'mcp__team-memory__search_team_memories',
   'send_local_image',
   'generate_image',
+  'create_skin',
   'plan_ppt_visuals',
   'audit_ppt_delivery',
   'open_file_preview',
@@ -112,6 +113,20 @@ describe('buildPiTaskPrompt', () => {
       toolNames: ['generate_image'],
     })
     expect(enabled).toContain('IMAGE_GENERATION_RULES')
+
+    const wallpaper = buildPiTaskPrompt({
+      basePrompt: BASE_PROMPT,
+      userMessage: '请生成一张壁纸并制作成 Profer 皮肤。',
+      toolNames: ['generate_image'],
+    })
+    expect(wallpaper).toContain('IMAGE_GENERATION_RULES')
+
+    const skinOnly = buildPiTaskPrompt({
+      basePrompt: BASE_PROMPT,
+      userMessage: '请创建一个 Profer 皮肤。',
+      toolNames: ['create_skin'],
+    })
+    expect(skinOnly).toContain('IMAGE_GENERATION_RULES')
 
     const unavailable = buildPiTaskPrompt({
       basePrompt: BASE_PROMPT,

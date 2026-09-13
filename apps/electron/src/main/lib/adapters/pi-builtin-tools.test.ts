@@ -303,6 +303,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
     const openPreviewTool = tools.find((tool) => tool.name === 'open_file_preview')
     const inspectOfficialPreviewTool = tools.find((tool) => tool.name === 'inspect_file_preview')
     expect(imageTool).toBeDefined()
+    expect(tools.find((tool) => tool.name === 'create_skin')).toBeDefined()
     expect(imageTool!.description).not.toContain('IMAGE_ATTACHMENT')
     expect(previewTool).toBeDefined()
     expect(JSON.stringify(previewTool!.parameters)).toContain('previousRevision')
@@ -318,7 +319,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
       ok: true,
       mode: 'official',
       edited: false,
-      output: { image: { localPath: 'C:/safe/session/.context/agent-output-images/x.png', filename: 'x.png', mediaType: 'image/png' } },
+      output: { image: { localPath: 'C:/safe/session/.context/agent-output-images/x.png', relativePath: '.context/agent-output-images/x.png', filename: 'x.png', mediaType: 'image/png' } },
     }
     const { sdk, tools } = createPiSdkStub()
     await buildPiBuiltinTools(sdk, { ...baseCtx, agentCwd: 'C:/safe/session', allowedRoots: ['C:/safe/attached'] })
@@ -407,7 +408,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
       { group: 'browser', names: ['BrowserObserve', 'BrowserNavigate'] },
       { group: 'clipboard', names: ['clipboard_read_text', 'clipboard_write_text'] },
       { group: 'preview', names: ['inspect_preview', 'open_file_preview', 'inspect_file_preview'] },
-      { group: 'image', names: ['send_local_image'] },
+      { group: 'image', names: ['send_local_image', 'generate_image', 'create_skin'] },
       { group: 'web', names: ['WebSearch', 'WebFetch'] },
     ] as const
     for (const { group, names: disabledNames } of cases) {

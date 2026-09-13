@@ -96,11 +96,12 @@
 */
 
 /* 可选：使用包内背景图。取消注释前，把图片放入 assets/background.webp。
- * ⚠️ 背景不能挂 body——AppShell 的 .shell-bg 是全屏不透明层，会完全盖住 body；
+ * ⚠️ 背景不能挂 body——AppShell 的 .shell-bg 是全屏外壳，body 背景不会成为应用壁纸；
  * 必须挂在 .shell-bg 上。assets/... 会由主进程安全改写为
  * profer-skin://<skin-id>/assets/...；不要使用 file:、data:、外链或 @import。
+ * 皮肤包单张 assets 图片不超过 4 MB，完整皮肤包不超过 5 MB。
 .shell-bg {
-  background-image: linear-gradient(hsl(222 30% 9% / 0.76), hsl(222 30% 9% / 0.76)), url("assets/background.webp");
+  background-image: linear-gradient(hsl(222 30% 9% / 0.42), hsl(222 30% 9% / 0.42)), url("assets/background.webp");
   background-size: cover;
   background-position: center;
 }

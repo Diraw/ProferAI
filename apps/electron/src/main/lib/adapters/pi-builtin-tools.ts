@@ -113,6 +113,7 @@ import {
   isAgentGptImageAvailable,
 } from '../agent-gpt-image-tools'
 import { GPT_IMAGE_QUALITIES, GPT_IMAGE_SIZES } from '../gpt-image-service'
+import { buildPiAgentSkinTools } from '../agent-skin-tools'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 
@@ -1566,6 +1567,12 @@ export async function buildPiBuiltinTools(
       tools.push(...buildPiAgentGptImageTools(sdk, ctx))
     } catch (error) {
       console.error('[Pi 桥接] 注入 GPT Image 工具失败:', error)
+    }
+
+    try {
+      tools.push(...buildPiAgentSkinTools(sdk, ctx))
+    } catch (error) {
+      console.error('[Pi 桥接] 注入皮肤工具失败:', error)
     }
   }
 

@@ -1,0 +1,75 @@
+import { describe, expect, mock, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// skin-manager-service 经 skin-service → config-paths 间接依赖 Electron；单测提供最小主进程 mock。
+mock.module('electron', () => ({
+  app: { getPath: () => tmpdir(), isPackaged: false },
+  net: {},
+}))
+
+// 隔离配置根目录：安装目标必须落在临时目录，绝不能写真实 ~/.profer-dev/skins。
+const configRoot = mkdtempSync(join(tmpdir(), 'profer-skin-manager-config-'))
+process.env.PROFER_CONFIG_DIR = configRoot
+
+const { installSkinFromFolder } = await import('./skin-manager-service')
+
+/** 写入一个最小可安装皮肤包；返回包根目录。 */
+function writePackage(id: string, options: { css?: string; assetName?: string } = {}): string {
+  const root = mkdtempSync(join(tmpdir(), 'profer-skin-package-'))
+  writeFileSync(
+    join(root, 'manifest.json'),
+    JSON.stringify({ id, name: `Skin ${id}`, tone: 'dark' }, null, 2),
+    'utf8',
+  )
+  const assetName = options.assetName
+  writeFileSync(
+    join(root, 'skin.css'),
+    options.css ?? (assetName ? `:root { --background: #111; }\n.shell-bg { background-image: url("assets/${assetName}"); }` : ':root { --background: #111; }'),
+    'utf8',
+  )
+  if (assetName) {
+    mkdirSync(join(root, 'assets'), { recursive: true })
+    writeFileSync(join(root, 'assets', assetName), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  }
+  return root
+}
+
+describe('皮肤安装的 Windows 保留设备名防护', () => {
+  test.each(['con', 'prn', 'aux', 'nul', 'com1', 'lpt9'])(
+    'Given skin id %s When installing Then the package is rejected for cross-platform safety',
+    (id) => {
+      const root = writePackage(id)
+      try {
+        const result = installSkinFromFolder(root)
+        expect(result.ok).toBe(false)
+        expect(result.message).toContain('Windows 保留设备名')
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    },
+  )
+
+  test('Given assets/con.png When installing Then it is rejected because Windows also blocks reserved names with extensions', () => {
+    const root = writePackage('reserved-asset-skin', { assetName: 'con.png' })
+    try {
+      const result = installSkinFromFolder(root)
+      expect(result.ok).toBe(false)
+      expect(result.message).toContain('Windows 保留设备名')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('Given a normal skin When installing Then reserved-name guard does not block it', () => {
+    const root = writePackage('fine-skin', { assetName: 'wallpaper.png' })
+    try {
+      const result = installSkinFromFolder(root)
+      expect(result.ok).toBe(true)
+      expect(result.skin?.id).toBe('fine-skin')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})

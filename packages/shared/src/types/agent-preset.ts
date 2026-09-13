@@ -247,6 +247,7 @@ export const AGENT_PRESET_CAPABILITY_GROUPS = [
     tools: [
       capabilityTool('generate_image', '生成图片', '生成或编辑图片', 'external'),
       capabilityTool('send_local_image', '输出本地图片', '把授权目录中的图片发送到当前回复', 'external'),
+      capabilityTool('create_skin', '创建 Profer 皮肤', '创建并安装用户皮肤包', 'write'),
     ],
   }),
   capabilityGroup({
@@ -482,7 +483,9 @@ export const BUILTIN_AGENT_PRESETS: AgentPreset[] = [
     effort: "high",
     promptSections: CODE_PROMPT_SECTIONS,
     disabledToolGroups: ["automation", "browser", "clipboard", "ppt-materials"],
-    disabledTools: ["generate_image"],
+    // create_skin 虽属 image 能力组，但是独立工具：代码预设已在提示词里声明“AI 生图仍关闭”，
+    // 若只禁 generate_image，create_skin 及其 SOP 会残留在代码会话，还会引导模型去调用被禁的生图工具。
+    disabledTools: ["generate_image", "create_skin"],
     createdAt: 0,
     updatedAt: 0,
   },
