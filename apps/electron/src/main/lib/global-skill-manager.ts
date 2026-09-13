@@ -5,7 +5,7 @@
  * 不直接把全局目录和工作区目录同时交给 Claude/Pi，避免重复发现。
  */
 import { randomUUID, createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, renameSync, writeFileSync, unlinkSync, copyFileSync, statSync, cpSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, mkdirSync, rmSync, renameSync, writeFileSync, unlinkSync, copyFileSync, statSync, lstatSync, readlinkSync, symlinkSync, cpSync } from 'node:fs'
 import { join, dirname, relative, resolve, basename } from 'node:path'
 import { assertSafeSkillSegment, canonicalSkillSegmentKey, safeSkillPath, assertSafeSkillRootChild } from './skill-path-security'
 import {
@@ -1515,8 +1515,62 @@ export function prepareRuntimeSkills(workspaceSlug: string): RuntimeSkillsProjec
       throw error
     }
   }
+  // Profer 的 Skill 读取工具和部分旧会话仍会按扁平路径访问
+  // `.runtime/skills/<slug>/SKILL.md`。运行时投影本身必须保留 fingerprint 隔离，
+  // 因此在同一受控根下维护兼容链接，既不复制内容，也不会让旧路径失效。
+  ensureRuntimeSkillCompatibilityLinks(workspaceSlug, projection, resolved)
   cleanupStaleRuntimeProjections(workspaceSlug, fingerprint)
   return { path: projection, skills: resolved, diagnostics: resolution.diagnostics }
+}
+
+/** 将旧版扁平 Skill 路径指向当前 fingerprint 投影；只处理受控 runtime 根下的链接。 */
+function ensureRuntimeSkillCompatibilityLinks(workspaceSlug: string, projection: string, skills: ResolvedSkillMeta[]): void {
+  const root = runtimeRoot(workspaceSlug)
+  const skillRoot = safeSkillPath(projection, 'skills', 'runtime skills directory')
+  const desiredSlugs = new Set(skills.map((skill) => skill.slug))
+
+  // 旧投影中已禁用/删除的 Skill 不能继续通过扁平兼容路径被读取。
+  // 只回收 runtime 根下由本机制创建、且确实指向某个投影 skills 子目录的软链接，
+  // 不碰 fingerprint 目录或其他非链接目录。
+  if (existsSync(root)) {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isSymbolicLink() || desiredSlugs.has(entry.name)) continue
+      const alias = safeSkillPath(root, entry.name, 'runtime Skill compatibility alias')
+      try {
+        const target = resolve(dirname(alias), readlinkSync(alias))
+        const targetRelative = relative(root, target).split('\\').join('/')
+        if (/^[a-f0-9]{16}\/skills\/[^/]+$/.test(targetRelative)) unlinkSync(alias)
+      } catch (error) {
+        console.warn(`[全局 Skill] 清理扁平兼容路径失败: ${alias}`, error)
+      }
+    }
+  }
+
+  for (const skill of skills) {
+    assertSafeSkillSegment(skill.slug, 'runtime Skill slug')
+    const alias = safeSkillPath(root, skill.slug, 'runtime Skill compatibility alias')
+    const target = safeSkillPath(skillRoot, skill.slug, 'runtime Skill compatibility target')
+
+    try {
+      const existing = lstatSync(alias)
+      if (!existing.isSymbolicLink()) continue
+      const existingTarget = resolve(dirname(alias), readlinkSync(alias))
+      if (existingTarget === resolve(target)) continue
+      unlinkSync(alias)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.warn(`[全局 Skill] 检查扁平兼容路径失败: ${alias}`, error)
+        continue
+      }
+    }
+
+    try {
+      // Windows junction 不要求开发者模式/管理员权限；macOS/Linux 使用目录软链接。
+      symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      console.warn(`[全局 Skill] 创建扁平兼容路径失败: ${alias} -> ${target}`, error)
+    }
+  }
 }
 
 /** 仅删除超过 7 天且不等于当前投影的受控 fingerprint 目录，避免影响进行中的 Agent run。 */

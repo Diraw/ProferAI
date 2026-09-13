@@ -3,7 +3,7 @@
  * 两种 runtime 只消费同一个 prepareRuntimeSkills() 投影，不能再直接扫描旧 master。
  */
 import { afterEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Skill } from '@earendil-works/pi-coding-agent'
@@ -62,7 +62,32 @@ describe('全局 Skill 运行时加载链路冒烟（Claude + Pi）', () => {
 
     expect(existsSync(join(projection.path, '.claude-plugin', 'plugin.json'))).toBe(true)
     expect(existsSync(join(piRoot, 'demo', 'SKILL.md'))).toBe(true)
+    // 旧会话/工具使用的扁平路径也必须持续可读，并指向当前 fingerprint 投影。
+    const compatibilityAlias = join(projection.path, '..', 'demo')
+    expect(lstatSync(compatibilityAlias).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(compatibilityAlias)).toBe(join(projection.path, 'skills', 'demo'))
+    expect(existsSync(join(compatibilityAlias, 'SKILL.md'))).toBe(true)
     expect(result.skills.map((item) => item.name)).toEqual(['demo'])
+  })
+
+  test('兼容路径会随 projection 更新并在 Skill 禁用后回收', () => {
+    const paths = setup()
+    const first = prepareRuntimeSkills('ws-a')
+    const alias = join(first.path, '..', 'demo')
+    expect(lstatSync(alias).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(alias)).toBe(join(first.path, 'skills', 'demo'))
+
+    writeFileSync(join(paths.builtin, 'demo', 'SKILL.md'), '---\nname: 演示\nversion: 1.0.1\n---\n\n# 演示更新\n')
+    seedBuiltinGlobalSkills(paths.builtin)
+    const second = prepareRuntimeSkills('ws-a')
+    expect(second.path).not.toBe(first.path)
+    expect(readlinkSync(alias)).toBe(join(second.path, 'skills', 'demo'))
+    expect(existsSync(join(alias, 'SKILL.md'))).toBe(true)
+
+    const builtin = listGlobalSkills()[0]!
+    setGlobalSkillEnabled('ws-a', builtin.skillId, false)
+    prepareRuntimeSkills('ws-a')
+    expect(existsSync(alias)).toBe(false)
   })
 
   test('两个 workspace 分别默认启用、禁用和替换时，projection 永远不重复加载', () => {
