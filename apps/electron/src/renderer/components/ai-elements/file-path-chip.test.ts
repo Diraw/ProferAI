@@ -77,4 +77,18 @@ describe('isAbsoluteFilePath 路径检测', () => {
   test('识别含中文的 Unix 绝对路径', () => {
     expect(isAbsoluteFilePath('/Users/admin/文档/测试.md')).toBe(true)
   })
+
+  test('识别 ~/ 主目录缩写路径（create_skin 的 installedPath 写法）', () => {
+    expect(isAbsoluteFilePath('~/.profer/skins/demo-skin/preview.png')).toBe(true)
+    expect(isAbsoluteFilePath('~/.profer-dev/skins/demo-skin/skin.css:12')).toBe(true)
+  })
+
+  test('单独的 ~ 与 ~other 写法不当作文件路径', () => {
+    expect(isAbsoluteFilePath('~')).toBe(false)
+    expect(isAbsoluteFilePath('~user/report.md')).toBe(false)
+  })
+
+  test('~/ 路径不再被当作相对路径二次处理', () => {
+    expect(isRelativeFilePath('~/.profer/skins/demo-skin/skin.css')).toBe(false)
+  })
 })

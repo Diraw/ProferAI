@@ -2,12 +2,12 @@
  * agent-directory-utils 测试
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { collectAttachedDirectories } from './agent-directory-utils'
+import { collectAttachedDirectories, collectProductArtifactDirectories } from './agent-directory-utils'
 
 let testDir: string | undefined
 let previousConfigRoot: string | undefined
@@ -99,5 +99,23 @@ describe('collectAttachedDirectories', () => {
 
     expect(result).toContain(workspaceDir)
     expect(result).toContain(getWorkspaceFilesDir(slug))
+  })
+})
+
+describe('collectProductArtifactDirectories', () => {
+  test('只返回真实存在的产品目录', () => {
+    mkdirSync(join(testDir!, 'skins'), { recursive: true })
+    mkdirSync(join(testDir!, 'plugins'), { recursive: true })
+
+    const result = collectProductArtifactDirectories()
+
+    expect(result).toEqual([join(testDir!, 'skins'), join(testDir!, 'plugins')])
+  })
+
+  test('不包含配置与凭据文件（凭据目录不在清单内）', () => {
+    mkdirSync(join(testDir!, 'skins'), { recursive: true })
+    const result = collectProductArtifactDirectories()
+
+    expect(result.some((dir) => dir.includes('channels') || dir.includes('auth-tokens') || dir.includes('sdk-config'))).toBe(false)
   })
 })

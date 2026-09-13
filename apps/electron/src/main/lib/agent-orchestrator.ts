@@ -158,7 +158,7 @@ import {
   MAX_CONTEXT_MESSAGES,
 } from './agent-prompt-utils'
 import { resolveSDKCliPath } from './agent-sdk-cli-path'
-import { collectAttachedDirectories } from './agent-directory-utils'
+import { collectAttachedDirectories, collectProductArtifactDirectories } from './agent-directory-utils'
 import { buildAgentRuntimeEnv } from './agent-runtime-env'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 import type { PiRetryUpdate } from './adapters/pi-retry-control'
@@ -1239,7 +1239,13 @@ export class AgentOrchestrator {
         sessionMeta,
         workspaceSlug,
       })
-      const previewAllowedRoots = workspaceSlug && agentCwd ? [agentCwd, ...attachedPreviewRoots] : attachedPreviewRoots
+      const previewAllowedRoots = [
+        // 产品自有产物目录（皮肤库/插件/Skill/附件）也是 Agent 产物的落地位置：
+        // 不加进来，create_skin 产出的皮肤预览、Agent 自己写的本地页面都过不了授权根。
+        ...(workspaceSlug && agentCwd ? [agentCwd] : []),
+        ...attachedPreviewRoots,
+        ...collectProductArtifactDirectories(),
+      ]
       const imageOutputAllowedRoots = workspaceSlug && agentCwd ? previewAllowedRoots : []
       const emitImageGenerationUpdate = (record: import('@profer/shared').AgentImageGenerationCard): void => {
         this.eventBus.emit(sessionId, {
@@ -1303,6 +1309,7 @@ export class AgentOrchestrator {
                   sessionMeta,
                   workspaceSlug,
                 }),
+                ...collectProductArtifactDirectories(),
               ].filter((root): root is string => typeof root === 'string' && root.length > 0),
             ),
           ],
@@ -1406,6 +1413,7 @@ ${enrichedMessage}`
               sessionMeta,
               workspaceSlug,
             }),
+            ...collectProductArtifactDirectories(),
           ].filter((root): root is string => typeof root === 'string' && root.length > 0),
         ),
       ]

@@ -584,7 +584,7 @@ const MarkdownLink = React.memo(function MarkdownLink({
               basePaths: ctxBasePaths,
             })
           }
-        } else if (sessionId && (/^[A-Za-z]:[\\/]/.test(href) || href.startsWith('/') || href.startsWith('.'))) {
+        } else if (sessionId && (/^[A-Za-z]:[\\/]/.test(href) || href.startsWith('/') || href.startsWith('~') || href.startsWith('.'))) {
           // 有来源会话时统一走受授权的预览入口；无来源会话 fail closed。
           openPreview(sessionId, {
             filePath: href,

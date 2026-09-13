@@ -30,6 +30,16 @@ describe('isAbsoluteFilePath（R2 统一实现）', () => {
     expect(isAbsoluteFilePath('/workspace/report.md')).toBe(true)
   })
 
+  test('用户主目录缩写 ~/ 路径（Agent 输出的皮肤目录等写法）', () => {
+    expect(isAbsoluteFilePath('~/.profer/skins/demo-skin/skin.css')).toBe(true)
+    expect(isAbsoluteFilePath('~\\.profer-dev\\skins\\demo-skin\\skin.css')).toBe(true)
+  })
+
+  test('单独的 ~ 与 ~other 写法不当作绝对路径', () => {
+    expect(isAbsoluteFilePath('~')).toBe(false)
+    expect(isAbsoluteFilePath('~other/report.md')).toBe(false)
+  })
+
   test('UNC 网络路径', () => {
     expect(isAbsoluteFilePath('\\\\server\\share\\file.md')).toBe(true)
   })

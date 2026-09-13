@@ -147,6 +147,7 @@ import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import { listBookmarks, addBookmark, removeBookmark, listHistory, clearHistory } from './lib/browser-start-page-store'
 import { getUnstagedChanges, getFileDiff, getUntrackedContent, revertFile, getDiffContents, listWorktrees, getWorktreeChanges, getMainRepoRoot, invalidateGitDiffCache } from './lib/git-diff-service'
 import { registerProferDirectoryPath, registerProferFilePath } from './lib/local-file-protocol'
+import { isReadOnlyPreviewPathAllowed } from './lib/preview-path-policy'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'
 import {
   listChannels,
@@ -707,32 +708,6 @@ function parseHttpUrl(rawUrl: string): string | null {
   }
 }
 
-/** 系统敏感目录——这些目录下的文件永远不允许被预览访问 */
-const SYSTEM_SENSITIVE_ROOTS: string[] = (() => {
-  if (process.platform === 'win32') {
-    const systemRoot = process.env.SystemRoot || 'C:\\Windows'
-    const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
-    const programData = process.env.ProgramData || 'C:\\ProgramData'
-    return [systemRoot, programFiles, programFilesX86, programData]
-  }
-  return ['/etc', '/sys', '/proc', '/dev', '/boot', '/root', '/usr/lib', '/usr/lib64', '/usr/sbin', '/sbin', '/bin', '/usr/bin']
-})()
-
-function isSystemSensitivePath(resolvedPath: string): boolean {
-  return SYSTEM_SENSITIVE_ROOTS.some((root) => {
-    try {
-      // realpathSync 确保 Windows 大小写一致（C:\Windows vs C:\WINDOWS）
-      const normalized = realpathSync(root)
-      return resolvedPath === normalized || resolvedPath.startsWith(normalized + sep)
-    } catch {
-      // 系统根目录不存在（不太可能），退回到 resolve
-      const fallback = resolve(root)
-      return resolvedPath === fallback || resolvedPath.startsWith(fallback + sep)
-    }
-  })
-}
-
 function isPathAllowed(filePath: string, options?: FileAccessOptions): boolean {
   // deny-by-default：渲染进程不可信，未提供访问选项时拒绝越权访问。
   // 调用方必须显式传递 sessionId 或 workspaceSlug 来声明授权上下文；即使有 sessionId，
@@ -756,6 +731,19 @@ function isPathAllowed(filePath: string, options?: FileAccessOptions): boolean {
   // 不再提供“有 sessionId 就放行工作区外任意普通文件”的 fallback。
   // sessionId 只用于解析会话/工作区的显式授权根；它本身不是任意本地路径的授权。
   return false
+}
+
+/**
+ * 只读预览判定：授权根内的路径优先放行；授权根之外的路径放宽到「真实存在且非系统/凭据敏感」。
+ *
+ * 会话里的文件链接来自 Agent 输出，路径常落在工作区之外（皮肤目录、/tmp 日志、~/Library 等），
+ * 这些路径用户已在对话里看见，点开预览不应再被授权根拦住。边界说明见 preview-path-policy.ts。
+ *
+ * 只用于只读预览类 handler；写操作与「用默认应用打开文件」必须继续使用 isPathAllowed。
+ */
+function isPreviewPathAllowed(filePath: string, options?: FileAccessOptions): boolean {
+  if (options && isPathAllowed(filePath, options)) return true
+  return isReadOnlyPreviewPathAllowed(filePath)
 }
 
 function normalizeFileAccessOptions(value?: FileAccessOptions | string[]): FileAccessOptions | undefined {
@@ -1554,13 +1542,16 @@ export function registerIpcHandlers(): void {
     async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<import('@profer/shared').DefaultAppInfo | null> => {
       if (!filePath || typeof filePath !== 'string') return null
       try {
+        const { expandHomeDirectory } = await import('./lib/file-preview-service')
         const options = normalizeFileAccessOptions(access)
-        if (options && !isPathAllowed(filePath, options)) {
-          console.warn('[IPC] shell:get-default-app-for-file 拒绝越界路径:', filePath)
+        // Agent 输出常用 `~/...` 写法；LaunchServices 查询需要真实路径
+        const targetPath = expandHomeDirectory(filePath)
+        if (options && !isPreviewPathAllowed(targetPath, options)) {
+          console.warn('[IPC] shell:get-default-app-for-file 拒绝系统/凭据敏感路径:', targetPath)
           return null
         }
-        console.log('[IPC] get-default-app-for-file 收到请求:', filePath)
-        const result = await getDefaultAppInfoForFile(filePath, options)
+        console.log('[IPC] get-default-app-for-file 收到请求:', targetPath)
+        const result = await getDefaultAppInfoForFile(targetPath, options)
         console.log('[IPC] get-default-app-for-file 返回:', result ? `name=${result.name} appPath=${result.appPath} iconLen=${result.iconDataUrl?.length}` : 'null')
         return result
       } catch (err) {
@@ -2978,7 +2969,7 @@ export function registerIpcHandlers(): void {
     const { resolveFilePath } = await import('./lib/file-preview-service')
     const options = normalizeFileAccessOptions(access)
     const resolved = resolveFilePath(filePath, getAllowedCandidateBasePaths(options), { skipGlobalSearch: true })
-    if (!resolved || !isPathAllowed(resolved, options) || extname(resolved).toLowerCase() !== '.pptx') return null
+    if (!resolved || !isPreviewPathAllowed(resolved, options) || extname(resolved).toLowerCase() !== '.pptx') return null
     return `sha256:${createHash('sha256').update(readFileSync(resolved)).digest('hex')}`
   })
   ipcMain.handle(AGENT_IPC_CHANNELS.FILE_PREVIEW_REPORT, async (event, report: import('@profer/shared').AgentFilePreviewReport): Promise<boolean> => {
@@ -4437,17 +4428,25 @@ export function registerIpcHandlers(): void {
   // 列出目录内容（浅层，安全校验）
   ipcMain.handle(
     AGENT_IPC_CHANNELS.LIST_DIRECTORY,
-    async (_, dirPath: string): Promise<FileEntry[]> => {
+    async (_, dirPath: string, access?: FileAccessOptions | string[]): Promise<FileEntry[]> => {
       const { existsSync, readdirSync, statSync } = await import('node:fs')
       const { resolve } = await import('node:path')
+      const { expandHomeDirectory } = await import('./lib/file-preview-service')
 
-      // 安全校验：路径必须在 agent-workspaces 目录下
-      const safePath = resolve(dirPath)
-      assertInsideAgentWorkspaces(safePath)
+      const options = normalizeFileAccessOptions(access)
+      const safePath = resolve(expandHomeDirectory(String(dirPath ?? '')))
 
       // 目录可能已被删除（如删除 Agent 会话后面板仍持有旧路径），优雅返回空列表
       if (!existsSync(safePath)) {
         return []
+      }
+      // 列出目录内容属只读预览：授权根内直接放行，根外按只读策略（系统/凭据敏感位置仍拒绝）。
+      // 预览面板的目录视图依赖它列工作区外的目录。
+      if (!isPreviewPathAllowed(safePath, options)) {
+        throw new Error('路径不在允许预览的范围内')
+      }
+      if (!statSync(safePath).isDirectory()) {
+        throw new Error('路径不是目录')
       }
 
       const entries: FileEntry[] = []
@@ -4700,8 +4699,8 @@ export function registerIpcHandlers(): void {
       const options = normalizeFileAccessOptions(access)
       const allowedBasePaths = getAllowedCandidateBasePaths(options)
       const resolved = resolveFilePath(filePath, allowedBasePaths)
-      if (!resolved || !isPathAllowed(resolved, options)) {
-        console.warn('[IPC] file:resolve-and-read 拒绝越界路径:', resolved ?? filePath)
+      if (!resolved || !isPreviewPathAllowed(resolved, options)) {
+        console.warn('[IPC] file:resolve-and-read 拒绝系统/凭据敏感路径:', resolved ?? filePath)
         return null
       }
       const result = resolveAndReadFile(resolved)
@@ -4784,11 +4783,34 @@ export function registerIpcHandlers(): void {
       const options = normalizeFileAccessOptions(access)
       // 预检模式（preflight=true）下跳过全局递归搜索，只做快速查找，避免批量预检阻塞主进程
       const result = resolveFilePath(filePath, getAllowedCandidateBasePaths(options), { skipGlobalSearch: options?.preflight })
-      if (result && !isPathAllowed(result, options)) {
-        console.warn('[IPC] file:resolve-path 拒绝越界路径:', result)
+      if (result && !isPreviewPathAllowed(result, options)) {
+        console.warn('[IPC] file:resolve-path 拒绝系统/凭据敏感路径:', result)
         return null
       }
       return result ? { url: registerProferFilePath(result), resolvedPath: result } : null
+    }
+  )
+
+  // 判断一个路径是文件、目录、不存在，还是存在但不可预览。
+  // 预览面板用它区分「目录链接」与「真不存在」，也给拒绝场景一个准确提示。
+  ipcMain.handle(
+    'file:describe-path',
+    async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<{ kind: 'file' | 'directory' | 'missing' | 'denied' }> => {
+      const { existsSync, statSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+      const { expandHomeDirectory } = await import('./lib/file-preview-service')
+      const options = normalizeFileAccessOptions(access)
+      const safePath = resolve(expandHomeDirectory(String(filePath ?? '')))
+      if (!filePath || !existsSync(safePath)) return { kind: 'missing' }
+      if (!isPreviewPathAllowed(safePath, options)) {
+        console.warn('[IPC] file:describe-path 拒绝系统/凭据敏感路径:', safePath)
+        return { kind: 'denied' }
+      }
+      try {
+        return { kind: statSync(safePath).isDirectory() ? 'directory' : 'file' }
+      } catch {
+        return { kind: 'missing' }
+      }
     }
   )
 
@@ -4800,8 +4822,8 @@ export function registerIpcHandlers(): void {
       const { resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       const result = resolveFilePath(filePath, getAllowedCandidateBasePaths(options))
-      if (!result || !isPathAllowed(result, options)) {
-        console.warn('[IPC] file:resolve-html-preview-path 拒绝越界路径:', result ?? filePath)
+      if (!result || !isPreviewPathAllowed(result, options)) {
+        console.warn('[IPC] file:resolve-html-preview-path 拒绝系统/凭据敏感路径:', result ?? filePath)
         return null
       }
       try {
@@ -4822,8 +4844,8 @@ export function registerIpcHandlers(): void {
       const options = normalizeFileAccessOptions(access)
       const allowedBasePaths = getAllowedCandidateBasePaths(options)
       const resolved = resolveFilePath(filePath, allowedBasePaths)
-      if (!resolved || !isPathAllowed(resolved, options)) {
-        console.warn('[IPC] file:prepare-pdf-preview 拒绝越界路径:', resolved ?? filePath)
+      if (!resolved || !isPreviewPathAllowed(resolved, options)) {
+        console.warn('[IPC] file:prepare-pdf-preview 拒绝系统/凭据敏感路径:', resolved ?? filePath)
         return null
       }
       const result = await preparePdfPreview(resolved)
@@ -4839,8 +4861,8 @@ export function registerIpcHandlers(): void {
       const options = normalizeFileAccessOptions(access)
       const allowedBasePaths = getAllowedCandidateBasePaths(options)
       const resolved = resolveFilePath(filePath, allowedBasePaths)
-      if (!resolved || !isPathAllowed(resolved, options)) {
-        console.warn('[IPC] file:docx-to-html 拒绝越界路径:', resolved ?? filePath)
+      if (!resolved || !isPreviewPathAllowed(resolved, options)) {
+        console.warn('[IPC] file:docx-to-html 拒绝系统/凭据敏感路径:', resolved ?? filePath)
         return null
       }
       const result = await convertDocxToHtml(resolved)
@@ -4856,34 +4878,32 @@ export function registerIpcHandlers(): void {
       const options = normalizeFileAccessOptions(access)
       const allowedBasePaths = getAllowedCandidateBasePaths(options)
       const resolved = resolveFilePath(filePath, allowedBasePaths)
-      if (!resolved || !isPathAllowed(resolved, options)) {
-        console.warn('[IPC] file:office-to-html 拒绝越界路径:', resolved ?? filePath)
+      if (!resolved || !isPreviewPathAllowed(resolved, options)) {
+        console.warn('[IPC] file:office-to-html 拒绝系统/凭据敏感路径:', resolved ?? filePath)
         return null
       }
       return convertOfficeToHtml(resolved)
     }
   )
 
-  // 注册文件路径到 profer-file:// 协议
-  // 路径必须在基础授权根目录内（工作区 + 用户常用目录）。
-  // 兼容旧调用方：未传 access 时回退到基础授权根校验。
+  // 注册文件路径到 profer-file:// 协议（只读预览）
+  // 授权根内直接放行；根外按只读预览策略校验（系统/凭据敏感位置仍拒绝）。
   ipcMain.handle(
     'file:register-preview-path',
     async (_, filePath: string, access?: FileAccessOptions | string[]): Promise<string | null> => {
       const { statSync } = await import('node:fs')
       const { registerProferFilePath } = await import('./lib/local-file-protocol')
+      const { expandHomeDirectory } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       try {
-        if (!statSync(filePath).isFile()) return null
-        // 安全校验：有 options 走完整 isPathAllowed；无 options 回退到基础授权根
-        const allowed = options
-          ? isPathAllowed(filePath, options)
-          : getAuthorizedRoots().some((root) => isUnderRoot(realpathOrResolve(filePath), root))
-        if (!allowed) {
-          console.warn('[IPC] file:register-preview-path 拒绝越界路径:', filePath)
+        // Agent 输出常用 `~/...` 写法；statSync / 协议注册都需要真实路径
+        const targetPath = expandHomeDirectory(filePath)
+        if (!statSync(targetPath).isFile()) return null
+        if (!isPreviewPathAllowed(targetPath, options)) {
+          console.warn('[IPC] file:register-preview-path 拒绝系统/凭据敏感路径:', targetPath)
           return null
         }
-        return registerProferFilePath(filePath)
+        return registerProferFilePath(targetPath)
       } catch { return null }
     }
   )
@@ -4896,7 +4916,7 @@ export function registerIpcHandlers(): void {
       const { resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       const resolved = resolveFilePath(filePath, getAllowedCandidateBasePaths(options))
-      if (!resolved || !isPathAllowed(resolved, options)) return null
+      if (!resolved || !isPreviewPathAllowed(resolved, options)) return null
       const st = statSync(resolved)
       if (maxSize && st.size > maxSize) return null
       return readFileSync(resolved).toString('base64')
@@ -5057,8 +5077,8 @@ export function registerIpcHandlers(): void {
       const { resolve } = await import('node:path')
       const safePath = resolve(filePath)
       const options = normalizeFileAccessOptions(access)
-      if (!isPathAllowed(safePath, options)) {
-        console.warn('[IPC] show-attached-in-folder 拒绝越界路径:', safePath)
+      if (!isPreviewPathAllowed(safePath, options)) {
+        console.warn('[IPC] show-attached-in-folder 拒绝系统/凭据敏感路径:', safePath)
         return
       }
       shell.showItemInFolder(safePath)

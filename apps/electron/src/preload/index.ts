@@ -1033,7 +1033,7 @@ export interface ElectronAPI {
   getAgentSessionPath: (workspaceId: string, sessionId: string) => Promise<string | null>
 
   /** 列出目录内容 */
-  listDirectory: (dirPath: string) => Promise<FileEntry[]>
+  listDirectory: (dirPath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<FileEntry[]>
 
   /** 删除文件/目录 */
   deleteFile: (filePath: string) => Promise<void>
@@ -1070,6 +1070,9 @@ export interface ElectronAPI {
 
   /** 解析文件路径并读取内容（供内联预览使用） */
   resolveAndReadFile: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<{ resolvedPath: string; content: string } | null>
+
+  /** 判断路径类型（预览面板区分目录链接、丢失路径与不可预览路径） */
+  describePath: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<{ kind: 'file' | 'directory' | 'missing' | 'denied' }>
 
   /** 写入文本文件（供 Markdown 内联编辑使用） */
   writeTextFile: (filePath: string, content: string, access?: import('@profer/shared').FileAccessOptions) => Promise<boolean>
@@ -2821,8 +2824,8 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SESSION_PATH, workspaceId, sessionId)
   },
 
-  listDirectory: (dirPath: string) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_DIRECTORY, dirPath)
+  listDirectory: (dirPath: string, access?: import('@profer/shared').FileAccessOptions) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_DIRECTORY, dirPath, access)
   },
 
   deleteFile: (filePath: string) => {
@@ -2874,6 +2877,10 @@ const electronAPI: ElectronAPI = {
 
   resolveAndReadFile: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => {
     return ipcRenderer.invoke('file:resolve-and-read', filePath, access) as Promise<{ resolvedPath: string; content: string } | null>
+  },
+
+  describePath: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => {
+    return ipcRenderer.invoke('file:describe-path', filePath, access) as Promise<{ kind: 'file' | 'directory' | 'missing' | 'denied' }>
   },
 
   writeTextFile: (filePath: string, content: string, access?: import('@profer/shared').FileAccessOptions) => {
