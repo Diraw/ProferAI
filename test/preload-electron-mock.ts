@@ -115,7 +115,7 @@ mock.module('electron', () => ({
     readText: () => '',
     writeText: () => undefined,
   },
-  dialog: {},
+  dialog: { showMessageBox: async () => ({ response: 0 }), showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
   ipcMain: {
     handle: () => undefined,
     on: () => undefined,
