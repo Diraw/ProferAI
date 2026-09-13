@@ -1,8 +1,8 @@
 /**
  * 自动更新核心模块
  *
- * 检测新版本 → 自动后台下载 → 用户确认后重启安装。
- * 仅在打包后的生产环境中工作。
+ * 打包版：检测新版本 → 自动后台下载 → 用户确认后重启安装。
+ * 开发版：只检查最新 Release，并引导手动下载，不尝试覆盖源码目录。
  */
 
 import { autoUpdater } from 'electron-updater'
@@ -12,9 +12,13 @@ import { UPDATER_IPC_CHANNELS } from './updater-types'
 import { runWithUpdateSourceFallback } from './update-fallback'
 import { getUpdateSources, type UpdateSource } from './update-sources'
 import { canReplaceUpdateStatus } from './update-state'
+import { getLatestRelease } from '../github-release-service'
+
+const GITHUB_RELEASES_URL = 'https://github.com/Yuan-lai-ru-ci/ProferAI/releases'
 
 /** 当前更新状态 */
-let currentStatus: UpdateStatus = { status: app.isPackaged ? 'idle' : 'disabled' }
+// 开发版也支持检查最新 Release；只有“自动下载安装”能力在开发版不可用。
+let currentStatus: UpdateStatus = { status: 'idle' }
 
 /** 主窗口引用 */
 let win: BrowserWindow | null = null
@@ -61,6 +65,36 @@ async function checkSource(source: UpdateSource): Promise<boolean> {
   return true
 }
 
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.replace(/^v/, '').split('.').map(Number)
+  const rightParts = right.replace(/^v/, '').split('.').map(Number)
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+async function checkDevelopmentUpdate(): Promise<void> {
+  setStatus({ status: 'checking' })
+  const release = await getLatestRelease()
+  if (!release || release.draft || release.prerelease) {
+    setStatus({ status: 'not-available' })
+    return
+  }
+  const version = release.tag_name.replace(/^v/, '')
+  if (compareVersions(version, app.getVersion()) <= 0) {
+    setStatus({ status: 'not-available' })
+    return
+  }
+  setStatus({
+    status: 'available',
+    version,
+    releaseNotes: release.body || undefined,
+    manualUrl: release.html_url || GITHUB_RELEASES_URL,
+  })
+}
+
 async function runUpdateCheck(): Promise<void> {
   setStatus({ status: 'checking' })
 
@@ -82,11 +116,19 @@ async function runUpdateCheck(): Promise<void> {
 
 /** 手动触发检查更新 */
 export async function checkForUpdates(): Promise<void> {
-  // 开发模式不检查更新（electron-updater 的 feed URL 仅在打包后嵌入）
+  // 开发版不能把安装包覆盖到源码目录，但可以检查最新 Release，方便开发期间及时获知
+  // 新版本；真正安装仍由用户打开发布页下载正式安装包完成。
   if (!app.isPackaged) {
-    console.log('[更新] 开发模式，跳过更新检查')
-    setStatus({ status: 'disabled' })
-    return
+    console.log('[更新] 开发模式，检查 GitHub 最新 Release')
+    if (inFlightUpdateCheck) return inFlightUpdateCheck
+    inFlightUpdateCheck = checkDevelopmentUpdate()
+      .catch((error) => {
+        const message = errorMessage(error)
+        console.error('[更新] 开发版检查更新失败:', message)
+        setStatus({ status: 'error', error: message })
+      })
+      .finally(() => { inFlightUpdateCheck = null })
+    return inFlightUpdateCheck
   }
 
   // 已在下载中或已下载完成，不重复检查

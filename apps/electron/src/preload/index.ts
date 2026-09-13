@@ -1171,6 +1171,7 @@ export interface ElectronAPI {
       status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'disabled' | 'error'
       version?: string
       releaseNotes?: string
+      manualUrl?: string
       progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number }
       error?: string
     }>
@@ -1178,6 +1179,7 @@ export interface ElectronAPI {
       status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'disabled' | 'error'
       version?: string
       releaseNotes?: string
+      manualUrl?: string
       progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number }
       error?: string
     }) => void) => () => void

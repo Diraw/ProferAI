@@ -49,6 +49,7 @@ export function UpdateDialog(): React.ReactElement | null {
   React.useEffect(() => {
     if (
       updateStatus.status === 'available' &&
+      !updateStatus.manualUrl &&
       updateStatus.version &&
       shownVersionRef.current !== updateStatus.version
     ) {

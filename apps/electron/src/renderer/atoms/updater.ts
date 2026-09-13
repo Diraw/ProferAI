@@ -20,6 +20,8 @@ export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'disabled' | 'error'
   version?: string
   releaseNotes?: string
+  /** 开发版只能手动下载正式安装包时使用。 */
+  manualUrl?: string
   progress?: DownloadProgress
   error?: string
 }

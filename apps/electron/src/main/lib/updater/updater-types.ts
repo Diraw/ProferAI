@@ -9,7 +9,7 @@ export type UpdateStatus =
   | { status: 'idle' }
   | { status: 'disabled' }
   | { status: 'checking' }
-  | { status: 'available'; version: string; releaseNotes?: string }
+  | { status: 'available'; version: string; releaseNotes?: string; manualUrl?: string }
   | { status: 'downloading'; version: string; progress: DownloadProgress }
   | { status: 'downloaded'; version: string }
   | { status: 'not-available' }
