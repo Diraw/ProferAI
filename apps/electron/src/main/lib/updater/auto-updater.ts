@@ -78,7 +78,13 @@ function compareVersions(left: string, right: string): number {
 async function checkDevelopmentUpdate(): Promise<void> {
   setStatus({ status: 'checking' })
   const release = await getLatestRelease()
-  if (!release || release.draft || release.prerelease) {
+  // getLatestRelease 只在请求失败时返回 null。必须与「确实没有新版本」区分，
+  // 否则断网 / 代理不通 / 触发 GitHub Rate limit 时开发者会看到“已是最新版本”的假象。
+  if (!release) {
+    setStatus({ status: 'error', error: '无法获取最新版本信息，请检查网络或代理设置' })
+    return
+  }
+  if (release.draft || release.prerelease) {
     setStatus({ status: 'not-available' })
     return
   }
@@ -170,19 +176,11 @@ export function cleanupUpdater(): void {
 }
 
 /**
- * 初始化自动更新
+ * 装配 electron-updater（仅在打包版可用：feed URL 在打包时嵌入）。
  *
- * @param mainWindow - 主窗口实例，用于推送更新状态
+ * 开发版不装配任何会尝试安装的路径，调度与状态推送由 initAutoUpdater 统一负责。
  */
-export function initAutoUpdater(mainWindow: BrowserWindow): void {
-  win = mainWindow
-
-  // 开发模式不初始化更新检查（feed URL 仅在打包后嵌入）
-  if (!app.isPackaged) {
-    console.log('[更新] 开发模式，自动更新模块未启用')
-    return
-  }
-
+function setupPackagedAutoUpdater(): void {
   // 应用代理设置 — electron-updater 底层用 Electron net 模块，遵循 HTTPS_PROXY 环境变量
   try {
     const { getEffectiveProxyUrl } = require('../proxy-settings-service') as {
@@ -256,6 +254,24 @@ export function initAutoUpdater(mainWindow: BrowserWindow): void {
     // 当前检查流程会捕获此错误并切换备用源。只有脱离该流程的异常才直接展示。
     if (!inFlightUpdateCheck) setStatus({ status: 'error', error: err.message })
   })
+}
+
+/**
+ * 初始化自动更新
+ *
+ * @param mainWindow - 主窗口实例，用于推送更新状态
+ */
+export function initAutoUpdater(mainWindow: BrowserWindow): void {
+  win = mainWindow
+
+  // 开发版不能把安装包覆盖到源码目录，feed URL 也只在打包后嵌入，因此不装配
+  // electron-updater；但下面的调度照旧执行，走 checkDevelopmentUpdate 检查最新
+  // Release 并引导手动下载（否则开发期间完全感知不到新版本）。
+  if (app.isPackaged) {
+    setupPackagedAutoUpdater()
+  } else {
+    console.log('[更新] 开发模式：跳过自动安装装配，仅检查最新 Release')
+  }
 
   // 启动后延迟 10 秒首次检查
   setTimeout(() => {
@@ -278,5 +294,9 @@ export function initAutoUpdater(mainWindow: BrowserWindow): void {
     win = null
   })
 
-  console.log('[更新] 自动更新模块已初始化（国内主源、GitHub 备用，自动下载）')
+  console.log(
+    app.isPackaged
+      ? '[更新] 自动更新模块已初始化（国内主源、GitHub 备用，自动下载）'
+      : '[更新] 开发版更新检查已初始化（仅检查最新 Release，提示手动下载）',
+  )
 }
