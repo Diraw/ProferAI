@@ -1,7 +1,38 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, powerMonitor, protocol, screen, shell } from 'electron'
 import { join } from 'path'
+import { createConnection } from 'net'
 import { existsSync, cpSync, mkdirSync, readdirSync } from 'fs'
 import { getDevInstanceId, resolveDevAppName, resolveDevUserDataPath } from './lib/dev-instance'
+import { appendDevDiagnostic } from './lib/dev-diagnostics-log'
+
+/**
+ * dev 模式下等待 Vite dev server 就绪的轮询参数。
+ *
+ * 冷启动实测耗时极不稳定（同机同仓库观测到 416ms / 510ms / 645ms / 1238ms / 5102ms / 9240ms），
+ * 而主窗口的 loadURL 固定发生在启动约第 5s。若早于 dev server 监听端口导航，
+ * Chromium 会直接返回 ERR_CONNECTION_REFUSED 且**不会自动重试**：页面停在加载态，
+ * renderer 永远不会执行 notifyRendererReady()（它要等 getSettings() 成功），
+ * 启动页因此一直不撤——表现为「初始界面加载很久」或彻底卡死。
+ */
+const DEV_SERVER_READY_TIMEOUT_MS = 30_000
+const DEV_SERVER_READY_POLL_MS = 200
+const DEV_SERVER_PROBE_TIMEOUT_MS = 1_000
+const DEV_SERVER_LOAD_MAX_RETRIES = 5
+
+/** 探测 TCP 端口是否已可连接（不经过 HTTP，不触碰 dev server 的变换流程）。 */
+function probeDevServerPort(hostname: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: hostname, port })
+    const finish = (ok: boolean): void => {
+      socket.destroy()
+      resolve(ok)
+    }
+    socket.setTimeout(DEV_SERVER_PROBE_TIMEOUT_MS)
+    socket.once('connect', () => finish(true))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', () => finish(false))
+  })
+}
 
 // userData 和单实例锁必须在任何会读取 userData 的模块加载前隔离。
 // PROFER_DEV_INSTANCE / PROFER_USER_DATA_DIR 仅对开发版生效，正式版忽略这些参数。
@@ -291,6 +322,15 @@ async function recoverEnabledDingTalkBots(): Promise<void> {
 }
 
 let mainWindow: BrowserWindow | null = null
+
+/** 诊断 payload 解析失败时保留原始字符串，避免整条记录因解析异常而丢失。 */
+function parseDiagnosticPayload(raw: string): unknown {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
 let startupSplashWindow: BrowserWindow | null = null
 
 const STARTUP_SPLASH_MIN_MS = 1200
@@ -472,13 +512,58 @@ function createWindow(): void {
   // 主界面默认放大到 110%；使用 webContents 缩放，避免 CSS zoom 破坏有限布局区域。
   mainWindow.webContents.setZoomFactor(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR)
   // 开发版将 renderer Console 直接镜像到 supervisor 日志，白屏/模块加载失败可无需手动打开 DevTools 即定位。
+  // 对话 resize 调试日志额外落盘（异步写入）。终端 scrollback（例如 Ghostty）不可由自动化稳定回放，
+  // 只持久化带专用前缀的结构化诊断，避免把正常 renderer 日志无限写入用户目录。
   if (!app.isPackaged) {
+    const diagnosticsDir = join(app.getPath('userData'), 'diagnostics')
+
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
       const severity = ['verbose', 'info', 'warning', 'error'][level] ?? String(level)
       console.log(`[renderer:${severity}] ${sourceId}:${line} ${message}`)
+
+      if (message.startsWith('[CONVERSATION-SCROLL-DEBUG] ') && process.env.PROFER_DEV_DIAGNOSTICS === '1') {
+        appendDevDiagnostic(diagnosticsDir, 'conversation-scroll-debug.jsonl', {
+          timestamp: new Date().toISOString(),
+          severity,
+          sourceId,
+          line,
+          payload: parseDiagnosticPayload(message.slice('[CONVERSATION-SCROLL-DEBUG] '.length)),
+        })
+      }
+    })
+
+    // 原生窗口几何：与 renderer 侧 window.innerHeight 按时间戳对照，用于定位
+    // “Electron 窗口边界与界面边界不同步”。必须在拖拽期间也能写入，因此同样异步且不做同步 I/O。
+    // 默认关闭：需要时设 PROFER_DEV_DIAGNOSTICS=1 启动 dev（与 renderer 侧观测一起使用）。
+    const logWindowGeometry = (): void => {
+      if (process.env.PROFER_DEV_DIAGNOSTICS !== '1') return
+      if (mainWindow === null || mainWindow.isDestroyed()) return
+      appendDevDiagnostic(diagnosticsDir, 'window-geometry-debug.jsonl', {
+        timestamp: new Date().toISOString(),
+        epoch: Date.now(),
+        bounds: mainWindow.getBounds(),
+        contentBounds: mainWindow.getContentBounds(),
+        zoomFactor: mainWindow.webContents.getZoomFactor(),
+      })
+    }
+    mainWindow.on('resize', logWindowGeometry)
+    mainWindow.on('resized', logWindowGeometry)
+    let devServerLoadRetries = 0
+    mainWindow.webContents.on('did-finish-load', () => {
+      devServerLoadRetries = 0
     })
     mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       console.error(`[renderer:did-fail-load] mainFrame=${isMainFrame} code=${errorCode} ${errorDescription}: ${validatedURL}`)
+      // 兜底重试：dev server 端口抖动 / 刚重启时（-102 CONNECTION_REFUSED、-105 NAME_NOT_RESOLVED），
+      // 有限次退避重试，避免主窗口永久停在加载态。仅限开发模式（外层已是 !app.isPackaged）。
+      const shouldRetry = isMainFrame && (errorCode === -102 || errorCode === -105) && devServerLoadRetries < DEV_SERVER_LOAD_MAX_RETRIES
+      if (!shouldRetry) return
+      devServerLoadRetries += 1
+      const delay = 500 * devServerLoadRetries
+      console.warn(`[renderer] dev server 未就绪，${delay}ms 后重试第 ${devServerLoadRetries}/${DEV_SERVER_LOAD_MAX_RETRIES} 次`)
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) loadRenderer()
+      }, delay)
     })
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
       console.error(`[renderer:process-gone] reason=${details.reason} exitCode=${details.exitCode}`)
@@ -576,9 +661,38 @@ function createWindow(): void {
     void startupSplashWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupSplashHtml(resolveStartupSplashDark()))}`)
   }
 
+  /**
+   * dev 下先等 dev server 端口就绪，再导航；避免 loadURL 早于 Vite 监听导致 ERR_CONNECTION_REFUSED。
+   * 端口已就绪（热刷新场景）时探测一次即返回，无额外延迟。
+   */
+  const waitForDevServerReady = async (): Promise<void> => {
+    if (!rendererUrl) return
+    let target: URL
+    try {
+      target = new URL(rendererUrl)
+    } catch {
+      return
+    }
+    const port = Number(target.port)
+    if (!port) return
+    const deadline = Date.now() + DEV_SERVER_READY_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      if (await probeDevServerPort(target.hostname, port)) return
+      await new Promise((resolve) => setTimeout(resolve, DEV_SERVER_READY_POLL_MS))
+    }
+    console.warn(`[renderer] dev server 在 ${DEV_SERVER_READY_TIMEOUT_MS}ms 内未就绪，仍尝试加载: ${rendererUrl}`)
+  }
+
   const loadRenderer = (): void => {
-    if (rendererUrl) void mainWindow?.loadURL(rendererUrl)
-    else void mainWindow?.loadFile(rendererFile)
+    if (!rendererUrl) {
+      void mainWindow?.loadFile(rendererFile)
+      return
+    }
+    void (async () => {
+      await waitForDevServerReady()
+      if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.loadURL(rendererUrl)
+    })()
   }
 
   const replayStartupSplash = (): void => {
