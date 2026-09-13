@@ -1632,6 +1632,12 @@
   border-color: hsl(var(--surface-border) / 0.65);
 }
 
+/* 对话滚动由 use-stick-to-bottom 唯一负责；浏览器原生 scroll anchoring
+ * 会与它在内容 reflow 时抢夺 scrollTop，导致消息列表上下抖动。 */
+.overflow-anchor-none {
+  overflow-anchor: none;
+}
+
 /* 隐藏滚动条但保留滚动功能 */
 .scrollbar-none,
 .scrollbar-none > * {

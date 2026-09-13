@@ -227,7 +227,9 @@ function StreamScrollFollow({ sessionId, streaming }: { sessionId: string; strea
     prevPendingCountRef.current = currentPendingCount
 
     if (shouldScroll) {
-      scrollToBottom({ animation: 'smooth', wait: true })
+      // 新一轮开始时直接定位到底部；随后内容高度会持续增长，smooth 会与
+      // stick-to-bottom 的 resize observer 叠加产生追赶抖动。
+      scrollToBottom({ animation: 'instant', wait: true })
     }
   }, [streaming, pendingAskUsers, sessionId, scrollToBottom])
 
@@ -582,38 +584,6 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   }, [smoothContent])
   const hasSmoothTextContent = smoothContentBlocks.some((block) => block.type === 'text')
 
-  /**
-   * 流式完成过渡：streaming 结束到持久化消息加载完成之间，
-   * 强制 resize="instant" 避免中间高度变化触发平滑滚动动画。
-   *
-   * 使用 render-phase 计算避免 useEffect 延迟一帧的问题：
-   * - streaming 变 false 的第一帧就能立即切到 instant，防止闪动
-   * - 后续通过 ref+timeout 延迟 150ms 才允许切回 smooth
-   */
-  const [transitioningCooldown, setTransitioningCooldown] = React.useState(false)
-  const wasStreamingRef = React.useRef(streaming)
-
-  // render-phase 判断：是否处于需要 instant resize 的过渡期
-  // liveMessages 非空说明持久化消息还没加载完（加载完后会清空 liveMessages）
-  const needsInstant = !streaming && (!!streamingContent || !!smoothContent || (liveMessages != null && liveMessages.length > 0))
-
-  React.useEffect(() => {
-    // 刚从 streaming → not-streaming：启动 cooldown
-    if (wasStreamingRef.current && !streaming) {
-      setTransitioningCooldown(true)
-    }
-    wasStreamingRef.current = streaming
-  }, [streaming])
-
-  React.useEffect(() => {
-    if (needsInstant) return
-    // 过渡完成后延迟 150ms 才关闭 cooldown，给 StickToBottom 时间稳定
-    const timer = setTimeout(() => setTransitioningCooldown(false), 150)
-    return () => clearTimeout(timer)
-  }, [needsInstant])
-
-  const transitioning = needsInstant || transitioningCooldown
-
   // 合并持久化 + 实时 SDKMessage（供 ContentBlock 内查找工具结果）
   const allSDKMessages = React.useMemo(() => {
     const persisted = persistedSDKMessages ?? []
@@ -693,6 +663,12 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     () => mergeAgentImageGenerationTimeline(visibleGroups, visibleImageGenerations, getGroupId),
     [visibleGroups, visibleImageGenerations],
   )
+  // 传给每个消息和文件访问上下文的候选路径保持稳定，避免窗口/流式状态变化时
+  // 因新建数组而让所有消息失去 memo 命中。
+  const messageBasePaths = React.useMemo(
+    () => [...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])],
+    [sessionPath, attachedDirs],
+  )
   const hasEarlierGroups = !pagedMode && resolvedVisibleGroupStart > 0
   const loadEarlierGroups = React.useCallback(() => {
     // 全量老路径的本地 slice 前移一页；分页模式由 onLoadEarlierHistory 服务端拉取接管。
@@ -771,9 +747,11 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
 
   return (
     <FileAccessSessionProvider sessionId={sessionId}>
-    <BasePathsProvider basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}>
+    <BasePathsProvider basePaths={messageBasePaths}>
     <div ref={historySelectionRootRef} className="relative flex min-h-0 flex-1 flex-col">
-    <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
+    {/* 消息内容的结构高度变化（窗口、输入区、横幅、换行）必须立即收敛；
+        StreamScrollFollow 仍会在新一轮开始时显式使用 smooth，二者职责分离。 */}
+    <Conversation resize="instant" className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={sessionId} ready={ready} />
       <TopHistoryLoader
         onLoadEarlierHistory={onLoadEarlierHistory}
@@ -834,11 +812,12 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
               return (
                 <MessageGroupRenderer
                   key={getGroupId(group)}
+                  sessionId={sessionId}
                   group={group}
                   allMessages={allSDKMessages}
                   historicalTaskSubjects={historicalTaskSubjects}
                   basePath={sessionPath || undefined}
-                  basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}
+                  basePaths={messageBasePaths}
                   onFork={shouldDisableActions ? undefined : onFork}
                   onRewind={shouldDisableActions ? undefined : onRewind}
                   onRetry={shouldDisableActions ? undefined : onRetry}
@@ -882,7 +861,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                             block={block}
                             allMessages={allSDKMessages}
                             basePath={sessionPath || undefined}
-                            basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}
+                            basePaths={messageBasePaths}
                             index={index}
                             dimmed={hasSmoothTextContent && block.type !== 'text'}
                             isStreaming={streaming}
