@@ -73,6 +73,24 @@ export interface BrowserTabSummary {
   openedByAgent: boolean
 }
 
+/**
+ * BrowserListTabs 的专用返回结构。
+ *
+ * 与 BrowserViewState 的关键区别：它只描述「已经存在的浏览器会话与标签」，
+ * 不代表浏览器可以被渲染。会话不存在时 exists=false、tabs 为空，
+ * 读取方绝不能据此创建 session / tab 或向 renderer 广播状态，
+ * 否则一次只读查询会凭空打开浏览器面板。
+ */
+export interface BrowserTabListResult {
+  sessionId: string
+  /** 该会话是否已经存在真实浏览器会话；false 时调用方不得创建。 */
+  exists: boolean
+  activeTabId: string | null
+  /** Agent 的默认工作标签；无会话或已关闭时为 null。 */
+  agentTabId: string | null
+  tabs: BrowserTabSummary[]
+}
+
 export interface BrowserViewState {
   sessionId: string
   /** 非用户触发时，面板可显示来源并提供停止当前 Agent run 的控制。 */

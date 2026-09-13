@@ -5,9 +5,19 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import type { SkinInfo, SkinManagerResult } from '../../types'
 import { MAX_SKIN_CSS_BYTES, auditSkinCss, getBuiltinSkinIds, getUserSkinDir, invalidateSkinCache, parseSkinManifestText, scanSkins } from './skin-service'
+import { isWindowsReservedName } from './skin-name-guards'
 
 const MAX_PACKAGE_BYTES = 5 * 1024 * 1024
-const MAX_ASSET_BYTES = 2 * 1024 * 1024
+// Agent 生图常见的 1536×1024 PNG 通常超过 2 MiB；4 MiB 仍低于完整皮肤包 5 MiB 上限，
+// 避免合法壁纸在导入阶段被静默拒绝，同时保留单文件资源上限。
+const MAX_ASSET_BYTES = 4 * 1024 * 1024
+/**
+ * 预览图独立上限。
+ *
+ * 预览图位于包根目录（不是 assets/），之前只受整包 5 MB 约束：它会转成 base64 data URL
+ * 常驻渲染进程内存（体积 ×≈1.33，缓存上限 32 条），必须单独收紧。
+ */
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024
 /** ZIP 文件本体大小上限：防止超大压缩包被 AdmZip 全量读入内存 */
 const MAX_ZIP_FILE_BYTES = 20 * 1024 * 1024
 /** ZIP 解压前预检的 uncompressed 总量上限（略高于包体限制，防止 zip 轰炸先撑爆磁盘再被 dirSize 拦截） */
@@ -56,7 +66,10 @@ function validateAssets(packageRoot: string): SkinManagerResult | null {
     if (!entry.isFile() || !ASSET_RE.test(`assets/${entry.name}`)) {
       return fail('assets 仅允许小写扩展名的 png/webp/svg/jpg/jpeg 图片文件（文件名与 assets/ 前缀不得使用大写）')
     }
-    if (statSync(join(assetsDir, entry.name)).size > MAX_ASSET_BYTES) return fail('单张皮肤图片不能超过 2 MB')
+    if (isWindowsReservedName(entry.name.replace(/\.[^.]+$/, ''))) {
+      return fail(`资源文件名「${entry.name}」使用了 Windows 保留设备名，在 Windows 上无法创建该文件，请改名`)
+    }
+    if (statSync(join(assetsDir, entry.name)).size > MAX_ASSET_BYTES) return fail('单张皮肤图片不能超过 4 MB')
   }
   return null
 }
@@ -95,10 +108,14 @@ function validatePackage(root: string): { id: string; info: SkinInfo } | SkinMan
   const manifest = parsed.manifest
   const id = manifest.id
   if (typeof id !== 'string' || !ID_RE.test(id)) return fail('皮肤 id 必须为 kebab-case')
+  if (isWindowsReservedName(id)) return fail(`皮肤 id「${id}」是 Windows 保留设备名，在 Windows 上无法创建同名目录，请换一个 id`)
   if (typeof manifest.name !== 'string' || !manifest.name.trim()) return fail('manifest.name 不能为空')
   for (const entry of readdirSync(packageRoot, { withFileTypes: true })) {
     if (!entry.isFile()) continue
-    if (entry.name.startsWith('preview.') && !PREVIEW_RE.test(entry.name)) return fail('预览图仅允许 png/webp/svg/jpg/jpeg')
+    if (entry.name.startsWith('preview.')) {
+      if (!PREVIEW_RE.test(entry.name)) return fail('预览图仅允许 png/webp/svg/jpg/jpeg')
+      if (statSync(join(packageRoot, entry.name)).size > MAX_PREVIEW_BYTES) return fail('预览图不能超过 2 MB')
+    }
   }
   return {
     id,

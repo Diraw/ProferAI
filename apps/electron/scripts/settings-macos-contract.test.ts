@@ -58,11 +58,17 @@ describe('Mac 设置页接线契约', () => {
     expect(startup).toContain('app.setLoginItemSettings({ openAtLogin: enabled })')
   })
 
-  test('Given 开发模式更新被禁用 When 设置页展示 Then 明确原因且类型贯通 IPC', () => {
+  test('Given 开发版只能手动下载更新 When 设置页展示 Then 引导打开发布页且类型贯通 IPC', () => {
     const about = source('renderer/components/settings/AboutSettings.tsx')
     expect(about).toContain("case 'disabled':")
-    expect(about).toContain('开发模式不检查更新，请使用安装包验证')
-    expect(about).toContain("disabled={isChecking || status.status === 'disabled'}")
+    expect(about).toContain('当前版本暂不支持应用内更新')
+    // 开发版不再因 'disabled' 禁用检查按钮：自动安装仍不可用，但可以查最新 Release。
+    expect(about).toContain('disabled={isChecking}')
+    expect(about).not.toContain("status.status === 'disabled'")
+    // 开发版发现新版本时只给手动下载入口，不进入 quitAndInstall 流程。
+    expect(about).toContain("status.manualUrl && status.status === 'available'")
+    expect(about).toContain('请手动下载')
+    expect(about).toContain('handleOpenManualUpdate')
     for (const path of ['renderer/atoms/updater.ts', 'renderer/vite-env.d.ts', 'preload/index.ts']) {
       expect(source(path)).toContain("| 'disabled' | 'error'")
     }

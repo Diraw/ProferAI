@@ -26,6 +26,7 @@ import {
   Database,
   Network,
   UserRound,
+  Blocks,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { settingsTabAtom, channelFormDirtyAtom, settingsCloseRequestedAtom, settingsOpenAtom } from "@/atoms/settings-tab";
@@ -35,6 +36,7 @@ import { authStatusAtom } from "@/atoms/identity-atoms";
 import { hasUpdateAtom } from "@/atoms/updater";
 import { tabsAtom, activeTabIdAtom, openTab, TUTORIAL_TAB_ID } from "@/atoms/tab-atoms";
 import { hasEnvironmentIssuesAtom } from "@/atoms/environment";
+import { pluginSystemEnabledAtom } from "@/atoms/plugin-system";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -61,6 +63,7 @@ import { CreditsSettings } from "./CreditsSettings";
 import { SubscriptionSettings } from "./SubscriptionSettings";
 import { OpenApiSettings } from "./OpenApiSettings";
 import { ProxySettings } from "./ProxySettings";
+import { PluginSettings } from "./PluginSettings";
 
 /** 设置 Tab 定义 */
 export interface SettingsTabItem {
@@ -105,11 +108,17 @@ const CONNECTION_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "proxy", label: "代理设置", icon: <Network size={16} /> },
 ];
 
-/** 系统：数据管理 / 关于 */
+/** 系统：数据管理 / 隐藏插件入口 / 关于 */
 const SYSTEM_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "data-management", label: "数据管理", icon: <Database size={16} /> },
   { id: "about", label: "关于/更新", icon: <Info size={16} /> },
 ];
+
+const PLUGIN_SYSTEM_ITEM: SettingsTabItem = {
+  id: "plugins",
+  label: "插件",
+  icon: <Blocks size={16} />,
+};
 
 /** 依赖团队账号登录的 Tab（未登录时不展示） */
 const AUTH_REQUIRED_TABS: ReadonlySet<SettingsTab> = new Set([
@@ -143,6 +152,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
       return <ShortcutSettings />;
     case "data-management":
       return <DataManagementSettings />;
+    case "plugins":
+      return <PluginSettings />;
     case "team":
       return <TeamWorkspaceSettings />;
     case "credits":
@@ -177,6 +188,7 @@ export function SettingsPanel({
   const appMode = useAtomValue(appModeAtom);
   const hasUpdate = useAtomValue(hasUpdateAtom);
   const hasEnvironmentIssues = useAtomValue(hasEnvironmentIssuesAtom);
+  const pluginSystemEnabled = useAtomValue(pluginSystemEnabledAtom);
   const [mainTabs, setMainTabs] = useAtom(tabsAtom);
   const setMainActiveTabId = useSetAtom(activeTabIdAtom);
   const authStatus = useAtomValue(authStatusAtom);
@@ -225,13 +237,17 @@ export function SettingsPanel({
       ? MODEL_GROUP_ITEMS
       : MODEL_GROUP_ITEMS.filter((item) => item.id !== "agent")
 
+    const systemItems = pluginSystemEnabled
+      ? [SYSTEM_GROUP_ITEMS[0]!, PLUGIN_SYSTEM_ITEM, ...SYSTEM_GROUP_ITEMS.slice(1)]
+      : SYSTEM_GROUP_ITEMS
+
     const allGroups: SettingsTabGroup[] = [
       { items: [{ id: "general", label: "通用偏好", icon: <Settings size={16} /> }] },
       { title: "账户", items: ACCOUNT_GROUP_ITEMS },
       { title: "模型与能力", items: modelItems },
       { title: "体验", items: EXPERIENCE_GROUP_ITEMS },
       { title: "连接", items: CONNECTION_GROUP_ITEMS },
-      { title: "系统", items: SYSTEM_GROUP_ITEMS },
+      { title: "系统", items: systemItems },
     ]
 
     if (authStatus.isLoggedIn) return allGroups
@@ -240,7 +256,7 @@ export function SettingsPanel({
     return allGroups
       .map((g) => ({ ...g, items: g.items.filter((t) => !AUTH_REQUIRED_TABS.has(t.id)) }))
       .filter((g) => g.items.length > 0)
-  }, [appMode, tabsOverride, authStatus.isLoggedIn]);
+  }, [appMode, tabsOverride, authStatus.isLoggedIn, pluginSystemEnabled]);
 
   // 将所有可见 tab 拍平成列表，用于 activeTab 回落与标题查找
   const tabs: SettingsTabItem[] = React.useMemo(

@@ -71,6 +71,7 @@ import {
   initializeUiScale,
 } from './atoms/ui-scale'
 import { initializePreviewModePreference, previewModePreferenceAtom } from './atoms/preview-atoms'
+import { pluginSystemEnabledAtom, installedPluginsAtom } from './atoms/plugin-system'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
 import {
@@ -615,6 +616,43 @@ function PreviewModePreferenceInitializer(): null {
   return null
 }
 
+/** 从 settings.json 恢复版本号连击解锁的插件入口。 */
+function PluginSystemInitializer(): null {
+  const store = useStore()
+  useEffect(() => {
+    let revision = 0
+    const refresh = (): void => {
+      const request = ++revision
+      void window.electronAPI.listPlugins().then((plugins) => {
+        if (request !== revision) return
+        store.set(installedPluginsAtom, plugins)
+        const pages = new Set(plugins.filter((plugin) => plugin.enabled).flatMap((plugin) =>
+          (plugin.manifest.contributes.pages ?? []).map((page) => `${plugin.manifest.id}:${page.id}`)))
+        const tabs = store.get(tabsAtom)
+        const next = tabs.filter((tab) => tab.type !== 'plugin' || pages.has(`${tab.pluginId}:${tab.pluginPageId}`))
+        if (next.length === tabs.length) return
+        store.set(tabsAtom, ensureScratchPadTab(next))
+        if (!next.some((tab) => tab.id === store.get(activeTabIdAtom))) {
+          store.set(activeTabIdAtom, SCRATCH_PAD_ID); store.set(appModeAtom, 'scratch')
+          store.set(currentConversationIdAtom, null); store.set(currentAgentSessionIdAtom, null); store.set(currentAgentWorkspaceIdAtom, null)
+        }
+      }).catch(() => undefined)
+    }
+    refresh()
+    const unsubscribe = window.electronAPI.onPluginsChanged(refresh)
+    return () => { revision += 1; unsubscribe() }
+  }, [store])
+  const setPluginSystemEnabled = useSetAtom(pluginSystemEnabledAtom)
+
+  useEffect(() => {
+    void window.electronAPI.getSettings()
+      .then((settings) => setPluginSystemEnabled(settings.pluginSystemEnabled === true))
+      .catch((error: unknown) => console.error('[插件] 初始化入口状态失败:', error))
+  }, [setPluginSystemEnabled])
+
+  return null
+}
+
 /**
  * Chat IPC 监听器初始化组件
  *
@@ -1130,6 +1168,7 @@ if (isQuickTaskWindow) {
       <MarkdownFontSizeInitializer />
       <UiScaleInitializer />
       <PreviewModePreferenceInitializer />
+      <PluginSystemInitializer />
       <ChatListenersInitializer />
       <AgentListenersInitializer />
       <ChatToolInitializer />

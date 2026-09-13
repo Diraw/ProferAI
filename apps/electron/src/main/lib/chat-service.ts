@@ -1,3 +1,4 @@
+import { routePluginModel } from './plugins/plugin-routing'
 /**
  * AI 聊天流式服务（Electron 编排层）
  *
@@ -217,6 +218,7 @@ export async function sendMessage(
   input: ChatSendInput,
   webContents: WebContents | null,
 ): Promise<void> {
+  input = routePluginModel(`chat:${input.conversationId}`, input)
   const {
     conversationId, userMessage, channelId,
     modelId, systemMessage, contextLength, contextDividers, attachments,

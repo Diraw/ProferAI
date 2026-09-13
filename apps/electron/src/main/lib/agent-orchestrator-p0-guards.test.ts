@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import { SAFE_TOOLS } from '@profer/shared'
 import {
   applySdkCredentials,
+  buildPiSkillMentionOptions,
+  isBrowserToolName,
   isPartialSDKMessage,
   isPlanModeMarkdownPath,
   isPlanModeMcpTool,
+  PLAN_MODE_READ_ONLY_BROWSER_TOOLS,
   releaseActiveSession,
+  resolvePlanModeBrowserPermission,
   tryAcquireActiveSession,
   tryReserveQueuedMessage,
   shouldPreInterruptQueuedMessage,
@@ -89,5 +94,67 @@ describe('AgentOrchestrator P0 guards', () => {
   test('Given Plan 模式 When 调用 MCP 工具 Then 拒绝', () => {
     expect(isPlanModeMcpTool('mcp__automation__create_automation')).toBe(true)
     expect(isPlanModeMcpTool('Read')).toBe(false)
+  })
+
+  test('Given 工具名 When 判断是否受管浏览器工具 Then 只认 Browser 前缀的 Pi-native 工具', () => {
+    expect(isBrowserToolName('BrowserListTabs')).toBe(true)
+    expect(isBrowserToolName('BrowserNavigate')).toBe(true)
+    expect(isBrowserToolName('Read')).toBe(false)
+    expect(isBrowserToolName('mcp__browser__BrowserListTabs')).toBe(false)
+  })
+
+  test('Given Plan 模式 When 调用只读浏览器工具 Then 允许', () => {
+    for (const toolName of PLAN_MODE_READ_ONLY_BROWSER_TOOLS) {
+      expect(resolvePlanModeBrowserPermission(toolName)).toEqual({ behavior: 'allow' })
+    }
+    expect([...PLAN_MODE_READ_ONLY_BROWSER_TOOLS]).toEqual([
+      'BrowserObserve',
+      'BrowserScreenshot',
+      'BrowserListTabs',
+      'BrowserPreviewOpen',
+    ])
+  })
+
+  test('Given Plan 模式 When 调用交互式浏览器工具 Then 拒绝并给出提示', () => {
+    const interactive = [
+      'BrowserNavigate',
+      'BrowserWaitFor',
+      'BrowserClick',
+      'BrowserFill',
+      'BrowserDomAction',
+      'BrowserExecuteJavaScript',
+      'BrowserPress',
+      'BrowserNewTab',
+      'BrowserSelectTab',
+      'BrowserCloseTab',
+    ]
+    for (const toolName of interactive) {
+      const decision = resolvePlanModeBrowserPermission(toolName)
+      expect(decision.behavior).toBe('deny')
+      expect(decision.message).toBeTruthy()
+    }
+  })
+
+  test('Given Plan 模式浏览器白名单 When 与 auto 安全工具集比对 Then auto 仍允许同一批工具', () => {
+    // auto 模式经 autoCanUseTool -> SAFE_TOOLS 自动放行；白名单必须是其子集，
+    // 否则会出现「Plan 允许、auto 反而弹审批」的规则漂移。
+    for (const toolName of PLAN_MODE_READ_ONLY_BROWSER_TOOLS) {
+      expect(SAFE_TOOLS).toContain(toolName)
+    }
+  })
+
+  test('Given 用户显式引用 Skill When 构造 Pi 选项 Then 透传 skillMentions，未引用时不产生字段', () => {
+    expect(buildPiSkillMentionOptions(['in-app-browser'])).toEqual({ skillMentions: ['in-app-browser'] })
+    // 空数组不产生字段，保持未显式引用时的 query 形态
+    expect(buildPiSkillMentionOptions([])).toEqual({})
+  })
+
+  test('Given 调用方持有 preset policy When 构造 Pi 选项 Then 使用副本，后续修改不污染白名单', () => {
+    const policySkillSlugs = ['in-app-browser']
+    const options = buildPiSkillMentionOptions(policySkillSlugs)
+
+    policySkillSlugs.push('pptx')
+
+    expect(options.skillMentions).toEqual(['in-app-browser'])
   })
 })

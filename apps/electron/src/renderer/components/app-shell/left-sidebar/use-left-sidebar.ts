@@ -40,6 +40,9 @@ import {
   agentWorkspacesAtom,
   workspaceCapabilitiesVersionAtom,
   agentDiffPanelTabAtom,
+  agentSidePanelOpenAtom,
+  agentSideExplorationMapAtom,
+  getExplorationSidePanelTab,
   agentDiffRefreshVersionAtom,
   agentDiffUnseenChangesAtom,
   agentDiffUnseenFilesAtom,
@@ -265,6 +268,7 @@ export function useLeftSidebar() {
 
   // Agent 模式状态
   const [agentSessions, setAgentSessions] = useAtom(agentSessionsAtom)
+  const setExplorationMap = useSetAtom(agentSideExplorationMapAtom)
   const [currentAgentSessionId, setCurrentAgentSessionId] = useAtom(currentAgentSessionIdAtom)
   const agentIndicatorMap = useAtomValue(agentSessionIndicatorMapAtom)
   const unviewedCompletedSessionIds = useAtomValue(unviewedCompletedSessionIdsAtom)
@@ -398,6 +402,7 @@ export function useLeftSidebar() {
     setPreviewPanelOpen(deleteKey)
     setPreviewFile(deleteKey)
     setDiffPanelTab(deleteKey)
+    setExplorationMap(deleteKey)
     setDiffRefreshVersion(deleteKey)
     setDiffUnseen(deleteKey)
     setDiffUnseenFiles(deleteKey)
@@ -455,7 +460,7 @@ export function useLeftSidebar() {
     sessionExistsAtom.remove(id)
 
     clearPreviewCacheForSession(id)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setDiffPanelTab, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
 
   const currentWorkspaceSlug = React.useMemo(() => {
     if (!currentWorkspaceId) return null
@@ -1232,8 +1237,36 @@ export function useLeftSidebar() {
     }
   }, [handleCreateProject])
 
-  /** 选择 Agent 会话（打开或聚焦标签页） */
+  /** 选择 Agent 会话（打开或聚焦标签页）。探索分支回到父会话右侧工作区。 */
   const handleSelectAgentSession = React.useCallback((id: string, title: string): void => {
+    const selected = agentSessions.find((session) => session.id === id)
+    if (selected?.explorationParentSessionId && selected.explorationSourceMessageId) {
+      const parent = agentSessions.find((session) => session.id === selected.explorationParentSessionId)
+      if (parent) {
+        openSession('agent', parent.id, parent.title)
+        store.set(agentSideExplorationMapAtom, (previous) => {
+          const branches = previous.get(parent.id) ?? []
+          if (branches.some((branch) => branch.sessionId === id)) return previous
+          const next = new Map(previous)
+          next.set(parent.id, [...branches, {
+            sessionId: id,
+            sourceMessageId: selected.explorationSourceMessageId!,
+            sourceLabel: selected.explorationSourceLabel ?? '主线探索节点',
+          }])
+          return next
+        })
+        store.set(agentDiffPanelTabAtom, (previous) => new Map(previous).set(parent.id, getExplorationSidePanelTab(id)))
+        store.set(agentSidePanelOpenAtom, true)
+        setActiveView('conversations')
+        setUnviewedCompleted((previous) => {
+          if (!previous.has(id)) return previous
+          const next = new Set(previous)
+          next.delete(id)
+          return next
+        })
+        return
+      }
+    }
     openSession('agent', id, title)
     setActiveView('conversations')
     // 清除该会话的"已完成未查看"标记
@@ -1243,7 +1276,7 @@ export function useLeftSidebar() {
       next.delete(id)
       return next
     })
-  }, [openSession, setActiveView, setUnviewedCompleted])
+  }, [agentSessions, openSession, setActiveView, setUnviewedCompleted, store])
 
   /** 标记 Agent 会话为「未读」：持久化 completedButUnconfirmed + 立即恢复绿标 + 同步列表数据 */
   const handleMarkUnread = React.useCallback((id: string): void => {

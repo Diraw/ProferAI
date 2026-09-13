@@ -224,7 +224,7 @@ function MessageColumn({
               )}
               {streamingContent ? (
                 <>
-                  <MessageResponse>{streamingContent}</MessageResponse>
+                  <MessageResponse streaming={streaming}>{streamingContent}</MessageResponse>
                   {streaming && <StreamingIndicator />}
                 </>
               ) : (

@@ -109,9 +109,11 @@ export function buildPiTaskPrompt(options: PiTaskPromptOptions): string {
     const needsImageOutput = hasImageOutput
       && matches(task, /(?:发送|附上|展示|回复).*?(?:图片|图像|png|jpe?g|gif|webp)|(?:本地|已有).{0,8}(?:图片|图像)/i)
     const needsImageGenerationRouting = tools.has('generate_image')
-      && matches(task, /(?:生成图片|画图|画一张|生图|p\s*图|修图|image generation)/i)
+      && matches(task, /(?:生成图片|画图|画一张|生图|p\s*图|修图|壁纸|背景图|皮肤|skin(?:\.css)?|wallpaper|image generation)/i)
+    const needsSkinCreationRouting = tools.has('create_skin')
+      && matches(task, /(?:皮肤|skin(?:\.css)?|wallpaper|壁纸|背景图)/i)
     const needsPpt = hasPptWorkflow && matches(task, /(?:\.pptx\b|\bppt\b|幻灯片|演示文稿|presentation|slides?)/i)
-    if (needsImageOutput || needsImageGenerationRouting || needsPpt) lowFrequency.push(delivery.text)
+    if (needsImageOutput || needsImageGenerationRouting || needsSkinCreationRouting || needsPpt) lowFrequency.push(delivery.text)
   }
 
   // Browser 是 buildSystemPrompt 的最后一个 section，直接截取尾部；若日后在它后面

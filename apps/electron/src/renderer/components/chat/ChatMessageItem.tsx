@@ -1,3 +1,4 @@
+import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 /**
  * ChatMessageItem - 单条消息渲染
  *
@@ -275,6 +276,7 @@ export const ChatMessageItem = React.memo(function ChatMessageItem({
         {/* 操作按钮（非 streaming 时显示，hover 时可见） */}
         {(message.content || message.error || (message.attachments && message.attachments.length > 0)) && !isStreaming && !isInlineEditing && (
           <MessageActions className="pl-[46px] mt-0.5 min-h-[28px]">
+            {conversationId && <PluginMessageActions reference={{ kind: 'chat', sessionId: conversationId, messageId: message.id }} />}
             <CopyButton content={message.role === 'user' && parsedUserContent ? parsedUserContent.text : message.content} copyAsPlainText={message.role === 'user'} />
             {message.role === 'assistant' && conversationId && (
               <MigrateToAgentButton conversationId={conversationId} />

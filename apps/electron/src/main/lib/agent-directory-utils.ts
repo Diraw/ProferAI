@@ -3,10 +3,11 @@
  *
  * 从 agent-orchestrator.ts 提取的纯函数，用于聚合 SDK 调用涉及的附加目录。
  */
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
+import { statSync } from 'node:fs'
 import type { AgentSessionMeta } from '@profer/shared'
 import { getWorkspaceAttachedDirectories, getWorkspaceAttachedFiles } from './agent-workspace-manager'
-import { getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
+import { getAgentWorkspacePath, getConfigDir, getWorkspaceFilesDir } from './config-paths'
 
 /**
  * 聚合一次 SDK 调用涉及的所有附加目录（去重，保持插入顺序）。
@@ -39,4 +40,29 @@ export function collectAttachedDirectories(params: {
   }
 
   return result
+}
+
+/**
+ * Profer 产品自有产物目录：皮肤库、插件、Skill 源、附件暂存（仅返回真实存在的目录）。
+ *
+ * 这些目录由 Profer 自己创建、在设置页里可见，Agent 生成的皮肤壁纸/缩略图等产物就落在这里，
+ * 所以 Agent 预览、图片输出与内置浏览器预览都应把它们当作可读根；
+ * 不含配置与凭据文件（channels.json、auth-tokens.enc、sdk-config 等不在列表内）。
+ *
+ * 刻意**不**并入 collectAttachedDirectories：那份清单还会进提示词的附加目录与项目探测，
+ * 把产品目录混进去会给每个会话增加噪声。
+ */
+export function collectProductArtifactDirectories(productArtifactConfigDir: string = getConfigDir()): string[] {
+  const configDir = productArtifactConfigDir
+  return ['skins', 'plugins', 'plugin-data', 'default-skills', 'global-skills', 'attachments']
+    .map((name) => join(configDir, name))
+    .filter((dir) => {
+      try {
+        // 调用方（如 createAuthorizedPreviewUrl / preview-inspection-service）对根目录做 realpath，
+        // 不存在的根会让整次调用失败，所以这里先过滤掉。
+        return statSync(dir).isDirectory()
+      } catch {
+        return false
+      }
+    })
 }

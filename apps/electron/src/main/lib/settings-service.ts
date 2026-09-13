@@ -29,6 +29,7 @@ function getDefaultSettings(): AppSettings {
     notificationsEnabled: true,
     feishuSessionMirror: { mode: 'off' },
     agentRuntime: DEFAULT_AGENT_RUNTIME,
+    pluginSystemEnabled: false,
   }
 }
 
@@ -65,6 +66,7 @@ export function getSettings(): AppSettings {
       notificationsEnabled: data.notificationsEnabled ?? true,
       feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
       agentRuntime: normalizeAgentRuntime(data.agentRuntime),
+      pluginSystemEnabled: data.pluginSystemEnabled === true,
     }
     return _settingsCache
   } catch (error) {
@@ -105,10 +107,20 @@ export function updateSettings(updates: Partial<AppSettings>): AppSettings {
     throw new Error('写入应用设置失败')
   }
 
+  for (const listener of settingsListeners) {
+    try { listener() } catch { /* 监听者错误不影响已保存的设置 */ }
+  }
   return updated
 }
 
 /** 清除内存缓存（测试用） */
 export function clearSettingsCache(): void {
   _settingsCache = null
+}
+
+/** 宿主外观变化同步给隔离的插件页面。 */
+const settingsListeners = new Set<() => void>()
+export function subscribeSettingsChanges(listener: () => void): () => void {
+  settingsListeners.add(listener)
+  return () => { settingsListeners.delete(listener) }
 }

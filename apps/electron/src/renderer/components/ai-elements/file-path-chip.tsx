@@ -286,6 +286,10 @@ export function isAbsoluteFilePath(text: string): boolean {
   if (trimmed.length < 2) return false
   const { path: clean } = stripLineCol(trimmed)
   if (!isAbsoluteFilePathCore(clean)) return false
+  if (clean.startsWith('~')) {
+    // `~/xxx` 主目录缩写：必须有分隔符与至少一段路径，避免把独立的 `~` 当成文件
+    return /^~[\\/][^\n]+$/.test(clean)
+  }
   if (clean.startsWith('/')) {
     if (!/^\/[^\n]+(?:\/[^\n]+)*$/.test(clean)) return false
     if (clean.endsWith('/') && !clean.includes('.')) return false

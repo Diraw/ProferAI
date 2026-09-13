@@ -34,7 +34,7 @@ function printHelp(): void {
     info(`  ${c.usage.padEnd(64)} ${c.summary}`)
   }
   info('\n全局 flag: --json  --config-dir DIR  --dev')
-  info('\n渐进式读取建议: 先 info/outline 看结构 → search 定位 → export --turns 取片段')
+  info('\n渐进式读取建议: 先 info/outline 看结构 → search 定位 → export --turns 取片段；探索分支用 export --after-message UUID 读取新增内容')
 }
 
 async function main(): Promise<number> {

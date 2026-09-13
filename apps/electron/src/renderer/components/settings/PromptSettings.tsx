@@ -23,10 +23,8 @@ import {
   selectedPromptIdAtom,
   defaultPromptIdAtom,
 } from '@/atoms/system-prompt-atoms'
+import { useSystemPromptAutosave } from '@/hooks/useSystemPromptAutosave'
 import type { SystemPrompt, SystemPromptCreateInput, SystemPromptUpdateInput } from '@profer/shared'
-
-/** 防抖保存延迟 (ms) */
-const DEBOUNCE_DELAY = 500
 
 export function PromptSettings(): React.ReactElement {
   const [config, setConfig] = useAtom(promptConfigAtom)
@@ -36,8 +34,6 @@ export function PromptSettings(): React.ReactElement {
   const [editName, setEditName] = React.useState('')
   const [editContent, setEditContent] = React.useState('')
   const [hoveredId, setHoveredId] = React.useState<string | null>(null)
-
-  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   /** 当前选中的提示词 */
   const selectedPrompt = React.useMemo(
@@ -111,24 +107,11 @@ export function PromptSettings(): React.ReactElement {
     }
   }
 
-  /** 防抖自动保存 */
-  const debounceSave = React.useCallback(
-    (id: string, input: SystemPromptUpdateInput): void => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
-      debounceRef.current = setTimeout(async () => {
-        try {
-          const updated = await window.electronAPI.updateSystemPrompt(id, input)
-          setConfig((prev) => ({
-            ...prev,
-            prompts: prev.prompts.map((p) => (p.id === updated.id ? updated : p)),
-          }))
-        } catch (error) {
-          console.error('[提示词设置] 保存失败:', error)
-        }
-      }, DEBOUNCE_DELAY)
-    },
-    [setConfig]
-  )
+  /**
+   * 防抖自动保存：同一提示词的字段变更合并提交，切换提示词互不覆盖，卸载时自动 flush。
+   * 详见 useSystemPromptAutosave。
+   */
+  const debounceSave = useSystemPromptAutosave()
 
   /** 名称变更 */
   const handleNameChange = (value: string): void => {

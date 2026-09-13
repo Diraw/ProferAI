@@ -307,6 +307,9 @@ describe('buildSystemPrompt', () => {
     expect(withoutAutomation).toContain('9. **AI 生图**')
     expect(withoutAutomation).toContain('`generate_image`')
     expect(withoutAutomation).toContain('不要尝试用代码、ASCII art 等伪造图片')
+    expect(withoutAutomation).toContain('文件相对当前会话 cwd 的路径')
+    expect(withoutAutomation).toContain('皮肤壁纸')
+    expect(withoutAutomation).toContain('单张 assets 图片不得超过 4 MB')
     expect(withoutAutomation).not.toContain('10. **PPT 视觉交付门禁**')
     expect(withoutAutomation).toContain('send_local_image')
     expect(withoutAutomation).toContain('自动把校验后的图片附加到当前回复')
@@ -474,7 +477,7 @@ describe('buildSystemPrompt', () => {
       permissionMode: 'auto',
       presetName: '代码',
       disabledToolGroups: ['automation', 'browser', 'clipboard', 'ppt-materials'],
-      disabledTools: ['generate_image'],
+      disabledTools: ['generate_image', 'create_skin'],
       isPiRuntime: true,
     })
     expect(prompt).toContain('proma_task_create')
@@ -486,6 +489,8 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('create_todo')
     expect(prompt).not.toContain('## Profer 受管浏览器')
     expect(prompt).not.toContain('`generate_image`')
+    // create_skin 归属 image 组：代码预设声明生图关闭时，皮肤创建工具及其 SOP 也必须一并消失
+    expect(prompt).not.toContain('10. **创建 Profer 皮肤**')
   })
 
   test('六类能力硬禁用时 Prompt 与动态浏览器上下文不暴露对应入口', () => {
@@ -588,5 +593,33 @@ describe('buildSystemPrompt', () => {
     })
     expect(claudePrompt).toContain('`list_team_memories`')
     expect(claudePrompt).not.toContain('mcp__team-memory__list_team_memories')
+  })
+})
+
+describe('buildSystemPrompt 皮肤创建指引', () => {
+  const base = {
+    workspaceName: 'Demo',
+    workspaceSlug: 'demo-workspace',
+    sessionId: 'session-123',
+    permissionMode: 'auto' as const,
+    agentCwd: '/tmp/profer-cwd',
+  }
+
+  test('create_skin 可用时给出固定皮肤目录，并要求不要全盘扫描', () => {
+    const prompt = buildSystemPrompt(base)
+    const userSkinDir = `~/${getConfigDirName()}/skins/`
+    expect(prompt).toContain('10. **创建 Profer 皮肤**')
+    expect(prompt).toContain(userSkinDir)
+    expect(prompt).toContain('installedPath')
+    // 措辞必须涵盖 Windows 侧的递归搜索命令，而不只是 macOS/Linux 的 find/ls
+    expect(prompt).toContain('不要用递归或全盘文件搜索去定位皮肤目录')
+    expect(prompt).toContain('Get-ChildItem -Recurse')
+    // create_skin 已内置安装校验，不应再要求模型手工做文件系统二次校验
+    expect(prompt).not.toContain('并执行一次皮肤导入/刷新或等价静态校验')
+  })
+
+  test('create_skin 被禁用时不再注入皮肤创建 SOP', () => {
+    const prompt = buildSystemPrompt({ ...base, disabledTools: ['create_skin'] })
+    expect(prompt).not.toContain('10. **创建 Profer 皮肤**')
   })
 })

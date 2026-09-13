@@ -193,6 +193,19 @@ export function TabBar({
       // 原生 WebContentsView 位于 renderer DOM 之上，不能等 React 重渲染后再隐藏：
       // 顶栏切换标签的瞬间，旧网页可能仍覆盖新 TabBar，甚至继续拦截鼠标命中。
       // 先同步切换主进程的前台浏览器所有权；新的 BrowserViewport 发布布局后再显示目标网页。
+      const pluginApi = (window.electronAPI as Partial<typeof window.electronAPI>)
+      const activePluginTab = tab.type === "plugin" && tab.pluginId && tab.pluginPageId
+        ? { pluginId: tab.pluginId, pageId: tab.pluginPageId }
+        : null
+      const hidePluginView = pluginApi.hidePluginView
+      if (typeof hidePluginView === 'function') {
+        for (const candidate of tabs) {
+          if (candidate.type === 'plugin' && candidate.pluginId && candidate.pluginPageId
+            && (!activePluginTab || candidate.id !== tab.id)) {
+            void hidePluginView(candidate.pluginId, candidate.pluginPageId).catch(() => undefined)
+          }
+        }
+      }
       const setForeground = (
         window.electronAPI as Partial<typeof window.electronAPI>
       ).setAgentBrowserForeground;
@@ -204,7 +217,12 @@ export function TabBar({
       // 点击任意 tab 都关闭定时任务编辑表单（overlay 否则会盖在内容区上）
       setAutomationForm({ open: false, draft: null });
 
-      if (tab.type === "chat") {
+      if (tab.type === "plugin") {
+        setAppMode("scratch");
+        setCurrentConversationId(null);
+        setCurrentAgentSessionId(null);
+        setCurrentAgentWorkspaceId(null);
+      } else if (tab.type === "chat") {
         setAppMode("chat");
         setCurrentConversationId(tab.sessionId);
       } else if (tab.type === "agent" || tab.type === "preview") {

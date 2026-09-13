@@ -126,7 +126,7 @@ describe('listAgentPresets', () => {
     expect(code.description).toContain('严格研发模式')
     expect(code.effort).toBe('high')
     expect(code.disabledToolGroups).toEqual(['automation', 'browser', 'clipboard', 'ppt-materials'])
-    expect(code.disabledTools).toEqual(['generate_image'])
+    expect(code.disabledTools).toEqual(['generate_image', 'create_skin'])
     expect(code.skillSlugs).toBeUndefined()
     expect(code.mcpServerNames).toBeUndefined()
     expect(code.promptSections?.[0]).toContain('跨边界修改必须检查调用方和契约')
@@ -1156,8 +1156,8 @@ describe('单工具裁剪（disabledTools）', () => {
       basePresetId: BUILTIN_PRESET_CODE,
       disabledTools: ['delegate_agent', 'run_automation_now'],
     })
-    // 基座 code 关闭 AI 生图；子预设的单工具禁用在其基础上做并集。
-    expect(getAgentPreset(WS_A, created.id).disabledTools).toEqual(['generate_image', 'delegate_agent', 'run_automation_now'])
+    // 基座 code 关闭 AI 生图与皮肤创建；子预设的单工具禁用在其基础上做并集。
+    expect(getAgentPreset(WS_A, created.id).disabledTools).toEqual(['generate_image', 'create_skin', 'delegate_agent', 'run_automation_now'])
   })
 
   test('Given 更新清空 When disabledTools=null Then 恢复完整工具集', () => {

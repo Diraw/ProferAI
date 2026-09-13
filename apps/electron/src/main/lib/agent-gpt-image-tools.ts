@@ -34,7 +34,7 @@ function toolResult(result: Awaited<ReturnType<typeof generateAgentGptImage>>): 
   return {
     content: [{
       type: 'text',
-      text: `图片已成功${result.edited ? '编辑' : '生成'}（1 张）${chargeHint}，并会自动显示在当前回复中。${result.revisedPrompt ? `\n修订后的提示词：${result.revisedPrompt}` : ''}\n请用正常文字说明图片内容，不要输出任何内部图片协议标记。`,
+      text: `图片已成功${result.edited ? '编辑' : '生成'}（1 张）${chargeHint}，并会自动显示在当前回复中。文件相对路径：${result.output.image.relativePath}。${result.revisedPrompt ? `\n修订后的提示词：${result.revisedPrompt}` : ''}\n如需将图片用于皮肤壁纸等后续文件工作流，请使用该相对路径；请用正常文字说明图片内容，不要输出任何内部图片协议标记。`,
     }],
     details: result.output,
   }

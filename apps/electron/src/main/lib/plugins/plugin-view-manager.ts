@@ -1,0 +1,474 @@
+import type { ProferPluginTaskReference } from '@profer/plugin-api'
+import { callPluginHost } from './plugin-host'
+import { pluginRequests } from './plugin-requests'
+import { pluginToolBroker } from './plugin-tool-broker'
+import { assertPluginPermission } from './plugin-permissions'
+import { app, ipcMain, nativeTheme, session as electronSession, View, WebContentsView, type BrowserWindow, type Session, type WebContents } from 'electron'
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import {
+  PROFER_PLUGIN_HOST_CHANNELS,
+  PROFER_PLUGIN_ID_PATTERN,
+  PROFER_PLUGIN_PAGE_ID_PATTERN,
+  type ProferPluginContext,
+  type ProferPluginViewLayout,
+} from '@profer/plugin-api'
+import { getSettings, subscribeSettingsChanges } from '../settings-service'
+import { resolveBrowserViewportLayout } from '../browser-view-layout'
+import { readJsonFileSafe, writeJsonFileAtomic } from '../safe-file'
+import { getInstalledPlugin, resolveInstalledPluginRoot, resolvePluginDataFile, resolvePluginPage } from './plugin-manager'
+
+function readPluginStorage(file: string): Record<string, unknown> {
+  const parsed = readJsonFileSafe<unknown>(file)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  return parsed as Record<string, unknown>
+}
+
+const MAX_STORAGE_BYTES = 512 * 1024
+const STORAGE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const RESERVED_STORAGE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
+
+interface PluginViewRecord {
+  key: string
+  pluginId: string
+  pageId: string
+  hostView: View
+  pageView: WebContentsView
+  webContentsId: number
+  partition: string
+  lastRendererInstanceId: string | null
+  lastLayoutSourceRevision: number
+  lastRevision: number
+  lastVisible: boolean
+  taskContext: ProferPluginTaskReference | null
+}
+
+const PLUGIN_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'none'",
+  "media-src 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "child-src 'none'",
+  "worker-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ')
+
+function pageKey(pluginId: string, pageId: string): string {
+  return `${pluginId}:${pageId}`
+}
+
+function isSafePageIdentity(pluginId: string, pageId: string): boolean {
+  return PROFER_PLUGIN_ID_PATTERN.test(pluginId) && PROFER_PLUGIN_PAGE_ID_PATTERN.test(pageId)
+}
+
+function pluginResourceResponse(request: Request, expectedPluginId: string, root: string): Response | Promise<Response> {
+  let url: URL
+  try { url = new URL(request.url) } catch { return new Response('Bad Request', { status: 400 }) }
+  if (url.hostname !== expectedPluginId || !PROFER_PLUGIN_ID_PATTERN.test(url.hostname)) return new Response('Forbidden', { status: 403 })
+
+  let relativePath: string
+  try { relativePath = decodeURIComponent(url.pathname.replace(/^\/+/, '')) } catch { return new Response('Bad Request', { status: 400 }) }
+  if (!relativePath || relativePath.includes('\0') || relativePath.includes('\\')) return new Response('Forbidden', { status: 403 })
+  const target = resolve(root, relativePath)
+  const rel = relative(root, target)
+  if (!rel || rel.startsWith('..') || isAbsolute(rel) || !target.startsWith(`${root}${sep}`)) return new Response('Forbidden', { status: 403 })
+  try {
+    if (!existsSync(target) || lstatSync(target).isSymbolicLink() || !statSync(target).isFile()) return new Response('Not Found', { status: 404 })
+    const realTarget = realpathSync(target)
+    if (!realTarget.startsWith(`${root}${sep}`)) return new Response('Forbidden', { status: 403 })
+  } catch {
+    return new Response('Not Found', { status: 404 })
+  }
+
+  const mime = MIME_TYPES[extname(target).toLowerCase()] ?? 'application/octet-stream'
+  try {
+    // 直接读取已验证文件，避免在 session 的默认拒绝 webRequest 下再发起 file:// 子请求。
+    const body = readFileSync(target)
+    const headers = new Headers({
+      'Content-Type': mime,
+      'Content-Security-Policy': PLUGIN_CSP,
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'Cross-Origin-Resource-Policy': 'same-origin',
+      'Cache-Control': 'no-store',
+    })
+    return new Response(body, { status: 200, headers })
+  } catch {
+    return new Response('Not Found', { status: 404 })
+  }
+}
+
+function validateLayout(layout: ProferPluginViewLayout): void {
+  if (!isSafePageIdentity(layout.pluginId, layout.pageId)) throw new Error('插件页面标识非法')
+  if (!layout.rendererInstanceId || layout.rendererInstanceId.length > 100) throw new Error('rendererInstanceId 非法')
+  if (!Number.isSafeInteger(layout.layoutSourceRevision) || layout.layoutSourceRevision <= 0) throw new Error('layoutSourceRevision 非法')
+  if (!Number.isSafeInteger(layout.revision) || layout.revision <= 0) throw new Error('revision 非法')
+  for (const value of Object.values(layout.bounds)) {
+    if (!Number.isFinite(value)) throw new Error('插件页面边界非法')
+  }
+}
+
+export class PluginViewManager {
+  private owner: BrowserWindow | null = null
+  private readonly views = new Map<string, PluginViewRecord>()
+  private readonly webContentsOwners = new Map<number, { pluginId: string; pageId: string; key: string }>()
+  private readonly guardedPartitions = new Set<string>()
+  private readonly protocolPartitions = new Set<string>()
+
+  setOwnerWindow(window: BrowserWindow | null): void {
+    if (this.owner === window) return
+    this.dispose()
+    this.owner = window
+  }
+
+  private installSessionGuards(pluginSession: Session): void {
+    pluginSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+    pluginSession.setPermissionCheckHandler(() => false)
+    pluginSession.on('will-download', (event, item) => {
+      event.preventDefault()
+      item.cancel()
+    })
+    pluginSession.webRequest.onBeforeRequest((details, callback) => {
+      callback({ cancel: !details.url.startsWith('profer-plugin://') })
+    })
+  }
+
+  private create(pluginId: string, pageId: string, toolRuntime = false): PluginViewRecord {
+    if (!this.owner || this.owner.isDestroyed()) throw new Error('主窗口尚未就绪')
+    const { page } = resolvePluginPage(pluginId, pageId)
+    const partition = `profer-plugin-${pluginId}`
+    const pluginSession = electronSession.fromPartition(partition, { cache: false })
+    if (!this.guardedPartitions.has(partition)) {
+      this.installSessionGuards(pluginSession)
+      this.guardedPartitions.add(partition)
+    }
+    if (!this.protocolPartitions.has(partition)) {
+      pluginSession.protocol.handle('profer-plugin', (request) => {
+        try {
+          return pluginResourceResponse(request, pluginId, resolveInstalledPluginRoot(pluginId))
+        } catch {
+          return new Response('Not Found', { status: 404 })
+        }
+      })
+      this.protocolPartitions.add(partition)
+    }
+
+    const hostView = new View()
+    const pageView = new WebContentsView({
+      webPreferences: {
+        partition,
+        preload: resolve(__dirname, 'plugin-preload.cjs'),
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        webviewTag: false,
+        devTools: !app.isPackaged,
+      },
+    })
+    hostView.setVisible(false)
+    hostView.addChildView(pageView)
+    this.owner.contentView.addChildView(hostView)
+    const key = pageKey(pluginId, pageId) + (toolRuntime ? ':tools' : '')
+    const record: PluginViewRecord = {
+      key,
+      pluginId,
+      pageId,
+      hostView,
+      pageView,
+      webContentsId: pageView.webContents.id,
+      partition,
+      lastRendererInstanceId: null,
+      lastLayoutSourceRevision: 0,
+      lastRevision: 0,
+      lastVisible: false,
+      taskContext: null,
+    }
+    this.views.set(key, record)
+    this.webContentsOwners.set(pageView.webContents.id, { pluginId, pageId, key })
+
+    pageView.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    const allowPluginNavigation = (event: Electron.Event, url: string): void => {
+      try {
+        const parsed = new URL(url)
+        if (parsed.protocol === 'profer-plugin:' && parsed.hostname === pluginId) return
+      } catch { /* 非法 URL 一律拒绝 */ }
+      event.preventDefault()
+    }
+    pageView.webContents.on('will-navigate', (event, url) => allowPluginNavigation(event, url))
+    pageView.webContents.on('will-redirect', (event, url) => allowPluginNavigation(event, url))
+    pageView.webContents.on('will-attach-webview', (event) => event.preventDefault())
+    let hasStartedNavigation = false
+    pageView.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+      if (!isMainFrame || isInPlace) return
+      if (hasStartedNavigation) { pluginToolBroker.dispose(pageView.webContents.id); pluginRequests.cancelOwner(pageView.webContents.id) }
+      hasStartedNavigation = true
+    })
+    pageView.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (isMainFrame) console.error(`[插件] 页面加载失败 ${pluginId}/${pageId}: ${errorCode} ${errorDescription} ${validatedURL}`)
+    })
+    pageView.webContents.on('render-process-gone', (_event, details) => {
+      console.error(`[插件] 页面渲染进程退出 ${pluginId}/${pageId}: ${details.reason}`)
+      this.disposeRecord(record)
+    })
+    pageView.webContents.on('destroyed', () => {
+      this.webContentsOwners.delete(record.webContentsId)
+      if (this.views.get(key) === record) this.disposeRecord(record)
+    })
+    void pageView.webContents.loadURL(`profer-plugin://${pluginId}/${page.entry}`).catch((error) => {
+      console.error(`[插件] 页面加载失败 ${pluginId}/${pageId}:`, error)
+    })
+    return record
+  }
+
+  activate(pluginId: string, pageId: string, context: ProferPluginTaskReference | null): void {
+    const record = this.views.get(pageKey(pluginId, pageId)) ?? this.create(pluginId, pageId)
+    record.taskContext = context
+    this.notifyContextChanged()
+  }
+
+  notifyContextChanged(): void {
+    for (const record of this.views.values()) {
+      const contents = record.pageView.webContents
+      if (contents.isDestroyed()) continue
+      try { contents.send(PROFER_PLUGIN_HOST_CHANNELS.CONTEXT_CHANGED, this.getContext(contents, contents.mainFrame)) } catch { /* 停用中的页面不再通知 */ }
+    }
+  }
+
+  async runTool(pluginId: string, toolId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    assertPluginPermission(pluginId, 'agent.tools')
+    const plugin = getInstalledPlugin(pluginId)
+    const tool = plugin?.manifest.contributes.tools?.find((candidate) => candidate.id === toolId)
+    if (!tool) throw new Error('插件工具不存在')
+    const record = this.views.get(`${pageKey(pluginId, tool.pageId)}:tools`) ?? this.create(pluginId, tool.pageId, true)
+    return pluginToolBroker.run(pluginId, toolId, args, record.pageView.webContents, signal)
+  }
+
+  async call(sender: WebContents, frame: Electron.WebFrameMain | null, method: unknown, input: unknown): Promise<unknown> {
+    const owner = this.ownerFor(sender, frame)
+    return callPluginHost(owner.pluginId, method, input, this.views.get(owner.key)?.taskContext ?? null, sender.id)
+  }
+
+  registerTool(sender: WebContents, frame: Electron.WebFrameMain | null, toolId: unknown): void {
+    const owner = this.ownerFor(sender, frame)
+    pluginToolBroker.register(owner.pluginId, owner.pageId, sender.id, toolId)
+  }
+
+  toolResult(sender: WebContents, frame: Electron.WebFrameMain | null, callId: unknown, value: unknown, error: unknown): void {
+    this.ownerFor(sender, frame)
+    pluginToolBroker.result(sender.id, callId, value, error)
+  }
+
+  setLayout(layout: ProferPluginViewLayout): void {
+    validateLayout(layout)
+    const key = pageKey(layout.pluginId, layout.pageId)
+    if (!layout.visible && !this.views.has(key)) return
+    const record = this.views.get(key) ?? this.create(layout.pluginId, layout.pageId)
+    if (!this.owner || this.owner.isDestroyed()) return
+
+    if (record.lastRendererInstanceId !== layout.rendererInstanceId) {
+      record.lastRendererInstanceId = layout.rendererInstanceId
+      record.lastLayoutSourceRevision = layout.layoutSourceRevision
+      record.lastRevision = 0
+    } else if (layout.layoutSourceRevision < record.lastLayoutSourceRevision) {
+      return
+    } else if (layout.layoutSourceRevision > record.lastLayoutSourceRevision) {
+      record.lastLayoutSourceRevision = layout.layoutSourceRevision
+      record.lastRevision = 0
+    }
+    if (layout.revision <= record.lastRevision) return
+    record.lastRevision = layout.revision
+
+    const bounds = resolveBrowserViewportLayout(
+      layout.bounds,
+      this.owner.webContents.getZoomFactor(),
+      this.owner.contentView.getBounds(),
+    )
+    const visible = layout.visible && bounds.width > 4 && bounds.height > 4 && this.owner.isVisible()
+    if (visible) {
+      for (const other of this.views.values()) {
+        if (other !== record && other.hostView.getVisible()) {
+          other.hostView.setVisible(false)
+          other.pageView.setVisible(false)
+          other.lastVisible = false
+        }
+      }
+      record.hostView.setBounds(bounds)
+      record.hostView.setBorderRadius(Math.max(0, Math.min(32, Math.round(layout.borderRadius))))
+      record.pageView.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height })
+      // 插件 View 是主窗口 contentView 的原生子视图；显示时提升到最上层，
+      // 否则主 renderer 的网页层可能盖住它，只留下空的 DOM 占位区。
+      this.owner.contentView.removeChildView(record.hostView)
+      this.owner.contentView.addChildView(record.hostView)
+    }
+    if (record.hostView.getVisible() !== visible) record.hostView.setVisible(visible)
+    if (record.pageView.getVisible() !== visible) record.pageView.setVisible(visible)
+    if (visible && !record.lastVisible) {
+      try { record.pageView.webContents.invalidate() } catch { /* 页面可能已销毁 */ }
+    }
+    record.lastVisible = visible
+  }
+
+  hide(pluginId: string, pageId: string): void {
+    if (!isSafePageIdentity(pluginId, pageId)) return
+    const record = this.views.get(pageKey(pluginId, pageId))
+    if (!record) return
+    record.hostView.setVisible(false)
+    record.pageView.setVisible(false)
+    record.lastVisible = false
+  }
+
+  close(pluginId: string, pageId: string): void {
+    if (!isSafePageIdentity(pluginId, pageId)) return
+    const record = this.views.get(pageKey(pluginId, pageId))
+    if (record) this.disposeRecord(record)
+  }
+
+  closePlugin(pluginId: string): void {
+    for (const record of [...this.views.values()]) {
+      if (record.pluginId === pluginId) this.disposeRecord(record)
+    }
+  }
+
+  /** 主 renderer 刷新或窗口失焦时立即收起所有 native View，避免旧页面覆盖新 DOM。 */
+  hideAll(): void {
+    for (const record of this.views.values()) {
+      record.hostView.setVisible(false)
+      record.pageView.setVisible(false)
+      record.lastVisible = false
+    }
+  }
+
+  private disposeRecord(record: PluginViewRecord): void {
+    if (this.views.get(record.key) !== record) return
+    pluginToolBroker.dispose(record.webContentsId)
+    pluginRequests.cancelOwner(record.webContentsId)
+    this.views.delete(record.key)
+    this.webContentsOwners.delete(record.webContentsId)
+    try { record.hostView.setVisible(false) } catch { /* 已销毁 */ }
+    try { record.hostView.setBounds({ x: 0, y: 0, width: 0, height: 0 }) } catch { /* 已销毁 */ }
+    try { record.hostView.removeChildView(record.pageView) } catch { /* 已销毁 */ }
+    try { this.owner?.contentView.removeChildView(record.hostView) } catch { /* 已销毁 */ }
+    if (!record.pageView.webContents.isDestroyed()) record.pageView.webContents.close()
+  }
+
+  dispose(): void {
+    for (const record of [...this.views.values()]) this.disposeRecord(record)
+    this.views.clear()
+    this.webContentsOwners.clear()
+    // Session protocol/guard 注册属于 Electron Session 生命周期，窗口重建后仍然存在，
+    // 不可在 dispose 时清空注册标记，否则下次打开插件会重复 protocol.handle。
+  }
+
+  private ownerFor(sender: WebContents, senderFrame: Electron.WebFrameMain | null): { pluginId: string; pageId: string; key: string } {
+    if (!senderFrame || senderFrame !== sender.mainFrame) throw new Error('仅允许插件主页面访问 Plugin Host API')
+    const owner = this.webContentsOwners.get(sender.id)
+    if (!owner) throw new Error('拒绝非插件页面访问 Plugin Host API')
+    const plugin = resolvePluginPage(owner.pluginId, owner.pageId).plugin
+    if (!plugin.enabled) throw new Error('插件已停用')
+    return owner
+  }
+
+  getContext(sender: WebContents, senderFrame: Electron.WebFrameMain | null): ProferPluginContext {
+    const owner = this.ownerFor(sender, senderFrame)
+    const { plugin } = resolvePluginPage(owner.pluginId, owner.pageId)
+    return {
+      plugin: {
+        id: plugin.manifest.id,
+        name: plugin.manifest.name,
+        version: plugin.manifest.version,
+        ...(plugin.manifest.description && { description: plugin.manifest.description }),
+        ...(plugin.manifest.publisher && { publisher: plugin.manifest.publisher }),
+      },
+      pageId: owner.pageId,
+      locale: app.getLocale() || 'zh-CN',
+      theme: getSettings().themeMode === 'light' || (getSettings().themeMode === 'system' && !nativeTheme.shouldUseDarkColors)
+        ? 'light'
+        : 'dark',
+    }
+  }
+
+  storageGet(sender: WebContents, senderFrame: Electron.WebFrameMain | null, key: unknown): unknown {
+    const owner = this.ownerFor(sender, senderFrame)
+    this.assertStoragePermission(owner.pluginId)
+    const safeKey = this.assertStorageKey(key)
+    return readPluginStorage(resolvePluginDataFile(owner.pluginId))[safeKey] ?? null
+  }
+
+  storageSet(sender: WebContents, senderFrame: Electron.WebFrameMain | null, key: unknown, value: unknown): void {
+    const owner = this.ownerFor(sender, senderFrame)
+    this.assertStoragePermission(owner.pluginId)
+    const safeKey = this.assertStorageKey(key)
+    const file = resolvePluginDataFile(owner.pluginId)
+    const current = readPluginStorage(file)
+    const next = { ...current, [safeKey]: value }
+    let serialized: string
+    try { serialized = JSON.stringify(next) } catch { throw new Error('插件存储值必须是可序列化 JSON') }
+    if (Buffer.byteLength(serialized) > MAX_STORAGE_BYTES) throw new Error('插件私有存储不能超过 512 KB')
+    writeJsonFileAtomic(file, next)
+  }
+
+  storageDelete(sender: WebContents, senderFrame: Electron.WebFrameMain | null, key: unknown): void {
+    const owner = this.ownerFor(sender, senderFrame)
+    this.assertStoragePermission(owner.pluginId)
+    const safeKey = this.assertStorageKey(key)
+    const file = resolvePluginDataFile(owner.pluginId)
+    const current = readPluginStorage(file)
+    if (!(safeKey in current)) return
+    delete current[safeKey]
+    writeJsonFileAtomic(file, current)
+  }
+
+  private assertStoragePermission(pluginId: string): void {
+    const pageId = [...this.webContentsOwners.values()].find((value) => value.pluginId === pluginId)?.pageId
+    if (!pageId) throw new Error('插件页面上下文不存在')
+    const plugin = resolvePluginPage(pluginId, pageId).plugin
+    if (!plugin.manifest.permissions?.includes('pluginStorage')) throw new Error('插件未声明 pluginStorage 权限')
+  }
+
+  private assertStorageKey(value: unknown): string {
+    if (typeof value !== 'string' || !STORAGE_KEY_PATTERN.test(value) || RESERVED_STORAGE_KEYS.has(value)) {
+      throw new Error('插件存储 key 非法')
+    }
+    return value
+  }
+}
+
+export const pluginViewManager = new PluginViewManager()
+
+/** 注册插件页面专属 IPC。发送者身份由 PluginViewManager 绑定，不接受页面自报 pluginId。 */
+export function registerPluginHostIpc(): void {
+  subscribeSettingsChanges(() => pluginViewManager.notifyContextChanged())
+  nativeTheme.on('updated', () => pluginViewManager.notifyContextChanged())
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.CALL, (event, method: unknown, input: unknown) => pluginViewManager.call(event.sender, event.senderFrame, method, input))
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.TOOL_REGISTER, (event, toolId: unknown) => pluginViewManager.registerTool(event.sender, event.senderFrame, toolId))
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.TOOL_RESULT, (event, callId: unknown, value: unknown, error: unknown) => pluginViewManager.toolResult(event.sender, event.senderFrame, callId, value, error))
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.GET_CONTEXT, (event) => pluginViewManager.getContext(event.sender, event.senderFrame))
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.STORAGE_GET, (event, key: unknown) => pluginViewManager.storageGet(event.sender, event.senderFrame, key))
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.STORAGE_SET, (event, key: unknown, value: unknown) => pluginViewManager.storageSet(event.sender, event.senderFrame, key, value))
+  ipcMain.handle(PROFER_PLUGIN_HOST_CHANNELS.STORAGE_DELETE, (event, key: unknown) => pluginViewManager.storageDelete(event.sender, event.senderFrame, key))
+}

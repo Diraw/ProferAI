@@ -22,7 +22,7 @@ html[class*="skin-"] ::-moz-selection {
 /* ===== 外层缝隙背景（shell） =====
  * 默认主题为 bg-background；皮肤用 --shell-bg-gradient（linear-gradient 完整值）。
  */
-html[class*="skin-"] .shell-bg {
+:where(html[class*="skin-"]) .shell-bg {
   background: var(--shell-bg-gradient);
 }
 

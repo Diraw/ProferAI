@@ -303,6 +303,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
     const openPreviewTool = tools.find((tool) => tool.name === 'open_file_preview')
     const inspectOfficialPreviewTool = tools.find((tool) => tool.name === 'inspect_file_preview')
     expect(imageTool).toBeDefined()
+    expect(tools.find((tool) => tool.name === 'create_skin')).toBeDefined()
     expect(imageTool!.description).not.toContain('IMAGE_ATTACHMENT')
     expect(previewTool).toBeDefined()
     expect(JSON.stringify(previewTool!.parameters)).toContain('previousRevision')
@@ -318,7 +319,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
       ok: true,
       mode: 'official',
       edited: false,
-      output: { image: { localPath: 'C:/safe/session/.context/agent-output-images/x.png', filename: 'x.png', mediaType: 'image/png' } },
+      output: { image: { localPath: 'C:/safe/session/.context/agent-output-images/x.png', relativePath: '.context/agent-output-images/x.png', filename: 'x.png', mediaType: 'image/png' } },
     }
     const { sdk, tools } = createPiSdkStub()
     await buildPiBuiltinTools(sdk, { ...baseCtx, agentCwd: 'C:/safe/session', allowedRoots: ['C:/safe/attached'] })
@@ -407,7 +408,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
       { group: 'browser', names: ['BrowserObserve', 'BrowserNavigate'] },
       { group: 'clipboard', names: ['clipboard_read_text', 'clipboard_write_text'] },
       { group: 'preview', names: ['inspect_preview', 'open_file_preview', 'inspect_file_preview'] },
-      { group: 'image', names: ['send_local_image'] },
+      { group: 'image', names: ['send_local_image', 'generate_image', 'create_skin'] },
       { group: 'web', names: ['WebSearch', 'WebFetch'] },
     ] as const
     for (const { group, names: disabledNames } of cases) {
@@ -541,5 +542,25 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
     const names = result.tools.map((t) => t.name)
     expect(names.some((n) => n.startsWith('mcp__task-graph__'))).toBe(false)
     expect(names).not.toContain('mcp__collaboration__delegate_agent')
+  })
+
+  test('Given 没有浏览器会话 When BrowserListTabs 执行 Then 返回 exists=false 且不创建标签', async () => {
+    const { sdk, tools } = createPiSdkStub()
+    const sessionId = 'browser-list-tabs-contract'
+    await buildPiBuiltinTools(sdk, { ...baseCtx, sessionId, agentCwd: 'C:/safe/session', allowedRoots: ['C:/safe/attached'] })
+
+    const listTabs = tools.find((tool) => tool.name === 'BrowserListTabs')
+    expect(listTabs).toBeDefined()
+    expect(listTabs!.description).toContain('read-only')
+
+    const result = await listTabs!.execute!('call-1', {}) as {
+      details?: { sessionId?: string; exists?: boolean; activeTabId?: string | null; agentTabId?: string | null; tabs?: unknown[] }
+    }
+
+    expect(result.details?.sessionId).toBe(sessionId)
+    expect(result.details?.exists).toBe(false)
+    expect(result.details?.activeTabId).toBeNull()
+    expect(result.details?.agentTabId).toBeNull()
+    expect(result.details?.tabs).toEqual([])
   })
 })

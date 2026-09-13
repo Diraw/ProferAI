@@ -41,6 +41,7 @@ describe('sendAgentLocalImage', () => {
 
     expect('marker' in result).toBe(false)
     expect(result.image.localPath).toMatch(/agent-output-images[\\/]/)
+    expect(result.image.relativePath).toMatch(/^\.context\/agent-output-images\//)
     expect(result.image.filename).toBe('diagram.png')
     expect(result.image.mediaType).toBe('image/png')
     expect(existsSync(result.image.absolutePath)).toBe(true)
@@ -64,6 +65,7 @@ describe('sendAgentLocalImage', () => {
     const result = await sendAgentLocalImage({ path: 'relative.webp' }, contextFor(fixture))
 
     expect(result.image.mediaType).toBe('image/webp')
+    expect(result.image.relativePath).toMatch(/^\.context\/agent-output-images\//)
     expect(existsSync(result.image.absolutePath)).toBe(true)
   })
 

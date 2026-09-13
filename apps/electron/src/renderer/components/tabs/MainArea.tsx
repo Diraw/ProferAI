@@ -16,6 +16,7 @@ import { PreviewPanel } from '@/components/diff/PreviewPanel'
 import { browserPanelDismissedSessionIdsAtom, browserPanelOpenMapAtom, browserSplitRatioAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
 import { panelVisibilityAtom } from '@/atoms/panel-layout-atoms'
 import { openBrowserFromPush } from '@/hooks/usePanelAutoLayout'
+import { shouldAutoOpenBrowserFromPush } from '@/lib/browser-auto-open'
 import { BrowserPanel } from '@/components/browser/BrowserPanel'
 import type { BrowserViewState } from '@profer/shared'
 import { useTrackSessionView } from '@/hooks/useTrackSessionView'
@@ -84,6 +85,17 @@ export function MainArea(): React.ReactElement {
     }
   }, [browserDismissed, browserSessionId, setBrowserStateMap])
 
+  /**
+   * 订阅实时状态推送。
+   *
+   * 不再把「收到任意浏览器状态」当作「用户需要看浏览器」：只有 Agent 真的开始展示页面
+   * （存在工作标签 + 最近动作是 navigate/tab）才自动打开。用户点击浏览器按钮走 TabBar 的
+   * 本地显式打开路径，切回会话走 getAgentBrowserState 恢复路径，两者都不受此处影响。
+   */
+  const handleBrowserStatePush = React.useCallback((state: BrowserViewState) => {
+    publishBrowserState(state, { autoOpen: shouldAutoOpenBrowserFromPush(state) })
+  }, [publishBrowserState])
+
   React.useLayoutEffect(() => {
     // 先同步主进程的可见性所有权，再处理旧会话隐藏和新布局，
     // 防止后台 Agent 在这次会话切换的 IPC 间隙抢先显示原生 WebContentsView。
@@ -110,8 +122,8 @@ export function MainArea(): React.ReactElement {
     // 但绝不能让整个主界面崩溃。完整 Electron preload 就绪后会正常订阅。
     const subscribe = (window.electronAPI as Partial<typeof window.electronAPI>).onAgentBrowserStateChanged
     if (typeof subscribe !== 'function') return
-    return subscribe(publishBrowserState)
-  }, [publishBrowserState])
+    return subscribe(handleBrowserStatePush)
+  }, [handleBrowserStatePush])
 
   React.useEffect(() => {
     if (!browserSessionId) return

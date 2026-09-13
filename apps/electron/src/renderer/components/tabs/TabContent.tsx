@@ -1,3 +1,4 @@
+import { PluginTaskLayout } from '@/components/plugins/PluginTaskLayout'
 /**
  * TabContent — 标签内容渲染器
  *
@@ -16,6 +17,7 @@ import { MarkdownRichEditor } from '@/components/diff/MarkdownRichEditor'
 import { MarkdownToc } from '@/components/diff/MarkdownToc'
 import { ScratchPadView } from '@/components/scratch-pad/ScratchPadView'
 import { TabErrorBoundary } from './TabErrorBoundary'
+import { PluginViewport } from './PluginViewport'
 
 export interface TabContentProps {
   tabId: string
@@ -51,7 +53,7 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
   if (tab.type === 'chat') {
     return (
       <TabErrorBoundary key={tab.sessionId} sessionId={tab.sessionId}>
-        <ChatView conversationId={tab.sessionId} />
+        <PluginTaskLayout kind="chat" sessionId={tab.sessionId}><ChatView conversationId={tab.sessionId} /></PluginTaskLayout>
       </TabErrorBoundary>
     )
   }
@@ -64,9 +66,13 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
     )
   }
 
+  if (tab.type === 'plugin' && tab.pluginId && tab.pluginPageId) {
+    return <PluginViewport pluginId={tab.pluginId} pageId={tab.pluginPageId} visible />
+  }
+
   return (
     <TabErrorBoundary key={tab.sessionId} sessionId={tab.sessionId}>
-      <AgentView sessionId={tab.sessionId} />
+      <PluginTaskLayout kind="agent" sessionId={tab.sessionId}><AgentView sessionId={tab.sessionId} /></PluginTaskLayout>
     </TabErrorBoundary>
   )
 }

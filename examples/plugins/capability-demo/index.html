@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>插件工具箱</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
+<body><main>
+  <header><span class="eyebrow">PROFER 插件</span><h1>插件工具箱</h1><p>选择模型、配置自动路由，或处理你交给插件的内容。</p></header>
+  <section><h2>使用模型</h2><label>模型<select id="model"></select></label><button id="refresh">刷新模型</button><button id="save-model">保存默认模型</button></section>
+  <section><h2>按时段自动路由</h2><p>按电脑本地时间生效。保存后，在任务的“自动路由”中选择本插件。</p><div class="row"><label>开始<input id="start" type="time" value="09:00"></label><label>结束<input id="end" type="time" value="18:00"></label><button id="save-rule">使用上方模型保存规则</button></div><pre id="rules"></pre></section>
+  <section><h2>处理内容</h2><div class="row"><button id="context">读取交给插件的内容</button><button id="attachments">选择附件</button></div><label>文本<textarea id="input" rows="5" placeholder="输入文本，或从当前任务和附件导入"></textarea></label><button id="generate">用所选模型总结</button><button id="cancel">取消调用</button></section>
+  <section><h2>网络服务</h2><p>此示例只声明了 example.com，可用于验证授权请求。</p><button id="fetch">读取示例网站</button></section>
+  <section><h2>结果</h2><p id="status" role="status">请先在插件设置中查看并授权能力。</p><pre id="output"></pre></section>
+</main></body></html>

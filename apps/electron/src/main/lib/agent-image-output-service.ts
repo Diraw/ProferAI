@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, realpath, readFile, stat, writeFile } from 'node:fs/promises'
-import { basename, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** 单张 Agent 本地图片的最大字节数：20 MiB。 */
 export const MAX_AGENT_IMAGE_OUTPUT_SIZE = 20 * 1024 * 1024
@@ -16,8 +16,11 @@ export type AgentImageMediaType = 'image/png' | 'image/jpeg' | 'image/gif' | 'im
 
 export interface AgentImageOutputResult {
   image: {
-    /** renderer 可通过 readAttachment() 读取的、位于 ~/.profer 内的绝对副本路径。 */
+    /** renderer 可通过 readAttachment() 读取的、位于当前会话目录内的绝对副本路径。 */
     localPath: string
+    /** 与 agentCwd 的相对路径（统一使用 /）；供 Agent 后续把生成图复制到皮肤 assets 等工作流使用。 */
+    relativePath: string
+    /** 兼容旧调用方的绝对路径字段；不要将其写入用户可见文本。 */
     absolutePath: string
     filename: string
     mediaType: AgentImageMediaType
@@ -110,6 +113,7 @@ export async function writeAgentImageOutput(
   await writeFile(absolutePath, data, { flag: 'wx' })
   const image = {
     localPath: absolutePath,
+    relativePath: relative(agentCwd, absolutePath).split(sep).join('/'),
     absolutePath,
     filename: filename ? displayFilename(filename, detected.extension) : `generated-image${detected.extension}`,
     mediaType,

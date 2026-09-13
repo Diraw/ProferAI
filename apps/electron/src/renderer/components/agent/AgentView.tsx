@@ -63,7 +63,7 @@ import { cn } from '@/lib/utils'
 import { evaluateAutoSendTurn } from '@/lib/agent-autosend-turn'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { registerShortcut } from '@/lib/shortcut-registry'
-import { previewPanelOpenMapAtom, autoPreviewEnabledAtom, quotedSelectionMapAtom, currentQuotedSelectionAtom, agentInterruptionMapAtom, currentAgentInterruptionAtom, getAgentInterruptionTone } from '@/atoms/preview-atoms'
+import { previewPanelOpenMapAtom, autoPreviewEnabledAtom, quotedSelectionMapAtom, agentInterruptionMapAtom, getAgentInterruptionTone } from '@/atoms/preview-atoms'
 import type { AgentInterruptionState } from '@/atoms/preview-atoms'
 import {
   agentStreamingStatesAtom,
@@ -109,11 +109,14 @@ import {
   agentMessageQueueAtomFamily,
   agentQueueAutoSendMapAtom,
   finalizeStreamingActivities,
-  currentAgentSessionIdAtom,
   workspaceCapabilitiesVersionAtom,
+  agentSideExplorationMapAtom,
+  agentSidePanelOpenAtom,
+  agentDiffPanelTabAtom,
+  getExplorationSidePanelTab,
 } from '@/atoms/agent-atoms'
-import { currentGraphSummaryAtom } from '@/atoms/graph-atoms'
 import { persistedGraphAtomFamily } from '@/atoms/graph-atoms'
+import { generateSummary } from '@profer/project-core'
 import { isTaskProgressTool } from './task-progress'
 import type { AgentContextStatus } from '@/atoms/agent-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
@@ -478,9 +481,9 @@ function AttachMenuButton({ onAttachFile, onAttachFolder }: {
 
 // ===== 工具栏 Graph 按钮（状态感知） =====
 
-function ToolbarGraphButton({ onClick }: { onClick: () => void }): React.ReactElement {
-  const atomSummary = useAtomValue(currentGraphSummaryAtom)
-  const sessionId = useAtomValue(currentAgentSessionIdAtom)
+function ToolbarGraphButton({ onClick, sessionId }: { onClick: () => void; sessionId: string }): React.ReactElement {
+  const atomSummary = useAtomValue(persistedGraphAtomFamily(sessionId))
+  const graphSummary = atomSummary ? generateSummary(atomSummary) : null
   const [ipcSummary, setIpcSummary] = React.useState<import('@profer/project-core').GraphSummary | null>(null)
 
   React.useEffect(() => {
@@ -490,7 +493,7 @@ function ToolbarGraphButton({ onClick }: { onClick: () => void }): React.ReactEl
     api.getGraphSummary(sessionId).then(s => { if (s && s.totalTasks > 0) setIpcSummary(s) }).catch(() => {})
   }, [sessionId])
 
-  const summary = atomSummary ?? ipcSummary
+  const summary = graphSummary ?? ipcSummary
   const hasData = summary && summary.totalTasks > 0
   const completed = summary?.statusCounts.completed ?? 0
   const total = summary?.totalTasks ?? 0
@@ -512,9 +515,11 @@ function ToolbarGraphButton({ onClick }: { onClick: () => void }): React.ReactEl
 
 export interface AgentViewProps {
   sessionId: string
+  /** 右侧探索 Tab 中嵌入的 Agent：隐藏重复 header，并禁止继续嵌套探索。 */
+  embedded?: boolean
 }
 
-export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
+export function AgentView({ sessionId, embedded = false }: AgentViewProps): React.ReactElement {
   const [persistedSDKMessages, setPersistedSDKMessages] = React.useState<SDKMessage[]>([])
   const persistedSDKMessagesRef = React.useRef<SDKMessage[]>([])
   persistedSDKMessagesRef.current = persistedSDKMessages
@@ -637,6 +642,9 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const globalWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const sessions = useAtomValue(agentSessionsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
+  const setSideExplorationMap = useSetAtom(agentSideExplorationMapAtom)
+  const setSidePanelOpen = useSetAtom(agentSidePanelOpenAtom)
+  const setSidePanelTabMap = useSetAtom(agentDiffPanelTabAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const agentPresetsMap = useAtomValue(agentPresetsAtom)
   const loadedPresetCaches = useAtomValue(agentPresetsLoadedAtom)
@@ -769,10 +777,11 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const planModeSessions = useAtomValue(agentPlanModeSessionsAtom)
   const isPlanMode = planModeSessions.has(sessionId)
   const store = useStore()
-  const currentQuotedSelection = useAtomValue(currentQuotedSelectionAtom)
+  // 嵌入右侧探索分支时 currentAgentSessionIdAtom 仍指向父会话，必须按 prop sessionId 取会话级输入状态。
+  const currentQuotedSelection = useAtomValue(quotedSelectionMapAtom).get(sessionId) ?? null
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
   const openPreview = useOpenPreview()
-  const currentAgentInterruption = useAtomValue(currentAgentInterruptionAtom)
+  const currentAgentInterruption = useAtomValue(agentInterruptionMapAtom).get(sessionId) ?? null
   const richTextInputRef = React.useRef<RichTextInputHandle>(null)
 
   /** 移除当前引用选中文本 */
@@ -2414,7 +2423,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       ...(() => {
         const skills = [...effectiveText.matchAll(/\/skill:(\S+)/g)].map(m => m[1]).filter(Boolean) as string[]
         const mcps = [...effectiveText.matchAll(/#mcp:(\S+)/g)].map(m => m[1]).filter(Boolean) as string[]
-        const sessionIds = [...effectiveText.matchAll(/&session:(\S+)/g)].map(m => m[1]).filter(Boolean) as string[]
+        const sessionIds = [...effectiveText.matchAll(/&session:([A-Za-z0-9-]+)(?:(?:~|::)\S+)?/g)].map(m => m[1]).filter(Boolean) as string[]
         return {
           ...(skills.length > 0 && { mentionedSkills: skills }),
           ...(mcps.length > 0 && { mentionedMcpServers: mcps }),
@@ -2793,30 +2802,35 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     }
   }, [sessionId, agentChannelId, agentModelId, currentWorkspaceId, openSession, setAgentSessions, setStreamingStates, permissionMode])
 
-  /** 分叉会话：从指定消息处创建新会话并自动切换 */
+  /** 从回复节点创建 Pi `/tree` 探索分支，并在当前主线的右侧工作区继续。 */
   const handleFork = React.useCallback(async (upToMessageUuid: string): Promise<void> => {
-    // 只有用户明确在源会话渠道内切换了模型，才把目标模型传给后端校验。
-    // 当前会话渠道已被删除/停用时，Pi 仍可先完成 artifact 分叉，避免无关的模型选择
-    // 把本可创建的历史分支阻断；后续继续对话时再由发送路径提示渠道不可用。
-    const forkModelId = agentChannelId === sessionMetaChannelId && agentModelId !== sessionMetaModelId
-      ? agentModelId || undefined
-      : undefined
+    if (sessionAgentRuntime !== 'pi') {
+      toast.info('探索分支目前仅支持 Pi Agent 会话')
+      return
+    }
     try {
       const meta = await window.electronAPI.forkAgentSession({
         sessionId,
         upToMessageUuid,
-        modelId: forkModelId,
+        // 探索必须继承分叉点的渠道与模型，不受当前全局选择器影响。
+        explorationSourceLabel: '这条 Agent 回复',
       })
-      setAgentSessions((prev) => [meta, ...prev])
-
-      // 切换到新会话 tab
-      openSession('agent', meta.id, meta.title)
-
-      toast.success('已创建分叉会话', {
-        description: meta.title,
+      setAgentSessions((prev) => prev.some((item) => item.id === meta.id) ? prev : [meta, ...prev])
+      setSideExplorationMap((prev) => {
+        const openBranches = prev.get(sessionId) ?? []
+        const next = new Map(prev)
+        next.set(sessionId, openBranches.some((item) => item.sessionId === meta.id)
+          ? openBranches
+          : [...openBranches, { sessionId: meta.id, sourceMessageId: upToMessageUuid, sourceLabel: '这条 Agent 回复' }])
+        return next
+      })
+      setSidePanelOpen(true)
+      setSidePanelTabMap((prev) => new Map(prev).set(sessionId, getExplorationSidePanelTab(meta.id)))
+      toast.success('已创建探索分支', {
+        description: '分支继承此处之前的完整上下文；结论可带回主线。',
       })
     } catch (error) {
-      console.error('[AgentView] 分叉会话失败:', error)
+      console.error('[AgentView] 创建探索分支失败:', error)
       const rawMsg = error instanceof Error ? error.message : '未知错误'
       // SDK 偶尔会因为 sidechain/消息归属问题抛 "not found in session"，
       // 这里给出更可操作的中文提示，而不是把 SDK 内部英文报错直接透传给用户
@@ -2827,7 +2841,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
         description: friendlyDesc,
       })
     }
-  }, [sessionId, openSession, setAgentSessions, agentChannelId, agentModelId, sessionMetaChannelId])
+  }, [sessionId, sessionAgentRuntime, setAgentSessions, setSideExplorationMap, setSidePanelOpen, setSidePanelTabMap])
 
   /** 快照回退：同一会话内回退到指定消息点，恢复文件 + 截断对话 */
   const [rewindTargetUuid, setRewindTargetUuid] = React.useState<string | null>(null)
@@ -2948,7 +2962,9 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   useLoadVoiceDictationSettings()
 
   const taskGraphEnabled = Boolean(
-    sessionBoundPreset && !isAgentPresetToolGroupDisabled(sessionBoundPreset.disabledToolGroups, 'task-graph'),
+    !embedded
+    && sessionBoundPreset
+    && !isAgentPresetToolGroupDisabled(sessionBoundPreset.disabledToolGroups, 'task-graph'),
   )
 
   const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => {
@@ -3046,7 +3062,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     },
     ...(taskGraphEnabled ? [{
       key: 'graph',
-      node: <ToolbarGraphButton onClick={() => { setGraphDialogOpen(true); setGraphRefreshVersion(v => v + 1) }} />,
+      node: <ToolbarGraphButton sessionId={sessionId} onClick={() => { setGraphDialogOpen(true); setGraphRefreshVersion(v => v + 1) }} />,
     }] : []),
   ]
     return items
@@ -3115,15 +3131,22 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   return (
     <>
     <AgentSessionProvider sessionId={sessionId}>
-      <div data-profer-navigation-region="conversation" tabIndex={-1} className="agent-conversation flex h-full min-w-0 w-full flex-1 flex-col max-w-[min(72rem,100%)] mx-auto">
-        {/* Agent Header */}
-        <AgentHeader sessionId={sessionId} />
-        <GoalStatusBar sessionId={sessionId} />
+      <div data-profer-navigation-region="conversation" tabIndex={-1} className="agent-conversation flex h-full min-h-0 min-w-0 w-full flex-1 flex-col max-w-[min(72rem,100%)] mx-auto">
+        {/* 探索分支已由右侧 Tab 标明归属，避免嵌入面板重复渲染全局 header。 */}
+        {!embedded && (
+          <div className="shrink-0">
+            <AgentHeader sessionId={sessionId} />
+          </div>
+        )}
+        <div className="shrink-0">
+          <GoalStatusBar sessionId={sessionId} />
+        </div>
 
         {/* 消息区域 */}
         <AgentMessages
           sessionId={sessionId}
           sessionModelId={agentModelId || undefined}
+          agentRuntime={sessionAgentRuntime}
           messagesLoaded={messagesLoaded}
           persistedSDKMessages={persistedSDKMessages}
           streaming={streaming}
@@ -3134,27 +3157,29 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
           stoppedByUser={stoppedByUser}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
-          onFork={handleFork}
+          onFork={embedded || sessionAgentRuntime !== 'pi' ? undefined : handleFork}
           onRewind={handleRewindRequest}
           onCompact={handleCompact}
           onLoadEarlierHistory={handleLoadEarlierHistory}
           historyMoreAvailable={historyHasMore}
           historyLoadingEarlier={historyLoading}
+          explorationEnabled={!embedded}
         />
 
         {/* 权限请求横幅 */}
-        <PermissionBanner sessionId={sessionId} onRequestStop={handleStop} />
+        <div className="shrink-0">
+          <PermissionBanner sessionId={sessionId} onRequestStop={handleStop} />
 
-        {/* AskUserQuestion 交互式问答横幅 */}
-        <AskUserBanner sessionId={sessionId} onRequestStop={handleStop} />
+          {/* AskUserQuestion 交互式问答横幅 */}
+          <AskUserBanner sessionId={sessionId} onRequestStop={handleStop} />
 
-
-        {/* ExitPlanMode 计划审批横幅 */}
-        <ExitPlanModeBanner sessionId={sessionId} onRequestStop={handleStop} />
+          {/* ExitPlanMode 计划审批横幅 */}
+          <ExitPlanModeBanner sessionId={sessionId} onRequestStop={handleStop} />
+        </div>
 
         {/* 输入区域 — 交互横幅显示时隐藏，由横幅替代 */}
         {!hasBannerOverlay && (
-        <div className="px-2.5 pb-2.5 md:px-[18px] md:pb-[18px]" data-input-mode="agent">
+        <div className="shrink-0 px-2.5 pb-2.5 md:px-[18px] md:pb-[18px]" data-input-mode="agent">
           {/* 下方 composer 以完整顶部圆角叠在服务轨上；服务轨延伸至圆角背后。 */}
           <div className="composer-stack">
             <RuntimeProcessPanel sessionId={sessionId} />

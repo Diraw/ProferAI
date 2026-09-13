@@ -775,10 +775,12 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
   return (
     <div
       className={cn(
-        'rich-text-input relative w-full overflow-y-auto scrollbar-thin transition-[max-height] duration-200 ease-in-out',
+        // 不再使用 max-height 过渡：紧凑档切换发生在 resize 收敛点，若再叠加 200ms
+        // 动画会把一次离散重排拉长成连续 reflow，持续推动滚动容器 ResizeObserver。
+        'rich-text-input relative w-full overflow-y-auto scrollbar-thin',
         isManuallyCollapsed
-          ? 'max-h-[101px]'
-          : isExpanded ? 'max-h-[500px]' : 'max-h-[200px]',
+          ? 'rich-text-input-collapsed'
+          : isExpanded ? 'rich-text-input-expanded' : 'rich-text-input-default',
         disabled && 'opacity-50 cursor-not-allowed',
         className
       )}
@@ -806,6 +808,18 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         </Tooltip>
       )}
       <style>{`
+        .rich-text-input {
+          max-height: 200px;
+        }
+        .rich-text-input.rich-text-input-expanded {
+          max-height: 500px;
+        }
+        .rich-text-input.rich-text-input-collapsed {
+          max-height: 101px;
+        }
+        /* 窗口高度驱动的“紧凑档”已移除（2026-09-13）：它每次切换会让消息区/composer
+         * 的边界相对不动的窗口底边跳约 40px，实测单次拖拽可触发 4 次，表现为底部边界
+         * 反复跳动。输入区高度改为恒定，边界不再随窗口高度变化。 */
         .ProseMirror {
           outline: none;
           padding: 9px 15px 0px;

@@ -90,7 +90,7 @@ describe('设置服务命名收敛兼容（Tablet* → Pocket*）', () => {
     expect(settings.pocketModePort).toBe(7788)
   })
 
-  test('Given 配置缺失或为空 When 读取设置 Then 移动模式保持未配置状态', () => {
+  test('Given 配置缺失或为空 When 读取设置 Then 移动模式保持未配置且插件入口默认关闭', () => {
     const configDir = process.env.PROFER_CONFIG_DIR!
     writeSettingsFile(configDir, {})
 
@@ -98,8 +98,19 @@ describe('设置服务命名收敛兼容（Tablet* → Pocket*）', () => {
 
     expect(settings.pocketModeEnabled).toBeUndefined()
     expect(settings.pocketModePort).toBeUndefined()
+    expect(settings.pluginSystemEnabled).toBe(false)
     // 兜底默认值仍生效
     expect(settings.notificationsEnabled).toBe(true)
+  })
+
+  test('Given 插件入口已解锁 When 重读设置 Then 保留启用状态', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+    writeSettingsFile(configDir, { pluginSystemEnabled: true })
+
+    expect(getSettings().pluginSystemEnabled).toBe(true)
+
+    updateSettings({ notificationsEnabled: false })
+    expect(readSettingsFile(configDir).pluginSystemEnabled).toBe(true)
   })
 
   test('Given 未显式配置端口 When 更新为 0 Then 写入 0 表示回落默认端口', () => {

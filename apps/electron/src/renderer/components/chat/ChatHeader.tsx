@@ -1,3 +1,4 @@
+import { PluginTaskControls } from '@/components/plugins/PluginTaskControls'
 /**
  * ChatHeader - 对话头部
  *
@@ -118,6 +119,7 @@ export function ChatHeader({ conversation, onOpenHistory }: ChatHeaderProps): Re
 
       {/* 右侧按钮组 */}
       <div className="flex items-center gap-1 titlebar-no-drag ml-auto">
+        <PluginTaskControls kind="chat" sessionId={conversation.id} />
         {onOpenHistory && (
           <Tooltip>
             <TooltipTrigger asChild>

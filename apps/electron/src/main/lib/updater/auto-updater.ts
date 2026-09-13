@@ -1,8 +1,8 @@
 /**
  * 自动更新核心模块
  *
- * 检测新版本 → 自动后台下载 → 用户确认后重启安装。
- * 仅在打包后的生产环境中工作。
+ * 打包版：检测新版本 → 自动后台下载 → 用户确认后重启安装。
+ * 开发版：只检查最新 Release，并引导手动下载，不尝试覆盖源码目录。
  */
 
 import { autoUpdater } from 'electron-updater'
@@ -12,9 +12,13 @@ import { UPDATER_IPC_CHANNELS } from './updater-types'
 import { runWithUpdateSourceFallback } from './update-fallback'
 import { getUpdateSources, type UpdateSource } from './update-sources'
 import { canReplaceUpdateStatus } from './update-state'
+import { getLatestRelease } from '../github-release-service'
+
+const GITHUB_RELEASES_URL = 'https://github.com/Yuan-lai-ru-ci/ProferAI/releases'
 
 /** 当前更新状态 */
-let currentStatus: UpdateStatus = { status: app.isPackaged ? 'idle' : 'disabled' }
+// 开发版也支持检查最新 Release；只有“自动下载安装”能力在开发版不可用。
+let currentStatus: UpdateStatus = { status: 'idle' }
 
 /** 主窗口引用 */
 let win: BrowserWindow | null = null
@@ -61,6 +65,42 @@ async function checkSource(source: UpdateSource): Promise<boolean> {
   return true
 }
 
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.replace(/^v/, '').split('.').map(Number)
+  const rightParts = right.replace(/^v/, '').split('.').map(Number)
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
+async function checkDevelopmentUpdate(): Promise<void> {
+  setStatus({ status: 'checking' })
+  const release = await getLatestRelease()
+  // getLatestRelease 只在请求失败时返回 null。必须与「确实没有新版本」区分，
+  // 否则断网 / 代理不通 / 触发 GitHub Rate limit 时开发者会看到“已是最新版本”的假象。
+  if (!release) {
+    setStatus({ status: 'error', error: '无法获取最新版本信息，请检查网络或代理设置' })
+    return
+  }
+  if (release.draft || release.prerelease) {
+    setStatus({ status: 'not-available' })
+    return
+  }
+  const version = release.tag_name.replace(/^v/, '')
+  if (compareVersions(version, app.getVersion()) <= 0) {
+    setStatus({ status: 'not-available' })
+    return
+  }
+  setStatus({
+    status: 'available',
+    version,
+    releaseNotes: release.body || undefined,
+    manualUrl: release.html_url || GITHUB_RELEASES_URL,
+  })
+}
+
 async function runUpdateCheck(): Promise<void> {
   setStatus({ status: 'checking' })
 
@@ -82,11 +122,19 @@ async function runUpdateCheck(): Promise<void> {
 
 /** 手动触发检查更新 */
 export async function checkForUpdates(): Promise<void> {
-  // 开发模式不检查更新（electron-updater 的 feed URL 仅在打包后嵌入）
+  // 开发版不能把安装包覆盖到源码目录，但可以检查最新 Release，方便开发期间及时获知
+  // 新版本；真正安装仍由用户打开发布页下载正式安装包完成。
   if (!app.isPackaged) {
-    console.log('[更新] 开发模式，跳过更新检查')
-    setStatus({ status: 'disabled' })
-    return
+    console.log('[更新] 开发模式，检查 GitHub 最新 Release')
+    if (inFlightUpdateCheck) return inFlightUpdateCheck
+    inFlightUpdateCheck = checkDevelopmentUpdate()
+      .catch((error) => {
+        const message = errorMessage(error)
+        console.error('[更新] 开发版检查更新失败:', message)
+        setStatus({ status: 'error', error: message })
+      })
+      .finally(() => { inFlightUpdateCheck = null })
+    return inFlightUpdateCheck
   }
 
   // 已在下载中或已下载完成，不重复检查
@@ -128,19 +176,11 @@ export function cleanupUpdater(): void {
 }
 
 /**
- * 初始化自动更新
+ * 装配 electron-updater（仅在打包版可用：feed URL 在打包时嵌入）。
  *
- * @param mainWindow - 主窗口实例，用于推送更新状态
+ * 开发版不装配任何会尝试安装的路径，调度与状态推送由 initAutoUpdater 统一负责。
  */
-export function initAutoUpdater(mainWindow: BrowserWindow): void {
-  win = mainWindow
-
-  // 开发模式不初始化更新检查（feed URL 仅在打包后嵌入）
-  if (!app.isPackaged) {
-    console.log('[更新] 开发模式，自动更新模块未启用')
-    return
-  }
-
+function setupPackagedAutoUpdater(): void {
   // 应用代理设置 — electron-updater 底层用 Electron net 模块，遵循 HTTPS_PROXY 环境变量
   try {
     const { getEffectiveProxyUrl } = require('../proxy-settings-service') as {
@@ -214,6 +254,24 @@ export function initAutoUpdater(mainWindow: BrowserWindow): void {
     // 当前检查流程会捕获此错误并切换备用源。只有脱离该流程的异常才直接展示。
     if (!inFlightUpdateCheck) setStatus({ status: 'error', error: err.message })
   })
+}
+
+/**
+ * 初始化自动更新
+ *
+ * @param mainWindow - 主窗口实例，用于推送更新状态
+ */
+export function initAutoUpdater(mainWindow: BrowserWindow): void {
+  win = mainWindow
+
+  // 开发版不能把安装包覆盖到源码目录，feed URL 也只在打包后嵌入，因此不装配
+  // electron-updater；但下面的调度照旧执行，走 checkDevelopmentUpdate 检查最新
+  // Release 并引导手动下载（否则开发期间完全感知不到新版本）。
+  if (app.isPackaged) {
+    setupPackagedAutoUpdater()
+  } else {
+    console.log('[更新] 开发模式：跳过自动安装装配，仅检查最新 Release')
+  }
 
   // 启动后延迟 10 秒首次检查
   setTimeout(() => {
@@ -236,5 +294,9 @@ export function initAutoUpdater(mainWindow: BrowserWindow): void {
     win = null
   })
 
-  console.log('[更新] 自动更新模块已初始化（国内主源、GitHub 备用，自动下载）')
+  console.log(
+    app.isPackaged
+      ? '[更新] 自动更新模块已初始化（国内主源、GitHub 备用，自动下载）'
+      : '[更新] 开发版更新检查已初始化（仅检查最新 Release，提示手动下载）',
+  )
 }

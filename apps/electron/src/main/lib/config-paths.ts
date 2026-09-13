@@ -285,6 +285,25 @@ export function getChatToolsConfigPath(): string {
   return join(getConfigDir(), 'chat-tools.json')
 }
 
+/** 第三方插件代码目录。插件代码与用户数据分离，卸载时默认不删除数据。 */
+export function getPluginsDir(): string {
+  const dir = join(getConfigDir(), 'plugins')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 已安装插件启停状态索引。 */
+export function getPluginsIndexPath(): string {
+  return join(getConfigDir(), 'plugins.json')
+}
+
+/** 第三方插件私有数据根目录。 */
+export function getPluginDataDir(): string {
+  const dir = join(getConfigDir(), 'plugin-data')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
 /**
  * 获取 Agent 会话索引文件路径
  *

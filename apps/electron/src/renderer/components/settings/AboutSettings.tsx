@@ -37,12 +37,17 @@ import { Badge } from '@/components/ui/badge'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { VersionHistory } from './VersionHistory'
+import { pluginSystemEnabledAtom } from '@/atoms/plugin-system'
+import {
+  INITIAL_PLUGIN_UNLOCK_CLICK_STATE,
+  advancePluginUnlockClick,
+} from '@/lib/plugin-unlock'
 
 /** 从 package.json 构建时由 Vite define 注入 */
 declare const __APP_VERSION__: string
 const APP_VERSION = __APP_VERSION__
 
-const GITHUB_RELEASES_URL = 'https://github.com/Yuan-lai-ru-ci/Profer/releases'
+const GITHUB_RELEASES_URL = 'https://github.com/Yuan-lai-ru-ci/ProferAI/releases'
 
 /** 更新状态卡片 */
 function UpdateCard(): React.ReactElement | null {
@@ -64,6 +69,14 @@ function UpdateCard(): React.ReactElement | null {
 
   const handleQuitAndInstall = (): void => {
     window.electronAPI.updater?.quitAndInstall()
+  }
+
+  const handleOpenManualUpdate = (): void => {
+    const url = status.manualUrl
+    if (!url) return
+    void window.electronAPI.openExternal(url).catch((error: unknown) => {
+      toast.error('无法打开下载页', { description: error instanceof Error ? error.message : String(error) })
+    })
   }
 
   // 当检测到新版本时，从本地内置 CHANGELOG 获取最新版本的更新内容
@@ -95,10 +108,18 @@ function UpdateCard(): React.ReactElement | null {
       <SettingsRow label="软件更新">
         <div className="flex items-center gap-3">
           {/* 状态文字 */}
-          <StatusText status={status.status} version={status.version} error={status.error} />
+          <StatusText status={status.status} version={status.version} error={status.error} manual={!!status.manualUrl} />
 
           {/* 操作按钮 */}
-          {status.status === 'downloaded' ? (
+          {status.manualUrl && status.status === 'available' ? (
+            <button
+              onClick={handleOpenManualUpdate}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              打开下载页
+            </button>
+          ) : status.status === 'downloaded' ? (
             <button
               onClick={handleQuitAndInstall}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
@@ -109,7 +130,7 @@ function UpdateCard(): React.ReactElement | null {
           ) : (
             <button
               onClick={handleCheck}
-              disabled={isChecking || status.status === 'disabled'}
+              disabled={isChecking}
               className="inline-flex items-center gap-1.5 rounded-md bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80 transition-colors disabled:opacity-50"
             >
               {isChecking ? (
@@ -160,21 +181,22 @@ function UpdateCard(): React.ReactElement | null {
 }
 
 /** 状态文字组件 */
-function StatusText({ status, version, error }: {
+function StatusText({ status, version, error, manual }: {
   status: string
   version?: string
   error?: string
+  manual?: boolean
 }): React.ReactElement {
   switch (status) {
     case 'disabled':
-      return <span className="text-xs text-muted-foreground">开发模式不检查更新，请使用安装包验证</span>
+      return <span className="text-xs text-muted-foreground">当前版本暂不支持应用内更新</span>
     case 'checking':
       return <span className="text-xs text-muted-foreground">正在检查...</span>
     case 'available':
       return (
         <span className="text-xs text-primary flex items-center gap-1">
           <ExternalLink className="h-3 w-3" />
-          新版本 v{version} 可用
+          {manual ? `新版本 v${version} 可用，请手动下载` : `新版本 v${version} 可用`}
         </span>
       )
     case 'downloading':
@@ -454,6 +476,33 @@ function ShellEnvironmentCard(): React.ReactElement | null {
 }
 
 export function AboutSettings(): React.ReactElement {
+  const pluginSystemEnabled = useAtomValue(pluginSystemEnabledAtom)
+  const setPluginSystemEnabled = useSetAtom(pluginSystemEnabledAtom)
+  const unlockClickStateRef = React.useRef(INITIAL_PLUGIN_UNLOCK_CLICK_STATE)
+  const unlockPendingRef = React.useRef(false)
+
+  const handleVersionClick = React.useCallback((): void => {
+    if (pluginSystemEnabled || unlockPendingRef.current) return
+
+    const result = advancePluginUnlockClick(unlockClickStateRef.current, Date.now())
+    unlockClickStateRef.current = result.state
+    if (!result.unlocked) return
+
+    unlockPendingRef.current = true
+    window.electronAPI.updateSettings({ pluginSystemEnabled: true })
+      .then(() => {
+        setPluginSystemEnabled(true)
+        toast.success('插件已启用')
+      })
+      .catch((error: unknown) => {
+        console.error('[插件] 启用入口失败:', error)
+        toast.error('插件启用失败，请重试')
+      })
+      .finally(() => {
+        unlockPendingRef.current = false
+      })
+  }, [pluginSystemEnabled, setPluginSystemEnabled])
+
   return (
     <div className="space-y-8">
       <SettingsSection
@@ -462,7 +511,18 @@ export function AboutSettings(): React.ReactElement {
       >
         <SettingsCard>
           <SettingsRow label="版本">
-            <span className="text-sm text-muted-foreground font-mono">{APP_VERSION}</span>
+            {pluginSystemEnabled ? (
+              <span className="font-mono text-sm text-muted-foreground">{APP_VERSION}</span>
+            ) : (
+              <button
+                type="button"
+                onClick={handleVersionClick}
+                aria-label={`Profer 版本 ${APP_VERSION}`}
+                className="select-none rounded-sm font-mono text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                {APP_VERSION}
+              </button>
+            )}
           </SettingsRow>
         </SettingsCard>
 

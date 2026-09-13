@@ -23,6 +23,7 @@ import { DiffView } from './DiffView'
 import { MarkdownRichEditor } from './MarkdownRichEditor'
 import { getPreviewCandidateBasePaths, isAbsoluteFilePath } from './preview-open-path'
 import { PreviewFindBar } from './PreviewFindBar'
+import { PreviewDirectoryView } from './PreviewDirectoryView'
 import { MarkdownToc } from './MarkdownToc'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { PIERRE_FILE_CSS } from '@/components/agent/tool-result-renderers/pierre-styles'
@@ -266,6 +267,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const [copied, setCopied] = React.useState(false)
   // 文件解析失败（主进程 resolveAndReadFile 返回 null）：区别于「文件存在但内容为空」
   const [notFound, setNotFound] = React.useState(false)
+  // 预览目标类型：目录链接展示目录清单；denied 区分「越权被拒」与「真的不存在」
+  const [pathKind, setPathKind] = React.useState<'file' | 'directory' | 'denied'>('file')
   const refreshVersionMap = useAtomValue(agentDiffRefreshVersionAtom)
   const setRefreshVersionMap = useSetAtom(agentDiffRefreshVersionAtom)
   const refreshVersion = refreshVersionMap.get(sessionId) ?? 0
@@ -467,6 +470,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
       setOldContent('')
       setNewContent('')
       setNotFound(false)
+      setPathKind('file')
       setDocxHtml('')
       setOfficeHtml('')
       setOfficeText('')
@@ -496,6 +500,20 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
 
         if (!cached) {
           if (previewOnly) {
+            // 先分清「文件 / 目录 / 不可预览」：目录链接（如 `~/.profer-dev/skins/<id>`）交给目录视图，
+            // denied 路径拿到准确提示；否则后面各类型分支只会各自报“加载失败/不存在”。
+            const described = await window.electronAPI.describePath(filePath, fileAccess)
+            if (cancelled) return
+            if (described.kind === 'directory') {
+              setPathKind('directory')
+              setLoading(false)
+              return
+            }
+            if (described.kind === 'denied') {
+              setPathKind('denied')
+              setLoading(false)
+              return
+            }
             if (isUnsupported) {
               if (!cancelled) setLoading(false)
               return
@@ -1102,7 +1120,20 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           {loading ? (
             <div className="flex items-center justify-center h-full text-muted-foreground text-[12px]">加载中...</div>
           ) : previewOnly ? (
-            isUnsupported ? (
+            pathKind === 'directory' ? (
+              <PreviewDirectoryView
+                filePath={filePath}
+                sessionId={sessionId}
+                basePaths={fileAccess?.candidateBasePaths}
+              />
+            ) : pathKind === 'denied' ? (
+              <div className="flex flex-col items-center justify-center h-full gap-1.5 px-4 text-center">
+                <FileQuestion className="size-6 text-muted-foreground/60" />
+                <span className="text-[13px] text-muted-foreground">该路径不在允许预览的范围内</span>
+                <span className="text-[12px] text-muted-foreground/70">系统目录与凭据目录（~/.ssh、钥匙串等）不参与预览</span>
+                <span className="text-[12px] text-muted-foreground/70 font-mono break-all">{filePath}</span>
+              </div>
+            ) : isUnsupported ? (
               <div className="flex flex-col items-center justify-center h-full gap-1.5 px-4 text-center">
                 <FileQuestion className="size-6 text-muted-foreground/60" />
                 <span className="text-[13px] text-muted-foreground">不支持预览此文件类型</span>
@@ -1308,7 +1339,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
             ) : notFound ? (
               <div className="flex flex-col items-center justify-center h-full gap-1.5 px-4 text-center">
                 <FileQuestion className="size-6 text-muted-foreground/60" />
-                <span className="text-[13px] text-muted-foreground">文件不存在或无法定位</span>
+                <span className="text-[13px] text-muted-foreground">文件不存在或无法读取</span>
                 <span className="text-[12px] text-muted-foreground/70 font-mono break-all">{filePath}</span>
               </div>
             ) : (

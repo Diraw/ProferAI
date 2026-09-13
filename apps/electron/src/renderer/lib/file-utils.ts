@@ -24,12 +24,19 @@ export function getFileBaseName(filePath: string): string {
  * - Windows 盘符：C:\ 或 C:/
  * - Windows UNC 网络路径：\\server\share
  * - macOS/Linux：以 / 开头
+ * - 用户主目录缩写：`~/`（或 `~\`）开头；主进程 resolveTargetPath 会展开为真实 home。
+ *   Agent 输出常用这种写法（如 create_skin 的 installedPath `~/.profer/skins/<id>`），
+ *   不识别就会把可预览的链接降级成普通文本。
  *
  * 仅做前缀归类，适用于「已知文件路径字符串」的判定；若用于消息文本检测（可能含行号后缀、
  * 正则等非路径内容），由调用方在需要时叠加保守校验（见 file-path-chip 薄封装）。
  */
 export function isAbsoluteFilePath(filePath: string): boolean {
-  return filePath.startsWith('/') || filePath.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(filePath)
+  return filePath.startsWith('/')
+    || filePath.startsWith('~/')
+    || filePath.startsWith('~\\')
+    || filePath.startsWith('\\\\')
+    || /^[A-Za-z]:[\\/]/.test(filePath)
 }
 
 /**

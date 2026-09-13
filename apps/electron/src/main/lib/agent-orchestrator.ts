@@ -1,3 +1,5 @@
+import { routePluginModel } from './plugins/plugin-routing'
+import { buildPluginAgentTools } from './plugins/plugin-agent-tools'
 /**
  * AgentOrchestrator — Agent 编排层
  *
@@ -156,7 +158,7 @@ import {
   MAX_CONTEXT_MESSAGES,
 } from './agent-prompt-utils'
 import { resolveSDKCliPath } from './agent-sdk-cli-path'
-import { collectAttachedDirectories } from './agent-directory-utils'
+import { collectAttachedDirectories, collectProductArtifactDirectories } from './agent-directory-utils'
 import { buildAgentRuntimeEnv } from './agent-runtime-env'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 import type { PiRetryUpdate } from './adapters/pi-retry-control'
@@ -167,16 +169,20 @@ import { injectClaudeClipboardMcpServer } from './claude-clipboard-tools'
 import { evaluatePptCapability } from './ppt-capability-gate'
 import { injectAgentImageOutputMcpServer } from './agent-image-output-tools'
 import { injectAgentGptImageMcpServer, isAgentGptImageAvailable } from './agent-gpt-image-tools'
+import { injectAgentSkinMcpServer } from './agent-skin-tools'
 import { injectAgentPreviewMcpServer } from './agent-preview-tools'
 import { agentFilePreviewSessionManager } from './agent-file-preview-session'
 import { injectPptDeliveryMcpServer } from './ppt-delivery-agent-tools'
 import { browserController } from './browser-controller'
 import {
   applySdkCredentials,
+  buildPiSkillMentionOptions,
+  isBrowserToolName,
   isPartialSDKMessage,
   isPlanModeMarkdownPath,
   isPlanModeMcpTool,
   releaseActiveSession,
+  resolvePlanModeBrowserPermission,
   shouldPreInterruptQueuedMessage,
   tryAcquireActiveSession,
   tryReserveQueuedMessage,
@@ -560,21 +566,41 @@ export class AgentOrchestrator {
   }
 
   /**
-   * 流完成后自动生成标题
+   * 流开始后自动生成标题。
    *
-   * 如果会话标题仍为默认值，自动调用标题生成并通过回调通知。
+   * 默认会话沿用首条消息自动命名；Pi 探索分支则在首条新增用户消息时命名一次，
+   * 避免把 fork 前复制的历史误当成分支自己的首条消息，也避免后续 turn 覆盖标题。
    */
   private async autoGenerateTitle(sessionId: string, userMessage: string, channelId: string, modelId: string, callbacks: SessionCallbacks): Promise<void> {
     try {
       const meta = getAgentSessionMeta(sessionId)
-      if (!meta || meta.title !== DEFAULT_SESSION_TITLE) return
+      if (!meta) return
 
-      const title = await this.generateTitle({
-        userMessage,
-        channelId,
-        modelId,
-      })
+      const isDefaultSessionTitle = meta.title === DEFAULT_SESSION_TITLE
+      const isFirstExplorationMessage = Boolean(
+        meta.explorationParentSessionId && !meta.explorationTitleInitializedAt,
+      )
+      if (!isDefaultSessionTitle && !isFirstExplorationMessage) return
+
+      // 分支的历史已由 Pi fork 复制；先持久化守卫，避免同一分支并发发送时重复请求标题。
+      const explorationTitleInitializedAt = isFirstExplorationMessage ? Date.now() : undefined
+      if (explorationTitleInitializedAt) {
+        updateAgentSessionMeta(sessionId, { explorationTitleInitializedAt })
+      }
+
+      const title = await this.generateTitle({ userMessage, channelId, modelId })
+        ?? (isFirstExplorationMessage ? createFallbackTitle(userMessage) : null)
       if (!title) return
+
+      // 标题请求是异步的；期间用户可能手动重命名，不能覆盖用户决定。
+      const latestMeta = getAgentSessionMeta(sessionId)
+      const canApplyDefaultTitle = isDefaultSessionTitle && latestMeta?.title === DEFAULT_SESSION_TITLE
+      const canApplyExplorationTitle = Boolean(
+        isFirstExplorationMessage
+        && latestMeta?.title === meta.title
+        && latestMeta.explorationTitleInitializedAt === explorationTitleInitializedAt,
+      )
+      if (!latestMeta || (!canApplyDefaultTitle && !canApplyExplorationTitle)) return
 
       updateAgentSessionMeta(sessionId, { title })
       callbacks.onTitleUpdated(title)
@@ -717,11 +743,10 @@ export class AgentOrchestrator {
    * 通过 EventBus 分发 AgentEvent，通过 callbacks 发送控制信号。
    */
   async sendMessage(input: AgentSendInput, callbacks: SessionCallbacks): Promise<void> {
+    const agentRuntime = normalizeAgentRuntime(input.agentRuntime ?? getAgentSessionMeta(input.sessionId)?.agentRuntime)
     const {
       sessionId,
       userMessage,
-      channelId,
-      modelId,
       workspaceId,
       additionalDirectories,
       customMcpServers,
@@ -731,7 +756,7 @@ export class AgentOrchestrator {
       mentionedSessionIds,
       automationContext,
     } = input
-    const agentRuntime = normalizeAgentRuntime(input.agentRuntime ?? getAgentSessionMeta(sessionId)?.agentRuntime)
+    let { channelId, modelId } = input
     // Pi/Claude 的错误结构和可恢复语义不同；Router 必须按本次请求 runtime 提供 helper。
     const errorHelpers = this.adapter.getErrorHelpers?.(agentRuntime) ?? this.adapter.errorHelpers
     const stderrChunks: string[] = []
@@ -759,6 +784,8 @@ export class AgentOrchestrator {
       callbacks.onComplete([], { startedAt: input.startedAt })
       return
     }
+    input = routePluginModel(`agent:${sessionId}`, input, agentRuntime)
+    ;({ channelId, modelId } = input)
     let resolveCompletion!: () => void
     const completion = new Promise<void>((resolve) => {
       resolveCompletion = resolve
@@ -1235,7 +1262,13 @@ export class AgentOrchestrator {
         sessionMeta,
         workspaceSlug,
       })
-      const previewAllowedRoots = workspaceSlug && agentCwd ? [agentCwd, ...attachedPreviewRoots] : attachedPreviewRoots
+      const previewAllowedRoots = [
+        // 产品自有产物目录（皮肤库/插件/Skill/附件）也是 Agent 产物的落地位置：
+        // 不加进来，create_skin 产出的皮肤预览、Agent 自己写的本地页面都过不了授权根。
+        ...(workspaceSlug && agentCwd ? [agentCwd] : []),
+        ...attachedPreviewRoots,
+        ...collectProductArtifactDirectories(),
+      ]
       const imageOutputAllowedRoots = workspaceSlug && agentCwd ? previewAllowedRoots : []
       const emitImageGenerationUpdate = (record: import('@profer/shared').AgentImageGenerationCard): void => {
         this.eventBus.emit(sessionId, {
@@ -1269,6 +1302,13 @@ export class AgentOrchestrator {
             onGenerationUpdate: emitImageGenerationUpdate,
           }, disabledTools)
         }
+        if (agentRuntime === 'claude') {
+          await injectAgentSkinMcpServer(sdk, mcpServers, {
+            agentCwd,
+            allowedRoots: imageOutputAllowedRoots,
+            workspaceSlug,
+          }, disabledTools)
+        }
       }
       if (pptCapabilityActive) {
         await injectPptDeliveryMcpServer(sdk, mcpServers, disabledTools)
@@ -1292,6 +1332,7 @@ export class AgentOrchestrator {
                   sessionMeta,
                   workspaceSlug,
                 }),
+                ...collectProductArtifactDirectories(),
               ].filter((root): root is string => typeof root === 'string' && root.length > 0),
             ),
           ],
@@ -1299,6 +1340,12 @@ export class AgentOrchestrator {
           disabledTools,
         })
       }
+
+      const pluginTools = await buildPluginAgentTools(sdk, mcpServers, (server, tool) =>
+        isEffectiveAgentPresetMcpServerAllowed(presetPolicy, server)
+        && !disabledTools?.includes(tool)
+        && !disabledTools?.includes(`mcp__${server}__${tool}`),
+      )
 
       // 合并外部注入的自定义 MCP 服务器（如飞书群聊工具），同样受当前预设白名单约束。
       if (customMcpServers) {
@@ -1389,6 +1436,7 @@ ${enrichedMessage}`
               sessionMeta,
               workspaceSlug,
             }),
+            ...collectProductArtifactDirectories(),
           ].filter((root): root is string => typeof root === 'string' && root.length > 0),
         ),
       ]
@@ -1425,7 +1473,7 @@ ${enrichedMessage}`
               pptCapabilityActive,
             })
             const mcpTools = await buildPiMcpTools(mcpServers)
-            return [...builtin.tools, ...mcpTools]
+            return [...builtin.tools, ...mcpTools, ...pluginTools]
           })()
         : undefined
       // 注册到 Map，支持运行中动态切换
@@ -1534,8 +1582,6 @@ ${enrichedMessage}`
         'CronDelete',
         'RemoteTrigger',
       ])
-      // Pi-native 浏览器工具不是 MCP：必须显式分类，避免被通用 mcp__ 调研放行规则遗漏。
-      const PLAN_MODE_READ_ONLY_BROWSER_TOOLS = new Set(['BrowserObserve', 'BrowserScreenshot', 'BrowserListTabs', 'BrowserPreviewOpen'])
 
       /** Plan 模式是否已被 Agent 进入（初始 plan 模式时天然为 true，其他模式需 EnterPlanMode 触发） */
       let planModeEntered = initialPermissionMode === 'plan'
@@ -1630,6 +1676,19 @@ ${enrichedMessage}`
           })
         }
 
+        // ── 受管浏览器：计划模式只读门禁 ──
+        // 必须在通用权限 switch 之前：该 switch 的每个分支都会 return，
+        // 放在其后会变成不可达代码，导致计划模式下 Browser 白名单从未生效。
+        // 非 plan 模式不在这里处理，直接交给下面 switch，保持 auto / bypassPermissions 既有行为。
+        // 受管浏览器对所有 Agent 会话开放；主进程仍隔离网页，并拒绝私网、下载、弹窗和网页权限，
+        // 页面内容始终视为不可信输入。
+        if (currentMode === 'plan' && isBrowserToolName(toolName)) {
+          const decision = resolvePlanModeBrowserPermission(toolName)
+          return decision.behavior === 'allow'
+            ? { behavior: 'allow' as const, updatedInput: input }
+            : { behavior: 'deny' as const, message: decision.message ?? '计划模式下不允许进行网页交互。' }
+        }
+
         // ── 普通工具的权限分派 ──
 
         switch (currentMode) {
@@ -1685,20 +1744,6 @@ ${enrichedMessage}`
 
           default:
             return { behavior: 'allow' as const, updatedInput: input }
-        }
-
-        // 所有 Pi 会话均可使用受管浏览器。主进程仍隔离网页，并拒绝私网、下载、弹窗和网页权限；
-        // 页面内容始终视为不可信输入。计划模式仅允许只读浏览器操作。
-        if (toolName.startsWith('Browser')) {
-          if (currentMode === 'plan') {
-            return PLAN_MODE_READ_ONLY_BROWSER_TOOLS.has(toolName)
-              ? { behavior: 'allow' as const, updatedInput: input }
-              : {
-                  behavior: 'deny' as const,
-                  message: '计划模式下只能观察受管浏览器，请在计划获批后再进行网页交互。',
-                }
-          }
-          return { behavior: 'allow' as const, updatedInput: input }
         }
       }
 
@@ -1818,6 +1863,8 @@ ${enrichedMessage}`
           ...(presetPolicy.allowedSkillSlugs !== undefined && {
             skillSlugs: [...presetPolicy.allowedSkillSlugs],
           }),
+          // 用户显式 /skill: 引用：Pi adapter 会把对应 Skill 正文内联进本轮 prompt。
+          ...buildPiSkillMentionOptions(allowedMentionedSkills),
           ...(piCustomTools && { customTools: piCustomTools }),
           ...(sessionMeta?.codexFastMode && { codexFastMode: true }),
           ...(userMessage.trim() === '/compact' && { compactRequest: true }),
@@ -3397,6 +3444,8 @@ ${enrichedMessage}`
 
       await this.adapter.sendQueuedMessage(sessionId, sdkMessage, {
         interrupt: opts?.interrupt,
+        // 队列消息复用同一轮已按预设 policy 过滤的 skill mentions，保持与主轮一致的正文展开能力。
+        ...buildPiSkillMentionOptions(allowedMentionedSkills),
       })
       // 消息已注入 Agent 会话（Pi interrupt 路径 reservation 已消费）。
       // 即使 run 在 await 期间已停止/被替换，本条消息仍必须持久化到同一会话文件，
