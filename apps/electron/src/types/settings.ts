@@ -289,6 +289,12 @@ export interface AppSettings {
   longTextPasteAsAttachmentEnabled?: boolean
   /** 输入框是否渲染 Markdown 富文本格式（默认 false，关闭后为纯文本模式，仍保留 Mention 引用） */
   richTextRenderingEnabled?: boolean
+  /** 窗口内高低于该值（px）时输入框进入紧凑档（默认 700；0 = 关闭，输入框高度恒定） */
+  inputCompactViewportHeight?: number
+  /** 紧凑档下输入框最小高度（px，默认 60；决定空内容时变矮多少，常规为 101） */
+  inputCompactMinHeight?: number
+  /** 紧凑档下输入框最大高度（px，默认 140；展开档为该值 2 倍且不超过 500） */
+  inputCompactMaxHeight?: number
   /** Markdown 预览字号档位（默认 'medium'，对应 15px） */
   markdownFontSize?: MarkdownFontSize
   /** 界面缩放档位（默认 'standard' 100%） */

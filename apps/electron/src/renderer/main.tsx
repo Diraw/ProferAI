@@ -60,6 +60,7 @@ import {
   stickyUserMessageEnabledAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
+  composerCompactModeAtom,
   initializeUiPreferences,
 } from './atoms/ui-preferences'
 import {
@@ -559,14 +560,16 @@ function UiPreferencesInitializer(): null {
   const setStickyUserMessageEnabled = useSetAtom(stickyUserMessageEnabledAtom)
   const setLongTextPasteAsAttachmentEnabled = useSetAtom(longTextPasteAsAttachmentEnabledAtom)
   const setRichTextRenderingEnabled = useSetAtom(richTextRenderingEnabledAtom)
+  const setComposerCompactMode = useSetAtom(composerCompactModeAtom)
 
   useEffect(() => {
     initializeUiPreferences(
       setStickyUserMessageEnabled,
       setLongTextPasteAsAttachmentEnabled,
-      setRichTextRenderingEnabled
+      setRichTextRenderingEnabled,
+      setComposerCompactMode
     )
-  }, [setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled])
+  }, [setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode])
 
   return null
 }
