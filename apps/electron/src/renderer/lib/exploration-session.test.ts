@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKMessage } from '@profer/shared'
-import { buildExplorationReferenceDraft, getLatestExplorationConclusion } from './exploration-session'
+import { buildExplorationReferenceDraft, getLatestExplorationConclusion, ownsExplorationShortcut, resolveForkActionAvailability, resolveLatestExplorationSourceMessageId } from './exploration-session'
 import { parseQueuedMessageMentions } from './agent-message-queue'
 
 function message(uuid: string, text: string): SDKMessage {
@@ -13,6 +13,50 @@ function message(uuid: string, text: string): SDKMessage {
 }
 
 describe('探索分支引用', () => {
+  test('Given 父会话与右侧探索分支同时挂载 When 判断快捷键归属 Then 仅当前工作面拥有快捷键', () => {
+    expect(ownsExplorationShortcut(false, 'parent', 'session')).toBe(true)
+    expect(ownsExplorationShortcut(false, 'parent', 'exploration:branch')).toBe(false)
+    expect(ownsExplorationShortcut(true, 'branch', 'exploration:branch')).toBe(true)
+    expect(ownsExplorationShortcut(true, 'other', 'exploration:branch')).toBe(false)
+  })
+
+  test('Given 主线 Pi 会话 When 解析分叉动作可用性 Then 分叉与探索都可用', () => {
+    expect(resolveForkActionAvailability({ embedded: false, agentRuntime: 'pi' }))
+      .toEqual({ canFork: true, canExplore: true })
+  })
+
+  test('Given 主线 Claude 会话 When 解析分叉动作可用性 Then 仍可分叉但不提供探索', () => {
+    expect(resolveForkActionAvailability({ embedded: false, agentRuntime: 'claude' }))
+      .toEqual({ canFork: true, canExplore: false })
+  })
+
+  test('Given 右侧嵌入的探索分支 When 解析分叉动作可用性 Then 两个入口都不提供', () => {
+    expect(resolveForkActionAvailability({ embedded: true, agentRuntime: 'pi' }))
+      .toEqual({ canFork: false, canExplore: false })
+  })
+
+  test('Given 历史会话缺省 runtime When 解析分叉动作可用性 Then 按 claude 处理仍保留分叉', () => {
+    expect(resolveForkActionAvailability({ embedded: false, agentRuntime: undefined }))
+      .toEqual({ canFork: true, canExplore: false })
+  })
+
+  test('Given 消息时间线与多个 binding When 选择文件探索锚点 Then 返回最近的主线 assistant', () => {
+    const sidechain = { ...message('sidechain', '内部结果'), parent_tool_use_id: 'tool-1' } as SDKMessage
+    const messages = [message('assistant-1', '第一轮'), sidechain, message('assistant-2', '第二轮')]
+    expect(resolveLatestExplorationSourceMessageId(messages, {
+      'assistant-1': 'entry-1',
+      sidechain: 'entry-sidechain',
+      'assistant-2': 'entry-2',
+    })).toBe('assistant-2')
+  })
+
+  test('Given 当前消息窗口不含绑定节点 When 选择文件探索锚点 Then 回退最后一个持久化 binding', () => {
+    expect(resolveLatestExplorationSourceMessageId([], {
+      'assistant-1': 'entry-1',
+      'assistant-2': 'entry-2',
+    })).toBe('assistant-2')
+  })
+
   test('Given fork 前历史与 fork 后回复 When 提取结论 Then 只返回锚点后的最新 assistant 文本', () => {
     const messages = [message('source', '主线旧结论'), message('new-1', '探索第一轮'), message('new-2', '探索最终结论')]
     expect(getLatestExplorationConclusion(messages, 'source')).toBe('探索最终结论')

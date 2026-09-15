@@ -156,6 +156,7 @@ import {
 import type { AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
 import type { QuotedSelection } from '@/atoms/preview-atoms'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
+import { ownsExplorationShortcut, resolveForkActionAvailability } from '@/lib/exploration-session'
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
@@ -663,6 +664,10 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
     () => sessions.find((s) => s.id === sessionId),
     [sessions, sessionId],
   )
+  const sidePanelTabs = useAtomValue(agentDiffPanelTabAtom)
+  const shortcutOwnerSessionId = sessionMeta?.explorationParentSessionId ?? sessionId
+  const activeSidePanelTab = sidePanelTabs.get(shortcutOwnerSessionId)
+  const ownsGlobalShortcuts = ownsExplorationShortcut(embedded, sessionId, activeSidePanelTab)
   const hasSessionMeta = Boolean(sessionMeta)
   // 1.6.2 每会话「队列自动发送」开关：权威来源是会话 meta（缺省开/重启保留）；map 仅为运行时缓存，
   // 首次/切会话且 meta 有值时由下方 effect 填充。用户手动关闭后会持久化为 false。
@@ -2803,8 +2808,50 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
     }
   }, [sessionId, agentChannelId, agentModelId, currentWorkspaceId, openSession, setAgentSessions, setStreamingStates, permissionMode])
 
-  /** 从回复节点创建 Pi `/tree` 探索分支，并在当前主线的右侧工作区继续。 */
+  /**
+   * 分叉会话：从指定回复处重建一个独立的顶层会话并自动切换过去。
+   *
+   * 与「探索分支」是两件事：这里产出的是可独立续聊的新会话，
+   * 用于源会话损坏时的救援重建、或换模型后接着往下做。
+   */
   const handleFork = React.useCallback(async (upToMessageUuid: string): Promise<void> => {
+    // 分叉只能用源会话同一渠道下的模型，否则新会话拿不到源会话的鉴权与配额。
+    if (agentModelId && agentChannelId && sessionMetaChannelId && agentChannelId !== sessionMetaChannelId) {
+      toast.error('分叉会话失败', {
+        description: '分叉只能使用源会话同一渠道下的模型，请切回当前会话渠道后再试。',
+      })
+      return
+    }
+    const forkModelId = agentChannelId === sessionMetaChannelId ? agentModelId || undefined : undefined
+
+    try {
+      const meta = await window.electronAPI.forkAgentSession({
+        sessionId,
+        upToMessageUuid,
+        modelId: forkModelId,
+      })
+      setAgentSessions((prev) => prev.some((item) => item.id === meta.id) ? prev : [meta, ...prev])
+      // 切到新会话 Tab：分叉的用途就是接着用，不应留在原会话。
+      openSession('agent', meta.id, meta.title)
+      toast.success('已创建分叉会话', {
+        description: meta.title,
+      })
+    } catch (error) {
+      console.error('[AgentView] 分叉会话失败:', error)
+      const rawMsg = error instanceof Error ? error.message : '未知错误'
+      // SDK 偶尔会因为 sidechain/消息归属问题抛 "not found in session"，
+      // 这里给出更可操作的中文提示，而不是把 SDK 内部英文报错直接透传给用户
+      const friendlyDesc = /not found in session/i.test(rawMsg)
+        ? '该消息无法作为分叉起点（可能属于子代理执行过程或已被清理）。请选择主对话中的其他消息再试。'
+        : rawMsg
+      toast.error('分叉会话失败', {
+        description: friendlyDesc,
+      })
+    }
+  }, [sessionId, agentChannelId, agentModelId, sessionMetaChannelId, openSession, setAgentSessions])
+
+  /** 从回复节点创建 Pi `/tree` 探索分支，在当前主线的右侧工作区并行继续，不离开主线。 */
+  const handleExplore = React.useCallback(async (upToMessageUuid: string): Promise<void> => {
     if (sessionAgentRuntime !== 'pi') {
       toast.info('探索分支目前仅支持 Pi Agent 会话')
       return
@@ -2833,16 +2880,20 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
     } catch (error) {
       console.error('[AgentView] 创建探索分支失败:', error)
       const rawMsg = error instanceof Error ? error.message : '未知错误'
-      // SDK 偶尔会因为 sidechain/消息归属问题抛 "not found in session"，
-      // 这里给出更可操作的中文提示，而不是把 SDK 内部英文报错直接透传给用户
       const friendlyDesc = /not found in session/i.test(rawMsg)
-        ? '该消息无法作为分叉起点（可能属于子代理执行过程或已被清理）。请选择主对话中的其他消息再试。'
+        ? '该消息无法作为探索起点（可能属于子代理执行过程或已被清理）。请选择主对话中的其他回复再试。'
         : rawMsg
-      toast.error('分叉会话失败', {
+      toast.error('创建探索分支失败', {
         description: friendlyDesc,
       })
     }
   }, [sessionId, sessionAgentRuntime, setAgentSessions, setSideExplorationMap, setSidePanelOpen, setSidePanelTabMap])
+
+  /** 回复操作栏两个分叉类动作的可用性：fork 面向所有 runtime，探索目前仅 Pi。 */
+  const { canFork, canExplore } = resolveForkActionAvailability({
+    embedded,
+    agentRuntime: sessionAgentRuntime,
+  })
 
   /** 快照回退：同一会话内回退到指定消息点，恢复文件 + 截断对话 */
   const [rewindTargetUuid, setRewindTargetUuid] = React.useState<string | null>(null)
@@ -2911,24 +2962,25 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
     }
   }, [rewindTargetUuid, sessionId, store])
 
-  // 监听快捷键系统分发的 stop-generation 事件
+  // 父会话与右侧探索分支会同时挂载；快捷键只归当前可见工作面，避免一次停止两个并行 run。
   React.useEffect(() => {
     const handler = (): void => {
-      if (streaming || backgroundWaiting) handleStop()
+      if (ownsGlobalShortcuts && (streaming || backgroundWaiting)) handleStop()
     }
     window.addEventListener('profer:stop-generation', handler)
     return () => window.removeEventListener('profer:stop-generation', handler)
-  }, [streaming, backgroundWaiting, handleStop])
+  }, [backgroundWaiting, handleStop, ownsGlobalShortcuts, streaming])
 
-  // 监听快捷键系统分发的 focus-input 事件（Cmd+L）
+  // Cmd+L 也只聚焦当前可见会话自己的输入框，不能命中 DOM 中更早出现的父输入框。
   React.useEffect(() => {
     const handler = (): void => {
-      const proseMirror = document.querySelector('[data-input-mode="agent"] .ProseMirror') as HTMLElement | null
-      proseMirror?.focus()
+      if (!ownsGlobalShortcuts) return
+      const conversation = document.querySelector<HTMLElement>(`[data-agent-session-id="${sessionId}"]`)
+      conversation?.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus()
     }
     window.addEventListener('profer:focus-input', handler)
     return () => window.removeEventListener('profer:focus-input', handler)
-  }, [])
+  }, [ownsGlobalShortcuts, sessionId])
 
   // 待发送附件按 sessionId 保存在 atom 中，切换标签会卸载 AgentView，但不能释放
   // ObjectURL 或删除 base64 缓存；否则返回该会话时缩略图会指向已撤销的 blob URL，
@@ -2953,8 +3005,9 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
   }, [sessionId, setPreviewOpenMap])
 
   React.useEffect(() => {
+    if (!ownsGlobalShortcuts) return
     return registerShortcut('toggle-preview-panel', togglePreviewPanel)
-  }, [togglePreviewPanel])
+  }, [ownsGlobalShortcuts, togglePreviewPanel])
 
   const hasTextInput = inputContent.trim().length > 0
   const isCompacting = contextStatus.isCompacting
@@ -3132,7 +3185,7 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
   return (
     <>
     <AgentSessionProvider sessionId={sessionId}>
-      <div data-profer-navigation-region="conversation" tabIndex={-1} className="agent-conversation flex h-full min-h-0 min-w-0 w-full flex-1 flex-col max-w-[min(72rem,100%)] mx-auto">
+      <div data-profer-navigation-region="conversation" data-agent-session-id={sessionId} tabIndex={-1} className="agent-conversation flex h-full min-h-0 min-w-0 w-full flex-1 flex-col max-w-[min(72rem,100%)] mx-auto">
         {/* 探索分支已由右侧 Tab 标明归属，避免嵌入面板重复渲染全局 header。 */}
         {!embedded && (
           <div className="shrink-0">
@@ -3158,7 +3211,8 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
           stoppedByUser={stoppedByUser}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
-          onFork={embedded || sessionAgentRuntime !== 'pi' ? undefined : handleFork}
+          onFork={canFork ? handleFork : undefined}
+          onExplore={canExplore ? handleExplore : undefined}
           onRewind={handleRewindRequest}
           onCompact={handleCompact}
           onLoadEarlierHistory={handleLoadEarlierHistory}

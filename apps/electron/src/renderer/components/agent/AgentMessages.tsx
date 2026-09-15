@@ -123,6 +123,8 @@ interface AgentMessagesProps {
   onRetry?: () => void
   onRetryInNewSession?: () => void
   onFork?: (upToMessageUuid: string) => void
+  /** 探索分支回调（Pi `/tree`）；仅 Pi 会话可用 */
+  onExplore?: (upToMessageUuid: string) => void
   onRewind?: (assistantMessageUuid: string) => void
   onCompact?: () => void
   /** Desktop-only durable image generation timeline cards. */
@@ -513,7 +515,7 @@ function AgentRunningIndicator({ startedAt }: { startedAt?: number }): React.Rea
   )
 }
 
-export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onFork, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
+export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onFork, onExplore, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
   const setMinimapCache = useSetAtom(tabMinimapCacheAtom)
   const channels = useAtomValue(channelsAtom)
@@ -819,6 +821,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                   basePath={sessionPath || undefined}
                   basePaths={messageBasePaths}
                   onFork={shouldDisableActions ? undefined : onFork}
+                  onExplore={shouldDisableActions ? undefined : onExplore}
                   onRewind={shouldDisableActions ? undefined : onRewind}
                   onRetry={shouldDisableActions ? undefined : onRetry}
                   onRetryInNewSession={shouldDisableActions ? undefined : onRetryInNewSession}

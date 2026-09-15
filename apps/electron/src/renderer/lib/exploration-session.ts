@@ -1,8 +1,52 @@
-import type { SDKMessage } from '@profer/shared'
+import type { AgentRuntime, SDKMessage } from '@profer/shared'
 
 export interface ExplorationReferenceDraft {
   markdown: string
   html: string
+}
+
+/**
+ * 回复操作栏两个「分叉类」动作的可用性。
+ *
+ * 两者语义不同，不能合并：
+ * - fork：从某条回复重建一个独立的顶层会话（会话损坏救援 / 换模型接续），所有 runtime 都支持。
+ * - explore：Pi `/tree` 探索分支，挂在主线右侧血缘下，目前仅 Pi runtime 支持。
+ */
+export function resolveForkActionAvailability(options: {
+  embedded: boolean
+  agentRuntime: AgentRuntime | undefined
+}): { canFork: boolean; canExplore: boolean } {
+  // 嵌入在右侧探索面板里的分支不再提供二级分叉入口。
+  if (options.embedded) return { canFork: false, canExplore: false }
+  return { canFork: true, canExplore: options.agentRuntime === 'pi' }
+}
+
+/** 父会话与右侧探索分支同时挂载时，只有当前可见工作面拥有全局快捷键。 */
+export function ownsExplorationShortcut(
+  embedded: boolean,
+  sessionId: string,
+  activeSidePanelTab: string | undefined,
+): boolean {
+  return embedded
+    ? activeSidePanelTab === `exploration:${sessionId}`
+    : !activeSidePanelTab?.startsWith('exploration:')
+}
+
+/**
+ * 从当前可见消息时间线选择最近一个可分叉的 assistant UUID。
+ * 消息缓存不完整时，退回 metadata 中最后写入的 binding。
+ */
+export function resolveLatestExplorationSourceMessageId(
+  messages: SDKMessage[],
+  bindings: Record<string, string> | undefined,
+): string | undefined {
+  const boundIds = new Set(Object.keys(bindings ?? {}))
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index] as { type?: unknown; uuid?: unknown; parent_tool_use_id?: unknown }
+    if (message.type !== 'assistant' || message.parent_tool_use_id != null) continue
+    if (typeof message.uuid === 'string' && boundIds.has(message.uuid)) return message.uuid
+  }
+  return Object.keys(bindings ?? {}).at(-1)
 }
 
 function escapeHtml(value: string): string {
