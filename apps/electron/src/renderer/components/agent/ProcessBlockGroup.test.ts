@@ -165,6 +165,81 @@ describe('Agent 过程块折叠分组', () => {
     }
   })
 
+  test('given final answer followed by a trailing thinking block when grouping then keeps the answer outside the process group', () => {
+    // 修复「最终回复被折叠」：真实流式数据里同一条 assistant 消息可能是 [text, thinking]
+    // （reasoning 晚于正文到达），旧实现因末块不是 text 而把整段回复折叠成「执行过程」。
+    const items = buildAssistantTurnRenderItems([
+      text('这是最终回复'),
+      thinking('收尾思考'),
+    ])
+
+    expect(items.map((item) => item.type)).toEqual(['process-group', 'block'])
+    if (items[0]?.type === 'process-group') {
+      expect(items[0].items.map((item) => item.index)).toEqual([1])
+    }
+    if (items[1]?.type === 'block') {
+      expect(items[1].item.index).toBe(0)
+    }
+  })
+
+  test('given final answer between steps and a trailing thinking block when grouping then only folds the process blocks', () => {
+    // turn 内聚合后以 thinking 收尾时，正文仍然必须外置。
+    const items = buildAssistantTurnRenderItems([
+      thinking('开工思考'),
+      text('最终回复'),
+      thinking('收尾思考'),
+    ])
+
+    expect(items.map((item) => item.type)).toEqual(['process-group', 'block'])
+    if (items[0]?.type === 'process-group') {
+      expect(items[0].items.map((item) => item.index)).toEqual([0, 2])
+    }
+    if (items[1]?.type === 'block') {
+      expect(items[1].item.index).toBe(1)
+    }
+  })
+
+  test('given intermediate text with later tools and a trailing thinking block when grouping then keeps the whole turn folded', () => {
+    // 正文之后仍有 tool_use：这段 text 是给工具看的中间说明，继续整组折叠。
+    const items = buildAssistantTurnRenderItems([
+      text('中间说明'),
+      thinking('中间思考'),
+      tool('tool-1'),
+      thinking('还在干活'),
+    ])
+
+    expect(items).toHaveLength(1)
+    expect(items[0]?.type).toBe('process-group')
+    if (items[0]?.type === 'process-group') {
+      expect(items[0].items.map((item) => item.index)).toEqual([0, 1, 2, 3])
+    }
+  })
+
+  test('given trailing thinking before final answer when grouping then folds thinking and keeps answer outside', () => {
+    const items = buildAssistantTurnRenderItems([
+      tool('tool-1'),
+      thinking('收尾思考'),
+      text('最终回复'),
+    ])
+
+    expect(items.map((item) => item.type)).toEqual(['process-group', 'block'])
+    if (items[0]?.type === 'process-group') {
+      expect(items[0].items.map((item) => item.index)).toEqual([0, 1])
+    }
+    if (items[1]?.type === 'block') {
+      expect(items[1].item.index).toBe(2)
+    }
+  })
+
+  test('given multi-block pure text answer when grouping then renders all text blocks as normal output', () => {
+    const items = buildAssistantTurnRenderItems([
+      text('第一段'),
+      text('第二段'),
+    ])
+
+    expect(items.map((item) => item.type)).toEqual(['block', 'block'])
+  })
+
   test('given repeated tools when building capability icons then returns unique tool names in order', () => {
     const toolNames = buildProcessGroupToolNames([
       tool('tool-1', 'Grep'),
