@@ -27,26 +27,25 @@ export { OpenAIResponsesAdapter } from './openai-responses-adapter.ts'
 export { GoogleAdapter } from './google-adapter.ts'
 
 /** 供应商适配器注册表 */
-const adapterRegistry = new Map<ProviderType, ProviderAdapter>([
-  ['anthropic', new AnthropicAdapter()],
-  ['anthropic-compatible', new AnthropicAdapter('anthropic-compatible')],
-  ['openai', new OpenAIAdapter()],
-  ['openai-responses', new OpenAIResponsesAdapter()],
-  ['xai', new OpenAIResponsesAdapter('xai')],
-  ['deepseek', new OpenAIAdapter('deepseek')],   // DeepSeek Chat 使用 OpenAI 兼容协议，Agent 单独使用 Anthropic 兼容入口
-  ['kimi-api', new AnthropicAdapter('kimi-api')],       // Kimi API 的 Anthropic 协议端点
-  ['kimi-coding', new AnthropicAdapter('kimi-coding')], // Kimi Coding Plan 订阅制（强制 User-Agent）
-  ['zhipu', new OpenAIAdapter()],         // 智谱 AI 使用 OpenAI 兼容协议
-  ['zhipu-coding', new AnthropicAdapter('zhipu-coding')], // 智谱 Coding Plan 订阅制（强制 User-Agent）
-  ['minimax', new AnthropicAdapter('minimax')], // MiniMax 使用 Anthropic 兼容协议
-  // Ollama Chat 使用 OpenAI-compatible API；Agent runtime 通过独立的 Anthropic 兼容入口调用
-  ['ollama', new OpenAIAdapter('ollama')],
-  ['doubao', new OpenAIAdapter()],        // 豆包使用 OpenAI 兼容协议
-  ['qwen', new OpenAIAdapter()],          // 通义千问使用 OpenAI 兼容协议
-  ['xiaomi', new AnthropicAdapter('xiaomi')],                       // 小米 MiMo API 使用 Anthropic 兼容协议
-  ['xiaomi-token-plan', new AnthropicAdapter('xiaomi-token-plan')], // 小米 Token Plan 订阅制（强制 User-Agent）
-  ['custom', new OpenAIAdapter()],        // 自定义也使用 OpenAI 兼容协议
-  ['google', new GoogleAdapter()],
+const adapterRegistry = new Map<ProviderType, () => ProviderAdapter>([
+  ['anthropic', () => new AnthropicAdapter()],
+  ['anthropic-compatible', () => new AnthropicAdapter('anthropic-compatible')],
+  ['openai', () => new OpenAIAdapter()],
+  ['openai-responses', () => new OpenAIResponsesAdapter()],
+  ['xai', () => new OpenAIResponsesAdapter('xai')],
+  ['deepseek', () => new OpenAIAdapter('deepseek')],
+  ['kimi-api', () => new AnthropicAdapter('kimi-api')],
+  ['kimi-coding', () => new AnthropicAdapter('kimi-coding')],
+  ['zhipu', () => new OpenAIAdapter()],
+  ['zhipu-coding', () => new AnthropicAdapter('zhipu-coding')],
+  ['minimax', () => new AnthropicAdapter('minimax')],
+  ['ollama', () => new OpenAIAdapter('ollama')],
+  ['doubao', () => new OpenAIAdapter()],
+  ['qwen', () => new OpenAIAdapter()],
+  ['xiaomi', () => new AnthropicAdapter('xiaomi')],
+  ['xiaomi-token-plan', () => new AnthropicAdapter('xiaomi-token-plan')],
+  ['custom', () => new OpenAIAdapter()],
+  ['google', () => new GoogleAdapter()],
 ])
 
 /**
@@ -57,9 +56,9 @@ const adapterRegistry = new Map<ProviderType, ProviderAdapter>([
  * @throws Error 如果供应商类型不支持
  */
 export function getAdapter(provider: ProviderType): ProviderAdapter {
-  const adapter = adapterRegistry.get(provider)
-  if (!adapter) {
+  const createAdapter = adapterRegistry.get(provider)
+  if (!createAdapter) {
     throw new Error(`不支持的供应商: ${provider}。你可能过去使用的是 Profer 商业版，请重新下载商业版覆盖安装，当前版本为开源版本。`)
   }
-  return adapter
+  return createAdapter()
 }

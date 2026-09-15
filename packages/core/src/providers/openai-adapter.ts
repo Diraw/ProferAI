@@ -246,6 +246,7 @@ export class OpenAIAdapter implements ProviderAdapter {
               type: 'tool_call_start',
               toolCallId: tc.id || `tc_${tc.index ?? 0}`,
               toolName: tc.function.name,
+              metadata: tc.index !== undefined ? { toolIndex: tc.index } : undefined,
             })
           }
           if (tc.function?.arguments) {
@@ -254,6 +255,7 @@ export class OpenAIAdapter implements ProviderAdapter {
             events.push({
               type: 'tool_call_delta',
               toolCallId: tc.id || '',
+              toolIndex: tc.index,
               argumentsDelta: tc.function.arguments,
             })
           }

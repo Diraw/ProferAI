@@ -700,6 +700,8 @@ export interface AgentCatalogInvalidation {
 export type AgentStreamPayload =
   | { kind: 'sdk_message'; message: SDKMessage }
   | { kind: 'profer_event'; event: ProferEvent }
+  | { kind: 'run_error'; error: string }
+  | { kind: 'run_complete'; completion: AgentStreamCompletePayload }
   | AgentCatalogInvalidation
 
 // ===== Agent 会话管理 =====

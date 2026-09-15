@@ -24,8 +24,10 @@ export interface StreamSSEOptions {
   onEvent: StreamEventCallback
   /** AbortSignal 用于取消请求 */
   signal?: AbortSignal
-  /** 首字节超时（毫秒），默认 30s。超时触发 AbortError，可被重试逻辑捕获并自动重试 */
+  /** 等待 HTTP 响应头的超时（毫秒），默认 30s。 */
   timeoutMs?: number
+  /** 两个流式 chunk 之间的最大空闲时间（毫秒），默认 120s。 */
+  idleTimeoutMs?: number
   /** 自定义 fetch 函数（代理等场景下由调用方注入） */
   fetchFn?: typeof globalThis.fetch
 }
@@ -105,7 +107,7 @@ function getSSERetryDelayMs(attempt: number, elapsedRetryDelayMs: number): numbe
  * - 无状态码（网络错误 / 流读取中断 / 空响应体）：视为瞬时问题，可重试
  */
 function isRetriableError(error: unknown): boolean {
-  if (error instanceof ProviderStreamError) return false
+  if (error instanceof ProviderStreamError || error instanceof StreamIdleTimeoutError) return false
   if (error instanceof HTTPError) {
     return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500
   }
@@ -191,9 +193,16 @@ function normalizeToolCallOutputIndex(value: unknown): string | undefined {
   return undefined
 }
 
+class StreamIdleTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`流式响应空闲超过 ${timeoutMs}ms`)
+    this.name = 'StreamIdleTimeoutError'
+  }
+}
+
 /** 单次 SSE 流式尝试（不含重试逻辑） */
 async function runStreamAttempt(options: StreamSSEOptions): Promise<StreamSSEResult> {
-  const { request, adapter, onEvent, signal, fetchFn = fetch, timeoutMs = 30_000 } = options
+  const { request, adapter, onEvent, signal, fetchFn = fetch, timeoutMs = 30_000, idleTimeoutMs = 120_000 } = options
 
   // 真正的"首字节超时"：仅在等待 HTTP 响应期间计时，收到响应后立即清除。
   // 使用 setTimeout + clearTimeout 而非 AbortSignal.timeout() 因为后者是绝对超时，
@@ -207,14 +216,20 @@ async function runStreamAttempt(options: StreamSSEOptions): Promise<StreamSSERes
     : timeoutController.signal
 
   // 1. 发起请求（支持通过 fetchFn 注入代理）
-  const response = await fetchFn(request.url, {
+  let response: Response
+  try {
+    response = await fetchFn(request.url, {
     method: 'POST',
     headers: request.headers,
     body: request.body,
     signal: effectiveSignal,
   })
+  } catch (error) {
+    clearTimeout(timer)
+    throw error
+  }
 
-  // 已收到 HTTP 响应头，清除首字节超时——后续流式读取不应受时间限制
+  // 已收到 HTTP 响应头，清除首字节超时；正文读取由 idleTimeoutMs 保护。
   clearTimeout(timer)
 
   // 2. 错误检查
@@ -244,88 +259,110 @@ async function runStreamAttempt(options: StreamSSEOptions): Promise<StreamSSERes
   const thinkingBlocks: ThinkingBlock[] = []
   let currentThinking: ThinkingBlock | null = null
 
+  // SSE 事件帧：以空行分隔；同帧内多行 `data:` 按规范用 \n 连接后再解析。
+  let pendingData: string[] = []
+
+  /** 派发当前积累的事件帧（遇到空行或流结束时调用）。 */
+  const dispatchPendingEvent = (): void => {
+    if (pendingData.length === 0) return
+    const data = pendingData.join('\n')
+    pendingData = []
+    if (!data || data === '[DONE]') return
+
+    const events = adapter.parseSSELine(data)
+    for (const event of events) {
+      let emitEvent = true
+      if (event.type === 'chunk') {
+        content += event.delta
+      } else if (event.type === 'reasoning') {
+        reasoning += event.delta
+        if (currentThinking) currentThinking.thinking += event.delta
+        else {
+          currentThinking = { thinking: event.delta }
+          thinkingBlocks.push(currentThinking)
+        }
+      } else if (event.type === 'reasoning_signature') {
+        if (currentThinking) currentThinking.signature = (currentThinking.signature ?? '') + event.signature
+        else {
+          currentThinking = { thinking: '', signature: event.signature }
+          thinkingBlocks.push(currentThinking)
+        }
+      } else if (event.type === 'reasoning_block_start') {
+        currentThinking = { thinking: '' }
+        thinkingBlocks.push(currentThinking)
+      } else if (event.type === 'reasoning_block_stop') {
+        currentThinking = null
+      } else if (event.type === 'tool_call_start') {
+        currentToolCallId = event.toolCallId
+        const outputIndex = normalizeToolCallOutputIndex(event.metadata?.outputIndex ?? event.metadata?.toolIndex)
+        if (outputIndex) toolCallIdsByOutputIndex.set(outputIndex, event.toolCallId)
+        const existing = pendingToolCalls.get(event.toolCallId)
+        if (existing?.name === event.toolName) emitEvent = false
+        pendingToolCalls.set(event.toolCallId, {
+          id: event.toolCallId,
+          name: event.toolName,
+          args: existing?.args ?? '',
+          metadata: { ...existing?.metadata, ...event.metadata },
+        })
+      } else if (event.type === 'tool_call_delta') {
+        const outputIndex = event.toolIndex !== undefined
+          ? String(event.toolIndex)
+          : normalizeToolCallOutputIndex(event.metadata?.outputIndex)
+        const tcId = event.toolCallId || (outputIndex ? toolCallIdsByOutputIndex.get(outputIndex) : undefined) || currentToolCallId
+        if (tcId) {
+          const pending = pendingToolCalls.get(tcId)
+          if (!pending) throw new ProviderStreamError(`收到未知工具调用参数: ${tcId}`)
+          pending.args = event.finalArguments !== undefined ? event.finalArguments : pending.args + event.argumentsDelta
+        }
+      } else if (event.type === 'done' && event.stopReason) {
+        stopReason = event.stopReason
+      } else if (event.type === 'error') {
+        throw new ProviderStreamError(event.error)
+      }
+      if (emitEvent) onEvent(event)
+    }
+  }
+
+  /** 解析一行 SSE；空行代表一个事件帧结束。 */
+  const processLine = (rawLine: string): void => {
+    // 兼容 CRLF：\r 属于换行符，不属于字段值。
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (line === '') { dispatchPendingEvent(); return }
+    if (line.startsWith(':')) return // 注释/心跳行
+    const colonIndex = line.indexOf(':')
+    const field = colonIndex === -1 ? line : line.slice(0, colonIndex)
+    let value = colonIndex === -1 ? '' : line.slice(colonIndex + 1)
+    // SSE 规范：冒号后的第一个空格是分隔符，需要剥离（值本身可含前导空格）。
+    if (value.startsWith(' ')) value = value.slice(1)
+    // event/id/retry 字段由 adapter 依据 JSON 自身判定，这里只收集数据体。
+    if (field === 'data') pendingData.push(value)
+  }
+
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          idleTimer = setTimeout(() => reject(new StreamIdleTimeoutError(idleTimeoutMs)), idleTimeoutMs)
+        }),
+      ]).finally(() => {
+        if (idleTimer) clearTimeout(idleTimer)
+      })
+      const { done, value } = next
       if (done) break
-
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
-      // 保留最后一个可能不完整的行
       buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        // SSE 规范：冒号后的空格是可选的，兼容 "data: {...}" 和 "data:{...}" 两种格式
-        let data: string
-        if (line.startsWith('data: ')) {
-          data = line.slice(6).trim()
-        } else if (line.startsWith('data:')) {
-          data = line.slice(5).trim()
-        } else {
-          continue
-        }
-        if (data === '[DONE]' || !data) continue
-
-        // 4. 委托给 adapter 解析供应商特定 JSON
-        const events = adapter.parseSSELine(data)
-
-        for (const event of events) {
-          if (event.type === 'chunk') {
-            content += event.delta
-          } else if (event.type === 'reasoning') {
-            reasoning += event.delta
-            // 同步追加到当前思考块
-            if (currentThinking) {
-              currentThinking.thinking += event.delta
-            } else {
-              // 容错：有些 Provider 不发 content_block_start，直接发 thinking_delta
-              currentThinking = { thinking: event.delta }
-              thinkingBlocks.push(currentThinking)
-            }
-          } else if (event.type === 'reasoning_signature') {
-            if (currentThinking) {
-              currentThinking.signature = (currentThinking.signature ?? '') + event.signature
-            } else {
-              // 容错：signature_delta 出现时没有活跃思考块，自建一个
-              currentThinking = { thinking: '', signature: event.signature }
-              thinkingBlocks.push(currentThinking)
-            }
-          } else if (event.type === 'reasoning_block_start') {
-            currentThinking = { thinking: '' }
-            thinkingBlocks.push(currentThinking)
-          } else if (event.type === 'reasoning_block_stop') {
-            currentThinking = null
-          } else if (event.type === 'tool_call_start') {
-            currentToolCallId = event.toolCallId
-            const outputIndex = normalizeToolCallOutputIndex(event.metadata?.outputIndex)
-            if (outputIndex) toolCallIdsByOutputIndex.set(outputIndex, event.toolCallId)
-            const existing = pendingToolCalls.get(event.toolCallId)
-            pendingToolCalls.set(event.toolCallId, {
-              id: event.toolCallId,
-              name: event.toolName,
-              args: existing?.args ?? '',
-              metadata: { ...existing?.metadata, ...event.metadata },
-            })
-          } else if (event.type === 'tool_call_delta') {
-            const outputIndex = normalizeToolCallOutputIndex(event.metadata?.outputIndex)
-            const tcId = event.toolCallId || (outputIndex ? toolCallIdsByOutputIndex.get(outputIndex) : undefined) || currentToolCallId
-            if (tcId) {
-              const pending = pendingToolCalls.get(tcId)
-              if (pending) {
-                pending.args = event.finalArguments !== undefined
-                  ? event.finalArguments
-                  : pending.args + event.argumentsDelta
-              }
-            }
-          } else if (event.type === 'done' && event.stopReason) {
-            stopReason = event.stopReason
-          } else if (event.type === 'error') {
-            throw new ProviderStreamError(event.error)
-          }
-          onEvent(event)
-        }
-      }
+      for (const line of lines) processLine(line)
     }
+    // SSE 服务端不保证最后一帧以换行结束；flush decoder 后逐行处理残余，并派发尾帧。
+    buffer += decoder.decode()
+    if (buffer) for (const line of buffer.split('\n')) processLine(line)
+    dispatchPendingEvent()
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    throw error
   } finally {
     reader.releaseLock()
   }
@@ -340,14 +377,8 @@ async function runStreamAttempt(options: StreamSSEOptions): Promise<StreamSSERes
         arguments: pending.args ? JSON.parse(pending.args) : {},
         metadata: pending.metadata,
       })
-    } catch {
-      // JSON 解析失败仍保留工具调用（空参数）
-      toolCalls.push({
-        id: pending.id,
-        name: pending.name,
-        arguments: {},
-        metadata: pending.metadata,
-      })
+    } catch (error) {
+      throw new ProviderStreamError(`工具 ${pending.name} 参数不是完整 JSON: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 

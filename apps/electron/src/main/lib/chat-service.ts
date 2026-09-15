@@ -40,8 +40,21 @@ import { searchKnowledgeItemsForChat } from './knowledge-item-service'
 import { prepareChatKnowledgeRequest } from './chat-knowledge-request'
 import { buildTitlePrompt, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
 
-/** 活跃的 AbortController 映射（conversationId → controller） */
-const activeControllers = new Map<string, AbortController>()
+/** 单个对话的活跃 Chat run。`settled` 在该 run 完成落盘与事件收尾后 resolve。 */
+interface ActiveChatRun {
+  runId: string
+  controller: AbortController
+  /** 用户已请求停止：新请求应等待旧 run 收尾，避免与它争抢同一份 JSONL。 */
+  stopping: boolean
+  settled: Promise<void>
+  resolveSettled: () => void
+}
+
+/** 活跃的 Chat run（conversationId → run）。 */
+const activeControllers = new Map<string, ActiveChatRun>()
+
+/** 等待被停止的旧 run 收尾的最长时间；超时后拒绝新请求而不是无限等待。 */
+const STOP_SETTLE_WAIT_MS = 3_000
 
 /** 最大工具续接轮数（安全上限，防止极端情况下的无限循环） */
 const MAX_TOOL_ROUNDS = 999
@@ -219,6 +232,7 @@ export async function sendMessage(
   webContents: WebContents | null,
 ): Promise<void> {
   input = routePluginModel(`chat:${input.conversationId}`, input)
+  const runId = input.runId
   const {
     conversationId, userMessage, channelId,
     modelId, systemMessage, contextLength, contextDividers, attachments,
@@ -231,6 +245,7 @@ export async function sendMessage(
   if (!channel) {
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
+      runId,
       error: '渠道不存在',
     })
     return
@@ -238,6 +253,7 @@ export async function sendMessage(
   if (!channel.enabled) {
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
+      runId,
       error: '当前渠道已停用，请重新选择可用模型',
     })
     return
@@ -246,6 +262,7 @@ export async function sendMessage(
   if (!selectedChannelModel || !selectedChannelModel.enabled) {
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
+      runId,
       error: '当前模型配置已失效，请在模型选择器中重新选择',
     })
     return
@@ -262,6 +279,7 @@ export async function sendMessage(
     if (!auth) {
       pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
         conversationId,
+        runId,
         error: '团队账号登录已过期，请重新登录后再使用商业渠道',
       })
       return
@@ -276,6 +294,7 @@ export async function sendMessage(
       if (channel.provider === 'xai' && resolveXaiCredentialMode(channel.credentialMode, apiKey) === 'oauth') {
         pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
           conversationId,
+          runId,
           error: 'xAI 订阅 OAuth 当前仅支持 Pi Agent 实验模式；Chat 请配置 xAI API Key',
         })
         return
@@ -283,11 +302,39 @@ export async function sendMessage(
     } catch {
       pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
         conversationId,
+        runId,
         error: '解密 API Key 失败',
       })
       return
     }
   }
+
+  // 串行化：同一对话同一时刻只允许一个 run，且必须在任何 side effect / await 之前登记。
+  // 若把检查放在追加用户消息之后，被拒绝的并发请求会先在 JSONL 里留下一条孤儿 user 消息。
+  // 用户刚点停止时，等待旧 run 收尾（它可能仍在把已输出的部分回复写盘），
+  // 否则旧 run 的 assistant 节点会落在新 run 的 user 节点之后，破坏会话顺序。
+  const existingRun = activeControllers.get(conversationId)
+  if (existingRun) {
+    if (existingRun.stopping) {
+      await Promise.race([
+        existingRun.settled,
+        new Promise<void>((resolve) => setTimeout(resolve, STOP_SETTLE_WAIT_MS)),
+      ])
+    }
+    if (activeControllers.has(conversationId)) {
+      pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
+        conversationId,
+        runId,
+        error: '上一条消息仍在处理中，请稍候再试',
+      })
+      return
+    }
+  }
+  let resolveSettled!: () => void
+  const settled = new Promise<void>((resolve) => { resolveSettled = resolve })
+  const controller = new AbortController()
+  const activeRun: ActiveChatRun = { runId, controller, stopping: false, settled, resolveSettled }
+  activeControllers.set(conversationId, activeRun)
 
   // 3. 先读取历史消息（在追加用户消息之前，避免 adapter 重复发送当前消息）
   //    关键：发送上下文只取当前 activePath 对应的线性消息流，绝不混入其他分支——否则
@@ -328,10 +375,6 @@ export async function sendMessage(
     // 资料检索失败不能阻断用户原始问题，亦不伪造“已使用资料”。
     console.warn('[聊天服务] 资料库片段检索失败，已跳过:', error)
   }
-
-  // 6. 创建 AbortController
-  const controller = new AbortController()
-  activeControllers.set(conversationId, controller)
 
   // 在 try 外累积流式内容，abort 时 catch 块仍可访问
   let accumulatedContent = ''
@@ -387,6 +430,7 @@ export async function sendMessage(
           accumulatedContent += event.delta ?? ''
           pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_CHUNK, {
             conversationId,
+            runId,
             delta: event.delta,
           })
           break
@@ -394,6 +438,7 @@ export async function sendMessage(
           accumulatedReasoning += event.delta ?? ''
           pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_REASONING, {
             conversationId,
+            runId,
             delta: event.delta,
           })
           break
@@ -405,6 +450,7 @@ export async function sendMessage(
           })
           pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, {
             conversationId,
+            runId,
             activity: { type: 'start', toolName: event.toolName!, toolCallId: event.toolCallId! },
           })
           break
@@ -449,6 +495,7 @@ export async function sendMessage(
       const toolResults = await executeToolCalls(toolCalls, {
         webContents,
         conversationId,
+        runId,
         currentAttachments: attachments,
         previousUserAttachments: lastUserMsg?.attachments,
         previousAssistantAttachments: lastAssistantMsg?.attachments,
@@ -534,6 +581,7 @@ export async function sendMessage(
 
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_COMPLETE, {
       conversationId,
+      runId,
       model: modelId,
       messageId: (accumulatedContent.trim() || accumulatedGeneratedAttachments.length > 0) ? assistantMsgId : undefined,
     })
@@ -563,12 +611,14 @@ export async function sendMessage(
 
         pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_COMPLETE, {
           conversationId,
+          runId,
           model: modelId,
           messageId: assistantMsgId,
         })
       } else {
         pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_COMPLETE, {
           conversationId,
+          runId,
           model: modelId,
         })
       }
@@ -605,11 +655,14 @@ export async function sendMessage(
 
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
+      runId,
       error: displayError,
       ...(insufficient ? { code: 'insufficient_credits', errorTitle: '额度不足' } : {}),
     })
   } finally {
-    activeControllers.delete(conversationId)
+    // 先唤醒等待中的新请求，再移除登记项；仅在仍是自己登记时才移除（旧 run 不能删除已替换的新 run）。
+    activeRun.resolveSettled()
+    if (activeControllers.get(conversationId) === activeRun) activeControllers.delete(conversationId)
   }
 }
 
@@ -617,20 +670,22 @@ export async function sendMessage(
  * 中止指定对话的生成
  */
 export function stopGeneration(conversationId: string): void {
-  const controller = activeControllers.get(conversationId)
-  if (controller) {
-    controller.abort()
-    activeControllers.delete(conversationId)
-    console.log(`[聊天服务] 已中止对话: ${conversationId}`)
-  }
+  const active = activeControllers.get(conversationId)
+  if (!active) return
+  // 只标记停止并 abort，登记项由该 run 自己的 finally 释放：
+  // 立刻删除会让新请求与尚未收尾的旧 run 同时写同一份 JSONL。
+  active.stopping = true
+  active.controller.abort()
+  console.log(`[聊天服务] 已中止对话: ${conversationId}`)
 }
 
 /** 中止所有活跃的聊天流（应用退出时调用） */
 export function stopAllGenerations(): void {
   if (activeControllers.size === 0) return
   console.log(`[聊天服务] 正在中止所有活跃对话 (${activeControllers.size} 个)...`)
-  for (const [conversationId, controller] of activeControllers) {
-    controller.abort()
+  for (const [conversationId, active] of activeControllers) {
+    active.stopping = true
+    active.controller.abort()
     console.log(`[聊天服务] 已中止对话: ${conversationId}`)
   }
   activeControllers.clear()

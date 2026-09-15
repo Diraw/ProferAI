@@ -161,8 +161,10 @@ export interface StreamToolCallStartEvent {
 /** 工具调用参数增量事件 */
 export interface StreamToolCallDeltaEvent {
   type: 'tool_call_delta'
-  /** 为空时由 reader 按 metadata / 当前工具调用关联。 */
+  /** 为空时由 reader 按 toolIndex / metadata / 当前工具调用关联。 */
   toolCallId: string
+  /** OpenAI Chat Completions 的稳定 tool_calls 数组索引。 */
+  toolIndex?: number
   /** 参数增量；finalArguments 存在时可为空字符串。 */
   argumentsDelta: string
   /** 完整参数兜底（如 provider 的 arguments.done 事件），存在时替换已累积参数。 */

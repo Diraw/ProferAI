@@ -23,6 +23,8 @@ export interface ToolExecutionContext {
   webContents: WebContents | null
   /** 对话 ID */
   conversationId: string
+  /** 本次流式运行的唯一代次。 */
+  runId: string
   /** 当前用户消息的附件列表 */
   currentAttachments?: FileAttachment[]
   /** 前一轮用户消息的附件 */
@@ -82,6 +84,7 @@ export async function executeToolCalls(
     // 推送工具结果事件给前端
     pushChatStream(context.webContents, context.conversationId, CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, {
       conversationId: context.conversationId,
+      runId: context.runId,
       activity: {
         type: 'result',
         toolName: tc.name,

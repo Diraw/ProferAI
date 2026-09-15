@@ -352,9 +352,11 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
     }
 
     // 初始化当前对话的流式状态
+    const runId = crypto.randomUUID()
     setStreamingStates((prev) => {
       const map = new Map(prev)
       map.set(conversationId, {
+        runId,
         streaming: true,
         content: '',
         reasoning: '',
@@ -380,6 +382,7 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
 
     const input: ChatSendInput = {
       conversationId,
+      runId,
       userMessage: content,
       messageHistory: [], // 后端已改为从磁盘读取完整历史，无需前端传入
       channelId: selectedModel.channelId,

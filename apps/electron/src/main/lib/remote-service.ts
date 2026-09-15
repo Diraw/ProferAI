@@ -1417,6 +1417,7 @@ export async function handleRemoteCommand(
       void sendMessage(
         {
           conversationId,
+          runId: randomUUID(),
           userMessage,
           messageHistory: [],
           channelId,
@@ -1741,6 +1742,10 @@ export function startRemoteService(): string | null {
 
   // 订阅 agentEventBus，把工作流事件广播给所有移动端客户端
   eventBusUnsubscribe = agentEventBus.on((sessionId, payload) => {
+    // run_complete / run_error 是桌面终态的补充通道：移动端已有 run_completed /
+    // 自身 completion 事件表达同一语义，不下发它们可避免旧版 Pocket 客户端
+    // 处理未知 payload.kind，也避免事件日志里出现重复终态。
+    if (payload.kind === 'run_complete' || payload.kind === 'run_error') return
     broadcastAgentEvent(sessionId, payload)
   })
 

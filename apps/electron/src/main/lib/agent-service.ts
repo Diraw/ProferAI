@@ -77,6 +77,19 @@ const sessionWebContents = new Map<string, WebContents>()
  * 最终历史仍由 session JSONL 保存，故这里只保留 active run，结束立即释放。
  */
 const activeStreamEventBacklogs = new Map<string, AgentStreamPayload[]>()
+/** 已结束但尚未被刷新 Renderer 消费的终态快照，短暂保留以覆盖刷新竞态。 */
+const completedStreamEventBacklogs = new Map<string, AgentStreamPayload[]>()
+const COMPLETED_BACKLOG_TTL_MS = 60_000
+
+function preserveCompletedBacklog(sessionId: string): void {
+  const backlog = activeStreamEventBacklogs.get(sessionId)
+  if (!backlog?.some((payload) => payload.kind === 'run_complete')) return
+  completedStreamEventBacklogs.set(sessionId, backlog)
+  // unref：只是过期清理，不应在进程退出前锁住事件循环。
+  setTimeout(() => {
+    if (completedStreamEventBacklogs.get(sessionId) === backlog) completedStreamEventBacklogs.delete(sessionId)
+  }, COMPLETED_BACKLOG_TTL_MS).unref?.()
+}
 
 /**
  * 已挂载 destroyed 回收钩子的 webContents 集合。
@@ -120,14 +133,22 @@ export function unregisterWebContents(sessionId: string): void {
  */
 export function restoreActiveAgentStreams(webContents: WebContents): string[] {
   const restored: string[] = []
-  for (const [sessionId, backlog] of activeStreamEventBacklogs) {
-    if (!orchestrator.isActive(sessionId)) continue
+  const snapshots = new Map([...completedStreamEventBacklogs, ...activeStreamEventBacklogs])
+  for (const [sessionId, backlog] of snapshots) {
+    if (!orchestrator.isActive(sessionId) && !completedStreamEventBacklogs.has(sessionId)) continue
     registerWebContents(sessionId, webContents)
-    restored.push(sessionId)
+    if (orchestrator.isActive(sessionId)) restored.push(sessionId)
     for (const payload of backlog) {
       if (webContents.isDestroyed()) break
       webContents.send(AGENT_IPC_CHANNELS.STREAM_EVENT, { sessionId, payload } as AgentStreamEvent)
+      // 终态也走 backlog，但 renderer 仍有独立完成/错误 IPC 兼容入口；刷新恢复时补发它。
+      if (payload.kind === 'run_complete') {
+        webContents.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, payload.completion)
+      } else if (payload.kind === 'run_error') {
+        webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId, error: payload.error })
+      }
     }
+    if (!orchestrator.isActive(sessionId)) completedStreamEventBacklogs.delete(sessionId)
   }
   return restored
 }
@@ -196,7 +217,10 @@ export async function runAgent(
   // 更新 webContents 映射（允许覆盖 — 由 orchestrator.activeSessions 处理真正的并发保护）
   registerWebContents(input.sessionId, webContents)
   // 被 active-run 并发保护拒绝的请求不能清空已有 run 的恢复记录。
-  if (!orchestrator.isActive(input.sessionId)) activeStreamEventBacklogs.set(input.sessionId, [])
+  if (!orchestrator.isActive(input.sessionId)) {
+    activeStreamEventBacklogs.set(input.sessionId, [])
+    completedStreamEventBacklogs.delete(input.sessionId)
+  }
   // 开始新一轮执行时清除"完成未确认"标记
   try {
     updateAgentSessionMeta(input.sessionId, { completedButUnconfirmed: false })
@@ -204,35 +228,34 @@ export async function runAgent(
   try {
     await orchestrator.sendMessage(input, {
       onError: (error) => {
-        if (!webContents.isDestroyed()) {
-          webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, {
-            sessionId: input.sessionId,
-            error,
-          })
-        }
+        eventBus.emit(input.sessionId, { kind: 'run_error', error })
+        const wc = sessionWebContents.get(input.sessionId)
+        if (wc && !wc.isDestroyed()) wc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error })
       },
       onComplete: (messages, opts) => {
-        if (!webContents.isDestroyed()) {
-          webContents.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, {
-            sessionId: input.sessionId,
-            messages,
-            stoppedByUser: opts?.stoppedByUser ?? false,
-            startedAt: opts?.startedAt,
-            resultSubtype: opts?.resultSubtype,
-            resultErrors: opts?.resultErrors,
-            backgroundTasksPending: opts?.backgroundTasksPending,
-            endReason: opts?.endReason,
-            endReasonLabel: opts?.endReasonLabel,
-          })
+        const completion = {
+          sessionId: input.sessionId,
+          messages,
+          stoppedByUser: opts?.stoppedByUser ?? false,
+          startedAt: opts?.startedAt,
+          resultSubtype: opts?.resultSubtype,
+          resultErrors: opts?.resultErrors,
+          backgroundTasksPending: opts?.backgroundTasksPending,
+          endReason: opts?.endReason,
+          endReasonLabel: opts?.endReasonLabel,
         }
+        eventBus.emit(input.sessionId, { kind: 'run_complete', completion })
+        const wc = sessionWebContents.get(input.sessionId)
+        if (wc && !wc.isDestroyed()) wc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, completion)
       },
       onTitleUpdated: (title) => {
         eventBus.emit(input.sessionId, {
           kind: 'profer_event',
           event: { type: 'title_updated', title },
         })
-        if (!webContents.isDestroyed()) {
-          webContents.send(AGENT_IPC_CHANNELS.TITLE_UPDATED, {
+        const currentWc = sessionWebContents.get(input.sessionId)
+        if (currentWc && !currentWc.isDestroyed()) {
+          currentWc.send(AGENT_IPC_CHANNELS.TITLE_UPDATED, {
             sessionId: input.sessionId,
             title,
           })
@@ -245,8 +268,9 @@ export async function runAgent(
           : beforePromotion
         if (beforePromotion?.draft && session) {
           await onDraftPromoted?.(session)
-          if (!webContents.isDestroyed()) {
-            webContents.send(AGENT_IPC_CHANNELS.SESSION_UPDATED, { session })
+          const currentWc = sessionWebContents.get(input.sessionId)
+          if (currentWc && !currentWc.isDestroyed()) {
+            currentWc.send(AGENT_IPC_CHANNELS.SESSION_UPDATED, { session })
           }
         }
       },
@@ -260,16 +284,13 @@ export async function runAgent(
     const errorMessage = err instanceof Error ? err.message : '未知错误'
     console.error(`[Agent 服务] errorMessage: ${errorMessage || '(空)'}`)
     console.error(`[Agent 服务] ══════════ runAgent 未处理异常 结束 ══════════`)
-    if (!webContents.isDestroyed()) {
-      webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, {
-        sessionId: input.sessionId,
-        error: errorMessage,
-      })
-      webContents.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, {
-        sessionId: input.sessionId,
-        messages: [],
-        stoppedByUser: false,
-      })
+    eventBus.emit(input.sessionId, { kind: 'run_error', error: errorMessage })
+    const completion = { sessionId: input.sessionId, messages: [], stoppedByUser: false, startedAt: input.startedAt }
+    eventBus.emit(input.sessionId, { kind: 'run_complete', completion })
+    const currentWc = sessionWebContents.get(input.sessionId)
+    if (currentWc && !currentWc.isDestroyed()) {
+      currentWc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error: errorMessage })
+      currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, completion)
     }
   } finally {
     // 仅在 orchestrator 已完成此会话时清理映射
@@ -277,6 +298,7 @@ export async function runAgent(
     if (!orchestrator.isActive(input.sessionId)) {
       runtimeContextStore.clear(input.sessionId)
       sessionWebContents.delete(input.sessionId)
+      preserveCompletedBacklog(input.sessionId)
       activeStreamEventBacklogs.delete(input.sessionId)
     }
   }
@@ -300,18 +322,19 @@ export async function runAgentHeadless(
     registerWebContents(runInput.sessionId, wc)
   }
   // 同理：外部入口的重复请求不得覆盖仍在运行的会话快照。
-  if (!orchestrator.isActive(runInput.sessionId)) activeStreamEventBacklogs.set(runInput.sessionId, [])
+  if (!orchestrator.isActive(runInput.sessionId)) {
+    activeStreamEventBacklogs.set(runInput.sessionId, [])
+    completedStreamEventBacklogs.delete(runInput.sessionId)
+  }
 
   try {
     await orchestrator.sendMessage(runInput, {
       onError: (error) => {
         callbacks.onError(error)
-        // 同步到渲染进程
-        if (wc && !wc.isDestroyed()) {
-          wc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, {
-            sessionId: runInput.sessionId,
-            error,
-          })
+        eventBus.emit(runInput.sessionId, { kind: 'run_error', error })
+        const currentWc = sessionWebContents.get(runInput.sessionId)
+        if (currentWc && !currentWc.isDestroyed()) {
+          currentWc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: runInput.sessionId, error })
         }
       },
       onComplete: (messages, opts) => {
@@ -320,19 +343,21 @@ export async function runAgentHeadless(
           messages,
           opts,
           forwardToRenderer: (completionMessages, completionOpts) => {
-            // 同步到渲染进程
-            if (wc && !wc.isDestroyed()) {
-              wc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, {
-                sessionId: runInput.sessionId,
-                messages: completionMessages,
-                stoppedByUser: completionOpts?.stoppedByUser ?? false,
-                startedAt: completionOpts?.startedAt,
-                resultSubtype: completionOpts?.resultSubtype,
-                resultErrors: completionOpts?.resultErrors,
-                backgroundTasksPending: completionOpts?.backgroundTasksPending,
-                endReason: completionOpts?.endReason,
-                endReasonLabel: completionOpts?.endReasonLabel,
-              })
+            const completion = {
+              sessionId: runInput.sessionId,
+              messages: completionMessages,
+              stoppedByUser: completionOpts?.stoppedByUser ?? false,
+              startedAt: completionOpts?.startedAt,
+              resultSubtype: completionOpts?.resultSubtype,
+              resultErrors: completionOpts?.resultErrors,
+              backgroundTasksPending: completionOpts?.backgroundTasksPending,
+              endReason: completionOpts?.endReason,
+              endReasonLabel: completionOpts?.endReasonLabel,
+            }
+            eventBus.emit(runInput.sessionId, { kind: 'run_complete', completion })
+            const currentWc = sessionWebContents.get(runInput.sessionId)
+            if (currentWc && !currentWc.isDestroyed()) {
+              currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, completion)
             }
           },
         })
@@ -344,8 +369,9 @@ export async function runAgentHeadless(
           event: { type: 'title_updated', title },
         })
         // 同步到渲染进程
-        if (wc && !wc.isDestroyed()) {
-          wc.send(AGENT_IPC_CHANNELS.TITLE_UPDATED, {
+        const currentWc = sessionWebContents.get(runInput.sessionId)
+        if (currentWc && !currentWc.isDestroyed()) {
+          currentWc.send(AGENT_IPC_CHANNELS.TITLE_UPDATED, {
             sessionId: runInput.sessionId,
             title,
           })
@@ -359,8 +385,10 @@ export async function runAgentHeadless(
         const session = beforePromotion?.draft
           ? updateAgentSessionMeta(runInput.sessionId, { draft: false })
           : beforePromotion
-        if (beforePromotion?.draft && session && wc && !wc.isDestroyed()) {
-          wc.send(AGENT_IPC_CHANNELS.SESSION_UPDATED, { session })
+        // 用当前登记的窗口发送，而不是 run 启动时捕获的 wc（刷新后旧窗口已销毁，事件会丢）。
+        const sessionWc = sessionWebContents.get(runInput.sessionId)
+        if (beforePromotion?.draft && session && sessionWc && !sessionWc.isDestroyed()) {
+          sessionWc.send(AGENT_IPC_CHANNELS.SESSION_UPDATED, { session })
         }
         eventBus.emit(runInput.sessionId, {
           kind: 'profer_event',
@@ -389,14 +417,19 @@ export async function runAgentHeadless(
     callbacks.onError(errorMessage)
     const completion = { stoppedByUser: false, startedAt, endReason: 'error' as const, endReasonLabel: '执行出错' }
     callbacks.onComplete([], completion)
-    if (wc && !wc.isDestroyed()) {
-      wc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: runInput.sessionId, error: errorMessage })
-      wc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, { sessionId: runInput.sessionId, messages: [], ...completion })
+    eventBus.emit(runInput.sessionId, { kind: 'run_error', error: errorMessage })
+    const terminal = { sessionId: runInput.sessionId, messages: [], ...completion }
+    eventBus.emit(runInput.sessionId, { kind: 'run_complete', completion: terminal })
+    const currentWc = sessionWebContents.get(runInput.sessionId)
+    if (currentWc && !currentWc.isDestroyed()) {
+      currentWc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: runInput.sessionId, error: errorMessage })
+      currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, terminal)
     }
   } finally {
     if (!orchestrator.isActive(runInput.sessionId)) {
       runtimeContextStore.clear(runInput.sessionId)
       sessionWebContents.delete(runInput.sessionId)
+      preserveCompletedBacklog(runInput.sessionId)
       activeStreamEventBacklogs.delete(runInput.sessionId)
     }
   }
