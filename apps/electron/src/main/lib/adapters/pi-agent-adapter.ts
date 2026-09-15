@@ -74,7 +74,7 @@ import {
   normalizePermissionInput,
   restorePiInput,
 } from './pi-message-adapter'
-import { DEFAULT_CONTEXT_WINDOW, buildModel } from './pi-model-registry'
+import { DEFAULT_CONTEXT_WINDOW, buildModel, normalizePiApi } from './pi-model-registry'
 import { createPartialMessageCoalescer, type PartialMessageCoalescer } from './pi-streaming-control'
 import { runPiPromptChain, type PiInterruptReservation } from './pi-prompt-chain'
 import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
@@ -128,7 +128,7 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   channelName?: string
   /**
    * 渠道模型上的 1M 上下文偏好：true 强开、false 强关、缺省按模型 + provider 自动判定。
-   * Pi 不做 SDK 侧 beta 协商，该偏好只决定注册给 Pi 的上下文窗口。
+   * Pi 不做 SDK 侧 beta 協商，该偏好只决定注册给 Pi 的上下文窗口。
    */
   context1m?: boolean | null
   maxTurns?: number
@@ -1883,7 +1883,12 @@ export class PiAgentAdapter implements AgentProviderAdapter {
             transport: inferReasoningTransport(input.provider),
           })
         : undefined
+      // DeepSeek 同时支持 OpenAI 兼容与 Anthropic 兼容两套端点，协议由端点形态决定。
+      // createDeepSeekReasoningRequestExtension 注入的是 Anthropic 专有的
+      // `thinking` / `output_config` 字段；若渠道指向第三方 OpenAI 兼容网关，
+      // 注入会污染 OpenAI 请求体（部分网关直接 400）。此处必须按实际协议门控。
       const deepSeekReasoningProfile = input.provider === 'deepseek'
+        && normalizePiApi(input.provider, input.baseUrl) === 'anthropic-messages'
         ? resolveReasoningProfile({
             modelId: input.model,
             transport: 'anthropic-messages',

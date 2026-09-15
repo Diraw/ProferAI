@@ -6,6 +6,7 @@ import {
   buildPiRequestHeaders,
   getCodexCatalogModels,
   listCodexModels,
+  normalizePiApi,
   requiresPromaUserAgent,
   resolvePiApiKey,
   stripAgentSdkContextSuffix,
@@ -424,6 +425,89 @@ describe('Pi runtime DeepSeek V4 1M 上下文', () => {
   })
 })
 
+describe('Pi runtime DeepSeek 双协议端点判定', () => {
+  // 背景：DeepSeek 同时提供 OpenAI 兼容与 Anthropic 兼容两套入口。旧实现把协议写死在
+  // provider 上（deepseek → anthropic-messages），导致把 DeepSeek 渠道指向只提供
+  // OpenAI 端点的第三方网关时，Agent 会向它发送 /v1/messages，完全不可用；
+  // 而 Chat 走 OpenAI 适配器却正常，两者不一致。
+  test('Given 端点形态不同 When 判定协议 Then 跟随端点而非 provider', () => {
+    expect(normalizePiApi('deepseek', 'https://api.deepseek.com/anthropic')).toBe('anthropic-messages')
+    expect(normalizePiApi('deepseek', 'https://gateway.example.com/anthropic')).toBe('anthropic-messages')
+    expect(normalizePiApi('deepseek', 'https://gateway.example.com/v1')).toBe('openai-completions')
+    expect(normalizePiApi('deepseek', 'https://gateway.example.com/v1/chat/completions')).toBe('openai-completions')
+    // 缺省地址（未配置 / 历史配置）保持官方 Anthropic 行为
+    expect(normalizePiApi('deepseek', undefined)).toBe('anthropic-messages')
+    expect(normalizePiApi('deepseek', '')).toBe('anthropic-messages')
+    // 商业代管 relay 由服务端路由决定协议，不得按端点形态改写
+    expect(normalizePiApi('deepseek', 'https://server.example/v1/proxy')).toBe('anthropic-messages')
+  })
+
+  test('Given 第三方 OpenAI 兼容网关 When 注册 Pi 模型 Then 使用 openai-completions 且保留协议根地址', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-thirdparty',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://api.kakouai.com/v1',
+      model: 'deepseek-v4.1-flash',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('openai-completions')
+    expect(result.model.baseUrl).toBe('https://api.kakouai.com/v1')
+  })
+
+  test('Given 第三方网关但填写完整 Chat Completions 端点 When 注册 Pi 模型 Then 还原为协议根地址', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-thirdparty-full',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://gateway.example.com/v1/chat/completions',
+      model: 'deepseek-v4.1-flash',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('openai-completions')
+    expect(result.model.baseUrl).toBe('https://gateway.example.com/v1')
+  })
+
+  test('Given 端点不同 When 构建 Pi 请求头 Then 仅 Anthropic 端点附带 Anthropic 专用头', () => {
+    // 第三方 OpenAI 端点必须交给 Pi 自带认证，不能带 Anthropic 专用头。
+    expect(buildPiRequestHeaders('deepseek', 'sk-test', 'https://gateway.example.com/v1')).toBeUndefined()
+    expect(buildPiRequestHeaders('deepseek', 'sk-test', 'https://api.deepseek.com/anthropic')).toMatchObject({
+      Authorization: 'Bearer sk-test',
+    })
+  })
+
+  test('Given DeepSeek 官方 Anthropic 入口 When 注册 Pi 模型 Then 保持 anthropic-messages', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-official',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      model: 'deepseek-v4-pro',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('anthropic-messages')
+    expect(result.model.baseUrl).toBe('https://api.deepseek.com/anthropic')
+  })
+})
+
 describe('Pi runtime GLM-5.3 fallback and reasoning metadata', () => {
   test('Given GLM-5.3 is absent from the Pi catalog When registered for Zhipu Then preserves 1M context, 128K output, and official thinking toggle', async () => {
     const sdk = await import('@earendil-works/pi-coding-agent')
@@ -621,5 +705,69 @@ describe('ChatGPT Codex 模型目录补丁', () => {
     expect(byId.get('gpt-5.4-mini')).toBe(400_000)
     expect(byId.get('gpt-5.5')).toBe(1_050_000)
     expect(byId.get('gpt-6-astra')).toBe(1_050_000)
+  })
+})
+
+describe('Pi runtime OpenAI 兼容渠道 finish_reason 兜底', () => {
+  /** model.compat 是各协议兼容位的联合类型，这里只取 OpenAI 侧的字段读值。 */
+  const openAiCompat = (model: { compat?: unknown }): { supportsFinishReason?: boolean; supportsReasoningEffort?: boolean } | undefined =>
+    model.compat as { supportsFinishReason?: boolean; supportsReasoningEffort?: boolean } | undefined
+
+  test('Given 用户自配 OpenAI 兼容渠道 When 注册模型 Then 关闭 finish_reason 校验并保留推理兼容位', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-custom-finish-reason',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'custom',
+      baseUrl: 'https://gateway.example.com/v1',
+      model: 'gpt-5.6',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    // 网关可能不发 finish_reason：缺了也不能让整轮失败。
+    expect(openAiCompat(result.model)?.supportsFinishReason).toBe(false)
+    // 推理档位能力不能被这次兜底覆盖掉。
+    expect(openAiCompat(result.model)?.supportsReasoningEffort).toBe(true)
+  })
+
+  test('Given 官方 OpenAI 渠道 When 注册模型 Then 保持 finish_reason 校验默认行为', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-official-openai',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.6',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(openAiCompat(result.model)?.supportsFinishReason).not.toBe(false)
+  })
+
+  test('Given Anthropic 协议的兼容渠道 When 注册模型 Then 不注入 OpenAI 专属兼容位', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-anthropic-compat-finish-reason',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'anthropic-compatible',
+      baseUrl: 'https://gateway.example.com',
+      model: 'claude-opus-4-8',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('anthropic-messages')
+    expect(openAiCompat(result.model)?.supportsFinishReason).not.toBe(false)
   })
 })

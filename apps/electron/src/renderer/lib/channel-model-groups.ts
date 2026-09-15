@@ -1,7 +1,14 @@
 import type { Channel, ChannelModel } from '@profer/shared'
+import { isChannelEnabledForRuntime } from '@profer/shared'
 
 export type ChannelSource = 'official' | 'self-configured'
 export type ChannelProtocol = 'openai' | 'anthropic'
+
+/** 判定 Agent 内核可用性所需的渠道字段。 */
+export type ChannelRuntimeCapability = Pick<
+  Channel,
+  'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'
+>
 
 export interface ChannelModelGroup {
   modelId: string
@@ -40,16 +47,19 @@ export function getChannelProtocol(provider: Channel['provider']): ChannelProtoc
 }
 
 /**
- * Some channels expose more than one wire protocol. Ollama uses OpenAI
- * compatibility for Chat and Anthropic compatibility for Claude/Pi Agent.
- * Keep getChannelProtocol's single display value for existing grouping code,
- * but use this predicate whenever a runtime applies a strict protocol filter.
+ * 该渠道能否服务于指定协议的 Agent 运行时。
+ *
+ * Agent 场景下「协议」等价于「内核」：Anthropic 协议 = Claude 内核，OpenAI 协议 = Pi 内核。
+ * 判定依据是渠道上用户勾选的 `agentRuntimes`（老配置回退到 provider 推导），
+ * **不再按渠道类型加门禁**——能不能用由用户勾选与填写的地址一并决定。
+ *
+ * getChannelProtocol 仍保留单一展示值，供分组与标签使用。
  */
 export function supportsChannelProtocol(
-  provider: Channel['provider'],
+  channel: ChannelRuntimeCapability,
   protocol: ChannelProtocol,
 ): boolean {
-  return provider === 'ollama' || getChannelProtocol(provider) === protocol
+  return isChannelEnabledForRuntime(channel, protocol === 'anthropic' ? 'claude' : 'pi')
 }
 
 export function groupChannelModels(channels: Channel[]): ChannelModelGroup[] {

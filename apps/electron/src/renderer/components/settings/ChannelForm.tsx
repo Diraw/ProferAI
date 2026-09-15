@@ -30,11 +30,14 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
+  PROVIDER_DEFAULT_AGENT_URLS,
   PROVIDER_DEFAULT_URLS,
   PROVIDER_LABELS,
+  inferAgentRuntimeModes,
   isAgentEnabledForChannel,
 } from '@profer/shared'
 import type {
+  AgentRuntimeMode,
   Channel,
   ChannelCreateInput,
   ChannelModel,
@@ -42,7 +45,7 @@ import type {
   FetchModelsResult,
   ProviderType,
 } from '@profer/shared'
-import { normalizeAnthropicProviderUrl } from '@profer/core'
+import { isAnthropicShapedEndpoint, normalizeAnthropicProviderUrl } from '@profer/core'
 import { getProviderLogo } from '@/lib/model-logo'
 import { applyModelDiscoveryResult, buildModelDiscoveryAttemptKey, shouldAutoDiscoverModels } from '@/lib/channel-model-discovery'
 import { resolveModel1MToggleState } from '@/lib/model-1m-toggle'
@@ -100,7 +103,7 @@ const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = {
   'anthropic-compatible': '/v1/messages',
   openai: '/chat/completions',
   'openai-responses': '/responses',
-  deepseek: '/messages',
+  deepseek: '/chat/completions',
   google: '/v1beta/models/{model}:generateContent',
   'kimi-api': '/messages',
   'kimi-coding': '/messages',
@@ -121,11 +124,12 @@ const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = {
   custom: '/chat/completions',
 }
 
-/** 走 Anthropic 协议的供应商集合（共用 /v1/messages 端点）；Ollama 仅用于 Agent */
+/** 走 Anthropic 协议的供应商集合（共用 /v1/messages 端点）；Ollama 仅用于 Agent。
+ * 注意：DeepSeek 的 Chat 走 OpenAI 兼容协议（/chat/completions），只有 Agent 走
+ * Anthropic 兼容入口，因此不在此集合内。 */
 const ANTHROPIC_PROTOCOL_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>([
   'anthropic',
   'anthropic-compatible',
-  'deepseek',
   'kimi-api',
   'kimi-coding',
   'zhipu-coding',
@@ -158,6 +162,31 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, '')
   if (provider === 'ollama') {
     return `${trimmed.replace(/\/v1$/, '')}/v1/chat/completions（Agent: /v1/messages）`
+  }
+  // custom 渠道在注册表里由 `new OpenAIAdapter()` 创建（providerType 为 'openai'），
+  // 运行时会在地址后自动补 /chat/completions；因此填协议根（如 …/v1）是正确的。
+  if (provider === 'custom') {
+    // 只填站点根地址时，拼接后的端点会落到站点页面而不是 API，这里给出显式提示。
+    const looksLikeSiteRoot = !/^https?:\/\/[^/]+\/[^/]+/.test(trimmed)
+    const hint = looksLikeSiteRoot ? '；该地址看起来是站点根地址，多数 OpenAI 兼容网关需要携带 /v1' : ''
+    return `${trimmed}${PROVIDER_CHAT_PATHS[provider]}${hint}`
+  }
+  if (provider === 'deepseek') {
+    // DeepSeek 的协议跟随端点形态：官方/`/anthropic` 走 Anthropic，
+    // 第三方 OpenAI 兼容网关走 OpenAI。预览必须如实展示，
+    // 否则用户无从得知 Agent 会向哪个端点、用哪种协议发请求。
+    const usesAnthropicPath = isAnthropicShapedEndpoint(trimmed)
+    const isOfficial = /(^|\/\/)api\.deepseek\.com([:/]|$)/i.test(trimmed)
+    const agentEndpoint = usesAnthropicPath || (!isOfficial && trimmed !== '')
+      ? trimmed
+      : PROVIDER_DEFAULT_AGENT_URLS.deepseek ?? ''
+    const agentProtocol = isAnthropicShapedEndpoint(agentEndpoint) ? 'Anthropic' : 'OpenAI 兼容'
+    // 提示已知不对称：DeepSeek 渠道的 Chat 固定走 OpenAI 兼容协议（仅 Agent 跟随端点形态）。
+    // 用户把 Base URL 填成 Anthropic 端点时，Chat 会打错协议，必须显式引导。
+    const hint = usesAnthropicPath
+      ? '；注意：DeepSeek 渠道的 Chat 固定走 OpenAI 兼容协议，此地址下 Chat 不可用；若需 Chat 也走 Anthropic，请改用「Anthropic 兼容格式」'
+      : ''
+    return `Chat：${trimmed}${PROVIDER_CHAT_PATHS.deepseek}；Agent：${agentEndpoint}（${agentProtocol}）${hint}`
   }
   if (ANTHROPIC_PROTOCOL_PROVIDERS.has(provider)) {
     return `${normalizeAnthropicProviderUrl(baseUrl, provider)}/messages`
@@ -225,6 +254,32 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const [oauthConfigured, setOauthConfigured] = React.useState(channel?.provider === 'xai' && channel.credentialMode === 'oauth')
   const [agentExperimentalEnabled, setAgentExperimentalEnabled] = React.useState(channel?.agentExperimentalEnabled === true)
   const [agentBaseUrl, setAgentBaseUrl] = React.useState(channel?.agentBaseUrl ?? '')
+  /** 用户是否手改过 Anthropic 端点；未改过就不回传，交给主进程按 OpenAI 端点推导。 */
+  const agentBaseUrlEditedRef = React.useRef(false)
+  /**
+   * Agent 内核勾选。可用性由用户决定，不再按渠道类型加门禁。
+   * 老配置没有该字段时，按 provider 规则推导出初值（与迁移逻辑一致）。
+   */
+  const [agentRuntimes, setAgentRuntimes] = React.useState<AgentRuntimeMode[]>(() =>
+    channel
+      ? channel.agentRuntimes ?? inferAgentRuntimeModes(channel)
+      : inferAgentRuntimeModes({ provider: 'anthropic' }),
+  )
+  const toggleAgentRuntime = React.useCallback((mode: AgentRuntimeMode, enabled: boolean): void => {
+    setAgentRuntimes((prev) => enabled
+      ? (prev.includes(mode) ? prev : [...prev, mode])
+      : prev.filter((item) => item !== mode))
+  }, [])
+  /**
+   * 地址框跟着内核勾选显隐：勾了 Pi 才显示 OpenAI 端点，勾了 Claude 才显示 Anthropic 端点。
+   *
+   * 两者都没勾时不隐藏 OpenAI 端点：它兼作 Chat 的请求地址，
+   * 全隐会让不做 Agent 的纯 Chat 渠道没法配地址。
+   */
+  const piEnabled = agentRuntimes.includes('pi')
+  const claudeEnabled = agentRuntimes.includes('claude')
+  const showOpenAIEndpoint = piEnabled || !claudeEnabled
+  const showAnthropicEndpoint = claudeEnabled
   const [apiKey, setApiKey] = React.useState('')
   const [showApiKey, setShowApiKey] = React.useState(false)
   const [oauthLoggingIn, setOauthLoggingIn] = React.useState(false)
@@ -291,7 +346,6 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     currentName: string,
     currentProvider: ProviderType,
     currentBaseUrl: string,
-    currentAgentBaseUrl: string,
     currentApiKey: string,
     currentEnabled: boolean,
   ) => {
@@ -301,7 +355,9 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         name: currentName,
         provider: currentProvider,
         baseUrl: currentBaseUrl,
-        agentBaseUrl: currentAgentBaseUrl.trim(),
+        // 用户改过 Anthropic 端点才回传；没改过则不发送，让主进程按 OpenAI 端点重新推导。
+        ...(agentBaseUrlEditedRef.current ? { agentBaseUrl: agentBaseUrl.trim() } : {}),
+        agentRuntimes,
         ...((currentProvider !== 'xai' || credentialMode === 'api-key'
           ? (credentialMode === 'api-key' && (currentApiKey.trim() || channel?.credentialMode !== 'oauth'))
           : oauthConfigured)
@@ -321,7 +377,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       console.error('[模型配置表单] auto-save 失败:', error)
       toast.error('自动保存失败，请检查后手动重试', { id: 'auto-save-error' })
     }
-  }, [isEdit, channel, credentialMode, oauthConfigured, agentExperimentalEnabled, onAgentEligibilityChange])
+  }, [isEdit, channel, agentBaseUrl, agentRuntimes, credentialMode, oauthConfigured, agentExperimentalEnabled, onAgentEligibilityChange])
 
   /** 触发防抖 auto-save */
   const scheduleAutoSave = React.useCallback((
@@ -329,14 +385,13 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     nextName: string,
     nextProvider: ProviderType,
     nextBaseUrl: string,
-    nextAgentBaseUrl: string,
     nextApiKey: string,
     nextEnabled: boolean,
   ) => {
     if (!isEdit || !initializedRef.current) return
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current)
     autoSaveTimerRef.current = setTimeout(() => {
-      doAutoSave(nextModels, nextName, nextProvider, nextBaseUrl, nextAgentBaseUrl, nextApiKey, nextEnabled)
+      doAutoSave(nextModels, nextName, nextProvider, nextBaseUrl, nextApiKey, nextEnabled)
     }, AUTO_SAVE_DELAY)
   }, [isEdit, doAutoSave])
 
@@ -352,11 +407,11 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     }
   }, [isEdit, apiKeyLoaded])
 
-  // 监听字段变化触发 auto-save
+  // 监听字段变化触发 auto-save（agentRuntimes 必须在依赖里：只切内核勾选也要落盘）
   React.useEffect(() => {
-    scheduleAutoSave(models, name, provider, baseUrl, agentBaseUrl, apiKey, enabled)
+    scheduleAutoSave(models, name, provider, baseUrl, apiKey, enabled)
     return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current) }
-  }, [models, name, provider, baseUrl, agentBaseUrl, credentialMode, oauthConfigured, agentExperimentalEnabled, apiKey, enabled, scheduleAutoSave])
+  }, [models, name, provider, baseUrl, credentialMode, oauthConfigured, agentExperimentalEnabled, apiKey, enabled, agentRuntimes, scheduleAutoSave])
 
   // 切换供应商时自动更新 Base URL 与名称，Anthropic 兼容渠道自动添加预设模型
   const handleProviderChange = (newProvider: string): void => {
@@ -371,6 +426,9 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     setCredentialMode('api-key')
     setOauthConfigured(false)
     setAgentExperimentalEnabled(false)
+    // 换供应商通常意味着换协议；按新供应商重推内核勾选，用户可再手改
+    setAgentRuntimes(inferAgentRuntimeModes({ provider: p }))
+    agentBaseUrlEditedRef.current = false
     setAgentBaseUrl('')
     setTestResult(null)
     setFetchResult(null)
@@ -530,6 +588,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         provider,
         baseUrl,
         agentBaseUrl: agentBaseUrl.trim() || undefined,
+        agentRuntimes,
         ...(provider === 'xai' && { credentialMode, agentExperimentalEnabled }),
         apiKey,
         models,
@@ -686,17 +745,52 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               description="API Key 由 xAI API 计费；订阅 OAuth 使用 SuperGrok 或 X Premium。"
             />
           )}
-          <SettingsInput
-            label="Base URL"
-            value={baseUrl}
-            onChange={setBaseUrl}
-            placeholder="https://api.example.com"
-            description={baseUrl.trim()
-              ? provider === 'ollama'
-                ? `预览：${buildPreviewUrl(baseUrl, provider)}；${getOllamaNetworkScope(baseUrl)}`
-                : `预览：${buildPreviewUrl(baseUrl, provider)}`
-              : undefined}
+          {/* Agent 内核勾选：能不能用由用户决定，不按渠道类型加门禁 */}
+          <SettingsToggle
+            label="Pi 模式"
+            description="Pi 内核可用"
+            checked={agentRuntimes.includes('pi')}
+            onCheckedChange={(checked) => toggleAgentRuntime('pi', checked)}
           />
+          <SettingsToggle
+            label="Claude 模式"
+            description="Claude 内核可用"
+            checked={agentRuntimes.includes('claude')}
+            onCheckedChange={(checked) => toggleAgentRuntime('claude', checked)}
+          />
+          {showOpenAIEndpoint && (
+            <SettingsInput
+              label="OpenAI 端点"
+              value={baseUrl}
+              onChange={setBaseUrl}
+              placeholder="https://api.example.com/v1"
+              description={baseUrl.trim()
+                ? provider === 'ollama'
+                  ? `预览：${buildPreviewUrl(baseUrl, provider)}；${getOllamaNetworkScope(baseUrl)}`
+                  : `预览：${buildPreviewUrl(baseUrl, provider)}`
+                : undefined}
+            />
+          )}
+          {/*
+            留空时的真实行为（主进程 inferAgentBaseUrl，已实跑核对）：
+            - 有官方默认入口的供应商 → 用官方入口（即 placeholder 显示的值）
+            - custom / anthropic-compatible / openai 等 → 沿用渠道的 OpenAI 端点
+            - deepseek 按地址形态分：官方地址用官方入口，第三方地址沿用 OpenAI 端点
+            文案必须与运行时一致，不写一个不会生效的示例地址。
+          */}
+          {showAnthropicEndpoint && (
+            <SettingsInput
+              label="Anthropic 端点"
+              value={agentBaseUrl}
+              onChange={(value) => { agentBaseUrlEditedRef.current = true; setAgentBaseUrl(value) }}
+              placeholder={PROVIDER_DEFAULT_AGENT_URLS[provider]}
+              description={provider === 'deepseek'
+                ? 'Claude 内核使用；留空自动推导：官方地址用官方入口，第三方地址沿用 OpenAI 端点'
+                : PROVIDER_DEFAULT_AGENT_URLS[provider]
+                  ? 'Claude 内核使用；留空用官方默认入口'
+                  : 'Claude 内核使用；留空沿用渠道的 OpenAI 端点'}
+            />
+          )}
           {/* API Key + 测试连接同行 */}
           <div className="px-4 py-3 space-y-2">
             <div className="flex items-center justify-between">

@@ -538,6 +538,7 @@ export function createChannel(input: ChannelCreateInput): Channel {
     ...(input.provider === 'xai' && input.credentialMode ? { credentialMode: input.credentialMode } : {}),
     ...(input.provider === 'xai' && input.agentExperimentalEnabled ? { agentExperimentalEnabled: true } : {}),
     agentBaseUrl: input.agentBaseUrl,
+    ...(input.agentRuntimes ? { agentRuntimes: input.agentRuntimes } : {}),
     apiKey: encryptApiKey(input.apiKey),
     models: input.models,
     enabled: input.enabled,
@@ -565,6 +566,7 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
   if (isOfficialManagedChannel({ id })) {
     if (input.name !== undefined || input.provider !== undefined ||
         input.baseUrl !== undefined || input.agentBaseUrl !== undefined ||
+        input.agentRuntimes !== undefined ||
         input.apiKey !== undefined) {
       throw new Error('官方渠道由平台统一管理，不可修改')
     }
@@ -587,6 +589,7 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
       input.provider !== undefined ||
       input.baseUrl !== undefined ||
       input.agentBaseUrl !== undefined ||
+      input.agentRuntimes !== undefined ||
       input.credentialMode !== undefined ||
       input.agentExperimentalEnabled !== undefined ||
       input.apiKey !== undefined ||
@@ -618,15 +621,30 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
     }
   }
 
+  // Agent URL 属于按 Base URL 推导的派生值，历史实现把它单独持久化。若用户改了
+  // Base URL / 供应商但没显式指定 Agent URL，继续保留旧值会让 Agent 请求打到
+  // 上一个地址（典型现象：换了 Base URL 后 Agent 依旧请求不到）。此处丢弃派生值，
+  // 交给 normalizeChannelForCurrentSchema 按新配置重新推导。
+  const nextProvider = input.provider ?? existing.provider
+  const nextBaseUrl = input.baseUrl ?? existing.baseUrl
+  const endpointChanged = nextProvider !== existing.provider || nextBaseUrl !== existing.baseUrl
+  const nextAgentBaseUrl = input.agentBaseUrl !== undefined
+    ? input.agentBaseUrl
+    : endpointChanged
+      ? undefined
+      : existing.agentBaseUrl
+
   const rawUpdated: Channel = {
     ...existing,
     name: input.name ?? existing.name,
-    provider: input.provider ?? existing.provider,
-    baseUrl: input.baseUrl ?? existing.baseUrl,
+    provider: nextProvider,
+    baseUrl: nextBaseUrl,
     ...(input.provider === 'xai'
       ? { credentialMode: input.credentialMode ?? existing.credentialMode, agentExperimentalEnabled: input.agentExperimentalEnabled ?? existing.agentExperimentalEnabled }
       : { credentialMode: undefined, agentExperimentalEnabled: undefined }),
-    agentBaseUrl: input.agentBaseUrl !== undefined ? input.agentBaseUrl : existing.agentBaseUrl,
+    agentBaseUrl: nextAgentBaseUrl,
+    // 未显式传入时保留原勾选；老配置的推导由 normalizeChannelForCurrentSchema 负责。
+    agentRuntimes: input.agentRuntimes !== undefined ? input.agentRuntimes : existing.agentRuntimes,
     apiKey: input.apiKey ? encryptApiKey(input.apiKey) : existing.apiKey,
     models: input.models ?? existing.models,
     enabled: input.enabled ?? existing.enabled,

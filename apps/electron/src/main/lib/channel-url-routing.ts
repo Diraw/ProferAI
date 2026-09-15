@@ -1,14 +1,34 @@
 import type { Channel, ChannelsConfig, ProviderType } from '@profer/shared'
-import { PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, isAgentCompatibleProvider } from '@profer/shared'
-import { normalizeBaseUrl } from '@profer/core'
+import { PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, inferAgentRuntimeModes, isAgentCompatibleProvider } from '@profer/shared'
+import { isAnthropicShapedEndpoint, normalizeBaseUrl } from '@profer/core'
 
-function hasAnthropicPath(baseUrl?: string): boolean {
+/** 是否指向 DeepSeek 官方域名；第三方网关不得被官方默认值迁移逻辑覆盖。 */
+function isOfficialDeepSeekHost(baseUrl?: string): boolean {
   if (!baseUrl) return false
   try {
-    return new URL(baseUrl).pathname.toLowerCase().includes('/anthropic')
+    return new URL(baseUrl).hostname.toLowerCase() === 'api.deepseek.com'
   } catch {
-    return baseUrl.toLowerCase().includes('/anthropic')
+    return baseUrl.trim().toLowerCase().includes('api.deepseek.com')
   }
+}
+
+/**
+ * 官方 DeepSeek Anthropic Agent 入口（含历史迁移遗留的写法）。
+ *
+ * 该地址只是官方推导结果，并非用户意图；用户把 Chat Base URL 切到第三方
+ * 网关后，不能再让它继续把 Agent 请求送回官方端点。
+ */
+function isOfficialDeepSeekAgentUrl(baseUrl?: string): boolean {
+  const raw = baseUrl?.trim()
+  if (!raw || !isOfficialDeepSeekHost(raw)) return false
+  let path: string
+  try {
+    path = new URL(raw).pathname
+  } catch {
+    path = raw.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+/, '')
+  }
+  const normalized = path.replace(/\/+$/, '').toLowerCase()
+  return normalized === '/anthropic' || normalized === '/anthropic/v1' || normalized === '/anthropic/v1/messages'
 }
 
 const PI_NATIVE_BASE_URL_PROVIDERS = new Set<ProviderType>([
@@ -35,16 +55,23 @@ function isOfficialDeepSeekV1Url(baseUrl?: string): boolean {
 
 export function inferAgentBaseUrl(provider: ProviderType, baseUrl?: string, agentBaseUrl?: string): string | undefined {
   const explicit = agentBaseUrl?.trim()
+
+  if (provider === 'deepseek') {
+    // 显式配置的非官方 Agent 入口优先：同时提供双协议的网关可以单独指定。
+    if (explicit && !isOfficialDeepSeekAgentUrl(explicit)) return explicit
+    // 官方 Agent 默认值不再优先于当前 Chat Base URL。历史配置把官方默认值
+    // 持久化进 agentBaseUrl，用户切换 Base URL 后 Agent 会继续打旧地址，
+    // 这是「换了 URL 仍请求不到」的根因。Agent 必须跟随当前 Base URL 推导。
+    if (isAnthropicShapedEndpoint(baseUrl)) return normalizeBaseUrl(baseUrl ?? '')
+    if (!baseUrl?.trim() || isOfficialDeepSeekHost(baseUrl)) return PROVIDER_DEFAULT_AGENT_URLS.deepseek
+    return normalizeBaseUrl(baseUrl)
+  }
+
   if (explicit) return explicit
 
   if (provider === 'ollama') {
     const normalized = normalizeBaseUrl(baseUrl ?? '')
     return normalized ? normalized.replace(/\/v1$/, '') : undefined
-  }
-
-  if (provider === 'deepseek') {
-    if (hasAnthropicPath(baseUrl)) return normalizeBaseUrl(baseUrl ?? '')
-    return PROVIDER_DEFAULT_AGENT_URLS.deepseek
   }
 
   if (provider === 'anthropic-compatible') {
@@ -69,7 +96,9 @@ export function normalizeChannelForCurrentSchema(channel: Channel): { channel: C
   }
 
   if (next.provider === 'deepseek') {
-    if (hasAnthropicPath(next.baseUrl)) {
+    // 只迁移官方 DeepSeek 的 Anthropic 地址；用户自定义网关可能也包含
+    // /anthropic，不能再被硬编码覆盖回 api.deepseek.com。
+    if (isOfficialDeepSeekAgentUrl(next.baseUrl)) {
       next = {
         ...next,
         agentBaseUrl: next.agentBaseUrl?.trim() || normalizeBaseUrl(next.baseUrl),
@@ -88,6 +117,13 @@ export function normalizeChannelForCurrentSchema(channel: Channel): { channel: C
   const inferredAgentBaseUrl = inferAgentBaseUrl(next.provider, next.baseUrl, next.agentBaseUrl)
   if (inferredAgentBaseUrl && next.agentBaseUrl !== inferredAgentBaseUrl) {
     next = { ...next, agentBaseUrl: inferredAgentBaseUrl }
+    changed = true
+  }
+
+  // 静默迁移：老配置没有勾选字段，按现有 provider 规则推导一次并写回。
+  // 推导结果与迁移前的门禁行为等价，用户不会感知到能力变化。
+  if (!next.agentRuntimes) {
+    next = { ...next, agentRuntimes: inferAgentRuntimeModes(next) }
     changed = true
   }
 

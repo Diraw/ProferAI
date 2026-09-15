@@ -21,7 +21,7 @@ import {
   resolveReasoningProfile,
   type ReasoningCapability,
 } from '@profer/shared'
-import { getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
+import { getProferUserAgent, isAnthropicShapedEndpoint, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
 import type { Api, KnownProvider, Model } from '@earendil-works/pi-ai/compat'
 import type { PiAgentQueryOptions } from './pi-agent-adapter'
 import { refreshXaiOAuthCredentialsSerial, rememberXaiOAuthCredentials } from '../xai-oauth-credentials'
@@ -213,8 +213,31 @@ function isLocalOllamaBaseUrl(baseUrl: string | undefined): boolean {
   }
 }
 
-function normalizePiApi(provider: ProviderType, baseUrl?: string): Api {
+/** 商业代管 relay 的 Base：协议由服务端路由决定，不能按端点形态推断。 */
+function isRelayProxyBaseUrl(baseUrl: string): boolean {
+  return baseUrl.trim().replace(/\/+$/, '').endsWith('/v1/proxy')
+}
+
+/**
+ * 解析 Pi 请求使用的协议。
+ *
+ * DeepSeek 同时提供 OpenAI 兼容与 Anthropic 兼容两套入口（官方另有 `/anthropic`）。
+ * 协议必须跟随**配置的端点**，而不是写死 provider：第三方中转网关绝大多数只提供
+ * OpenAI 兼容端点，若仍按 provider 判定为 Anthropic，Agent 会向它发送
+ * `/v1/messages` 而完全不可用——而 Chat 走 OpenAI 适配器却正常，两者会不一致。
+ *
+ * 例外：商业代管 relay（`…/v1/proxy`）由服务端路由决定协议，保持 provider 判定。
+ */
+export function normalizePiApi(provider: ProviderType, baseUrl?: string): Api {
   if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) return 'openai-completions'
+  if (
+    provider === 'deepseek'
+    && baseUrl?.trim()
+    && !isRelayProxyBaseUrl(baseUrl)
+    && !isAnthropicShapedEndpoint(baseUrl)
+  ) {
+    return 'openai-completions'
+  }
   switch (provider) {
     case 'openai':
     case 'opencode-go-openai':
@@ -326,6 +349,29 @@ export async function resolvePiReasoningCapability(provider: ProviderType, model
   })
 }
 
+/**
+ * 第三方 OpenAI 兼容网关的 finish_reason 兜底。
+ *
+ * Pi 的 openai-completions 适配器在 `compat.supportsFinishReason !== false` 时，会把
+ * 「SSE 正常收尾但一帧都没带 finish_reason」判为整轮失败，报
+ * `Stream ended without finish_reason`。而这类网关的 `/v1/chat/completions` 与
+ * `/v1/responses` 往往不是同一套实现：同一渠道配在 Codex（Responses 协议）里可能完全
+ * 正常，Profer 走 Chat Completions 就会撞上这条判定。
+ *
+ * 只对用户自配的 OpenAI 兼容渠道（provider === 'custom'）关掉该校验：
+ * - 服务端给了 finish_reason 时行为完全不变（hasFinishReason 分支先行生效）；
+ * - 缺失时按 stop / toolUse 推断结束原因，保住这一轮已经拿到的正文与工具调用；
+ * - 真正的传输中断由底层抛网络错误，走不到这条判定，不会被静默吞掉。
+ */
+function applyOpenAICompatibleFinishReasonFallback(
+  input: PiAgentQueryOptions,
+  api: Api,
+  compat: PiModelDefaults['compat'],
+): PiModelDefaults['compat'] {
+  if (api !== 'openai-completions' || input.provider !== 'custom') return compat
+  return { ...(compat ?? {}), supportsFinishReason: false } as PiModelDefaults['compat']
+}
+
 async function resolvePiModelDefaults(
   input: PiAgentQueryOptions,
   explicit1MContext = false,
@@ -367,7 +413,11 @@ async function resolvePiModelDefaults(
   return {
     reasoning: catalogModel?.reasoning ?? true,
     thinkingLevelMap: providerSpecificCapabilities?.thinkingLevelMap ?? catalogModel?.thinkingLevelMap,
-    compat: providerSpecificCapabilities?.compat,
+    compat: applyOpenAICompatibleFinishReasonFallback(
+      input,
+      api,
+      providerSpecificCapabilities?.compat,
+    ),
     input: catalogModel ? [...catalogModel.input] : ['text', 'image'],
     cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
     contextWindow,
@@ -408,7 +458,8 @@ function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType)
   if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) {
     return `${baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`
   }
-  if (normalizePiApi(provider, baseUrl) === 'anthropic-messages') {
+  const api = normalizePiApi(provider, baseUrl)
+  if (api === 'anthropic-messages') {
     // Pi's Anthropic SDK appends `/v1/messages` itself. Do not first resolve
     // the complete endpoint: that turns the commercial relay base
     // `/v1/proxy` into `/v1/proxy/messages`, after which Pi appends another

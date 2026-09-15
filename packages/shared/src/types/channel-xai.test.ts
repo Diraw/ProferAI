@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   isAgentEnabledForChannel,
   resolveXaiCredentialMode,
+  type AgentRuntimeMode,
 } from './channel'
 
 const oauthSecret = JSON.stringify({
@@ -14,6 +15,7 @@ function channel(overrides: Partial<{
   provider: 'xai' | 'anthropic'
   enabled: boolean
   agentExperimentalEnabled: boolean
+  agentRuntimes: AgentRuntimeMode[]
 }> = {}) {
   return {
     provider: 'xai' as const,
@@ -22,7 +24,7 @@ function channel(overrides: Partial<{
   }
 }
 
-describe('xAI 凭据模式与 Agent 实验开关', () => {
+describe('xAI 凭据模式与 Agent 内核资格', () => {
   test('Given 历史 xAI OAuth JSON When 未声明模式 Then 自动识别为 oauth', () => {
     expect(resolveXaiCredentialMode(undefined, oauthSecret)).toBe('oauth')
   })
@@ -36,15 +38,27 @@ describe('xAI 凭据模式与 Agent 实验开关', () => {
     expect(resolveXaiCredentialMode('oauth', 'xai-api-key')).toBe('oauth')
   })
 
-  test('Given xAI 渠道未开启实验开关 When 判断 Agent 资格 Then 拒绝进入 Agent 列表', () => {
+  // isAgentEnabledForChannel 现在只是「该渠道是否勾选了 Claude 内核」的兼容别名，
+  // Agent 资格完全以内核勾选（agentRuntimes）为准，不再看渠道类型或实验开关。
+  test('Given 渠道没有任何勾选信息 When 判断 Claude 内核资格 Then 按 provider 推导等价结果', () => {
+    // xAI 无 Anthropic 端点，推导结果里没有 claude
     expect(isAgentEnabledForChannel(channel())).toBe(false)
-  })
-
-  test('Given xAI 渠道已开启实验开关 When 判断 Agent 资格 Then 允许进入 Agent 列表', () => {
-    expect(isAgentEnabledForChannel(channel({ agentExperimentalEnabled: true }))).toBe(true)
-  })
-
-  test('Given 非 xAI 的既有兼容渠道 When 判断 Agent 资格 Then 保持原有兼容语义', () => {
+    // 既有兼容渠道推导结果含 claude，保持原有语义
     expect(isAgentEnabledForChannel(channel({ provider: 'anthropic' }))).toBe(true)
+  })
+
+  test('Given 渠道显式勾选 Claude 内核 When 判断 Claude 内核资格 Then 允许（不看渠道类型）', () => {
+    expect(isAgentEnabledForChannel(channel({ agentRuntimes: ['pi', 'claude'] }))).toBe(true)
+  })
+
+  test('Given 渠道只勾选 Pi 内核 When 判断 Claude 内核资格 Then 拒绝', () => {
+    expect(isAgentEnabledForChannel(channel({ agentRuntimes: ['pi'] }))).toBe(false)
+  })
+
+  test('Given xAI 只开了实验开关但没有勾选 When 判断 Claude 内核资格 Then 开关不再决定资格', () => {
+    // 实验开关的历史作用是把 xAI 老配置迁移为 Pi 内核（agentRuntimes: ['pi']），
+    // 它不代表用户勾选了 Claude 内核，因此这里必须是 false。
+    expect(isAgentEnabledForChannel(channel({ agentExperimentalEnabled: true }))).toBe(false)
+    expect(isAgentEnabledForChannel(channel({ agentExperimentalEnabled: true, agentRuntimes: ['pi'] }))).toBe(false)
   })
 })

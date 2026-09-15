@@ -60,7 +60,7 @@ function buildModelOptions(
     if (filterChannelIds && filterChannelIds.length > 0 && !filterChannelIds.includes(channel.id)) continue
 
     const protocol = getChannelProtocol(channel.provider)
-    if (strictProtocolFilter && !supportsChannelProtocol(channel.provider, preferredProtocol)) continue
+    if (strictProtocolFilter && !supportsChannelProtocol(channel, preferredProtocol)) continue
 
     for (const model of channel.models) {
       if (!model.enabled) continue
@@ -484,7 +484,10 @@ export function ModelSelector({
                               {option.modelName}
                           </span>
                           <span className="shrink-0 text-[10px] text-muted-foreground/70 uppercase">
-                            {option.protocol}
+                            {/* 严格按协议过滤时，标签应反映运行时实际使用的协议：
+                                DeepSeek 同时在 OpenAI 与 Anthropic 两侧可用，
+                                其 display 值（openai）会在 Claude 模式下误导用户。 */}
+                            {strictProtocolFilter ? preferredProtocol : option.protocol}
                           </span>
                           {(option.channelCount ?? 0) > 1 && (
                             <span className="shrink-0 inline-flex items-center gap-1 text-[10px] text-muted-foreground" title={`已合并 ${option.channelCount} 个渠道`}>
