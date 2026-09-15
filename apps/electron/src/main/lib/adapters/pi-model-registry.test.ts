@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   DEFAULT_CONTEXT_WINDOW,
+  applyModel1MContextPreference,
   buildModel,
   buildPiRequestHeaders,
   getCodexCatalogModels,
@@ -115,6 +116,24 @@ describe('Pi runtime 智谱团队版认证', () => {
   })
 })
 
+describe('渠道模型 1M 偏好归一', () => {
+  test('Given 强制开启 When 归一窗口 Then 至少 1M', () => {
+    expect(applyModel1MContextPreference(500_000, true)).toBe(1_000_000)
+    // 本来就大于 1M 的窗口（Codex 1.05M）不得被降下来
+    expect(applyModel1MContextPreference(1_050_000, true)).toBe(1_050_000)
+  })
+
+  test('Given 强制关闭 When 归一窗口 Then 压回保守默认窗口', () => {
+    expect(applyModel1MContextPreference(1_000_000, false)).toBe(DEFAULT_CONTEXT_WINDOW)
+    expect(applyModel1MContextPreference(500_000, false)).toBe(DEFAULT_CONTEXT_WINDOW)
+  })
+
+  test('Given 未设置或 null When 归一窗口 Then 保持原值', () => {
+    expect(applyModel1MContextPreference(500_000, undefined)).toBe(500_000)
+    expect(applyModel1MContextPreference(1_000_000, null)).toBe(1_000_000)
+  })
+})
+
 describe('Pi runtime xAI API Key provider', () => {
   test('Given xAI API Key When buildModel Then 使用 Pi 内置 xai Responses 模型并隔离 runtime key', async () => {
     const sdk = await import('@earendil-works/pi-coding-agent')
@@ -131,6 +150,38 @@ describe('Pi runtime xAI API Key provider', () => {
     expect(result.model.provider).toBe('xai')
     expect(result.model.api).toBe('openai-responses')
     expect(result.model.id).toBe('grok-4.6')
+  })
+
+  test('Given xAI 渠道模型勾选了 1M When buildModel Then 抬到 1M 窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-api-key-1m-on',
+      apiKey: 'xai-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      baseUrl: 'https://api.x.ai/v1',
+      model: 'grok-4.6',
+      context1m: true,
+    })
+
+    expect(result.model.contextWindow).toBe(1_000_000)
+  })
+
+  test('Given xAI 渠道模型关掉了 1M When buildModel Then 压回保守窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-api-key-1m-off',
+      apiKey: 'xai-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      baseUrl: 'https://api.x.ai/v1',
+      model: 'grok-4.6',
+      context1m: false,
+    })
+
+    expect(result.model.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW)
   })
 
   test('Given xAI Responses 中转站的未知模型 When buildModel Then 在隔离 runtime 注册该模型并复用中转 Base URL', async () => {
@@ -331,6 +382,45 @@ describe('Pi runtime DeepSeek V4 1M 上下文', () => {
 
     expect(result.model.id).toBe('gateway/deepseek-v4-flash')
     expect(result.model.contextWindow).toBe(1_000_000)
+  })
+
+  test('Given 渠道模型勾选了 1M When 未验证的第三方网关 Then 也按 1M 注册窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-custom-v4-toggled-on',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'custom',
+      baseUrl: 'https://gateway.example.com/v1',
+      model: 'gateway/deepseek-v4-pro',
+      context1m: true,
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.id).toBe('gateway/deepseek-v4-pro')
+    expect(result.model.contextWindow).toBe(1_000_000)
+  })
+
+  test('Given 渠道模型关掉了 1M When 官方 DeepSeek V4 Then 退回保守窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-v4-toggled-off',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+      context1m: false,
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW)
   })
 })
 

@@ -126,6 +126,11 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   /** OAuth credential coordination key; equals the selected Profer channel id. */
   channelId?: string
   channelName?: string
+  /**
+   * 渠道模型上的 1M 上下文偏好：true 强开、false 强关、缺省按模型 + provider 自动判定。
+   * Pi 不做 SDK 侧 beta 协商，该偏好只决定注册给 Pi 的上下文窗口。
+   */
+  context1m?: boolean | null
   maxTurns?: number
   permissionMode: ProferPermissionMode
   canUseTool?: (

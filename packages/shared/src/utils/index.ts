@@ -21,8 +21,12 @@ export {
   normalizeContextModelId,
   isDeepSeekV4Model,
   resolveAgentSdkModelId,
+  strip1MContextSuffix,
+  resolveOneMillionContextDecision,
+  resolveAgentSdk1MSelection,
   resolveContextWindowFromModelUsage,
 } from './context-window'
+export type { OneMillionContextSource, OneMillionContextDecision, AgentSdk1MSelection } from './context-window'
 export { calculateContextUsageRatio } from './context-usage'
 export {
   THINKING_SIGNATURE_ERROR_CODE,

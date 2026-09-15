@@ -64,4 +64,26 @@ describe('Agent 辅助模型路由', () => {
 
     expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe(DEEPSEEK_SUBAGENT_MODEL_ID)
   })
+
+  test('Given 渠道模型手动关掉了 1M When 解析模型路由 Then 即使代际支持也不启用', () => {
+    const policy = resolveAgentModelRouting({
+      modelId: 'deepseek-v4-pro',
+      provider: 'deepseek',
+      context1m: false,
+    })
+
+    expect(policy.enable1MContext).toBe(false)
+    // 手动关闭 1M 不应影响 SubAgent 路由
+    expect(policy.subagentModel).toBe(DEEPSEEK_SUBAGENT_MODEL_ID)
+  })
+
+  test('Given 渠道模型手动开了 1M When 未验证的模型 Then 也启用', () => {
+    const policy = resolveAgentModelRouting({
+      modelId: 'glm-4.6',
+      provider: 'custom',
+      context1m: true,
+    })
+
+    expect(policy.enable1MContext).toBe(true)
+  })
 })

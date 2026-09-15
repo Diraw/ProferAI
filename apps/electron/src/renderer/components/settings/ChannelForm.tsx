@@ -44,7 +44,8 @@ import type {
 } from '@profer/shared'
 import { normalizeAnthropicProviderUrl } from '@profer/core'
 import { getProviderLogo } from '@/lib/model-logo'
-import { applyModelDiscoveryResult } from '@/lib/channel-model-discovery'
+import { applyModelDiscoveryResult, buildModelDiscoveryAttemptKey, shouldAutoDiscoverModels } from '@/lib/channel-model-discovery'
+import { resolveModel1MToggleState } from '@/lib/model-1m-toggle'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   AlertDialog,
@@ -164,57 +165,53 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
   return `${trimmed}${PROVIDER_CHAT_PATHS[provider]}`
 }
 
-function getPresetModelsForProvider(provider: ProviderType): ChannelModel[] {
-  switch (provider) {
-    case 'deepseek':
-      return [
-        { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true },
-        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', enabled: true },
-      ]
-    case 'kimi-api':
-      return [
-        { id: 'k3', name: 'Kimi K3', enabled: true },
-        { id: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true },
-      ]
-    case 'kimi-coding':
-      return [
-        { id: 'k3', name: 'Kimi K3', enabled: true },
-        { id: 'kimi-for-coding', name: 'Kimi for Coding', enabled: true },
-      ]
-    case 'zhipu':
-    case 'zhipu-coding':
-    case 'zhipu-coding-team':
-      return [
-        { id: 'glm-5.3', name: 'GLM-5.3', enabled: true },
-        { id: 'glm-5.2', name: 'GLM-5.2', enabled: true },
-        { id: 'glm-5.1', name: 'GLM-5.1', enabled: false },
-      ]
-    case 'xai':
-      return [{ id: 'grok-4.6', name: 'Grok 4.6', enabled: true }]
-    case 'minimax':
-      return [
-        { id: 'MiniMax-M3', name: 'MiniMax-M3', enabled: true },
-        { id: 'MiniMax-M2.7', name: 'MiniMax-M2.7', enabled: true },
-      ]
-    case 'xiaomi':
-    case 'xiaomi-token-plan':
-      return [
-        { id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', enabled: true },
-        { id: 'mimo-v2-pro', name: 'MiMo V2 Pro', enabled: true },
-        { id: 'mimo-v2.5', name: 'MiMo V2.5', enabled: true },
-        { id: 'mimo-v2-omni', name: 'MiMo V2 Omni', enabled: true },
-        { id: 'mimo-v2-flash', name: 'MiMo V2 Flash', enabled: true },
-      ]
-    default:
-      return []
-  }
-}
-
 /** auto-save 防抖延迟 */
 const AUTO_SAVE_DELAY = 600
 
+/** 自动模型发现的防抖延迟：等用户把 API Key / 地址敲完再请求端点 */
+const AUTO_DISCOVERY_DELAY = 700
+
 function isAgentEligibleChannel(channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled'>): boolean {
   return isAgentEnabledForChannel(channel)
+}
+
+/**
+ * 模型行上的「1M」勾选。
+ *
+ * 显示的是**生效结果**：自动判定的模型（如已验证的 DeepSeek V4）也会显示为开启。
+ * 实线边 = 自动判定，虚线边 = 用户手动强开 / 强关；点击写入显式偏好。
+ */
+function Model1MToggle({
+  model,
+  provider,
+  onToggle,
+}: {
+  model: ChannelModel
+  provider: ProviderType
+  onToggle: (modelId: string) => void
+}): React.ReactElement {
+  const state = resolveModel1MToggleState(model, provider)
+
+  return (
+    <button
+      type="button"
+      aria-pressed={state.enabled}
+      title={state.title}
+      onClick={(event) => {
+        event.stopPropagation()
+        onToggle(model.id)
+      }}
+      className={cn(
+        'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium leading-4 transition-colors',
+        state.enabled
+          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+          : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground',
+        state.source !== 'auto' && 'border-dashed',
+      )}
+    >
+      1M
+    </button>
+  )
 }
 
 export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCancel }: ChannelFormProps): React.ReactElement {
@@ -253,6 +250,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const [testResult, setTestResult] = React.useState<ChannelTestResult | null>(null)
   const [fetchingModels, setFetchingModels] = React.useState(false)
   const [fetchResult, setFetchResult] = React.useState<FetchModelsResult | null>(null)
+  /** 已自动尝试过发现的「供应商 + 地址 + 凭证」组合，避免同一组合反复请求 */
+  const autoDiscoveryKeyRef = React.useRef<string | null>(null)
+  /** 用户手动增删过模型后不再自动发现，避免把用户清空的清单又塞回来 */
+  const modelsUserEditedRef = React.useRef(false)
   const [apiKeyLoaded, setApiKeyLoaded] = React.useState(false)
   const [showExitDialog, setShowExitDialog] = React.useState(false)
 
@@ -374,8 +375,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     setTestResult(null)
     setFetchResult(null)
     setModelFilter('')
-    // provider 切换意味着协议和模型命名空间都变了，旧模型继续保留会导致实际请求打错端点。
-    setModels(getPresetModelsForProvider(p))
+    // 换供应商意味着协议和模型命名空间都变了：清空旧模型，由端点发现或用户手填重新确定清单。
+    // 这里不预置任何「这家供应商大概有哪些模型」的清单——预置清单会冒充真实端点能力，
+    // 用户看起来像已配置完成，实际可能拿不到服务，也看不到账号真实的可用模型。
+    setModels([])
   }
 
   /** 添加模型 */
@@ -396,6 +399,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 删除模型 */
   const handleRemoveModel = (modelId: string): void => {
+    modelsUserEditedRef.current = true
     setModels((prev) => prev.filter((m) => m.id !== modelId))
   }
 
@@ -406,13 +410,39 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     )
   }
 
-  /** 从供应商 API 拉取可用模型列表 */
-  const handleFetchModels = async (): Promise<void> => {
-    if (provider === 'xai' && credentialMode === 'oauth') return
-    if ((provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()) return
+  /**
+   * 切换模型上的 1M 上下文偏好。
+   *
+   * 写入的是显式强开 / 强关；模型未手动设置过时显示的是自动判定结果。
+   */
+  const handleToggleModel1M = (modelId: string): void => {
+    setModels((prev) => prev.map((model) => (
+      model.id === modelId
+        ? { ...model, context1m: resolveModel1MToggleState(model, provider).nextExplicit }
+        : model
+    )))
+  }
+
+  /**
+   * 是否具备发起模型发现的条件。
+   *
+   * Ollama 走本机 /api/tags，不需要 Key；其余供应商必须同时有地址与凭证。
+   */
+  const canDiscoverModels = Boolean(baseUrl.trim())
+    && (provider === 'ollama' || Boolean(apiKey.trim()))
+    && !(provider === 'xai' && credentialMode === 'oauth')
+
+  /**
+   * 从供应商 API 拉取可用模型列表（自动发现与手动点击共用）。
+   *
+   * 远端发现失败只反馈结果，不能把失败误当成权威空列表，
+   * 否则编辑模式的 auto-save 会错误覆盖用户现有模型配置。
+   */
+  const runModelDiscovery = React.useCallback(async (options?: { keepPreviousResult?: boolean }): Promise<void> => {
+    if (!canDiscoverModels) return
 
     setFetchingModels(true)
-    setFetchResult(null)
+    if (!options?.keepPreviousResult) setFetchResult(null)
 
     try {
       const result = await window.electronAPI.fetchModels({
@@ -423,8 +453,6 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
       setFetchResult(result)
 
-      // 远端发现失败只反馈结果，不能把失败误当成权威空列表。
-      // 否则编辑模式的 auto-save 会错误覆盖用户现有模型配置。
       if (!result.success) return
 
       setModels((prev) => applyModelDiscoveryResult(prev, result))
@@ -434,7 +462,40 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     } finally {
       setFetchingModels(false)
     }
+  }, [canDiscoverModels, provider, baseUrl, apiKey])
+
+  /** 手动「从供应商获取」：覆盖上一次结果提示，并记下尝试键避免与自动发现重复请求 */
+  const handleFetchModels = (): void => {
+    autoDiscoveryKeyRef.current = buildModelDiscoveryAttemptKey({ provider, baseUrl, apiKey })
+    void runModelDiscovery()
   }
+
+  /**
+   * 自动从供应商发现模型清单。
+   *
+   * 渠道不再预置任何模型，清单必须来自端点本身：地址与凭证就绪且当前没有任何模型时自动拉取一次。
+   * 同一个「供应商 + 地址 + 凭证」组合只尝试一次，错误凭证不会反复打点；
+   * 改地址 / 改 Key / 手动点击「从供应商获取」都会重新发起。
+   */
+  React.useEffect(() => {
+    const attemptKey = buildModelDiscoveryAttemptKey({ provider, baseUrl, apiKey })
+    const shouldDiscover = shouldAutoDiscoverModels({
+      canDiscover: canDiscoverModels,
+      modelCount: models.length,
+      fetching: fetchingModels,
+      awaitingCredentials: isEdit && !apiKeyLoaded,
+      userEditedModels: modelsUserEditedRef.current,
+      attemptKey,
+      lastAttemptKey: autoDiscoveryKeyRef.current,
+    })
+    if (!shouldDiscover) return
+
+    const timer = setTimeout(() => {
+      autoDiscoveryKeyRef.current = attemptKey
+      void runModelDiscovery({ keepPreviousResult: true })
+    }, AUTO_DISCOVERY_DELAY)
+    return () => clearTimeout(timer)
+  }, [isEdit, apiKeyLoaded, models.length, fetchingModels, canDiscoverModels, provider, baseUrl, apiKey, credentialMode, runModelDiscovery])
 
   /** 测试连接（直接使用表单当前值，无需先保存） */
   const handleTest = async (): Promise<void> => {
@@ -494,8 +555,14 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 创建渠道（仅新建模式） */
   const handleCreate = async (): Promise<void> => {
-    if (models.length === 0) {
-      toast.warning('尚未配置模型，建议先从供应商获取或手动添加', { id: 'no-models-warn' })
+    // 模型清单来自端点发现，用户必须至少启用一个，否则渠道创建后在选择列表里也不可用。
+    if (!models.some((model) => model.enabled)) {
+      toast.warning(
+        models.length === 0
+          ? '尚未配置模型，请先从供应商获取或手动添加'
+          : '尚未启用任何模型，请从可用模型中至少启用一个',
+        { id: 'no-models-warn' },
+      )
       return
     }
     const savedChannel = await doCreate()
@@ -504,7 +571,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
   /** 检测表单是否有未保存内容 */
   const isDirty = !isEdit && (name.trim() !== '' || apiKey.trim() !== '' || models.length > 0)
-  const hasNoModels = !isEdit && models.length === 0
+  const hasNoModels = !isEdit && !models.some((model) => model.enabled)
 
   /** 返回按钮：创建模式下有未保存内容时拦截 */
   const handleBack = (): void => {
@@ -725,7 +792,9 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         <SettingsCard divided={false}>
           {enabledModels.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-              还没有启用任何模型，从下方可用模型中选择
+              {models.length === 0
+                ? '还没有模型清单：填写 API Key 后会自动从供应商获取，也可以手动添加模型 ID'
+                : '还没有启用任何模型，从下方可用模型中选择'}
             </div>
           ) : (
             <div className="divide-y divide-border/50">
@@ -741,6 +810,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                       <span className="text-muted-foreground ml-1">({model.id})</span>
                     )}
                   </span>
+                  <Model1MToggle model={model} provider={provider} onToggle={handleToggleModel1M} />
                   <button
                     type="button"
                     onClick={() => handleToggleModel(model.id)}
@@ -765,7 +835,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             size="sm"
             type="button"
             onClick={handleFetchModels}
-            disabled={fetchingModels || (provider !== 'ollama' && !(provider === 'xai' && credentialMode === 'oauth') && !apiKey.trim()) || !baseUrl.trim()}
+            disabled={fetchingModels || !canDiscoverModels}
             className="h-7 text-xs"
           >
             {fetchingModels ? (
@@ -828,6 +898,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                       <span className="text-muted-foreground ml-1">({model.id})</span>
                     )}
                   </span>
+                  <Model1MToggle model={model} provider={provider} onToggle={handleToggleModel1M} />
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); handleRemoveModel(model.id) }}
@@ -902,7 +973,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             <AlertDialogTitle>放弃未保存的更改？</AlertDialogTitle>
             <AlertDialogDescription>
               {hasNoModels
-                ? '当前尚未配置模型，建议先配置模型再保存。'
+                ? '当前尚未启用任何模型，该渠道不会出现在模型选择列表中。'
                 : '您填写的内容尚未保存，确定要放弃编辑吗？'}
             </AlertDialogDescription>
           </AlertDialogHeader>

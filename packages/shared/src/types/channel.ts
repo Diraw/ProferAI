@@ -289,6 +289,13 @@ export interface ChannelModel {
   name: string
   /** 是否启用 */
   enabled: boolean
+  /**
+   * 1M 上下文偏好（三态，由渠道配置里的「1M」勾选控制）：
+   * - 缺省：按模型 + provider 白名单自动判定（历史行为）
+   * - true：强制开启（未验证的第三方网关也允许，能否真协商由端点决定）
+   * - false：强制关闭（即使模型 / 渠道验证支持也不按 1M 处理）
+   */
+  context1m?: boolean
   /** 来源标记：手动添加的模型在拉取供应商列表时保留，不会被覆盖清除 */
   source?: 'manual' | 'fetched'
   /** 服务端代管模式下，当前登录用户实际可见的模型倍率。 */
