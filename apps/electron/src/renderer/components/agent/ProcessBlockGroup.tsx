@@ -346,8 +346,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, keepExpandedAfterComple
           key={i}
           className={cn(
             dimmed && 'opacity-80',
-            // 流式过程中不使用入场位移动画；新块高度变化本身已经会触发滚动，
-            // slide-in-from-top 会让同一段内容出现二次位移，看起来像页面抖动。
+            isStreaming && 'animate-in fade-in slide-in-from-top-1 duration-200',
           )}
         >
           {child}
@@ -413,9 +412,9 @@ export function ProcessBlockGroup({ blocks, isStreaming, keepExpandedAfterComple
           style={{
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',
             opacity: expanded ? 1 : 0,
-            // 自动收起是结构性变化，禁止 height transition；否则消息区会在 500ms
-            // 内持续变化并与滚动锚点互相作用。手动展开/收起仍由内容状态直接收敛。
-            transition: 'none',
+            transition: measuredHeight !== undefined
+              ? `height ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out, opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`
+              : `opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`,
           }}
         >
           <div className="space-y-2">
