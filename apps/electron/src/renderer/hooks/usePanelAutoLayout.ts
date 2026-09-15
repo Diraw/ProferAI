@@ -84,6 +84,9 @@ export function openFilePanel(): void {
  * - 后台会话：仅记录打开意图，激活时由可见性判定。
  */
 export function openBrowserFromPush(sessionId: string): void {
+  // currentAgentSessionIdAtom 在旧版切换路径中可能晚于 appMode 更新；两者都要校验，
+  // 否则后台会话的迟到状态会把旧浏览器意图带到 Chat/另一个 Agent 会话。
+  if (store.get(appModeAtom) !== 'agent' || sessionId !== store.get(currentAgentSessionIdAtom)) return
   const alreadyOpen = store.get(browserPanelOpenMapAtom).get(sessionId) === true
   store.set(browserPanelOpenMapAtom, (prev) => {
     if (prev.get(sessionId) === true) return prev
@@ -91,7 +94,6 @@ export function openBrowserFromPush(sessionId: string): void {
     next.set(sessionId, true)
     return next
   })
-  if (sessionId !== store.get(currentAgentSessionIdAtom)) return
   const windowWidth = store.get(windowWidthAtom)
   const layout = getCurrentLayout()
   const vis = applyOpenVisibility('browser', layout, windowWidth)

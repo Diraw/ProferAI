@@ -59,6 +59,8 @@ export interface BrowserTabState {
   zoomFactor: number
   /** 用户阅读用途：当前 tab 是否处于整页翻译态。 */
   translated: boolean
+  /** 最近一次主框架加载失败的原因；成功导航或重新开始加载时清空。 */
+  loadError: string | null
   trace: BrowserTraceItem[]
 }
 
@@ -115,6 +117,12 @@ export interface BrowserViewState {
   activity: BrowserTraceItem | null
   /** 当前 active tab 是否处于整页翻译态（用户点击翻译按钮后）。 */
   translated: boolean
+  /**
+   * 当前 active tab 主框架加载失败的原因；null 表示没有失败。
+   * 注意：浏览器内部错误页（chrome-error://）不会写入 url，失败原因只在这里暴露，
+   * 面板据此展示可重试的错误态。
+   */
+  loadError: string | null
 }
 
 export interface BrowserNavigateInput {

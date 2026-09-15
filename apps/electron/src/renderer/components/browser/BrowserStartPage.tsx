@@ -3,6 +3,7 @@ import type { BrowserStartPageState } from '@profer/shared'
 import { Bookmark, Clock, Globe2, Search, Sparkles, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { normalizeStartPageInput } from './browser-start-page-navigation'
 
 interface BrowserStartPageProps {
   state: BrowserStartPageState
@@ -12,26 +13,12 @@ interface BrowserStartPageProps {
   onClearHistory?: () => void
 }
 
-function normalizeUrl(input: string): string {
-  const value = input.trim()
-  if (!value) return ''
-  // 1. 已带协议：直接当作完整 URL。
-  if (/^https?:\/\//i.test(value)) return value
-  // 2. 形如域名（含 "." 且无空格）：补 https://。
-  //    排除 "1.2" 之类纯数字点号；允许带路径、端口、查询，避免把 "bilibili.com/" 误判为搜索词。
-  if (!/\s/.test(value) && /^[a-z0-9-]+(\.[a-z0-9-]+)+/i.test(value)) {
-    return `https://${value}`
-  }
-  // 3. 其余（裸词、含空格、中文等）当作搜索词，走搜索引擎。
-  return `https://www.bing.com/search?q=${encodeURIComponent(value)}`
-}
-
 export function BrowserStartPage({ state, onNavigate, onRemoveBookmark, onClearHistory }: BrowserStartPageProps): React.ReactElement {
   const [query, setQuery] = React.useState('')
 
   const submit = (event?: React.FormEvent) => {
     event?.preventDefault()
-    const target = normalizeUrl(query)
+    const target = normalizeStartPageInput(query)
     if (target) onNavigate(target)
   }
 
