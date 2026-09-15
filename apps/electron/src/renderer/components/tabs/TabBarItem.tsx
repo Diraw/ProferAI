@@ -204,6 +204,7 @@ export function TabBarItem({
   if (isScratch) {
     return (
       <div
+        data-tab-id={id}
         className="relative flex-none titlebar-no-drag"
         onMouseEnter={onHoverEnter}
         onMouseLeave={onHoverLeave}
@@ -216,8 +217,8 @@ export function TabBarItem({
             'text-xs transition-colors select-none cursor-grab active:cursor-grabbing focus-visible:ring-0 focus-visible:ring-offset-0',
             'border border-transparent',
             isActive
-              ? 'app-tab-active text-foreground'
-              : 'app-tab-inactive text-muted-foreground hover:text-foreground',
+              ? 'topbar-tab-active text-foreground'
+              : 'topbar-tab-inactive text-muted-foreground hover:text-foreground',
             stateBorderClass,
           )}
           onClick={handleClick}
@@ -258,8 +259,8 @@ export function TabBarItem({
           'text-xs transition-colors select-none cursor-grab active:cursor-grabbing focus-visible:ring-0 focus-visible:ring-offset-0',
           'border border-transparent',
           isActive
-            ? 'app-tab-active text-foreground'
-            : 'app-tab-inactive text-muted-foreground hover:text-foreground',
+            ? 'topbar-tab-active text-foreground'
+            : 'topbar-tab-inactive text-muted-foreground hover:text-foreground',
           stateBorderClass,
           isTearingOff && 'ring-2 ring-primary/70 ring-offset-0 bg-primary/10',
         )}

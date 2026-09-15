@@ -41,6 +41,9 @@ import { activeViewAtom } from "@/atoms/active-view";
 import { workspaceCapabilitiesVersionAtom } from "@/atoms/agent-atoms";
 import { workspacePresetsAtom } from "@/atoms/agent-preset-atoms";
 import { useProjectActions } from "@/hooks/useProjectActions";
+import { WindowControlsHost } from "@/components/WindowControlsTemplate";
+import { detectIsWindows } from "@/lib/platform";
+import { resolveWindowControlsRightInset } from "@/lib/window-controls-layout";
 import type { McpServerEntry, SkillMeta } from "@profer/shared";
 import { useAgentSkillsData } from "./useAgentSkillsData";
 import { SkillCard } from "./SkillCard";
@@ -62,6 +65,7 @@ type CapabilityTab = "skills" | "marketplace" | "mcp" | "memory" | "presets";
 export function AgentSkillsView(): React.ReactElement {
   const data = useAgentSkillsData();
   const setActiveView = useSetAtom(activeViewAtom);
+  const isWindows = React.useMemo(() => detectIsWindows(), []);
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom);
   const presetList = useAtomValue(workspacePresetsAtom(data.workspaceSlug));
   const { workspaces, currentWorkspaceId, selectProject } = useProjectActions();
@@ -305,7 +309,19 @@ export function AgentSkillsView(): React.ReactElement {
 
   if (!data.hasWorkspace && !globalConfigOpen) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 bg-content-area text-center">
+      <div className="relative flex h-full flex-col items-center justify-center gap-3 bg-content-area text-center">
+        {/* 本页全屏取代 TabBar，窗口按钮必须由本页自己声明；缺失时 Windows 会整组
+            失去最小化/最大化/关闭（该回归已发生过一次：宿主被后续重构移除）。 */}
+        <div
+          className="absolute inset-x-0 top-0 z-0 h-14 titlebar-drag-region"
+          style={{ right: resolveWindowControlsRightInset(isWindows) }}
+          aria-hidden="true"
+        />
+        <WindowControlsHost
+          id="agent-skills"
+          priority={20}
+          className="absolute right-2 top-[3px] z-20"
+        />
         <div className="flex size-16 items-center justify-center rounded-2xl bg-foreground/[0.04]">
           <Blocks className="size-8 text-foreground/30" />
         </div>
@@ -330,11 +346,23 @@ export function AgentSkillsView(): React.ReactElement {
   return (
     <div
       data-profer-navigation-region="agent-skills"
-      className="flex h-full flex-col overflow-hidden bg-content-area"
+      className="relative flex h-full flex-col overflow-hidden bg-content-area"
     >
-      {/* 顶部 50px 留给 AppShell 的全局 drag-region。不能把含 pt-14 的外层设为
-          no-drag，否则它的布局盒会覆盖窗口顶端并抵消全局拖拽区。交互控件从 56px
-          开始的内层才设为 no-drag，以同时保证窗口拖动和 Radix Popover 点击可用。 */}
+      {/* 本页全屏取代 TabBar，窗口按钮必须由本页自己声明（priority 高于 MainArea 的兜底宿主）。
+          拖拽层同样必须在按钮前结束：drag 矩形压住 no-drag 按钮矩形时，
+          Windows 125%/150%/175% 缩放会把单击判成标题栏点击。 */}
+      <div
+        className="absolute inset-x-0 top-0 z-0 h-14 titlebar-drag-region"
+        style={{ right: resolveWindowControlsRightInset(isWindows) }}
+        aria-hidden="true"
+      />
+      <WindowControlsHost
+        id="agent-skills"
+        priority={20}
+        className="absolute right-2 top-[3px] z-20"
+      />
+      {/* 顶部 56px 已交给上面的拖拽层。不能把含 mt-14 的外层设为 no-drag，
+          否则它的布局盒会盖住窗口顶端并抵消拖拽区；交互控件从 56px 开始的内层才设 no-drag。 */}
       <div className="mx-auto mt-14 flex w-full max-w-6xl shrink-0 flex-col gap-3 px-4 pb-4 sm:px-6 lg:px-8">
         <div className="titlebar-no-drag flex min-h-5 items-center">
           <Tooltip>

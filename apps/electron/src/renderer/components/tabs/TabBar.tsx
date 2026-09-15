@@ -63,7 +63,12 @@ import { cn } from "@/lib/utils";
 import { replaceAgentSessionInFreshnessOrder } from "@/lib/agent-session-list";
 
 import { promoteMru } from "@profer/shared";
-import { TOPBAR_CONTENT_HEIGHT, TOPBAR_HEIGHT } from "./topbar-layout";
+import { resolveWindowControlsRightInset } from "@/lib/window-controls-layout";
+import {
+  TOPBAR_CONTENT_HEIGHT,
+  TOPBAR_CONTENT_OFFSET,
+  TOPBAR_HEIGHT,
+} from "./topbar-layout";
 
 export function TabBar({
   teamMode = false,
@@ -73,6 +78,7 @@ export function TabBar({
   const [activeTabId, setActiveTabId] = useAtom(activeTabIdAtom);
   const indicatorMap = useAtomValue(tabIndicatorMapAtom);
   const setTabMru = useSetAtom(tabMruAtom);
+  const isWindows = React.useMemo(() => detectIsWindows(), []);
 
   // Tab 切换时同步 sidebar 状态
   const appMode = useAtomValue(appModeAtom);
@@ -447,9 +453,18 @@ export function TabBar({
   if (tabs.length === 0)
     return (
       <div
-        className="topbar-editorial flex items-center tabbar-bg titlebar-drag-region"
+        className="topbar-editorial relative tabbar-bg"
         style={{ height: TOPBAR_HEIGHT }}
-      />
+      >
+        {/* 无 Tab 时窗口按钮由 MainArea 的通用宿主提供（不在本组件内，
+            因此无法用 --topbar-actions-width 测量），拖拽层按安全宽度避让。
+            不能让 drag 矩形压住 no-drag 的按钮矩形：Windows 125%/150%/175%
+            缩放时会被 OS 判成标题栏点击，表现为按钮单击无效。 */}
+        <div
+          className="topbar-drag-surface absolute inset-y-0 left-0 titlebar-drag-region"
+          style={{ right: resolveWindowControlsRightInset(isWindows) }}
+        />
+      </div>
     );
 
   return (
@@ -662,6 +677,34 @@ function TabBarInner({
 
   // 滚动容器 ref
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const topbarContentRef = React.useRef<HTMLDivElement>(null);
+  const visibleTopBarToolIds = topBarTools
+    .filter((tool) => tool.visible)
+    .map((tool) => tool.id)
+    .join("|");
+
+  // 右侧控件是独立浮层；滚动区只预留它的实际宽度，避免两个矩形布局盒硬拼接。
+  React.useLayoutEffect(() => {
+    const content = topbarContentRef.current;
+    if (!content) return;
+
+    const updateActionsWidth = (): void => {
+      const actions = content.querySelector<HTMLElement>(".topbar-actions-slot");
+      if (!actions) {
+        content.style.removeProperty("--topbar-actions-width");
+        return;
+      }
+      content.style.setProperty("--topbar-actions-width", `${actions.offsetWidth}px`);
+    };
+
+    updateActionsWidth();
+    const observer = new ResizeObserver(updateActionsWidth);
+    observer.observe(content);
+    const actions = content.querySelector<HTMLElement>(".topbar-actions-slot");
+    if (actions) observer.observe(actions);
+    return () => observer.disconnect();
+  }, [visibleTopBarToolIds, showTabBarWindowControls]);
+
   // Tab ??????????????????????????????
   // ????????????? flex-shrink ????????
   type TabCompressionLevel = "full" | "title-only";
@@ -962,66 +1005,69 @@ function TabBarInner({
   return (
     <div
       ref={barRef}
-      className="topbar-editorial relative tabbar-bg titlebar-drag-region"
+      className="topbar-editorial relative tabbar-bg"
       style={{ height: TOPBAR_HEIGHT }}
     >
-      {/* 整个顶栏背景默认可拖动；Tab、工具组和窗口按钮通过 titlebar-no-drag 明确保留交互。 */}
-      <div
-        className={cn(
-          "absolute inset-x-0 top-0 h-[4px] titlebar-drag-region",
-          showTabBarWindowControls && "right-[126px]",
-        )}
-      />
+      {/* 顶栏不整条声明 drag：Tab、工具组、窗口按钮都是 no-drag，整条 drag 只能靠
+          从大矩形里扣除小块矩形来放行交互，正是 Windows 高 DPI 点击失效的成因。
+          这里改为单一拖拽层，并在右侧操作胶囊左缘精确结束（见 .topbar-drag-surface）。 */}
 
       {tearingOff && (
         <div className="pointer-events-none absolute -bottom-px left-0 right-0 h-px bg-primary/60 shadow-[0_0_8px_rgba(0,0,0,0.2)]" />
       )}
 
-      {/* 40px 外框中的 37px 内容行；Tab 直接从主区左缘开始，操作区使用真实布局列。 */}
+      {/* 40px 外框中的 37px 内容行；偏移取整数（见 TOPBAR_CONTENT_OFFSET），
+          Tab viewport 与右侧控件独立，避免两者共享直角接缝。 */}
       <div
-        className="topbar-content absolute inset-x-0 top-1/2 z-10 grid w-full -translate-y-1/2 grid-cols-[minmax(0,1fr)_auto] items-center"
-        style={{ height: TOPBAR_CONTENT_HEIGHT }}
+        ref={topbarContentRef}
+        className="topbar-content absolute inset-x-0 z-10"
+        style={{ top: TOPBAR_CONTENT_OFFSET, height: TOPBAR_CONTENT_HEIGHT }}
       >
-        <div
-          ref={scrollRef}
-          className="flex h-[37px] min-w-0 items-center gap-1 overflow-x-auto px-1 scrollbar-none titlebar-drag-region"
-        >
-          {tabs.map((tab) => (
-            <TabBarItem
-              key={tab.id}
-              id={tab.id}
-              type={tab.type}
-              title={tab.title}
-              workspaceName={
-                tab.type === "agent"
-                  ? workspaceNameBySessionId.get(tab.sessionId)
-                  : undefined
-              }
-              hideWorkspaceName={tabCompressionLevel === "title-only"}
-              hideRenameControl={tabCompressionLevel === "title-only"}
-              isAutomation={
-                tab.type === "agent" && automationSessionIds.has(tab.sessionId)
-              }
-              onRename={
-                tab.type === "agent"
-                  ? (title) => handleRenameAgentSession(tab.sessionId, title)
-                  : undefined
-              }
-              isActive={tab.id === activeTabId}
-              isStreaming={streamingMap.get(tab.id) ?? "idle"}
-              isHovered={hoveredTabId === tab.id}
-              isLeaving={hoveredTabId === tab.id && isLeaving}
-              isTearingOff={tearingOff === tab.id}
-              onActivate={() => onActivate(tab.id)}
-              onClose={() => onClose(tab.id)}
-              onMiddleClick={() => onClose(tab.id)}
-              onDragStart={(e) => handleDragStartWithTearOff(tab.id, e)}
-              onHoverEnter={() => handleTabHoverEnter(tab.id)}
-              onHoverLeave={handleTabHoverLeave}
-              onPanelHoverEnter={handlePanelHoverEnter}
-              onPanelHoverLeave={handleTabHoverLeave}
-            />
-          ))}
+        <div className="topbar-drag-surface absolute inset-y-0 left-0 titlebar-drag-region" />
+
+        <div className="topbar-tabs-viewport absolute inset-0 overflow-hidden rounded-r-full">
+          <div
+            ref={scrollRef}
+            className="topbar-tabs-scroll flex min-w-0 items-center gap-1 overflow-x-auto px-1 scrollbar-none"
+            style={{ height: TOPBAR_CONTENT_HEIGHT }}
+          >
+            {tabs.map((tab) => (
+              <TabBarItem
+                key={tab.id}
+                id={tab.id}
+                type={tab.type}
+                title={tab.title}
+                workspaceName={
+                  tab.type === "agent"
+                    ? workspaceNameBySessionId.get(tab.sessionId)
+                    : undefined
+                }
+                hideWorkspaceName={tabCompressionLevel === "title-only"}
+                hideRenameControl={tabCompressionLevel === "title-only"}
+                isAutomation={
+                  tab.type === "agent" && automationSessionIds.has(tab.sessionId)
+                }
+                onRename={
+                  tab.type === "agent"
+                    ? (title) => handleRenameAgentSession(tab.sessionId, title)
+                    : undefined
+                }
+                isActive={tab.id === activeTabId}
+                isStreaming={streamingMap.get(tab.id) ?? "idle"}
+                isHovered={hoveredTabId === tab.id}
+                isLeaving={hoveredTabId === tab.id && isLeaving}
+                isTearingOff={tearingOff === tab.id}
+                onActivate={() => onActivate(tab.id)}
+                onClose={() => onClose(tab.id)}
+                onMiddleClick={() => onClose(tab.id)}
+                onDragStart={(e) => handleDragStartWithTearOff(tab.id, e)}
+                onHoverEnter={() => handleTabHoverEnter(tab.id)}
+                onHoverLeave={handleTabHoverLeave}
+                onPanelHoverEnter={handlePanelHoverEnter}
+                onPanelHoverLeave={handleTabHoverLeave}
+              />
+            ))}
+          </div>
         </div>
 
         <TopBarActions
@@ -1052,7 +1098,7 @@ interface TopBarTool {
   highlighted?: boolean;
 }
 
-/** 顶栏右侧操作插槽：内容参与 Grid 布局，背景由伪元素独立绘制。 */
+/** 顶栏右侧操作插槽：内容参与 Grid 布局，并由插槽本体绘制胶囊背景。 */
 function TopBarActions({
   tools,
   showWindowControls,
@@ -1066,10 +1112,10 @@ function TopBarActions({
   if (visibleTools.length === 0 && !showWindowControls) return null;
 
   return (
-    <div className="topbar-actions-slot relative z-20 flex h-[37px] items-center gap-1 titlebar-no-drag">
+    <div className="topbar-actions-slot relative z-20 flex items-center gap-1 titlebar-no-drag">
       {visibleTools.length > 0 && (
         <div
-          className="topbar-tool-group flex h-[31px] items-center gap-1"
+          className="topbar-tool-group relative z-10 flex h-[31px] items-center gap-0.5"
           role="toolbar"
           aria-label="顶栏工具"
         >
