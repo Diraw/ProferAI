@@ -3,8 +3,8 @@ import { INTRO_FLUID_FRAGMENT_SHADER, INTRO_FLUID_VERTEX_SHADER } from '../../sh
 /**
  * 生成冷启动独立窗口的原始 WebGL Splash HTML。
  *
- * Windows 主进程在创建窗口前默认选择 ANGLE D3D11on12，规避部分 NVIDIA + D3D11
- * 环境中原始动态 ring 的呈现闪动；shader 的原始视觉结构保持不变。
+ * Windows 下可通过显式 PROFER_ANGLE_BACKEND=d3d11on12 选择兼容性后端；该开关
+ * 作用于整个 Electron 进程，默认不启用。Splash 的原始 WebGL 视觉结构保持不变。
  */
 export function createStartupSplashHtml(isDark: boolean): string {
   const background = isDark ? '#0b0b0c' : '#f7f7f5'
