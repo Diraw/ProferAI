@@ -241,6 +241,35 @@ function extractToolResultForTask(message: SDKUserMessage, resultBlock: SDKToolR
   return extractStructuredToolResultText(message) ?? extractToolResultText(resultBlock.content)
 }
 
+/**
+ * 从结构化 tool_result 直接解析 TaskCreate 输出。
+ *
+ * 与 `parseTaskCreateResult(JSON.stringify(value))` 结果一致，但优先直接读取对象，
+ * 避免为了取 id/subject 两个字段而序列化整个 tool_use_result —— 该字段在 Pi runtime 下
+ * 是 tool_result 正文的完整副本，单条可达数 MB，在流式期间逐帧序列化会造成大量临时分配。
+ */
+function parseTaskCreateResultFromStructuredValue(
+  value: Record<string, unknown>,
+): { id: string; subject?: string } | null {
+  const task = value.task
+  if (isRecord(task) && (typeof task.id === 'string' || typeof task.id === 'number')) {
+    return {
+      id: String(task.id),
+      subject: typeof task.subject === 'string' ? task.subject : undefined,
+    }
+  }
+
+  // result 可能被包在 content block 数组里：[{type:"text",text:'{"task":{...}}'}]
+  const extracted = extractToolResultText(value)
+  if (extracted) {
+    const parsed = parseTaskCreateResult(extracted)
+    if (parsed) return parsed
+  }
+
+  // 兜底：与 parseTaskCreateResult(JSON.stringify(value)) 完全一致（仅在上述快路径均未命中时执行）
+  return parseTaskCreateResult(JSON.stringify(value))
+}
+
 // ===== 辅助：判断 user 消息是否为真正的人类用户输入（非工具结果/子代理提示） =====
 // 见文件头 import：isUserInputMessage 引自 @profer/session-core（与服务端分页共用同一判据）
 
@@ -453,15 +482,20 @@ function buildTaskProgressData(
     }
   }
 
+  // 只提取 task 工具对应的 tool_result：turn 内其余工具结果不会被本函数消费，
+  // 提前跳过可避免对它们做无谓的文本提取与大对象序列化。
   const toolResultMap = new Map<string, string>()
-  for (const msg of turnMessages) {
-    if (msg.type !== 'user') continue
-    const userMsg = msg as SDKUserMessage
-    const blocks = userMsg.message?.content
-    if (!Array.isArray(blocks)) continue
-    for (const b of blocks) {
-      if (b.type === 'tool_result') {
+  if (taskBlocks.length > 0) {
+    const wantedToolUseIds = new Set(taskBlocks.map((tb) => tb.id))
+    for (const msg of turnMessages) {
+      if (msg.type !== 'user') continue
+      const userMsg = msg as SDKUserMessage
+      const blocks = userMsg.message?.content
+      if (!Array.isArray(blocks)) continue
+      for (const b of blocks) {
+        if (b.type !== 'tool_result') continue
         const rb = b as SDKToolResultBlock
+        if (!wantedToolUseIds.has(rb.tool_use_id)) continue
         const text = extractToolResultForTask(userMsg, rb)
         if (text) toolResultMap.set(rb.tool_use_id, text)
       }
@@ -488,44 +522,54 @@ function buildTaskProgressData(
  */
 export function buildHistoricalTaskSubjects(allMessages: SDKMessage[]): Map<string, string> {
   const historicalTaskSubjects = new Map<string, string>()
-  const globalResultMap = new Map<string, string>()
-  const pendingTaskCreates: SDKToolUseBlock[] = []
 
+  // 第一轮：收集带 subject/description 的 TaskCreate（原实现在收尾阶段才 continue，
+  // 这里提前筛选，等价但避免为不会被消费的 TaskCreate 解析结果）。
+  const subjectFallbackByToolUseId = new Map<string, string>()
   for (const msg of allMessages) {
-    if (msg.type === 'user') {
-      const userMsg = msg as SDKUserMessage
-      const blocks = userMsg.message?.content
-      if (!Array.isArray(blocks)) continue
-      for (const b of blocks) {
-        if (b.type === 'tool_result') {
-          const rb = b as SDKToolResultBlock
-          const text = extractToolResultForTask(userMsg, rb)
-          if (text) globalResultMap.set(rb.tool_use_id, text)
-        }
-      }
-    } else if (msg.type === 'assistant') {
-      const aMsg = msg as SDKAssistantMessage
-      const blocks = aMsg.message?.content
-      if (!Array.isArray(blocks)) continue
-      for (const b of blocks) {
-        if (b.type === 'tool_use' && (b as SDKToolUseBlock).name === 'TaskCreate') {
-          pendingTaskCreates.push(b as SDKToolUseBlock)
-        }
-      }
+    if (msg.type !== 'assistant') continue
+    const blocks = (msg as SDKAssistantMessage).message?.content
+    if (!Array.isArray(blocks)) continue
+    for (const b of blocks) {
+      if (b.type !== 'tool_use' || (b as SDKToolUseBlock).name !== 'TaskCreate') continue
+      const tb = b as SDKToolUseBlock
+      const input = tb.input as Record<string, unknown>
+      const subject = typeof input.subject === 'string'
+        ? input.subject
+        : typeof input.description === 'string'
+          ? input.description
+          : undefined
+      if (subject) subjectFallbackByToolUseId.set(tb.id, subject)
+    }
+  }
+  if (subjectFallbackByToolUseId.size === 0) return historicalTaskSubjects
+
+  // 第二轮：只解析上述 TaskCreate 对应的 tool_result，其余工具结果一律跳过
+  // （原实现对全部 tool_result 提取并序列化，其中绝大多数从未被消费）。
+  const parsedByToolUseId = new Map<string, { id: string; subject?: string }>()
+  for (const msg of allMessages) {
+    if (msg.type !== 'user') continue
+    const userMsg = msg as SDKUserMessage
+    const blocks = userMsg.message?.content
+    if (!Array.isArray(blocks)) continue
+    for (const b of blocks) {
+      if (b.type !== 'tool_result') continue
+      const rb = b as SDKToolResultBlock
+      if (!subjectFallbackByToolUseId.has(rb.tool_use_id)) continue
+      const raw = userMsg as unknown as Record<string, unknown>
+      const structured = raw.toolUseResult ?? raw.tool_use_result
+      const parsed = isRecord(structured)
+        ? parseTaskCreateResultFromStructuredValue(structured)
+        : parseTaskCreateResult(extractToolResultText(rb.content))
+      if (parsed) parsedByToolUseId.set(rb.tool_use_id, parsed)
     }
   }
 
-  for (const tb of pendingTaskCreates) {
-    const input = tb.input as Record<string, unknown>
-    const subject = typeof input.subject === 'string'
-      ? input.subject
-      : typeof input.description === 'string'
-        ? input.description
-        : undefined
-    if (!subject) continue
-    const resultText = globalResultMap.get(tb.id)
-    const parsedResult = parseTaskCreateResult(resultText)
-    if (parsedResult?.id) historicalTaskSubjects.set(parsedResult.id, parsedResult.subject ?? subject)
+  for (const [toolUseId, fallbackSubject] of subjectFallbackByToolUseId) {
+    const parsedResult = parsedByToolUseId.get(toolUseId)
+    if (parsedResult?.id) {
+      historicalTaskSubjects.set(parsedResult.id, parsedResult.subject ?? fallbackSubject)
+    }
   }
 
   return historicalTaskSubjects
@@ -1455,12 +1499,15 @@ export function getGroupId(group: MessageGroup): string {
   return `turn-empty-${++fallbackIdCounter}`
 }
 
+/** 预览文本最大长度（user 与 assistant-turn 共用） */
+const GROUP_PREVIEW_LIMIT = 200
+
 /**
  * 从 MessageGroup 中提取纯文本预览，供迷你地图使用
  */
 export function getGroupPreview(group: MessageGroup): string {
   if (group.type === 'user') {
-    return parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text.slice(0, 200)
+    return parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text.slice(0, GROUP_PREVIEW_LIMIT)
   }
   if (group.type === 'system') {
     if (group.message.subtype === 'compact_boundary') return '上下文已压缩'
@@ -1469,18 +1516,23 @@ export function getGroupPreview(group: MessageGroup): string {
     if (group.message.subtype === 'interruption_record') return group.message.message ?? '任务中断'
     return ''
   }
-  // assistant-turn：收集所有 text 块
-  const texts: string[] = []
+  // assistant-turn：按顺序累加 text 块，达到预览上限即返回。
+  // 与原 `texts.join(' ').slice(0, 200)` 结果一致，区别在于不再为 200 字符拼接整轮全文。
+  let preview = ''
+  let hasText = false
   for (const aMsg of group.assistantMessages) {
     const rawBlocks = aMsg.message?.content
     if (!Array.isArray(rawBlocks)) continue
     for (const block of normalizeThinkTagsInContentBlocks(rawBlocks)) {
       if (block.type === 'text' && 'text' in block) {
-        texts.push((block as { text: string }).text)
+        const text = (block as { text: string }).text
+        preview = hasText ? `${preview} ${text}` : text
+        hasText = true
+        if (preview.length >= GROUP_PREVIEW_LIMIT) return preview.slice(0, GROUP_PREVIEW_LIMIT)
       }
     }
   }
-  return texts.join(' ').slice(0, 200)
+  return preview.slice(0, GROUP_PREVIEW_LIMIT)
 }
 
 function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {
