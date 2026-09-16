@@ -566,9 +566,37 @@ export function appendAgentMessage(id: string, message: AgentMessage): void {
 }
 
 /** 单条 SDKMessage 序列化后最大长度（UTF-16 code units，超出则截断内容） */
-const MAX_SDK_MESSAGE_LENGTH = 256 * 1024 // ~256K chars
+/** 落盘规则：单条消息序列化后的字符上限。写入路径与存量迁移共用此常量。 */
+export const MAX_SDK_MESSAGE_LENGTH = 256 * 1024 // ~256K chars
 /** 截断后保留的预览文本长度 */
 const TRUNCATED_PREVIEW_LENGTH = 2000
+
+/**
+ * 按落盘规则收敛一条**已序列化**的会话行；未超限则原样返回。
+ *
+ * 写入路径（`appendSDKMessages` / `serializeSDKMessageForStorage`）与存量迁移
+ * （`oversized-session-migration`）共用这一个入口。此前同一套规则散在两处内联，
+ * 正是「各自漏一处」的温床——补 4 个覆盖缺口时已吃过一次这个亏。
+ */
+export function sanitizeSerializedSessionLine(line: string, sessionId?: string): string {
+  if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
+
+  let message: SDKMessage
+  try {
+    message = JSON.parse(line) as SDKMessage
+  } catch {
+    // 损坏行不在这里处理（迁移侧会记为 skipped）；原样返回，避免二次破坏
+    return line
+  }
+
+  const sanitized = JSON.stringify(sanitizeOversizedMessage(message, line.length))
+  if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
+    console.warn(
+      `[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars)${sessionId ? `, session=${sessionId}` : ''}`,
+    )
+  }
+  return sanitized
+}
 
 /**
  * 追加 SDKMessage 到会话的 JSONL 文件（Phase 4 新持久化格式）
@@ -587,15 +615,9 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
   const filePath = getAgentSessionMessagesPath(id)
 
   try {
-    const lines = persistentMessages.map((m) => {
-      const serialized = JSON.stringify(m)
-      if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
-      const sanitized = JSON.stringify(sanitizeOversizedMessage(m, serialized.length))
-      if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
-        console.warn(`[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars), session=${id}`)
-      }
-      return sanitized
-    }).join('\n') + '\n'
+    const lines = persistentMessages
+      .map((m) => sanitizeSerializedSessionLine(JSON.stringify(m), id))
+      .join('\n') + '\n'
     appendFileSync(filePath, lines, 'utf-8')
   } catch (error) {
     console.error(`[Agent 会话] 追加 SDKMessage 失败 (${id}):`, error)
@@ -1753,12 +1775,9 @@ function serializeSDKMessageForStorage(
   }
   if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
 
-  let sanitized = JSON.stringify(sanitizeOversizedMessage(msg, serialized.length))
+  let sanitized = sanitizeSerializedSessionLine(serialized)
   if (sourceDir && destDir) {
     sanitized = rewriteSourceToDest(sanitized, sourceDir, destDir)
-  }
-  if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
-    console.warn(`[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars)`)
   }
   return sanitized
 }
