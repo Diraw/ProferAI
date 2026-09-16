@@ -603,16 +603,78 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
   }
 }
 
-/**
- * 截断超大 SDKMessage 的内容，保留元数据结构。
- * 处理三类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片。
- */
-function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
-  const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
-  const truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2
+/** 递归收敛 tool_use_result 时的最大深度，防止异常结构导致栈过深 */
+const MAX_TOOL_RESULT_SANITIZE_DEPTH = 8
 
+/**
+ * 逐级收紧时的字符串阈值下限。
+ * 低于它就不再继续收紧，避免把正常长度的内容也切碎。
+ */
+const MIN_SANITIZE_STRING_THRESHOLD = 4000
+
+/** 逐级收紧的最大轮数（128K → 32K → 8K → 4K） */
+const MAX_SANITIZE_ATTEMPTS = 4
+
+/** 仅普通对象（排除数组与 null），供结构化载荷遍历使用 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 递归收敛结构化的工具结果载荷。
+ *
+ * Pi runtime 会把 tool_result 的完整 details 作为顶层 `tool_use_result` 落盘
+ * （见 pi-message-adapter.ts），它与 message.content 等量，实测单条最大约 12 MB
+ * （整页 HTML、PDF 的 base64、内嵌图片）。这里用与 message.content 同一套规则处理：
+ * 超过阈值的字符串截断为预览 + 说明。
+ *
+ * 渲染侧只有 parseAgentImageAttachmentDetails 会读它，而该函数提取的是
+ * localPath / filename / mediaType 这类路径型标记，不依赖超长字符串，因此截断安全。
+ */
+function sanitizeToolResultPayload(
+  payload: unknown,
+  truncationThreshold: number,
+  truncationNote: string,
+  depth = 0,
+): unknown {
+  if (depth > MAX_TOOL_RESULT_SANITIZE_DEPTH) return payload
+  if (typeof payload === 'string') {
+    return payload.length > truncationThreshold
+      ? payload.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
+      : payload
+  }
+  if (Array.isArray(payload)) {
+    return payload.map((item) => sanitizeToolResultPayload(item, truncationThreshold, truncationNote, depth + 1))
+  }
+  if (!isPlainRecord(payload)) return payload
+
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(payload)) {
+    sanitized[key] = sanitizeToolResultPayload(value, truncationThreshold, truncationNote, depth + 1)
+  }
+  return sanitized
+}
+
+/**
+ * 按给定字符串阈值就地收敛一份消息副本（调用方保证 clone 是可安全修改的深拷贝）。
+ * 处理四类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片、
+ * 以及顶层 tool_use_result 副本（message.content 的等量拷贝）。
+ */
+function applyOversizedSanitization(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const clone: any = JSON.parse(JSON.stringify(msg))
+  clone: any,
+  truncationNote: string,
+  truncationThreshold: number,
+): SDKMessage {
+  // 顶层 tool_use_result 是 tool_result 正文的完整副本，必须与 message.content 同规则处理，
+  // 否则即使正文被截断，整行依然超限（实测 161/250 条巨型行涉此，72 条仅副本就超限）。
+  if (clone.tool_use_result !== undefined) {
+    clone.tool_use_result = sanitizeToolResultPayload(clone.tool_use_result, truncationThreshold, truncationNote)
+  }
+  if (clone.toolUseResult !== undefined) {
+    clone.toolUseResult = sanitizeToolResultPayload(clone.toolUseResult, truncationThreshold, truncationNote)
+  }
+
   const content = clone.message?.content
   if (Array.isArray(content)) {
     for (let i = 0; i < content.length; i++) {
@@ -629,12 +691,24 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
         if (typeof block.content === 'string' && block.content.length > truncationThreshold) {
           block.content = block.content.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
         }
-        // 剥离 base64 图片数据
         if (Array.isArray(block.content)) {
           block.content = block.content.map((item: Record<string, unknown>) => {
-            if (item?.type === 'image' && (item.source as Record<string, unknown>)?.data) {
-              const dataLen = String((item.source as Record<string, unknown>).data).length
-              return { type: 'image', _truncated: true, _originalLength: dataLen }
+            // 剥离 base64 图片数据。两种结构并存：Anthropic 风格 { source: { data } }
+            // 与 Pi 风格 { data } —— 后者此前漏处理，实测约 95 MB 未收敛。
+            if (item?.type === 'image') {
+              const source = item.source as Record<string, unknown> | undefined
+              const data = typeof item.data === 'string'
+                ? item.data
+                : typeof source?.data === 'string'
+                  ? String(source.data)
+                  : undefined
+              if (data) {
+                return { type: 'image', _truncated: true, _originalLength: data.length }
+              }
+            }
+            // 嵌套在数组里的 text block 此前不受限，同样按阈值截断
+            if (item?.type === 'text' && typeof item.text === 'string' && item.text.length > truncationThreshold) {
+              return { ...item, text: item.text.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote }
             }
             return item
           })
@@ -649,6 +723,31 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
   }
 
   return clone as SDKMessage
+}
+
+/**
+ * 截断超大 SDKMessage 的内容，保留元数据结构。
+ *
+ * 字符串的“原文长度”与“序列化长度”可能严重不等：含大量控制字符的内容会被 JSON
+ * 转义为 \\uXXXX（最多膨胀 6 倍，实测 49K 原文 → 279K JSON）。所以这里不以原文长度
+ * 一次定稿，而是按**实际序列化结果**逐级收紧阈值，直到落入上限或到达下限。
+ */
+function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
+  const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const original: any = JSON.parse(JSON.stringify(msg))
+  let threshold = MAX_SDK_MESSAGE_LENGTH / 2
+  let result = applyOversizedSanitization(JSON.parse(JSON.stringify(original)), truncationNote, threshold)
+
+  for (let attempt = 1; attempt < MAX_SANITIZE_ATTEMPTS; attempt++) {
+    if (JSON.stringify(result).length <= MAX_SDK_MESSAGE_LENGTH) return result
+    if (threshold <= MIN_SANITIZE_STRING_THRESHOLD) return result
+    threshold = Math.max(MIN_SANITIZE_STRING_THRESHOLD, Math.floor(threshold / 4))
+    result = applyOversizedSanitization(JSON.parse(JSON.stringify(original)), truncationNote, threshold)
+  }
+
+  return result
 }
 
 /** 桌面端 Agent 会话懒加载单页消息数（首次只取尾部，触顶/按钮加载更早） */
