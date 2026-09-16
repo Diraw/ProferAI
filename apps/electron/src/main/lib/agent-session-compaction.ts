@@ -10,6 +10,10 @@
  * `agent-session-manager.sanitizeSerializedSessionLine`。写入路径与整理路径共用同一个
  * 入口，规则只会有一份；4 个缺口那次的教训正是「同一套规则散在多处、各自漏一处」。
  *
+ * 为什么全部用异步 fs：整理由用户在设置页触发，真机全量约 4~16 秒。用同步 fs 会把
+ * 主进程（进而整个 UI）卡住；异步 fs 在 I/O 之间让出事件循环，界面仍可响应。
+ * 这与既有的 `calculateStorageStats` 保持同一取舍。
+ *
  * 安全约束：
  * 1. 只改超限行，其余行逐字节原样保留（按 `\n` 切分再拼回，不动换行风格）。
  * 2. 改写前整份备份到 `<configDir>/migrations/backup-<时间戳>/`。
@@ -22,7 +26,7 @@
  * 备份恢复旧文件后标记仍在，就永远不会再整理。自闸不存在这种漏网，代价只是一次扫描。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getAgentSessionsDir, getConfigDir } from './config-paths'
 import { MAX_SDK_MESSAGE_LENGTH, sanitizeSerializedSessionLine } from './agent-session-manager'
@@ -64,109 +68,44 @@ function createEmptyResult(): SessionCompactionResult {
   }
 }
 
-function ensureBackupDir(result: SessionCompactionResult): string {
+async function listSessionFiles(sessionsDir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(sessionsDir)
+    return entries.filter((name) => name.endsWith('.jsonl'))
+  } catch {
+    return []
+  }
+}
+
+async function ensureBackupDir(result: SessionCompactionResult): Promise<string> {
   if (result.backupDir) return result.backupDir
   const dir = join(getConfigDir(), 'migrations', `backup-${new Date().toISOString().replace(/[:.]/g, '-')}`)
-  mkdirSync(dir, { recursive: true })
+  await mkdir(dir, { recursive: true })
   result.backupDir = dir
   return dir
 }
 
-/**
- * 就地整理所有会话文件里的超限行。幂等：没有超限行时不做任何写入。
- *
- * 同步实现（整理动作由用户在设置页显式触发，且需要把结果如实回给用户）。
- */
-export function compactAgentSessionStorage(): SessionCompactionResult {
-  const result = createEmptyResult()
-  const sessionsDir = getAgentSessionsDir()
-
-  let fileNames: string[]
-  try {
-    fileNames = readdirSync(sessionsDir).filter((name) => name.endsWith('.jsonl'))
-  } catch {
-    return result
+function recordError(result: SessionCompactionResult, name: string, error: unknown): void {
+  result.failedFiles++
+  if (result.errors.length < MAX_RECORDED_ERRORS) {
+    result.errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
   }
-
-  for (const name of fileNames) {
-    const filePath = join(sessionsDir, name)
-    result.scannedFiles++
-
-    try {
-      // UTF-8 下字节数 ≥ 字符数，所以文件总字节数不超过上限时，不可能存在超限行。
-      // 这一步让绝大多数小文件免于读取。
-      const sizeBeforeRead = statSync(filePath).size
-      if (sizeBeforeRead <= MAX_SDK_MESSAGE_LENGTH) continue
-
-      const lines = readFileSync(filePath, 'utf-8').split('\n')
-      let fileChanged = false
-      let fileCharsBefore = 0
-      let fileCharsAfter = 0
-
-      const compactedLines = lines.map((line) => {
-        if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
-        const compacted = sanitizeSerializedSessionLine(line, name)
-        if (compacted === line) return line
-        fileChanged = true
-        fileCharsBefore += line.length
-        fileCharsAfter += compacted.length
-        return compacted
-      })
-
-      if (!fileChanged) continue
-
-      // 并发保护：读取期间文件被追加说明 app 正在写这个会话，本轮放过它。
-      if (statSync(filePath).size !== sizeBeforeRead) {
-        result.skippedFiles++
-        continue
-      }
-
-      const backupDir = ensureBackupDir(result)
-      copyFileSync(filePath, join(backupDir, name))
-
-      const tmpPath = filePath + TMP_SUFFIX
-      writeFileSync(tmpPath, compactedLines.join('\n'), 'utf-8')
-      renameSync(tmpPath, filePath)
-
-      result.rewrittenFiles++
-      result.rewrittenLines += lines.filter((line) => line.length > MAX_SDK_MESSAGE_LENGTH).length
-      result.charsBefore += fileCharsBefore
-      result.charsAfter += fileCharsAfter
-    } catch (error) {
-      result.failedFiles++
-      if (result.errors.length < MAX_RECORDED_ERRORS) {
-        result.errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      // 失败时清掉可能残留的临时文件，避免污染会话目录
-      try {
-        rmSync(filePath + TMP_SUFFIX, { force: true })
-      } catch {
-        // 清理失败不覆盖原始错误
-      }
-    }
-  }
-
-  return result
 }
 
-/** 仅统计不写入：用于先给用户看「整理能省多少」再决定是否执行。 */
-export function previewAgentSessionCompaction(): SessionCompactionResult {
+/**
+ * 仅统计不写入：用于先给用户看「整理能省多少」再决定是否执行。
+ */
+export async function previewAgentSessionCompaction(): Promise<SessionCompactionResult> {
   const result = createEmptyResult()
   const sessionsDir = getAgentSessionsDir()
 
-  let fileNames: string[]
-  try {
-    fileNames = readdirSync(sessionsDir).filter((name) => name.endsWith('.jsonl'))
-  } catch {
-    return result
-  }
-
-  for (const name of fileNames) {
-    const filePath = join(sessionsDir, name)
+  for (const name of await listSessionFiles(sessionsDir)) {
     result.scannedFiles++
     try {
-      if (statSync(filePath).size <= MAX_SDK_MESSAGE_LENGTH) continue
-      const lines = readFileSync(filePath, 'utf-8').split('\n')
+      const filePath = join(sessionsDir, name)
+      if ((await stat(filePath)).size <= MAX_SDK_MESSAGE_LENGTH) continue
+
+      const lines = (await readFile(filePath, 'utf-8')).split('\n')
       let touched = false
       for (const line of lines) {
         if (line.length <= MAX_SDK_MESSAGE_LENGTH) continue
@@ -179,9 +118,73 @@ export function previewAgentSessionCompaction(): SessionCompactionResult {
       }
       if (touched) result.rewrittenFiles++
     } catch (error) {
-      result.failedFiles++
-      if (result.errors.length < MAX_RECORDED_ERRORS) {
-        result.errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
+      recordError(result, name, error)
+    }
+  }
+
+  return result
+}
+
+/**
+ * 就地整理所有会话文件里的超限行。幂等：没有超限行时不做任何写入。
+ */
+export async function compactAgentSessionStorage(): Promise<SessionCompactionResult> {
+  const result = createEmptyResult()
+  const sessionsDir = getAgentSessionsDir()
+
+  for (const name of await listSessionFiles(sessionsDir)) {
+    const filePath = join(sessionsDir, name)
+    result.scannedFiles++
+
+    try {
+      // UTF-8 下字节数 ≥ 字符数，所以文件总字节数不超过上限时，不可能存在超限行。
+      // 这一步让绝大多数小文件免于读取。
+      const sizeBeforeRead = (await stat(filePath)).size
+      if (sizeBeforeRead <= MAX_SDK_MESSAGE_LENGTH) continue
+
+      const lines = (await readFile(filePath, 'utf-8')).split('\n')
+      let fileChanged = false
+      let fileCharsBefore = 0
+      let fileCharsAfter = 0
+      let fileLinesRewritten = 0
+
+      const compactedLines = lines.map((line) => {
+        if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
+        const compacted = sanitizeSerializedSessionLine(line, name)
+        if (compacted === line) return line
+        fileChanged = true
+        fileLinesRewritten++
+        fileCharsBefore += line.length
+        fileCharsAfter += compacted.length
+        return compacted
+      })
+
+      if (!fileChanged) continue
+
+      // 并发保护：读取期间文件被追加说明 app 正在写这个会话，本轮放过它。
+      if ((await stat(filePath)).size !== sizeBeforeRead) {
+        result.skippedFiles++
+        continue
+      }
+
+      const backupDir = await ensureBackupDir(result)
+      await copyFile(filePath, join(backupDir, name))
+
+      const tmpPath = filePath + TMP_SUFFIX
+      await writeFile(tmpPath, compactedLines.join('\n'), 'utf-8')
+      await rename(tmpPath, filePath)
+
+      result.rewrittenFiles++
+      result.rewrittenLines += fileLinesRewritten
+      result.charsBefore += fileCharsBefore
+      result.charsAfter += fileCharsAfter
+    } catch (error) {
+      recordError(result, name, error)
+      // 失败时清掉可能残留的临时文件，避免污染会话目录
+      try {
+        await rm(filePath + TMP_SUFFIX, { force: true })
+      } catch {
+        // 清理失败不覆盖原始错误
       }
     }
   }

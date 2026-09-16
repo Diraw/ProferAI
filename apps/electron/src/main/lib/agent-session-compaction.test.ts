@@ -64,13 +64,13 @@ function writeSession(name: string, lines: string[]): string {
 const readLines = (path: string): string[] => readFileSync(path, 'utf-8').split('\n').filter(Boolean)
 
 describe('历史会话整理 · 只动超限行', () => {
-  test('Given 文件含 1 条超限行 + 若干小行 When 整理 Then 只改超限行且其余逐字节不变', () => {
+  test('Given 文件含 1 条超限行 + 若干小行 When 整理 Then 只改超限行且其余逐字节不变', async () => {
     const small1 = smallLine('第一条小消息')
     const small2 = smallLine('第二条小消息')
     const big = oversizedLine('BIG-1')
     const path = writeSession('a.jsonl', [small1, big, small2])
 
-    const result = compaction.compactAgentSessionStorage()
+    const result = await compaction.compactAgentSessionStorage()
 
     expect(result.rewrittenFiles).toBe(1)
     expect(result.rewrittenLines).toBe(1)
@@ -84,11 +84,11 @@ describe('历史会话整理 · 只动超限行', () => {
     expect(after.every((line) => line.length <= MAX)).toBe(true)
   })
 
-  test('Given 全是小行 When 整理 Then 不写任何文件、不产生备份', () => {
+  test('Given 全是小行 When 整理 Then 不写任何文件、不产生备份', async () => {
     const path = writeSession('small.jsonl', [smallLine('a'), smallLine('b')])
     const before = readFileSync(path, 'utf-8')
 
-    const result = compaction.compactAgentSessionStorage()
+    const result = await compaction.compactAgentSessionStorage()
 
     expect(result.rewrittenFiles).toBe(0)
     expect(result.rewrittenLines).toBe(0)
@@ -96,10 +96,10 @@ describe('历史会话整理 · 只动超限行', () => {
     expect(readFileSync(path, 'utf-8')).toBe(before)
   })
 
-  test('Given 多次超限行 When 整理 Then 全部收敛且统计正确', () => {
+  test('Given 多次超限行 When 整理 Then 全部收敛且统计正确', async () => {
     const path = writeSession('multi.jsonl', [oversizedLine('BIG-1'), smallLine('中'), oversizedLine('BIG-2')])
 
-    const result = compaction.compactAgentSessionStorage()
+    const result = await compaction.compactAgentSessionStorage()
 
     expect(result.rewrittenLines).toBe(2)
     expect(result.charsBefore).toBeGreaterThan(800 * 1024)
@@ -109,25 +109,25 @@ describe('历史会话整理 · 只动超限行', () => {
 })
 
 describe('历史会话整理 · 幂等与备份', () => {
-  test('Given 已整理过 When 再跑一次 Then 零改动（幂等）', () => {
+  test('Given 已整理过 When 再跑一次 Then 零改动（幂等）', async () => {
     const path = writeSession('idem.jsonl', [oversizedLine('BIG'), smallLine('小')])
 
-    const first = compaction.compactAgentSessionStorage()
+    const first = await compaction.compactAgentSessionStorage()
     expect(first.rewrittenLines).toBe(1)
 
     const afterFirst = readFileSync(path, 'utf-8')
-    const second = compaction.compactAgentSessionStorage()
+    const second = await compaction.compactAgentSessionStorage()
 
     expect(second.rewrittenFiles).toBe(0)
     expect(second.rewrittenLines).toBe(0)
     expect(readFileSync(path, 'utf-8')).toBe(afterFirst)   // 第二次完全没碰文件
   })
 
-  test('Given 发生改写 When 检查备份 Then 备份内容等于改写前的原文', () => {
+  test('Given 发生改写 When 检查备份 Then 备份内容等于改写前的原文', async () => {
     const original = [oversizedLine('BIG'), smallLine('小')]
     const path = writeSession('backup.jsonl', original)
 
-    const result = compaction.compactAgentSessionStorage()
+    const result = await compaction.compactAgentSessionStorage()
 
     expect(result.backupDir).toBeDefined()
     const backupPath = join(result.backupDir!, 'backup.jsonl')
@@ -135,21 +135,21 @@ describe('历史会话整理 · 幂等与备份', () => {
     expect(readFileSync(backupPath, 'utf-8')).toBe(original.join('\n') + '\n')
   })
 
-  test('Given 整理过程 When 检查会话目录 Then 不残留临时文件', () => {
+  test('Given 整理过程 When 检查会话目录 Then 不残留临时文件', async () => {
     writeSession('tmp-check.jsonl', [oversizedLine('BIG')])
 
-    compaction.compactAgentSessionStorage()
+    await compaction.compactAgentSessionStorage()
 
     expect(readdirSync(sessionsDir).filter((n) => n.endsWith('.compact-tmp'))).toHaveLength(0)
   })
 })
 
 describe('历史会话整理 · 预览不写入', () => {
-  test('Given 调用预览 When 检查磁盘 Then 文件与备份均未产生', () => {
+  test('Given 调用预览 When 检查磁盘 Then 文件与备份均未产生', async () => {
     const original = [oversizedLine('BIG')]
     const path = writeSession('preview.jsonl', original)
 
-    const preview = compaction.previewAgentSessionCompaction()
+    const preview = await compaction.previewAgentSessionCompaction()
 
     expect(preview.rewrittenLines).toBe(1)
     expect(preview.charsBefore).toBeGreaterThan(preview.charsAfter)
@@ -158,10 +158,10 @@ describe('历史会话整理 · 预览不写入', () => {
     expect(existsSync(join(root, 'migrations'))).toBe(false)
   })
 
-  test('Given 预览后再执行 When 比较统计 Then 两者超限行数一致', () => {
+  test('Given 预览后再执行 When 比较统计 Then 两者超限行数一致', async () => {
     writeSession('p2.jsonl', [oversizedLine('A'), oversizedLine('B')])
-    const preview = compaction.previewAgentSessionCompaction()
-    const applied = compaction.compactAgentSessionStorage()
+    const preview = await compaction.previewAgentSessionCompaction()
+    const applied = await compaction.compactAgentSessionStorage()
 
     expect(applied.rewrittenLines).toBe(preview.rewrittenLines)
     expect(applied.charsBefore).toBe(preview.charsBefore)

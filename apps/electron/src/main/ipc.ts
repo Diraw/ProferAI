@@ -285,6 +285,7 @@ import type { MainWindowGetter } from './lib/ipc-sender-guard'
 import { getMainWindow } from './lib/main-window-state'
 import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCustomSoundsDir, getAgentWorkspacePath } from './lib/config-paths'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
+import { compactAgentSessionStorage, previewAgentSessionCompaction } from './lib/agent-session-compaction'
 import { listTeamMemories, readTeamMemory, createTeamMemory, updateTeamMemory, listTeamMemoryRevisions, archiveTeamMemory } from './lib/team-memory-service'
 import type { CleanupOptions } from './lib/storage-service'
 import {
@@ -6032,6 +6033,15 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(STORAGE_IPC_CHANNELS.CLEANUP_TEMP, async () => {
     return cleanupTempFiles()
+  })
+
+  // 历史会话整理：与「清理」不同，这是就地收敛超限行，不删除任何会话。
+  ipcMain.handle(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_PREVIEW, async () => {
+    return previewAgentSessionCompaction()
+  })
+
+  ipcMain.handle(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_APPLY, async () => {
+    return compactAgentSessionStorage()
   })
 
   // ===== 工作区热力图 =====

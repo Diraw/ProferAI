@@ -1413,6 +1413,10 @@ export interface ElectronAPI {
   cleanupStorage: (options: unknown) => Promise<unknown>
   /** 清理临时文件（快速） */
   cleanupTempStorage: () => Promise<unknown>
+  /** 预览历史会话整理：只统计可收敛的超限行与体积，不写入 */
+  previewSessionCompaction: () => Promise<unknown>
+  /** 执行历史会话整理：就地收敛超限行，不删除任何会话 */
+  applySessionCompaction: () => Promise<unknown>
   /** 取消迁移导入（清理临时解压目录） */
   migrationCancelImport: (tempDir: string) => Promise<void>
 
@@ -3432,6 +3436,14 @@ const electronAPI: ElectronAPI = {
 
   cleanupTempStorage: () => {
     return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.CLEANUP_TEMP)
+  },
+
+  previewSessionCompaction: () => {
+    return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_PREVIEW)
+  },
+
+  applySessionCompaction: () => {
+    return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_APPLY)
   },
 
   migrationCancelImport: (tempDir: string) => {
