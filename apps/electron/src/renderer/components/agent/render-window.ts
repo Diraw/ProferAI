@@ -5,8 +5,9 @@
  * 如果两类共用一个窗口，过程会把回复挤出可视范围；分开计数后，过程再长也不影响回复。
  *
  * 本模块只做「渲染裁剪」，不改动底层数据，也不影响任何派生计算（任务映射、迷你地图等）。
+ * 展开/收起属于渲染层职责，这里只负责把被折叠的段原样交出去。
  */
-import type { AssistantTurnRenderItem } from './ProcessBlockGroup'
+import type { AssistantTurnRenderItem, IndexedContentBlock } from './ProcessBlockGroup'
 
 /** 段窗口配置；过程与回复分别计数 */
 export interface RenderWindowLimits {
@@ -22,48 +23,42 @@ export const DEFAULT_RENDER_WINDOW: RenderWindowLimits = {
   processSegments: 20,
 }
 
-export interface ApplyRenderWindowOptions {
-  limits?: RenderWindowLimits
-  /** 用户主动展开的额外过程段数 */
-  expandedProcess?: number
-  /** 用户主动展开的额外回复段数 */
-  expandedReply?: number
-}
-
 export interface WindowedTurnItems {
-  /** 裁剪后的渲染项（保持原顺序） */
+  /** 窗口内的渲染项（保持原顺序） */
   items: AssistantTurnRenderItem[]
-  /** 过程区被折叠的段数（0 = 未折叠） */
-  foldedProcessCount: number
-  /** 回复区被折叠的段数（0 = 未折叠） */
-  foldedReplyCount: number
+  /** 过程区被折叠的段（最早的若干段，按原顺序） */
+  foldedProcessItems: IndexedContentBlock[]
+  /** 回复区被折叠的段（按原顺序） */
+  foldedReplyItems: IndexedContentBlock[]
 }
 
 /**
  * 按过程/回复两个窗口裁剪一轮的渲染项。
  *
- * - 窗口锚定末尾：保留最近 N 段，更早的折叠
+ * - 窗口锚定末尾：保留最近 N 段，更早的进 folded*Items
  * - 过程与回复独立计数，互不挤占
  * - 不修改入参，返回新数组
  */
 export function applyRenderWindow(
   items: AssistantTurnRenderItem[],
-  options: ApplyRenderWindowOptions = {},
+  limits: RenderWindowLimits = DEFAULT_RENDER_WINDOW,
 ): WindowedTurnItems {
-  const limits = options.limits ?? DEFAULT_RENDER_WINDOW
-  const processLimit = Math.max(0, limits.processSegments + (options.expandedProcess ?? 0))
-  const replyLimit = Math.max(0, limits.replySegments + (options.expandedReply ?? 0))
+  const processLimit = Math.max(0, limits.processSegments)
+  const replyLimit = Math.max(0, limits.replySegments)
 
   // 回复项（type === 'block'）在整轮里是连续的一段；先定位再统一取尾部窗口。
   const replyIndexes: number[] = []
   for (let index = 0; index < items.length; index++) {
     if (items[index]!.type === 'block') replyIndexes.push(index)
   }
-  const foldedReplyCount = Math.max(0, replyIndexes.length - replyLimit)
-  const visibleReplyIndexes = new Set(replyIndexes.slice(foldedReplyCount))
+  const replyKeepFrom = Math.max(0, replyIndexes.length - replyLimit)
+  const visibleReplyIndexes = new Set(replyIndexes.slice(replyKeepFrom))
+  const foldedReplyItems: IndexedContentBlock[] = replyIndexes
+    .slice(0, replyKeepFrom)
+    .map((index) => (items[index] as { type: 'block'; item: IndexedContentBlock }).item)
 
   const windowed: AssistantTurnRenderItem[] = []
-  let foldedProcessCount = 0
+  let foldedProcessItems: IndexedContentBlock[] = []
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index]!
@@ -71,11 +66,11 @@ export function applyRenderWindow(
       if (visibleReplyIndexes.has(index)) windowed.push(item)
       continue
     }
-    // 过程组：取尾部窗口（一轮里至多一个过程组，直接覆盖计数）
+    // 过程组：取尾部窗口（一轮里至多一个过程组）
     const keepFrom = Math.max(0, item.items.length - processLimit)
-    foldedProcessCount = keepFrom
+    foldedProcessItems = item.items.slice(0, keepFrom)
     windowed.push(keepFrom === 0 ? item : { type: 'process-group', items: item.items.slice(keepFrom) })
   }
 
-  return { items: windowed, foldedProcessCount, foldedReplyCount }
+  return { items: windowed, foldedProcessItems, foldedReplyItems }
 }

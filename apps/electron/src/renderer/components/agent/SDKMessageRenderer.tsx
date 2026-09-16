@@ -14,7 +14,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, ChevronUp } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -24,6 +24,7 @@ import { TaskProgressCard } from './TaskProgressCard'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
 import { ProcessBlockGroup, buildAssistantTurnRenderItems, buildCompletedToolResultIds } from './ProcessBlockGroup'
 import { applyRenderWindow } from './render-window'
+import { FoldedSegmentsRegion } from './FoldedSegmentsRegion'
 import { extractToolResultText, isTaskProgressTool, parseTaskCreateResult } from './task-progress'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tag-parser'
 import { DurationBadge } from './AgentMessages'
@@ -667,22 +668,6 @@ function ExternalizedContentNotice({ sessionId, messages }: { sessionId?: string
   )
 }
 
-// ===== 折叠占位（过程与回复共用同一外观，用户无需感知内部差异） =====
-
-function FoldedSegmentsPlaceholder({ count, onExpand }: { count: number; onExpand: () => void }): React.ReactElement | null {
-  if (count <= 0) return null
-  return (
-    <button
-      type="button"
-      onClick={onExpand}
-      className="flex w-full items-center gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-left text-[12px] text-muted-foreground/70 transition-colors hover:bg-muted/40"
-    >
-      <ChevronUp className="size-3.5 shrink-0" />
-      <span>更早的 {count} 段已折叠，点击展开</span>
-    </button>
-  )
-}
-
 // ===== AssistantTurnRenderer — 渲染一个完整的 assistant turn =====
 
 export interface AssistantTurnRendererProps {
@@ -814,16 +799,11 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       completedToolResultIds,
     })
   }, [topLevelBlocks, isStreaming, completedToolResultIds])
-  // 用户主动展开的额外段数；过程与回复分别累计
-  const [expandedProcessSegments, setExpandedProcessSegments] = React.useState(0)
-  const [expandedReplySegments, setExpandedReplySegments] = React.useState(0)
-  // 渲染窗口：过程与回复各自取尾部窗口，避免过程把回复挤出可视范围
-  const { items: windowedItems, foldedProcessCount, foldedReplyCount } = React.useMemo(
-    () => applyRenderWindow(renderItems, {
-      expandedProcess: expandedProcessSegments,
-      expandedReply: expandedReplySegments,
-    }),
-    [renderItems, expandedProcessSegments, expandedReplySegments],
+  // 渲染窗口：过程与回复各自取尾部窗口，避免过程把回复挤出可视范围。
+  // 展开/收起的状态由 FoldedSegmentsRegion 自己持有，父组件不参与（否则外层折叠时无法重置）。
+  const { items: windowedItems, foldedProcessItems, foldedReplyItems } = React.useMemo(
+    () => applyRenderWindow(renderItems),
+    [renderItems],
   )
   const firstReplyIndex = React.useMemo(
     () => windowedItems.findIndex((item) => item.type === 'block'),
@@ -908,10 +888,10 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
               if (item.type === 'block') {
                 return (
                   <React.Fragment key={`reply-${item.item.index}`}>
-                    {itemIndex === firstReplyIndex && (
-                      <FoldedSegmentsPlaceholder
-                        count={foldedReplyCount}
-                        onExpand={() => setExpandedReplySegments((prev) => prev + foldedReplyCount)}
+                    {itemIndex === firstReplyIndex && foldedReplyItems.length > 0 && (
+                      <FoldedSegmentsRegion
+                        count={foldedReplyItems.length}
+                        renderRevealed={() => foldedReplyItems.map((folded) => renderTopLevelBlock(folded.block, folded.index))}
                       />
                     )}
                     {renderTopLevelBlock(item.item.block, item.item.index)}
@@ -922,20 +902,23 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
               const groupBlocks = item.items.map((groupItem) => groupItem.block)
               const firstIndex = item.items[0]?.index ?? 0
               return (
-                <React.Fragment key={`process-${firstIndex}`}>
-                  <FoldedSegmentsPlaceholder
-                    count={foldedProcessCount}
-                    onExpand={() => setExpandedProcessSegments((prev) => prev + foldedProcessCount)}
-                  />
-                  <ProcessBlockGroup
-                    blocks={groupBlocks}
-                    isStreaming={isStreaming}
-                    keepExpandedAfterComplete={processGroupsKeepExpanded}
-                    isMessageTail={itemIndex === windowedItems.length - 1}
-                  >
-                    {item.items.map((groupItem) => renderProcessGroupBlock(groupItem.block, groupItem.index))}
-                  </ProcessBlockGroup>
-                </React.Fragment>
+                <ProcessBlockGroup
+                  key={`process-${firstIndex}`}
+                  blocks={groupBlocks}
+                  isStreaming={isStreaming}
+                  keepExpandedAfterComplete={processGroupsKeepExpanded}
+                  isMessageTail={itemIndex === windowedItems.length - 1}
+                >
+                  {/* 折叠占位符放在过程组内部：外层折叠时它随之隐藏；
+                     外层重新展开时子元素已卸载并重建，展开状态自然回到折叠态。 */}
+                  {foldedProcessItems.length > 0 && (
+                    <FoldedSegmentsRegion
+                      count={foldedProcessItems.length}
+                      renderRevealed={() => foldedProcessItems.map((folded) => renderProcessGroupBlock(folded.block, folded.index))}
+                    />
+                  )}
+                  {item.items.map((groupItem) => renderProcessGroupBlock(groupItem.block, groupItem.index))}
+                </ProcessBlockGroup>
               )
             })}
           </div>

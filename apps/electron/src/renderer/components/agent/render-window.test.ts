@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKContentBlock } from '@profer/shared'
-import type { AssistantTurnRenderItem } from './ProcessBlockGroup'
+import type { AssistantTurnRenderItem, IndexedContentBlock } from './ProcessBlockGroup'
 import { applyRenderWindow, DEFAULT_RENDER_WINDOW } from './render-window'
 
 function block(text: string): SDKContentBlock {
@@ -22,7 +22,10 @@ function makeItems(processCount: number, replyCount: number): AssistantTurnRende
   return items
 }
 
-const visibleSegmentTexts = (items: AssistantTurnRenderItem[]): string[] => {
+const textOf = (item: IndexedContentBlock): string => (item.block as { text: string }).text
+
+/** 窗口内可见的所有段文本 */
+const visibleTexts = (items: AssistantTurnRenderItem[]): string[] => {
   const texts: string[] = []
   for (const item of items) {
     if (item.type === 'block') texts.push((item.item.block as { text: string }).text)
@@ -33,31 +36,34 @@ const visibleSegmentTexts = (items: AssistantTurnRenderItem[]): string[] => {
 
 describe('渲染窗口 · 基本裁剪', () => {
   test('Given 都未超窗 When 裁剪 Then 不折叠且结构不变', () => {
-    const { items, foldedProcessCount, foldedReplyCount } = applyRenderWindow(makeItems(5, 3))
+    const { items, foldedProcessItems, foldedReplyItems } = applyRenderWindow(makeItems(5, 3))
 
-    expect(foldedProcessCount).toBe(0)
-    expect(foldedReplyCount).toBe(0)
-    expect(visibleSegmentTexts(items)).toEqual(['过程0', '过程1', '过程2', '过程3', '过程4', '回复0', '回复1', '回复2'])
+    expect(foldedProcessItems).toEqual([])
+    expect(foldedReplyItems).toEqual([])
+    expect(visibleTexts(items)).toEqual(['过程0', '过程1', '过程2', '过程3', '过程4', '回复0', '回复1', '回复2'])
   })
 
-  test('Given 过程超窗 When 裁剪 Then 只保留最近 N 段且折叠计数正确', () => {
-    const { items, foldedProcessCount, foldedReplyCount } = applyRenderWindow(makeItems(50, 2))
+  test('Given 过程超窗 When 裁剪 Then 窗口留最新 N 段、折叠的是最早的段', () => {
+    const { items, foldedProcessItems, foldedReplyItems } = applyRenderWindow(makeItems(50, 2))
 
-    expect(foldedProcessCount).toBe(50 - DEFAULT_RENDER_WINDOW.processSegments)
-    expect(foldedReplyCount).toBe(0)
-    const texts = visibleSegmentTexts(items)
-    // 过程只保留末尾 20 段（过程30..过程49），回复不受影响
-    expect(texts.slice(0, 20)).toEqual(Array.from({ length: 20 }, (_, i) => `过程${30 + i}`))
-    expect(texts.slice(-2)).toEqual(['回复0', '回复1'])
+    // 折叠的必须是「更早的」那些
+    expect(foldedProcessItems.map(textOf)).toEqual(Array.from({ length: 30 }, (_, i) => `过程${i}`))
+    expect(foldedReplyItems).toEqual([])
+
+    const visible = visibleTexts(items)
+    expect(visible.slice(0, 20)).toEqual(Array.from({ length: 20 }, (_, i) => `过程${30 + i}`))
+    expect(visible.slice(-2)).toEqual(['回复0', '回复1'])
   })
 
-  test('Given 回复超窗 When 裁剪 Then 只保留最近 N 段', () => {
-    const { items, foldedReplyCount } = applyRenderWindow(makeItems(2, 45))
+  test('Given 回复超窗 When 裁剪 Then 折叠最早、保留最新', () => {
+    const { items, foldedReplyItems } = applyRenderWindow(makeItems(2, 45))
 
-    expect(foldedReplyCount).toBe(45 - DEFAULT_RENDER_WINDOW.replySegments)
-    const texts = visibleSegmentTexts(items)
-    expect(texts.slice(-1)).toEqual(['回复44'])
-    expect(texts.filter((t) => t.startsWith('回复'))).toHaveLength(DEFAULT_RENDER_WINDOW.replySegments)
+    const foldedCount = 45 - DEFAULT_RENDER_WINDOW.replySegments
+    expect(foldedReplyItems.map(textOf)).toEqual(Array.from({ length: foldedCount }, (_, i) => `回复${i}`))
+    // 可见的是最近 30 段，即 回复15..回复44
+    expect(visibleTexts(items).filter((t) => t.startsWith('回复'))).toEqual(
+      Array.from({ length: DEFAULT_RENDER_WINDOW.replySegments }, (_, i) => `回复${foldedCount + i}`),
+    )
   })
 })
 
@@ -65,72 +71,67 @@ describe('渲染窗口 · 过程与回复独立计数', () => {
   test('Given 过程很长 When 裁剪 Then 回复段数不受过程影响', () => {
     // 这是「分开算窗口」的核心价值：过程再长也不该把回复挤掉
     const replyCount = 10
-    const { foldedReplyCount, items } = applyRenderWindow(makeItems(300, replyCount))
+    const { foldedReplyItems, items } = applyRenderWindow(makeItems(300, replyCount))
 
-    expect(foldedReplyCount).toBe(0)
-    expect(visibleSegmentTexts(items).filter((t) => t.startsWith('回复'))).toHaveLength(replyCount)
+    expect(foldedReplyItems).toEqual([])
+    expect(visibleTexts(items).filter((t) => t.startsWith('回复'))).toHaveLength(replyCount)
   })
 
   test('Given 回复很长 When 裁剪 Then 过程段数不受回复影响', () => {
-    const { foldedProcessCount } = applyRenderWindow(makeItems(8, 200))
+    const { foldedProcessItems } = applyRenderWindow(makeItems(8, 200))
 
-    expect(foldedProcessCount).toBe(0)
+    expect(foldedProcessItems).toEqual([])
   })
 })
 
-describe('渲染窗口 · 展开', () => {
-  test('Given 过程已折叠 When 展开 10 段 Then 可见段数增加且折叠数减少', () => {
-    const base = applyRenderWindow(makeItems(50, 2))
-    const expanded = applyRenderWindow(makeItems(50, 2), { expandedProcess: 10 })
+describe('渲染窗口 · 不丢段（完整性）', () => {
+  test('Given 两侧都超窗 When 合并窗口内与折叠段 Then 等于原始全部段', () => {
+    const original = makeItems(80, 50)
+    const { items, foldedProcessItems, foldedReplyItems } = applyRenderWindow(original)
 
-    expect(expanded.foldedProcessCount).toBe(base.foldedProcessCount - 10)
-    expect(visibleSegmentTexts(expanded.items).filter((t) => t.startsWith('过程'))).toHaveLength(
-      visibleSegmentTexts(base.items).filter((t) => t.startsWith('过程')).length + 10,
-    )
+    const all = [
+      ...foldedProcessItems.map(textOf),
+      ...visibleTexts(items).filter((t) => t.startsWith('过程')),
+      ...foldedReplyItems.map(textOf),
+      ...visibleTexts(items).filter((t) => t.startsWith('回复')),
+    ]
+    expect(all).toHaveLength(130)
+    expect(new Set(all).size).toBe(130) // 无重复
+    expect(all).toEqual([
+      ...Array.from({ length: 80 }, (_, i) => `过程${i}`),
+      ...Array.from({ length: 50 }, (_, i) => `回复${i}`),
+    ])
   })
 
-  test('Given 展开超过总量 When 裁剪 Then 全量展示且折叠为 0', () => {
-    const { items, foldedProcessCount, foldedReplyCount } = applyRenderWindow(makeItems(30, 40), {
-      expandedProcess: 999,
-      expandedReply: 999,
-    })
+  test('Given 折叠段 When 检查来源索引 Then 仍指向原始位置', () => {
+    const { foldedProcessItems } = applyRenderWindow(makeItems(50, 2))
 
-    expect(foldedProcessCount).toBe(0)
-    expect(foldedReplyCount).toBe(0)
-    expect(visibleSegmentTexts(items)).toHaveLength(70)
-  })
-
-  test('Given 过程与回复同时展开 When 裁剪 Then 两个窗口互不干扰', () => {
-    const { foldedProcessCount, foldedReplyCount } = applyRenderWindow(makeItems(100, 100), {
-      expandedProcess: 5,
-      expandedReply: 7,
-    })
-
-    expect(foldedProcessCount).toBe(100 - (DEFAULT_RENDER_WINDOW.processSegments + 5))
-    expect(foldedReplyCount).toBe(100 - (DEFAULT_RENDER_WINDOW.replySegments + 7))
+    // 索引必须是原始索引，否则展开时渲染工具结果会找错配对
+    expect(foldedProcessItems.map((item) => item.index)).toEqual(Array.from({ length: 30 }, (_, i) => i))
   })
 })
 
 describe('渲染窗口 · 边界与纯函数性质', () => {
-  test('Given 空输入 Then 返回空且计数为 0', () => {
+  test('Given 空输入 Then 返回空且无折叠段', () => {
     const result = applyRenderWindow([])
     expect(result.items).toEqual([])
-    expect(result.foldedProcessCount).toBe(0)
-    expect(result.foldedReplyCount).toBe(0)
+    expect(result.foldedProcessItems).toEqual([])
+    expect(result.foldedReplyItems).toEqual([])
   })
 
   test('Given 只有回复没有过程 Then 正常裁剪', () => {
-    const { items, foldedProcessCount } = applyRenderWindow(makeItems(0, 40))
-    expect(foldedProcessCount).toBe(0)
-    expect(visibleSegmentTexts(items)).toHaveLength(DEFAULT_RENDER_WINDOW.replySegments)
+    const { items, foldedProcessItems } = applyRenderWindow(makeItems(0, 40))
+    expect(foldedProcessItems).toEqual([])
+    expect(visibleTexts(items)).toHaveLength(DEFAULT_RENDER_WINDOW.replySegments)
   })
 
   test('Given 自定义窗口上限 Then 按自定义值裁剪', () => {
-    const { foldedProcessCount, foldedReplyCount } = applyRenderWindow(makeItems(10, 10), {
-      limits: { processSegments: 4, replySegments: 3 },
+    const { foldedProcessItems, foldedReplyItems } = applyRenderWindow(makeItems(10, 10), {
+      processSegments: 4,
+      replySegments: 3,
     })
-    expect(foldedProcessCount).toBe(6)
-    expect(foldedReplyCount).toBe(7)
+    expect(foldedProcessItems).toHaveLength(6)
+    expect(foldedReplyItems).toHaveLength(7)
   })
 
   test('Given 调用裁剪 When 检查入参 Then 原始数组未被修改', () => {
