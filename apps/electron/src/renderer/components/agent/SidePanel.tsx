@@ -7,7 +7,7 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { X, FolderOpen, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart, MessageSquarePlus, Trash2, GitMerge, Split } from 'lucide-react'
+import { X, FolderOpen, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart, MessageSquarePlus, Trash2, GitMerge, GitFork, Split } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -59,6 +59,7 @@ import {
   liveMessagesMapAtom,
   agentSessionDraftsAtom,
   agentSessionDraftHtmlAtom,
+  agentSessionIndicatorMapAtom,
   getExplorationSessionIdFromSidePanelTab,
   getExplorationSidePanelTab,
   type AgentExplorationBranchTab,
@@ -97,7 +98,8 @@ function getMovedPath(filePath: string, targetDir: string): string {
 }
 
 function SideAgentSessionContent({ children }: { children: React.ReactNode }): React.ReactElement {
-  return <div className="min-h-0 flex-1 overflow-hidden animate-in fade-in-0 slide-in-from-right-1 duration-150 motion-reduce:animate-none">{children}</div>
+  // flex-col：上面是分支条（固定高），下面是嵌入式 Agent 会话（占满剩余高度）
+  return <div className="min-h-0 flex-1 flex flex-col overflow-hidden animate-in fade-in-0 slide-in-from-right-1 duration-150 motion-reduce:animate-none">{children}</div>
 }
 
 function ExplorationBringBackAction({
@@ -169,12 +171,47 @@ function ExplorationBringBackAction({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Button variant="ghost" size="icon" className="size-7 active:scale-[0.96]" onClick={handleBringBack} disabled={!conclusion} aria-label="添加探索引用">
-          <GitMerge className="size-3.5" />
+        {/* 刻意不用 disabled：禁用态按钮不派发事件，tooltip 也无法解释原因。
+            改用 aria-disabled + 低透明度，点击时由 handleBringBack 给出 toast 说明。 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn('h-6 flex-shrink-0 gap-1 px-2 text-[11px] active:scale-[0.97]', !conclusion && 'opacity-45')}
+          aria-disabled={!conclusion}
+          onClick={handleBringBack}
+          aria-label="把探索结论带回主线"
+        >
+          <GitMerge className="size-3" />
+          带回主线
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">{conclusion ? '将探索后新增内容作为会话引用添加到主线草稿' : '完成一轮新的探索回复后即可添加引用'}</TooltipContent>
+      <TooltipContent side="bottom">{conclusion ? '将探索后新增内容作为会话引用添加到主线草稿' : '完成一轮新的探索回复后即可带回'}</TooltipContent>
     </Tooltip>
+  )
+}
+
+/**
+ * 探索面板顶部的分支条：标明该分支的主线来源，并承载「带回主线」动作。
+ * 带回属于分支内容操作，放在面板内部而不是 Tab 栏，避免占用 Tab 横向空间。
+ */
+function ExplorationBranchBar({
+  parentSessionId,
+  branch,
+  sessions,
+}: {
+  parentSessionId: string
+  branch: AgentExplorationBranchTab
+  sessions: AgentSessionMeta[]
+}): React.ReactElement {
+  const branchTitle = sessions.find((session) => session.id === branch.sessionId)?.title ?? '探索分支'
+  return (
+    <div className="flex h-[34px] flex-shrink-0 items-center gap-1.5 border-b border-border/60 px-2.5 text-[11px]">
+      <GitFork className="size-3 flex-shrink-0 text-muted-foreground" />
+      <span className="min-w-0 truncate font-medium text-foreground/80">{branchTitle}</span>
+      <span className="min-w-0 truncate text-muted-foreground/60">· {branch.sourceLabel}</span>
+      <div className="min-w-0 flex-1" />
+      <ExplorationBringBackAction parentSessionId={parentSessionId} branch={branch} sessions={sessions} />
+    </div>
   )
 }
 
@@ -192,6 +229,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const sessions = useAtomValue(agentSessionsAtom)
   const explorationMap = useAtomValue(agentSideExplorationMapAtom)
+  const sessionIndicators = useAtomValue(agentSessionIndicatorMapAtom)
   const setExplorationMap = useSetAtom(agentSideExplorationMapAtom)
   const explorationBranches = explorationMap.get(sessionId) ?? []
   const activeExplorationSessionId = getExplorationSessionIdFromSidePanelTab(activeTab)
@@ -709,6 +747,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   const explorationTabs = explorationBranches.map((branch) => ({
     id: getExplorationSidePanelTab(branch.sessionId) as `exploration:${string}`,
     label: sessions.find((session) => session.id === branch.sessionId)?.title ?? '探索分支',
+    status: sessionIndicators.get(branch.sessionId) ?? 'idle',
   }))
 
   return (
@@ -742,18 +781,20 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
             activeTab={activeTab}
             onTabChange={onTabChange}
             explorationTabs={explorationTabs}
-            activeTabAction={activeExplorationBranch ? (
-              <ExplorationBringBackAction parentSessionId={sessionId} branch={activeExplorationBranch} sessions={sessions} />
-            ) : undefined}
-            onClose={() => {
-              const branchSessionId = getExplorationSessionIdFromSidePanelTab(activeTab)
+            onCloseExplorationTab={(tab) => {
+              const branchSessionId = getExplorationSessionIdFromSidePanelTab(tab)
               if (branchSessionId) handleCloseExplorationTab(branchSessionId)
-              else setAgentPanelOpen(false)
             }}
+            onClose={() => setAgentPanelOpen(false)}
           />
 
           {activeExplorationBranch ? (
             <SideAgentSessionContent>
+              <ExplorationBranchBar
+                parentSessionId={sessionId}
+                branch={activeExplorationBranch}
+                sessions={sessions}
+              />
               <AgentView sessionId={activeExplorationBranch.sessionId} embedded />
             </SideAgentSessionContent>
           ) : activeTab === 'changes' ? (

@@ -1,5 +1,6 @@
 import type { AgentRuntime, Channel } from '@profer/shared'
-import { getChannelProtocol, supportsChannelProtocol } from './channel-model-groups'
+import { isChannelEnabledForRuntime } from '@profer/shared'
+import { getChannelProtocol } from './channel-model-groups'
 
 /** Pi can use every enabled channel without changing Claude's compatibility whitelist. */
 export function nextAgentChannelIdsAfterModelSelect(
@@ -26,14 +27,16 @@ export function resolveAgentModelSelection(
   current?: AgentModelSelection | null,
 ): AgentModelSelection | null {
   const preferredProtocol = runtime === 'pi' ? 'openai' : 'anthropic'
-  const isEligibleChannel = (channel: Channel): boolean => (
-    channel.enabled
-      // Pi supports both OpenAI and Anthropic protocols. Its backend registry
-      // selects the wire protocol per provider, so do not hide Anthropic
-      // channels merely because OpenAI is the preferred fallback order.
-      && (runtime === 'pi' || supportsChannelProtocol(channel.provider, preferredProtocol))
-      && (runtime === 'pi' || claudeChannelIds.includes(channel.id))
-  )
+  /**
+   * 可用性判定改为按渠道上用户勾选的 Agent 内核（`agentRuntimes`），不再按渠道类型。
+   * 未迁移的老配置（agentRuntimes === undefined）仍用历史 Claude 白名单兜底，
+   * 保证升级瞬间的行为不变。
+   */
+  const isEligibleChannel = (channel: Channel): boolean => {
+    if (!channel.enabled) return false
+    if (runtime !== 'pi' && channel.agentRuntimes === undefined) return claudeChannelIds.includes(channel.id)
+    return isChannelEnabledForRuntime(channel, runtime === 'pi' ? 'pi' : 'claude')
+  }
 
   if (current) {
     const channel = channels.find((item) => item.id === current.channelId)
@@ -47,8 +50,8 @@ export function resolveAgentModelSelection(
   const eligibleChannels = channels.filter(isEligibleChannel)
   const orderedChannels = runtime === 'pi'
     ? [
-        ...eligibleChannels.filter((channel) => supportsChannelProtocol(channel.provider, 'openai')),
-        ...eligibleChannels.filter((channel) => !supportsChannelProtocol(channel.provider, 'openai')),
+        ...eligibleChannels.filter((channel) => getChannelProtocol(channel.provider) === 'openai'),
+        ...eligibleChannels.filter((channel) => getChannelProtocol(channel.provider) !== 'openai'),
       ]
     : eligibleChannels
   for (const channel of orderedChannels) {

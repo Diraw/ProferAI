@@ -77,6 +77,7 @@ import { getAgentCompletionMarkers } from '@/lib/agent-completion-presence'
 import { getPlanModeChangeFromToolName, updatePlanModeSessionSet } from '@/lib/agent-plan-mode'
 import { getSessionFileChangeKind, upsertSessionFileChange } from '@/lib/session-file-changes'
 import { compactCompletedBackgroundStreamState, isCurrentAgentStreamCompletion, settleCompletedAgentStreamState } from '@/lib/agent-stream-state-cleanup'
+import { AgentStreamRestoreGate } from '@/lib/agent-stream-restore-gate'
 import { isAbsoluteFilePath } from '@/lib/file-utils'
 import { inspectOfficialPptxPreview } from '@/components/file-browser/office-preview/official-preview-session'
 
@@ -651,6 +652,13 @@ export function useGlobalAgentListeners(): void {
         unstable_batchedUpdates(() => {
         const { sessionId, payload } = streamEvent
 
+        // 终态（run_complete / run_error）的语义由专用 IPC（STREAM_COMPLETE / STREAM_ERROR）
+        // 统一承担：agent-service 在刷新恢复时会为终态 payload 补发同名 IPC，因此这里直接跳过。
+        // 若在这里抢先落后状态，专用 handler 的竞态保护（isCurrentAgentStreamCompletion 要求
+        // running/backgroundWaiting）会判定「已结束」并跳过收尾，导致桌面通知、未查看标记、
+        // 中断 chip、后台任务清理、finalize 等副作用全部丢失。
+        if (payload.kind === 'run_complete' || payload.kind === 'run_error') return
+
         if (payload.kind === 'profer_event') {
           const proferEvent = payload.event
           if (proferEvent.type === 'preview_requested' && proferEvent.sessionId === sessionId) {
@@ -1183,6 +1191,14 @@ export function useGlobalAgentListeners(): void {
     // 大刷新会清空 renderer Jotai，但 main 中的 Agent run 仍可能继续执行。
     // listener 已安装后再请求重连：main 会先绑定新 webContents 并按顺序回放本轮事件。
     // 若 run 尚未产出任何事件，也先写入 running 占位，保留停止和追加消息能力。
+    //
+    // 恢复窗口内的终态必须先暂存：main 的 backlog 回放是同步的，而 running 占位要等 IPC 返回
+    // 才写入，run 若恰在这个窗口内结束，专用 handler 的竞态保护会因「本会话还没有流式状态」
+    // 判定为迟到终态并丢弃，表现为刷新后残留 spinner。闸门负责延后到占位写入后再派发。
+    const restoreTerminalGate = new AgentStreamRestoreGate(
+      (sessionId) => store.get(agentStreamingStatesAtom).get(sessionId) !== undefined,
+    )
+
     window.electronAPI.restoreActiveAgentStreams()
       .then((sessionIds) => {
         store.set(agentStreamingStatesAtom, (prev) => {
@@ -1200,12 +1216,16 @@ export function useGlobalAgentListeners(): void {
           }
           return next ?? prev
         })
+        // 占位已写好，此时派发暂存的终态才能通过竞态保护并完成收尾副作用。
+        restoreTerminalGate.settle()
       })
-      .catch((error) => console.error('[Agent] 刷新后恢复活跃流失败:', error))
+      .catch((error) => {
+        console.error('[Agent] 刷新后恢复活跃流失败:', error)
+        restoreTerminalGate.settle()
+      })
 
     // ===== 2. 流式完成 =====
-    const cleanupComplete = window.electronAPI.onAgentStreamComplete(
-      (data: AgentStreamCompletePayload) => {
+    const handleStreamComplete = (data: AgentStreamCompletePayload): void => {
         // STREAM_COMPLETE 是该 session 的提交屏障：先收敛尚未执行的 rAF 批次，
         // 再刷新持久化消息和清理状态，避免终态抢在最后一条流式消息之前。
         liveMessageBatcher.flush(data.sessionId)
@@ -1411,12 +1431,17 @@ export function useGlobalAgentListeners(): void {
         }
         finalize()
         }) // unstable_batchedUpdates
+    }
+
+    const cleanupComplete = window.electronAPI.onAgentStreamComplete(
+      (data: AgentStreamCompletePayload) => {
+        if (restoreTerminalGate.defer(data.sessionId, () => handleStreamComplete(data))) return
+        handleStreamComplete(data)
       }
     )
 
     // ===== 3. 流式错误 =====
-    const cleanupError = window.electronAPI.onAgentStreamError(
-      (data: { sessionId: string; error: string }) => {
+    const handleStreamError = (data: { sessionId: string; error: string }): void => {
         liveMessageBatcher.flush(data.sessionId)
         streamStateBatcher.flush(data.sessionId)
         unstable_batchedUpdates(() => {
@@ -1439,6 +1464,12 @@ export function useGlobalAgentListeners(): void {
           })
         }
         }) // unstable_batchedUpdates
+    }
+
+    const cleanupError = window.electronAPI.onAgentStreamError(
+      (data: { sessionId: string; error: string }) => {
+        if (restoreTerminalGate.defer(data.sessionId, () => handleStreamError(data))) return
+        handleStreamError(data)
       }
     )
 

@@ -25,6 +25,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { TodoDatePicker, formatTodoDueDate } from '@/components/ui/todo-date-picker'
 import { ShortcutKeycaps } from '@/components/shortcuts/ShortcutKeycaps'
 import { WindowControlsHost } from '@/components/WindowControlsTemplate'
+import { detectIsWindows } from '@/lib/platform'
+import { resolveWindowControlsRightInset } from '@/lib/window-controls-layout'
 
 const TABS: Array<{ id: PlanningTab; label: string }> = [
   { id: 'todos', label: 'Todo' },
@@ -49,6 +51,7 @@ function PlanningStat({ label, value }: { label: string; value: number }): React
 
 export function PlanningView({ standalone = false }: { standalone?: boolean } = {}): React.ReactElement {
   const [tab, setTab] = useAtom(planningTabAtom)
+  const isWindows = React.useMemo(() => detectIsWindows(), [])
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const teamWorkspaceId = workspaces.find((workspace) => workspace.id === currentWorkspaceId)?.type === 'team' ? currentWorkspaceId : undefined
@@ -112,9 +115,16 @@ export function PlanningView({ standalone = false }: { standalone?: boolean } = 
   }, [createAutomation, tab, triggerCalendarCreate, triggerTodoCreate]), true, { exclusive: true })
   return (
     <div data-profer-navigation-region="planning" tabIndex={-1} className="flex h-full flex-col overflow-hidden bg-content-area">
-      {/* 页面标题区作为可拖拽空白区；标题旁的统计和窗口按钮保持可交互。 */}
-      <header className={cn('relative flex w-full items-start titlebar-drag-region', standalone ? 'px-5 pb-3 pt-4' : 'px-6 pb-3 pt-4 sm:px-8 xl:px-10')}>
+      {/* 页面标题区作为可拖拽空白区；标题旁的统计和窗口按钮保持可交互。
+          拖拽层在 Windows 窗口按钮前结束：drag 矩形压住 no-drag 按钮矩形时，
+          高 DPI 缩放会把单击判成标题栏点击（与 TabBar 同一类问题）。 */}
+      <header className={cn('relative flex w-full items-start', standalone ? 'px-5 pb-3 pt-4' : 'px-6 pb-3 pt-4 sm:px-8 xl:px-10')}>
         <div className="pointer-events-none absolute inset-x-0 top-0 h-2" aria-hidden="true" />
+        <div
+          className="absolute inset-y-0 left-0 titlebar-drag-region"
+          style={{ right: resolveWindowControlsRightInset(isWindows) }}
+          aria-hidden="true"
+        />
         <WindowControlsHost id="planning" priority={20} className="absolute right-2 top-[3px] z-20" />
         <div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">

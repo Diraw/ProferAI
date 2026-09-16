@@ -1,7 +1,7 @@
 /**
- * session-tree.ts — 委派会话树构建与状态聚合
+ * session-tree.ts — 关联会话树构建与状态聚合
  *
- * 从 LeftSidebar.tsx 抽离的纯函数：委派子会话识别、树构建、状态优先级聚合、
+ * 从 LeftSidebar.tsx 抽离的纯函数：关联会话识别、树构建、状态优先级聚合、
  * 子会话计数、可见性判断等。不依赖 React/atom。
  */
 
@@ -34,26 +34,37 @@ export function isDelegatedChildSession(session: AgentSessionMeta): boolean {
   return !!session.parentSessionId && !!session.sourceDelegationId
 }
 
+/** 探索分支使用独立血缘字段，不参与委派删除级联。 */
+export function isExplorationChildSession(session: AgentSessionMeta): boolean {
+  return !!session.explorationParentSessionId && !!session.explorationSourceMessageId
+}
+
+export function getRelatedParentSessionId(session: AgentSessionMeta): string | undefined {
+  if (isDelegatedChildSession(session)) return session.parentSessionId
+  if (isExplorationChildSession(session)) return session.explorationParentSessionId
+  return undefined
+}
+
 export function buildAgentSessionTrees(sessions: AgentSessionMeta[]): AgentSessionTreeItem[] {
   const sessionIds = new Set(sessions.map((session) => session.id))
   const childrenByParentId = new Map<string, AgentSessionMeta[]>()
   const roots: AgentSessionMeta[] = []
 
   for (const session of sessions) {
+    const relatedParentSessionId = getRelatedParentSessionId(session)
     if (
-      isDelegatedChildSession(session)
-      && session.parentSessionId
-      && sessionIds.has(session.parentSessionId)
+      relatedParentSessionId
+      && sessionIds.has(relatedParentSessionId)
       // 委派树不得跨项目归并。历史异常数据或并发切换项目产生的错误 workspaceId
       // 应保持为可见根节点，避免子会话看起来被“合并”进另一个项目。
       && sessions.some((parent) => (
-        parent.id === session.parentSessionId
+        parent.id === relatedParentSessionId
         && parent.workspaceId === session.workspaceId
       ))
     ) {
-      const children = childrenByParentId.get(session.parentSessionId) ?? []
+      const children = childrenByParentId.get(relatedParentSessionId) ?? []
       children.push(session)
-      childrenByParentId.set(session.parentSessionId, children)
+      childrenByParentId.set(relatedParentSessionId, children)
       continue
     }
 
@@ -79,6 +90,15 @@ export function getDelegatedChildStatus(
   return status ?? 'idle'
 }
 
+export function getRelatedChildStatus(
+  session: AgentSessionMeta,
+  agentIndicatorMap: Map<string, SessionIndicatorStatus>,
+): SessionIndicatorStatus {
+  return isDelegatedChildSession(session)
+    ? getDelegatedChildStatus(session, agentIndicatorMap)
+    : agentIndicatorMap.get(session.id) ?? 'idle'
+}
+
 export function getSessionTreeStatus(
   item: AgentSessionTreeItem,
   agentIndicatorMap: Map<string, SessionIndicatorStatus>,
@@ -90,7 +110,7 @@ export function getSessionTreeStatus(
   // 父会话行需要体现"有子代理在活动"；但子代理"已完成未查看"是后台结果，
   // 不应让父会话保持绿色完成标记（用户不一定去查看子代理）。
   const childActiveStatuses = item.childSessions
-    .map((session) => getDelegatedChildStatus(session, agentIndicatorMap))
+    .map((session) => getRelatedChildStatus(session, agentIndicatorMap))
     .filter((status): status is 'blocked' | 'running' =>
       status === 'blocked' || status === 'running')
 
@@ -120,6 +140,37 @@ export function getDelegationSummary(childSessions: AgentSessionMeta[]): Delegat
   }
 }
 
+export interface RelatedSessionSummary extends DelegationSummary {
+  label: '子会话' | '探索分支' | '关联会话'
+  /**
+   * 是否在父行显示 x/y 计数。
+   *
+   * 仅纯委派子会话显示：父行右侧已挤着时间、置顶、归档与三点菜单，
+   * 探索分支需的是“是否跑出结论”而不是“看了没看”，叠加计数会与子会话抢位置且含义不可靠。
+   * 探索分支的进度改由父行状态色条与分支行状态点表达。
+   */
+  showCount: boolean
+}
+
+/** 汇总父会话下直接关联子会话的展开信息，供侧栏父行使用。 */
+export function getRelatedSessionSummary(childSessions: AgentSessionMeta[]): RelatedSessionSummary {
+  const delegatedChildren = childSessions.filter(isDelegatedChildSession)
+  const hasExploration = childSessions.some(isExplorationChildSession)
+  const delegatedSummary = getDelegationSummary(delegatedChildren)
+
+  return {
+    total: childSessions.length,
+    running: delegatedSummary.running,
+    completed: delegatedSummary.completed,
+    label: delegatedChildren.length > 0 && hasExploration
+      ? '关联会话'
+      : hasExploration
+        ? '探索分支'
+        : '子会话',
+    showCount: !hasExploration,
+  }
+}
+
 export function treeContainsSessionId(item: AgentSessionTreeItem, sessionId: string | null): boolean {
   if (!sessionId) return false
   return item.session.id === sessionId || item.childSessions.some((session) => session.id === sessionId)
@@ -141,6 +192,18 @@ export function getDirectDelegatedChildren(
   return sessions.filter((session) => (
     session.parentSessionId === parentSessionId
     && !!session.sourceDelegationId
+  ))
+}
+
+export function getDirectRelatedChildren(
+  sessions: AgentSessionMeta[],
+  parentSessionId: string,
+): AgentSessionMeta[] {
+  const parent = sessions.find((session) => session.id === parentSessionId)
+  if (!parent) return []
+  return sessions.filter((session) => (
+    getRelatedParentSessionId(session) === parentSessionId
+    && session.workspaceId === parent.workspaceId
   ))
 }
 
@@ -168,9 +231,13 @@ export function collectDelegatedDeletionSessionIds(
 }
 
 export function hasPinnedVisibleParent(session: AgentSessionMeta, sessions: AgentSessionMeta[]): boolean {
-  if (!isDelegatedChildSession(session) || !session.parentSessionId) return false
-  const parent = sessions.find((item) => item.id === session.parentSessionId)
-  return !!parent?.pinned && !parent.archived
+  const parentSessionId = getRelatedParentSessionId(session)
+  if (!parentSessionId) return false
+  const parent = sessions.find((item) => item.id === parentSessionId)
+  return !!parent
+    && parent.workspaceId === session.workspaceId
+    && !!parent.pinned
+    && !parent.archived
 }
 
 export function getSyncableDelegatedChildren(

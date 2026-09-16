@@ -14,7 +14,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -544,6 +544,8 @@ export interface AssistantTurnRendererProps {
   basePath?: string
   /** 分叉回调（传入最后一条 assistant 消息的 uuid） */
   onFork?: (upToMessageUuid: string) => void
+  /** 探索分支回调（Pi `/tree`；hover 分叉按钮时可用） */
+  onExplore?: (upToMessageUuid: string) => void
   /** 回退回调（传入 assistant message uuid） */
   onRewind?: (assistantMessageUuid: string) => void
   /** 错误重试回调（仅当 turn 含错误消息时使用） */
@@ -562,7 +564,7 @@ export interface AssistantTurnRendererProps {
   showThinking?: boolean
 }
 
-export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessages, historicalTaskSubjects, basePath, onFork, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true }: AssistantTurnRendererProps): React.ReactElement | null {
+export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessages, historicalTaskSubjects, basePath, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true }: AssistantTurnRendererProps): React.ReactElement | null {
   const channels = useAtomValue(channelsAtom)
   const processGroupsKeepExpanded = useAtomValue(agentProcessGroupsKeepExpandedAtom)
   const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
@@ -790,9 +792,27 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
             {sessionId && typeof lastUuid === 'string' && <PluginMessageActions reference={{ kind: 'agent', sessionId, messageId: lastUuid }} />}
             {textContent && <CopyButton content={textContent} />}
             {onFork && lastUuid && (
-              <MessageAction tooltip="从此处分叉" onClick={() => onFork(lastUuid)}>
-                <Split className="size-3.5" />
-              </MessageAction>
+              <div className="group/fork flex items-center">
+                <MessageAction tooltip="从此处分叉（独立新会话，可换模型接续）" onClick={() => onFork(lastUuid)}>
+                  <Split className="size-3.5" />
+                </MessageAction>
+                {/* 探索分支入口：悬停分叉按钮时从右侧滑出，默认宽 0 不占用操作栏。 */}
+                {onExplore && (
+                  <div
+                    className={cn(
+                      'flex items-center overflow-hidden',
+                      'w-0 opacity-0 transition-all duration-150',
+                      'group-hover/fork:w-7 group-hover/fork:opacity-100',
+                      // 键盘用户聚焦时同样展开，避免入口不可见
+                      'focus-within:w-7 focus-within:opacity-100',
+                    )}
+                  >
+                    <MessageAction tooltip="从此处探索（保留主线，结论可带回）" onClick={() => onExplore(lastUuid)}>
+                      <GitFork className="size-3.5" />
+                    </MessageAction>
+                  </div>
+                )}
+              </div>
             )}
             {onRewind && lastUuid && (
               <MessageAction tooltip="回退到此处" onClick={() => onRewind(lastUuid)}>
@@ -1373,6 +1393,8 @@ export interface MessageGroupRendererProps {
   /** 当前 Agent session；嵌入右侧探索分支时不能依赖全局父 session。 */
   sessionId?: string
   onFork?: (upToMessageUuid: string) => void
+  /** 探索分支回调（Pi `/tree`），由回复操作栏 hover 分叉按钮时触发。 */
+  onExplore?: (upToMessageUuid: string) => void
   onRewind?: (assistantMessageUuid: string) => void
   /** 错误重试回调（仅当 turn 含错误消息时使用） */
   onRetry?: () => void
@@ -1461,7 +1483,7 @@ export function getGroupPreview(group: MessageGroup): string {
   return texts.join(' ').slice(0, 200)
 }
 
-function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {
+function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
 
   if (group.type === 'user') {
@@ -1499,6 +1521,7 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
         historicalTaskSubjects={historicalTaskSubjects}
         basePath={basePath}
         onFork={onFork}
+        onExplore={onExplore}
         onRewind={onRewind}
         onRetry={onRetry}
         onRetryInNewSession={onRetryInNewSession}
@@ -1561,6 +1584,7 @@ export const MessageGroupRenderer = React.memo(MessageGroupRendererView, (prev, 
   if (prev.isStreaming !== next.isStreaming || prev.stoppedByUser !== next.stoppedByUser) return false
   if (prev.sessionModelId !== next.sessionModelId || prev.showThinking !== next.showThinking) return false
   return prev.onFork === next.onFork
+    && prev.onExplore === next.onExplore
     && prev.onRewind === next.onRewind
     && prev.onRetry === next.onRetry
     && prev.onRetryInNewSession === next.onRetryInNewSession

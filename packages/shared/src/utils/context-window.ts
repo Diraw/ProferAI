@@ -249,6 +249,78 @@ export function resolveAgentSdkModelId(modelId: string, providerOrEnabled?: Prov
   return supportsVerified1MContext(modelId, providerOrEnabled) ? `${modelId}[1m]` : modelId
 }
 
+/**
+ * 去掉 Claude SDK 专用的 `[1m]` 变体后缀。
+ *
+ * 该后缀只对 Claude Agent SDK 有意义（模型变体 + beta 協商）；一旦把它交给供应商 API
+ * （标题生成、探测请求等）就会指向不存在的模型 ID。只在「模型 ID 即将出门」时使用，
+ * 不要用它去规范化用户配置里手填的 ID。
+ */
+export function strip1MContextSuffix(modelId: string): string {
+  return modelId.replace(/\[1m\]$/i, '')
+}
+
+/** 1M 上下文的生效来源，供 UI 区分「自动」与「手动覆盖」。 */
+export type OneMillionContextSource = 'auto' | 'forced-on' | 'forced-off'
+
+export interface OneMillionContextDecision {
+  /** 最终是否按 1M 上下文处理 */
+  enabled: boolean
+  /** 生效来源：自动判定 / 手动强制开启 / 手动强制关闭 */
+  source: OneMillionContextSource
+  /** 不带人工覆盖时的自动判定结果（即模型 + provider 是否已验证） */
+  autoEnabled: boolean
+}
+
+/**
+ * 解析 1M 上下文的三态决策。
+ *
+ * 渠道配置里的显式偏好（渠道模型的 `context1m`）优先于自动判定：
+ * - `true`：任何模型 / 网关都强开（能不能真协商由端点决定）
+ * - `false`：即使模型与 provider 都验证支持也不按 1M 处理
+ * - 缺省：回落到模型 + provider 白名单（历史行为）
+ */
+export function resolveOneMillionContextDecision(
+  modelId: string | undefined,
+  provider: ProviderType | undefined,
+  explicit?: boolean | null,
+): OneMillionContextDecision {
+  const autoEnabled = supportsVerified1MContext(modelId, provider)
+  if (explicit === true) return { enabled: true, source: 'forced-on', autoEnabled }
+  if (explicit === false) return { enabled: false, source: 'forced-off', autoEnabled }
+  return { enabled: autoEnabled, source: 'auto', autoEnabled }
+}
+
+export interface AgentSdk1MSelection {
+  /** 实际交给 Claude SDK 的模型 ID（需要时追加 `[1m]` 变体后缀） */
+  modelId: string
+  /** 是否注入 `context-1m-2025-08-07` beta */
+  oneMillionContextEnabled: boolean
+  /** 生效来源 */
+  source: OneMillionContextSource
+}
+
+/**
+ * 解析本轮交给 Claude SDK 的 1M 选择：模型 ID 变体与 beta 注入必须同时决定。
+ *
+ * 只有后缀没有 beta，SDK 不会按 1M 协商；只有 beta 没有后缀，请求仍走默认窗口。
+ * 两者共享同一个决策，避免两处判定漂移（含用户在渠道里显式写入 `[1m]` 的模型）。
+ */
+export function resolveAgentSdk1MSelection(
+  modelId: string,
+  provider: ProviderType | undefined,
+  explicit?: boolean | null,
+): AgentSdk1MSelection {
+  if (!modelId) return { modelId, oneMillionContextEnabled: false, source: 'auto' }
+  const decision = resolveOneMillionContextDecision(modelId, provider, explicit)
+  const hasSuffix = /\[1m\]$/i.test(modelId)
+  return {
+    modelId: decision.enabled && !hasSuffix ? `${modelId}[1m]` : modelId,
+    oneMillionContextEnabled: decision.enabled,
+    source: decision.source,
+  }
+}
+
 /** 按实际 provider 推断 Agent SDK 上下文窗口，不向未知代理假设 1M 协议。 */
 export function inferAgentSdkContextWindow(modelId: string | undefined, provider?: ProviderType): number | undefined {
   if (!modelId) return undefined

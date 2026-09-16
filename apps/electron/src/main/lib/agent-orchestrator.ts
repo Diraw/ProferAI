@@ -44,7 +44,8 @@ import {
   THINKING_SIGNATURE_ERROR_CODE,
   THINKING_SIGNATURE_ERROR_MESSAGE,
   THINKING_SIGNATURE_ERROR_TITLE,
-  resolveAgentSdkModelId,
+  resolveAgentSdk1MSelection,
+  strip1MContextSuffix,
   AGENT_PRESET_CAPABILITY_GROUPS,
   createEffectiveAgentPresetPolicy,
   withLoadedMcpServerNames,
@@ -474,7 +475,10 @@ export class AgentOrchestrator {
    * 使用 Provider 适配器系统，支持所有渠道。任何错误返回 null。
    */
   async generateTitle(input: AgentGenerateTitleInput): Promise<string | null> {
-    const { userMessage, channelId, modelId } = input
+    const { userMessage, channelId } = input
+    // SDK 回报的模型名可能是 `deepseek-v4-pro[1m]` 这类 1M 变体：该后缀只对 Claude Agent SDK
+    // 有意义，发给供应商 API 会指向不存在的模型。标题请求必须用真实模型 ID。
+    const modelId = strip1MContextSuffix(input.modelId)
     console.log('[Agent 标题生成] 开始生成标题:', {
       channelId,
       modelId,
@@ -995,14 +999,21 @@ export class AgentOrchestrator {
 
     // 3. 构建本轮专属 SDK 环境。绝不修改主进程 process.env，避免并发 session 串扰凭证。
     const configuredModelId = modelId || DEFAULT_MODEL_ID
+    // 渠道模型上的「1M」勾选决定本轮是否按 1M 上下文处理：
+    // true 强开（未验证的网关也允许）、false 强关、缺省按模型 + provider 自动判定。
+    // 模型 ID 比较不区分大小写（历史配置里存在 MiniMax-M3 这类写法差异）。
+    const configuredModelKey = configuredModelId.toLowerCase()
+    const configuredChannelModel = channel.models.find((model) => model.id.toLowerCase() === configuredModelKey)
+    const context1mPreference = configuredChannelModel?.context1m ?? null
       const modelRouting = resolveAgentModelRouting({
         modelId: configuredModelId,
         provider: channel.provider,
+        context1m: context1mPreference,
       })
-    // 仅对已验证的 provider/model 组合追加 Claude SDK 的 `[1m]` 后缀；Pi 保持原始模型 ID。
-    const sdk1MModelId = resolveAgentSdkModelId(configuredModelId, channel.provider)
-    const oneMillionContextEnabled = modelRouting.enable1MContext && sdk1MModelId !== configuredModelId
-    const effectiveSdkModelId = oneMillionContextEnabled ? sdk1MModelId : configuredModelId
+    // 模型 ID 变体与 1M beta 必须一起决定，否则会出现「有后缀无 beta」的伪 1M。
+    const sdk1MSelection = resolveAgentSdk1MSelection(configuredModelId, channel.provider, context1mPreference)
+    const oneMillionContextEnabled = sdk1MSelection.oneMillionContextEnabled
+    const effectiveSdkModelId = sdk1MSelection.modelId
       let sdkEnv = await this.buildSdkEnv(runtimeCredentials)
     applyAgentModelRoutingToEnv(sdkEnv, modelRouting)
 
@@ -1841,6 +1852,8 @@ ${enrichedMessage}`
           }),
           channelId,
           channelName: channel.name,
+          // Pi 不做 SDK 侧 beta 協商，只用 1M 偏好决定注册的上下文窗口（影响压缩阈值与用量环）。
+          ...(context1mPreference !== null && { context1m: context1mPreference }),
           permissionMode: initialPermissionMode,
           piAgentDir: getSdkConfigDir(),
           // Keep Pi JSONL session files below the SDK-isolated config directory, never in another workspace.

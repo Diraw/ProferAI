@@ -21,7 +21,7 @@ import {
   resolveReasoningProfile,
   type ReasoningCapability,
 } from '@profer/shared'
-import { getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
+import { getProferUserAgent, isAnthropicShapedEndpoint, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
 import type { Api, KnownProvider, Model } from '@earendil-works/pi-ai/compat'
 import type { PiAgentQueryOptions } from './pi-agent-adapter'
 import { refreshXaiOAuthCredentialsSerial, rememberXaiOAuthCredentials } from '../xai-oauth-credentials'
@@ -213,8 +213,31 @@ function isLocalOllamaBaseUrl(baseUrl: string | undefined): boolean {
   }
 }
 
-function normalizePiApi(provider: ProviderType, baseUrl?: string): Api {
+/** 商业代管 relay 的 Base：协议由服务端路由决定，不能按端点形态推断。 */
+function isRelayProxyBaseUrl(baseUrl: string): boolean {
+  return baseUrl.trim().replace(/\/+$/, '').endsWith('/v1/proxy')
+}
+
+/**
+ * 解析 Pi 请求使用的协议。
+ *
+ * DeepSeek 同时提供 OpenAI 兼容与 Anthropic 兼容两套入口（官方另有 `/anthropic`）。
+ * 协议必须跟随**配置的端点**，而不是写死 provider：第三方中转网关绝大多数只提供
+ * OpenAI 兼容端点，若仍按 provider 判定为 Anthropic，Agent 会向它发送
+ * `/v1/messages` 而完全不可用——而 Chat 走 OpenAI 适配器却正常，两者会不一致。
+ *
+ * 例外：商业代管 relay（`…/v1/proxy`）由服务端路由决定协议，保持 provider 判定。
+ */
+export function normalizePiApi(provider: ProviderType, baseUrl?: string): Api {
   if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) return 'openai-completions'
+  if (
+    provider === 'deepseek'
+    && baseUrl?.trim()
+    && !isRelayProxyBaseUrl(baseUrl)
+    && !isAnthropicShapedEndpoint(baseUrl)
+  ) {
+    return 'openai-completions'
+  }
   switch (provider) {
     case 'openai':
     case 'opencode-go-openai':
@@ -326,7 +349,33 @@ export async function resolvePiReasoningCapability(provider: ProviderType, model
   })
 }
 
-async function resolvePiModelDefaults(input: PiAgentQueryOptions, explicit1MContext = false): Promise<PiModelDefaults> {
+/**
+ * 第三方 OpenAI 兼容网关的 finish_reason 兜底。
+ *
+ * Pi 的 openai-completions 适配器在 `compat.supportsFinishReason !== false` 时，会把
+ * 「SSE 正常收尾但一帧都没带 finish_reason」判为整轮失败，报
+ * `Stream ended without finish_reason`。而这类网关的 `/v1/chat/completions` 与
+ * `/v1/responses` 往往不是同一套实现：同一渠道配在 Codex（Responses 协议）里可能完全
+ * 正常，Profer 走 Chat Completions 就会撞上这条判定。
+ *
+ * 只对用户自配的 OpenAI 兼容渠道（provider === 'custom'）关掉该校验：
+ * - 服务端给了 finish_reason 时行为完全不变（hasFinishReason 分支先行生效）；
+ * - 缺失时按 stop / toolUse 推断结束原因，保住这一轮已经拿到的正文与工具调用；
+ * - 真正的传输中断由底层抛网络错误，走不到这条判定，不会被静默吞掉。
+ */
+function applyOpenAICompatibleFinishReasonFallback(
+  input: PiAgentQueryOptions,
+  api: Api,
+  compat: PiModelDefaults['compat'],
+): PiModelDefaults['compat'] {
+  if (api !== 'openai-completions' || input.provider !== 'custom') return compat
+  return { ...(compat ?? {}), supportsFinishReason: false } as PiModelDefaults['compat']
+}
+
+async function resolvePiModelDefaults(
+  input: PiAgentQueryOptions,
+  explicit1MContext = false,
+): Promise<PiModelDefaults> {
   const catalogModel = input.model ? await findPiCatalogModel(input.provider, input.model) : undefined
   const api = normalizePiApi(input.provider, input.baseUrl)
   const providerSpecificCapabilities = compilePiReasoningCapabilities(api, input.model)
@@ -343,25 +392,32 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions, explicit1MCont
   const isGlm53 = modelId === 'glm-5.3'
   const isVolcengineGlm5x = (input.provider === 'doubao' || input.provider === 'ark-coding-plan') && (modelId === 'glm-5.2' || modelId === 'glm-5.3')
   // 1M 按「代际默认」判定，但同样要求 provider 已验证（如 deepseek / zhipu-coding / xiaomi…）：
-  // custom、anthropic-compatible 与自建网关仍保留 catalog 的保守窗口，除非用户显式带 `[1m]`。
+  // custom、anthropic-compatible 与自建网关仍保留 catalog 的保守窗口，除非渠道模型上勾选了 1M。
+  // 用户在渠道配置里显式关闭 1M 时，跳过所有 1M 判定，按保守默认窗口注册（影响 Pi 的压缩阈值）。
   const isVerifiedOneMillionContext = explicit1MContext || supportsVerified1MContext(input.model, input.provider)
   // DeepSeek 世代模型经第三方网关时，全局 catalog 会带上 1M 窗口，但不能据此假定该网关已协商 1M：
-  // 保留历史行为——退回保守默认窗口，只有用户显式写 `[1m]` 才认这份能力声明。
+  // 保留历史行为——退回保守默认窗口，只有显式声明 1M 才认这份能力声明。
   const isRelayedDeepSeekGeneration = input.provider !== 'deepseek'
     && !explicit1MContext
     && supportsVerified1MContext(input.model, 'deepseek')
-  const catalogContextWindow = isRelayedDeepSeekGeneration
+  const rawCatalogContextWindow = isRelayedDeepSeekGeneration
     ? DEFAULT_CONTEXT_WINDOW
     : (catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
-  const contextWindow = isOfficialGpt56 || isOfficialGpt6Astra
+  const computedContextWindow = isOfficialGpt56 || isOfficialGpt6Astra
     ? CODEX_56_CONTEXT_WINDOW
     : isVerifiedOneMillionContext
-      ? Math.max(catalogContextWindow, ONE_MILLION_CONTEXT_WINDOW)
-      : catalogContextWindow
+      ? Math.max(rawCatalogContextWindow, ONE_MILLION_CONTEXT_WINDOW)
+      : rawCatalogContextWindow
+  // 渠道模型上的 1M 勾选最后统一生效（强开抬到 1M、强关压回保守窗口）。
+  const contextWindow = applyModel1MContextPreference(computedContextWindow, input.context1m)
   return {
     reasoning: catalogModel?.reasoning ?? true,
     thinkingLevelMap: providerSpecificCapabilities?.thinkingLevelMap ?? catalogModel?.thinkingLevelMap,
-    compat: providerSpecificCapabilities?.compat,
+    compat: applyOpenAICompatibleFinishReasonFallback(
+      input,
+      api,
+      providerSpecificCapabilities?.compat,
+    ),
     input: catalogModel ? [...catalogModel.input] : ['text', 'image'],
     cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
     contextWindow,
@@ -369,19 +425,50 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions, explicit1MCont
   }
 }
 
+/**
+ * 按渠道模型上的 1M 偏好归一上下文窗口。
+ *
+ * - 强制开启：抬到 1M（能否真正協商由端点决定）
+ * - 强制关闭：把 1M 级窗口压回保守默认窗口，但不抬升本来就小于默认窗口的模型
+ * - 未设置：保持 catalog / 代际判定结果
+ *
+ * 所有注册窗口的 builder（通用、xAI、Codex）都要过这里，否则「1M」勾选在部分
+ * provider 上会变成空话。
+ */
+export function applyModel1MContextPreference(
+  contextWindow: number,
+  preference?: boolean | null,
+): number {
+  if (preference === true) return Math.max(contextWindow, ONE_MILLION_CONTEXT_WINDOW)
+  if (preference === false) return Math.min(contextWindow, DEFAULT_CONTEXT_WINDOW)
+  return contextWindow
+}
+
+/** 在注册前把 1M 偏好应用到模型元数据上。 */
+function applyModel1MContextPreferenceToModel(
+  model: PiCatalogModel,
+  preference?: boolean | null,
+): PiCatalogModel {
+  const contextWindow = applyModel1MContextPreference(model.contextWindow ?? DEFAULT_CONTEXT_WINDOW, preference)
+  return contextWindow === model.contextWindow ? model : { ...model, contextWindow }
+}
+
 function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType): string | undefined {
   if (!baseUrl) return undefined
   if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) {
     return `${baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`
   }
-  if (normalizePiApi(provider, baseUrl) === 'anthropic-messages') {
+  const api = normalizePiApi(provider, baseUrl)
+  if (api === 'anthropic-messages') {
     // Pi's Anthropic SDK appends `/v1/messages` itself. Do not first resolve
     // the complete endpoint: that turns the commercial relay base
     // `/v1/proxy` into `/v1/proxy/messages`, after which Pi appends another
     // `/v1/messages` and the request lands on a 404 route.
     return normalizeAnthropicBaseUrlForSdk(baseUrl)
   }
-  if (provider === 'custom' || provider === 'openai-responses') {
+  // DeepSeek 走 OpenAI 兼容端点时，若用户填了完整 `/chat/completions`，
+  // 需先还原成协议根地址，避免 Pi 重复拼接。
+  if (provider === 'custom' || provider === 'openai-responses' || provider === 'deepseek') {
     return normalizeOpenAIBaseUrlForSdk(baseUrl)
   }
   return baseUrl.trim().replace(/\/$/, '')
@@ -488,7 +575,7 @@ async function buildCodexModelWithRuntimeKey(sdk: PiSdk, input: PiAgentQueryOpti
   if (!model) {
     throw new Error('未找到可用的 ChatGPT (Codex) 模型，请确认已登录并升级 Pi 运行时')
   }
-  return { modelRuntime, model: applyVerifiedGpt56ContextWindow(model) }
+  return { modelRuntime, model: applyModel1MContextPreferenceToModel(applyVerifiedGpt56ContextWindow(model), input.context1m) }
 }
 
 /** 列出 Pi SDK 内置的 ChatGPT (Codex) 模型 ID，供渲染层"模型拉取"使用。 */
@@ -512,6 +599,7 @@ export async function buildModel(
           model: input.model,
           codexOAuthCredentials: input.codexOAuthCredentials,
           onCodexOAuthCredentialsRefreshed: input.onCodexOAuthCredentialsRefreshed,
+          context1m: input.context1m,
         })
       : buildCodexModelWithRuntimeKey(sdk, input)
   }
@@ -525,14 +613,16 @@ export async function buildModel(
         model: input.model,
         xaiOAuthCredentials: input.xaiOAuthCredentials,
         onXaiOAuthCredentialsRefreshed: input.onXaiOAuthCredentialsRefreshed,
+        context1m: input.context1m,
       })
     }
     return buildXaiApiKeyModel(sdk, input)
   }
   const providerName = `profer-${input.provider}-${input.sessionId}`
   const resolvedApiKey = resolvePiApiKey(input.provider, input.apiKey)
-  // Pi 请求使用干净模型 ID，但先保留用户显式 `[1m]` 配置，供未知兼容网关声明能力。
-  const explicit1MContext = /\[1m\]$/i.test(input.model ?? '')
+  // Pi 请求使用干净模型 ID，但先保留用户显式 `[1m]` 配置与渠道模型上的 1M 勾选：
+  // 前者供未知兼容网关声明能力，后者支持用户手动强开 / 强关。
+  const explicit1MContext = /\[1m\]$/i.test(input.model ?? '') || input.context1m === true
   const resolvedModelId = stripAgentSdkContextSuffix(input.model)
   const modelRuntime = await sdk.ModelRuntime.create(createIsolatedModelRuntimeOptions())
   if (shouldUseRuntimeApiKey(input.provider)) {
@@ -582,6 +672,8 @@ export interface CodexModelInput {
   model?: string
   codexOAuthCredentials?: CodexOAuthCredentials
   onCodexOAuthCredentialsRefreshed?: (credentials: CodexOAuthCredentials) => void | Promise<void>
+  /** 渠道模型上的 1M 偏好；仅 Agent 链路传入，标题生成等轻量请求不需要。 */
+  context1m?: boolean | null
 }
 
 function createCodexRuntimeCredentialStore(initial: CodexOAuthCredentials, onRefreshed?: CodexModelInput['onCodexOAuthCredentialsRefreshed']) {
@@ -652,7 +744,7 @@ export async function buildCodexModel(sdk: PiSdk, input: CodexModelInput) {
   if (!model) {
     throw new Error('未找到可用的 ChatGPT (Codex) 模型，请确认已登录并升级 Pi 运行时')
   }
-  return { modelRuntime, model: applyVerifiedGpt56ContextWindow(model) }
+  return { modelRuntime, model: applyModel1MContextPreferenceToModel(applyVerifiedGpt56ContextWindow(model), input.context1m) }
 }
 
 type XaiRuntimeCredential = XaiOAuthCredentials & {
@@ -666,6 +758,8 @@ export interface XaiModelInput {
   model?: string
   xaiOAuthCredentials?: XaiOAuthCredentials
   onXaiOAuthCredentialsRefreshed?: (credentials: XaiOAuthCredentials) => void | Promise<void>
+  /** 渠道模型上的 1M 偏好；仅 Agent 链路传入。 */
+  context1m?: boolean | null
 }
 
 function createXaiRuntimeCredentialStore(channelId: string, initial: XaiOAuthCredentials, onRefreshed?: XaiModelInput['onXaiOAuthCredentialsRefreshed']) {
@@ -749,7 +843,7 @@ async function buildXaiApiKeyModel(sdk: PiSdk, input: PiAgentQueryOptions) {
     compat: reasoningCapabilities?.compat ?? catalogModel?.compat,
     input: catalogModel ? [...catalogModel.input] : ['text', 'image'] as ('text' | 'image')[],
     cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
-    contextWindow: catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    contextWindow: applyModel1MContextPreference(catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW, input.context1m),
     maxTokens: catalogModel?.maxTokens ?? DEFAULT_MAX_TOKENS,
   }
 
@@ -782,5 +876,5 @@ export async function buildXaiOAuthModel(sdk: PiSdk, input: XaiModelInput) {
   if (!model) {
     throw new Error('未找到可用的 xAI（Grok）模型，请确认订阅已授权并升级 Pi 运行时')
   }
-  return { modelRuntime, model }
+  return { modelRuntime, model: applyModel1MContextPreferenceToModel(model, input.context1m) }
 }

@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
   DEFAULT_CONTEXT_WINDOW,
+  applyModel1MContextPreference,
   buildModel,
   buildPiRequestHeaders,
   getCodexCatalogModels,
   listCodexModels,
+  normalizePiApi,
   requiresPromaUserAgent,
   resolvePiApiKey,
   stripAgentSdkContextSuffix,
@@ -115,6 +117,24 @@ describe('Pi runtime 智谱团队版认证', () => {
   })
 })
 
+describe('渠道模型 1M 偏好归一', () => {
+  test('Given 强制开启 When 归一窗口 Then 至少 1M', () => {
+    expect(applyModel1MContextPreference(500_000, true)).toBe(1_000_000)
+    // 本来就大于 1M 的窗口（Codex 1.05M）不得被降下来
+    expect(applyModel1MContextPreference(1_050_000, true)).toBe(1_050_000)
+  })
+
+  test('Given 强制关闭 When 归一窗口 Then 压回保守默认窗口', () => {
+    expect(applyModel1MContextPreference(1_000_000, false)).toBe(DEFAULT_CONTEXT_WINDOW)
+    expect(applyModel1MContextPreference(500_000, false)).toBe(DEFAULT_CONTEXT_WINDOW)
+  })
+
+  test('Given 未设置或 null When 归一窗口 Then 保持原值', () => {
+    expect(applyModel1MContextPreference(500_000, undefined)).toBe(500_000)
+    expect(applyModel1MContextPreference(1_000_000, null)).toBe(1_000_000)
+  })
+})
+
 describe('Pi runtime xAI API Key provider', () => {
   test('Given xAI API Key When buildModel Then 使用 Pi 内置 xai Responses 模型并隔离 runtime key', async () => {
     const sdk = await import('@earendil-works/pi-coding-agent')
@@ -131,6 +151,38 @@ describe('Pi runtime xAI API Key provider', () => {
     expect(result.model.provider).toBe('xai')
     expect(result.model.api).toBe('openai-responses')
     expect(result.model.id).toBe('grok-4.6')
+  })
+
+  test('Given xAI 渠道模型勾选了 1M When buildModel Then 抬到 1M 窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-api-key-1m-on',
+      apiKey: 'xai-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      baseUrl: 'https://api.x.ai/v1',
+      model: 'grok-4.6',
+      context1m: true,
+    })
+
+    expect(result.model.contextWindow).toBe(1_000_000)
+  })
+
+  test('Given xAI 渠道模型关掉了 1M When buildModel Then 压回保守窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-api-key-1m-off',
+      apiKey: 'xai-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      baseUrl: 'https://api.x.ai/v1',
+      model: 'grok-4.6',
+      context1m: false,
+    })
+
+    expect(result.model.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW)
   })
 
   test('Given xAI Responses 中转站的未知模型 When buildModel Then 在隔离 runtime 注册该模型并复用中转 Base URL', async () => {
@@ -332,6 +384,128 @@ describe('Pi runtime DeepSeek V4 1M 上下文', () => {
     expect(result.model.id).toBe('gateway/deepseek-v4-flash')
     expect(result.model.contextWindow).toBe(1_000_000)
   })
+
+  test('Given 渠道模型勾选了 1M When 未验证的第三方网关 Then 也按 1M 注册窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-custom-v4-toggled-on',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'custom',
+      baseUrl: 'https://gateway.example.com/v1',
+      model: 'gateway/deepseek-v4-pro',
+      context1m: true,
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.id).toBe('gateway/deepseek-v4-pro')
+    expect(result.model.contextWindow).toBe(1_000_000)
+  })
+
+  test('Given 渠道模型关掉了 1M When 官方 DeepSeek V4 Then 退回保守窗口', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-v4-toggled-off',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+      context1m: false,
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW)
+  })
+})
+
+describe('Pi runtime DeepSeek 双协议端点判定', () => {
+  // 背景：DeepSeek 同时提供 OpenAI 兼容与 Anthropic 兼容两套入口。旧实现把协议写死在
+  // provider 上（deepseek → anthropic-messages），导致把 DeepSeek 渠道指向只提供
+  // OpenAI 端点的第三方网关时，Agent 会向它发送 /v1/messages，完全不可用；
+  // 而 Chat 走 OpenAI 适配器却正常，两者不一致。
+  test('Given 端点形态不同 When 判定协议 Then 跟随端点而非 provider', () => {
+    expect(normalizePiApi('deepseek', 'https://api.deepseek.com/anthropic')).toBe('anthropic-messages')
+    expect(normalizePiApi('deepseek', 'https://gateway.example.com/anthropic')).toBe('anthropic-messages')
+    expect(normalizePiApi('deepseek', 'https://gateway.example.com/v1')).toBe('openai-completions')
+    expect(normalizePiApi('deepseek', 'https://gateway.example.com/v1/chat/completions')).toBe('openai-completions')
+    // 缺省地址（未配置 / 历史配置）保持官方 Anthropic 行为
+    expect(normalizePiApi('deepseek', undefined)).toBe('anthropic-messages')
+    expect(normalizePiApi('deepseek', '')).toBe('anthropic-messages')
+    // 商业代管 relay 由服务端路由决定协议，不得按端点形态改写
+    expect(normalizePiApi('deepseek', 'https://server.example/v1/proxy')).toBe('anthropic-messages')
+  })
+
+  test('Given 第三方 OpenAI 兼容网关 When 注册 Pi 模型 Then 使用 openai-completions 且保留协议根地址', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-thirdparty',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://api.kakouai.com/v1',
+      model: 'deepseek-v4.1-flash',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('openai-completions')
+    expect(result.model.baseUrl).toBe('https://api.kakouai.com/v1')
+  })
+
+  test('Given 第三方网关但填写完整 Chat Completions 端点 When 注册 Pi 模型 Then 还原为协议根地址', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-thirdparty-full',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://gateway.example.com/v1/chat/completions',
+      model: 'deepseek-v4.1-flash',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('openai-completions')
+    expect(result.model.baseUrl).toBe('https://gateway.example.com/v1')
+  })
+
+  test('Given 端点不同 When 构建 Pi 请求头 Then 仅 Anthropic 端点附带 Anthropic 专用头', () => {
+    // 第三方 OpenAI 端点必须交给 Pi 自带认证，不能带 Anthropic 专用头。
+    expect(buildPiRequestHeaders('deepseek', 'sk-test', 'https://gateway.example.com/v1')).toBeUndefined()
+    expect(buildPiRequestHeaders('deepseek', 'sk-test', 'https://api.deepseek.com/anthropic')).toMatchObject({
+      Authorization: 'Bearer sk-test',
+    })
+  })
+
+  test('Given DeepSeek 官方 Anthropic 入口 When 注册 Pi 模型 Then 保持 anthropic-messages', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-deepseek-official',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      model: 'deepseek-v4-pro',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('anthropic-messages')
+    expect(result.model.baseUrl).toBe('https://api.deepseek.com/anthropic')
+  })
 })
 
 describe('Pi runtime GLM-5.3 fallback and reasoning metadata', () => {
@@ -531,5 +705,69 @@ describe('ChatGPT Codex 模型目录补丁', () => {
     expect(byId.get('gpt-5.4-mini')).toBe(400_000)
     expect(byId.get('gpt-5.5')).toBe(1_050_000)
     expect(byId.get('gpt-6-astra')).toBe(1_050_000)
+  })
+})
+
+describe('Pi runtime OpenAI 兼容渠道 finish_reason 兜底', () => {
+  /** model.compat 是各协议兼容位的联合类型，这里只取 OpenAI 侧的字段读值。 */
+  const openAiCompat = (model: { compat?: unknown }): { supportsFinishReason?: boolean; supportsReasoningEffort?: boolean } | undefined =>
+    model.compat as { supportsFinishReason?: boolean; supportsReasoningEffort?: boolean } | undefined
+
+  test('Given 用户自配 OpenAI 兼容渠道 When 注册模型 Then 关闭 finish_reason 校验并保留推理兼容位', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-custom-finish-reason',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'custom',
+      baseUrl: 'https://gateway.example.com/v1',
+      model: 'gpt-5.6',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    // 网关可能不发 finish_reason：缺了也不能让整轮失败。
+    expect(openAiCompat(result.model)?.supportsFinishReason).toBe(false)
+    // 推理档位能力不能被这次兜底覆盖掉。
+    expect(openAiCompat(result.model)?.supportsReasoningEffort).toBe(true)
+  })
+
+  test('Given 官方 OpenAI 渠道 When 注册模型 Then 保持 finish_reason 校验默认行为', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-official-openai',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.6',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(openAiCompat(result.model)?.supportsFinishReason).not.toBe(false)
+  })
+
+  test('Given Anthropic 协议的兼容渠道 When 注册模型 Then 不注入 OpenAI 专属兼容位', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-anthropic-compat-finish-reason',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'anthropic-compatible',
+      baseUrl: 'https://gateway.example.com',
+      model: 'claude-opus-4-8',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('anthropic-messages')
+    expect(openAiCompat(result.model)?.supportsFinishReason).not.toBe(false)
   })
 })

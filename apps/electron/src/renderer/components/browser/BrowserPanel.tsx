@@ -80,6 +80,13 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
     setUrl(state?.url ?? '')
   }, [state?.url])
 
+  // 切换 Agent 会话时，地址栏输入属于旧会话，不能把未提交内容带到新会话。
+  React.useEffect(() => {
+    urlDirtyRef.current = false
+    autoNavigatedTabRef.current = null
+    setUrl(state?.url ?? '')
+  }, [sessionId])
+
   // 订阅“下载被拦截”事件：受管浏览器不放行下载，但给用户可见反馈。
   React.useEffect(() => {
     const unsubscribe = (window.electronAPI as Partial<typeof window.electronAPI>).onAgentBrowserDownloadBlocked
@@ -103,8 +110,10 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
     try {
       const result = await doTranslate({ sessionId, tabId: undefined })
       setTranslated(result.translated)
+      if (result.error) toast.error('翻译失败', { description: result.error })
     } catch (error) {
       console.error('[受管浏览器] 翻译失败:', error)
+      toast.error('翻译失败', { description: error instanceof Error ? error.message : '无法翻译当前页面' })
     } finally {
       setTranslating(false)
     }
@@ -129,10 +138,10 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
     const navigateBrowser = (window.electronAPI as Partial<typeof window.electronAPI>).navigateAgentBrowser
     if (!value || typeof navigateBrowser !== 'function') return
     try {
-      await navigateBrowser({ sessionId, url: value })
-      // 导航已提交并生效，解除脏标记并同步为提交地址；后续主进程回推状态会再次校正。
+      const nextState = await navigateBrowser({ sessionId, url: value })
+      // 以主进程规范化后的地址为准（例如补全 HTTPS），避免地址栏显示值与实际页面分叉。
       urlDirtyRef.current = false
-      setUrl(value)
+      setUrl(nextState.url || value)
     } catch (error) {
       console.error('[受管浏览器] 导航失败:', error)
       toast.error('导航失败', { description: error instanceof Error ? error.message : '无法打开该地址' })
@@ -183,6 +192,40 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
   const agentTabId = state?.agentTabId ?? ''
   const tabs = state?.tabs ?? []
   const riskBlocked = riskAcknowledged !== true
+  // 后退/前进/刷新是用户主动发起的导航，必须有可见的进行中与失败反馈；
+  // 之前这三个按钮只发 IPC、不等待结果，失败时界面无任何提示。
+  const [pendingNavAction, setPendingNavAction] = React.useState<null | 'back' | 'forward' | 'reload'>(null)
+  const runNavigationAction = React.useCallback(async (action: 'back' | 'forward' | 'reload'): Promise<boolean> => {
+    const api = (window.electronAPI as Partial<typeof window.electronAPI>)
+    const run = action === 'back' ? api.goBackAgentBrowser : action === 'forward' ? api.goForwardAgentBrowser : api.reloadAgentBrowser
+    if (typeof run !== 'function') return false
+    setPendingNavAction(action)
+    try {
+      await run(sessionId)
+      // 这是明确的导航意图；解除脏标记，让随后回推的真实页面地址接管地址栏。
+      urlDirtyRef.current = false
+      return true
+    } catch (error) {
+      const label = action === 'back' ? '后退' : action === 'forward' ? '前进' : '刷新'
+      console.error(`[受管浏览器] ${label}失败:`, error)
+      toast.error(`${label}失败`, { description: error instanceof Error ? error.message : '无法完成该操作' })
+      return false
+    } finally {
+      setPendingNavAction(null)
+    }
+  }, [sessionId])
+
+  // 主框架加载失败：展示面板内可重试的错误态。重试期间先摘掉遮罩，
+  // 让原生网页视图恢复，避免错误态盖住正在重新加载的页面。
+  const loadError = state?.loadError ?? null
+  const [retryingLoad, setRetryingLoad] = React.useState(false)
+  const showLoadError = !!loadError && !retryingLoad && !riskBlocked
+  React.useEffect(() => { if (!loadError) setRetryingLoad(false) }, [loadError])
+  const retryLoad = React.useCallback(async () => {
+    setRetryingLoad(true)
+    // 重试失败时恢复错误面板，避免遮罩消失后只剩空白页面。
+    if (!await runNavigationAction('reload')) setRetryingLoad(false)
+  }, [runNavigationAction])
   const isBackgroundRun = state?.executionSource === 'automation' || state?.executionSource === 'delegation'
   const activity = state?.activity ?? null
   const activityStatus = activity?.status === 'unknown' ? '结果未知' : activity?.status === 'failed' ? '失败' : activity?.status === 'dispatched' ? '已派发' : '已完成'
@@ -235,25 +278,24 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
     if (!startPage || !state?.url) return
     const api = (window.electronAPI as Partial<typeof window.electronAPI>)
     const isBookmarked = startPage.bookmarks.some((b) => b.url === state.url)
-    if (isBookmarked) {
-      const target = startPage.bookmarks.find((b) => b.url === state.url)
-      if (target && typeof api.removeBrowserBookmark === 'function') {
-        setStartPage(await api.removeBrowserBookmark(target.id))
-      }
-      return
-    }
-    if (typeof api.addBrowserBookmark !== 'function') return
     setBookmarking(true)
     try {
+      if (isBookmarked) {
+        const target = startPage.bookmarks.find((b) => b.url === state.url)
+        if (target && typeof api.removeBrowserBookmark === 'function') {
+          setStartPage(await api.removeBrowserBookmark(target.id))
+        }
+        return
+      }
+      if (typeof api.addBrowserBookmark !== 'function') return
       setStartPage(await api.addBrowserBookmark({ title: state.title || state.url, url: state.url }))
     } catch (error) {
-      console.error('[受管浏览器] 收藏失败:', error)
-      toast.error('收藏失败', { description: error instanceof Error ? error.message : '未知错误' })
+      console.error('[受管浏览器] 收藏操作失败:', error)
+      toast.error(isBookmarked ? '取消收藏失败' : '收藏失败', { description: error instanceof Error ? error.message : '未知错误' })
     } finally {
       setBookmarking(false)
     }
   }, [startPage, state?.url, state?.title])
-
   const removeBookmark = React.useCallback(async (id: string) => {
     const api = (window.electronAPI as Partial<typeof window.electronAPI>)
     if (typeof api.removeBrowserBookmark !== 'function') return
@@ -274,9 +316,9 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
     const navigateBrowser = (window.electronAPI as Partial<typeof window.electronAPI>).navigateAgentBrowser
     if (!targetUrl || typeof navigateBrowser !== 'function') return
     try {
-      await navigateBrowser({ sessionId, url: targetUrl })
+      const nextState = await navigateBrowser({ sessionId, url: targetUrl })
       urlDirtyRef.current = false
-      setUrl(targetUrl)
+      setUrl(nextState.url || targetUrl)
     } catch (error) {
       console.error('[受管浏览器] 导航失败:', error)
       toast.error('导航失败', { description: error instanceof Error ? error.message : '无法打开该地址' })
@@ -307,9 +349,9 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
         {sourceLabel && (
           <span className="shrink-0 rounded bg-primary/10 px-1 py-px text-[9px] font-medium text-primary">{sourceLabel}</span>
         )}
-        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-6" disabled={riskBlocked || !state?.canGoBack} onClick={() => void window.electronAPI.goBackAgentBrowser?.(sessionId)}><ArrowLeft className="size-3.5" /></Button></TooltipTrigger><TooltipContent>后退</TooltipContent></Tooltip>
-        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-6" disabled={riskBlocked || !state?.canGoForward} onClick={() => void window.electronAPI.goForwardAgentBrowser?.(sessionId)}><ArrowRight className="size-3.5" /></Button></TooltipTrigger><TooltipContent>前进</TooltipContent></Tooltip>
-        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-6" disabled={riskBlocked} onClick={() => void window.electronAPI.reloadAgentBrowser?.(sessionId)}><RefreshCw className="size-3.5" /></Button></TooltipTrigger><TooltipContent>刷新</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-6" disabled={riskBlocked || pendingNavAction !== null || !state?.canGoBack} onClick={() => void runNavigationAction('back')}>{pendingNavAction === 'back' ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowLeft className="size-3.5" />}</Button></TooltipTrigger><TooltipContent>后退</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-6" disabled={riskBlocked || pendingNavAction !== null || !state?.canGoForward} onClick={() => void runNavigationAction('forward')}>{pendingNavAction === 'forward' ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowRight className="size-3.5" />}</Button></TooltipTrigger><TooltipContent>前进</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="size-6" disabled={riskBlocked || pendingNavAction !== null} onClick={() => void runNavigationAction('reload')}>{pendingNavAction === 'reload' ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}</Button></TooltipTrigger><TooltipContent>刷新</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={`size-6 ${translated ? 'text-primary' : ''}`} disabled={riskBlocked || translating} onClick={() => void toggleTranslate()}>{translating ? <LoaderCircle className="size-3.5 animate-spin" /> : <Languages className="size-3.5" />}</Button></TooltipTrigger><TooltipContent>{translated ? '恢复原文' : '整页翻译'}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className={`size-6 ${isBookmarked ? 'text-amber-500' : ''}`} disabled={riskBlocked || !state?.url || bookmarking} onClick={() => void toggleBookmark()} aria-label="收藏当前页">{bookmarking ? <LoaderCircle className="size-3.5 animate-spin" /> : <Star className={`size-3.5 ${isBookmarked ? 'fill-current' : ''}`} />}</Button></TooltipTrigger><TooltipContent>{isBookmarked ? '取消收藏' : '收藏当前页'}</TooltipContent></Tooltip>
         {/* 地址栏：平时显示 URL 胶囊；hover 时胶囊淡出、输入框淡入原位替换（文字位置/字号一致），末尾复制；动画对齐 ContextMenu（fade + zoom 的轻量版） */}
@@ -326,7 +368,7 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
                 disabled={riskBlocked}
                 value={url}
                 onChange={(event) => { const v = event.target.value; setUrl(v); urlDirtyRef.current = true }}
-                placeholder="输入域名或 URL（默认 HTTPS，仅公共网站）"
+                placeholder="输入域名或 URL（本地地址默认 HTTP，公网地址默认 HTTPS）"
                 className="h-6 min-w-0 flex-1 px-2 py-0 text-xs md:text-xs"
                 aria-label="浏览器地址"
               />
@@ -385,40 +427,46 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
       </div>
       <div className="flex items-center h-8 gap-1 px-2 border-b border-border/30 bg-muted/10 overflow-x-auto scrollbar-none">
         {tabs.map((tab) => (
-          <button
+          <div
             key={tab.tabId}
-            type="button"
-            disabled={riskBlocked}
-            onClick={() => void selectTab(tab.tabId)}
-            onMouseDown={(event) => {
-              // 中键关闭标签，与顶部会话标签行为一致
-              if (event.button === 1) {
-                event.preventDefault()
-                void closeTab(tab.tabId)
-              }
-            }}
+            role="group"
+            aria-label={`${tab.title || '新建标签页'}${tab.openedByAgent ? '（由 Agent 创建）' : ''}`}
             className={cn(
-              'managed-browser-tab group flex items-center gap-1.5 h-6 min-w-[120px] max-w-[220px] rounded px-2 text-[11px] disabled:cursor-not-allowed disabled:opacity-50',
+              'managed-browser-tab group flex items-center gap-1.5 h-6 min-w-[120px] max-w-[220px] rounded px-1 text-[11px]',
               tab.tabId === activeTabId
                 ? 'managed-browser-tab-active shadow-sm'
                 : 'managed-browser-tab-inactive',
             )}
-            aria-label={`切换到 ${tab.title || '新建标签页'}${tab.openedByAgent ? '（由 Agent 创建）' : ''}`}
           >
-            <Globe2 className="size-3 shrink-0" />
-            <span className="truncate flex-1 text-left">{tab.title || '新建标签页'}</span>
-            {tab.openedByAgent && <span className="shrink-0 rounded bg-primary/10 px-1 py-px text-[9px] font-medium text-primary">Agent</span>}
-            <span
-              role="button"
-              tabIndex={0}
-              className="shrink-0 rounded p-0.5 opacity-50 hover:bg-muted hover:opacity-100"
-              aria-label={`关闭 ${tab.title || '标签'}`}
-              onClick={(event) => { event.stopPropagation(); void closeTab(tab.tabId) }}
-              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); void closeTab(tab.tabId) } }}
+            <button
+              type="button"
+              disabled={riskBlocked}
+              onClick={() => void selectTab(tab.tabId)}
+              onMouseDown={(event) => {
+                // 中键关闭标签，与顶部会话标签行为一致
+                if (event.button === 1) {
+                  event.preventDefault()
+                  void closeTab(tab.tabId)
+                }
+              }}
+              className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label={`切换到 ${tab.title || '新建标签页'}${tab.openedByAgent ? '（由 Agent 创建）' : ''}`}
+              aria-current={tab.tabId === activeTabId ? 'page' : undefined}
             >
-              <X className="size-3" />
-            </span>
-          </button>
+              <Globe2 className="size-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">{tab.title || '新建标签页'}</span>
+              {tab.openedByAgent && <span className="shrink-0 rounded bg-primary/10 px-1 py-px text-[9px] font-medium text-primary">Agent</span>}
+            </button>
+            <button
+              type="button"
+              disabled={riskBlocked}
+              className="shrink-0 rounded p-0.5 opacity-50 hover:bg-muted hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
+              aria-label={`关闭 ${tab.title || '标签'}`}
+              onClick={() => void closeTab(tab.tabId)}
+            >
+              <X className="size-3" aria-hidden="true" />
+            </button>
+          </div>
         ))}
         <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-6 shrink-0" disabled={riskBlocked} onClick={() => void createTab()} aria-label="新建浏览器标签"><Plus className="size-3.5" /></Button></TooltipTrigger><TooltipContent>新建标签</TooltipContent></Tooltip>
       </div>
@@ -439,12 +487,33 @@ export function BrowserPanel({ sessionId, state, avoidWindowControls = false, la
             onClearHistory={clearHistory}
           />
         ) : (
-          <BrowserViewport
-            key={`${activeTabId}:${layoutKey}`}
-            sessionId={sessionId}
-            tabId={activeTabId}
-            visible={browserVisible}
-          />
+          <div className="relative flex flex-1 min-h-0">
+            <BrowserViewport
+              key={`${activeTabId}:${layoutKey}`}
+              sessionId={sessionId}
+              tabId={activeTabId}
+              visible={browserVisible}
+            />
+            {/* 原生 WebContentsView 盖在 DOM 之上；data-browser-blocking 会让它自行隐藏，
+                否则错误态会被原生失败页遮住。 */}
+            {showLoadError && (
+              <div
+                data-browser-blocking
+                data-state="open"
+                className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-browser-host px-8 text-center"
+                role="alert"
+              >
+                <Globe2 className="size-6 text-muted-foreground" />
+                <p className="text-sm font-medium text-foreground">页面加载失败</p>
+                <p className="max-w-sm text-xs leading-5 text-muted-foreground">{loadError}</p>
+                {state?.url && <p className="max-w-sm truncate text-[10px] text-muted-foreground/70">{state.url}</p>}
+                <div className="mt-1 flex items-center gap-2">
+                  <Button type="button" size="sm" className="h-7 px-3 text-xs" onClick={() => void retryLoad()}>重试</Button>
+                  <Button type="button" size="sm" variant="ghost" className="h-7 px-3 text-xs" onClick={() => void copyUrl()}>复制地址</Button>
+                </div>
+              </div>
+            )}
+          </div>
         )
       ) : (
         <div className="flex flex-1 min-h-0 items-center justify-center bg-muted/15 px-8 text-center">

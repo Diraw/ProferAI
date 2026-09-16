@@ -336,6 +336,8 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
 
         case 'response.output_item.done':
           if (event.item?.type === 'function_call') {
+            // added 事件通常已发过 start；reader 会按 call ID 去重。若上游只发 done，
+            // 仍需在这里补发 start，保证工具参数有归属。
             events.push({
               type: 'tool_call_start',
               toolCallId: buildResponsesToolCallId(event.item, event.output_index),

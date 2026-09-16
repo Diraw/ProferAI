@@ -2813,15 +2813,18 @@ export function registerIpcHandlers(): void {
   )
 
   // 受管浏览器：renderer 只能投影状态和更新 slot 布局，不能取得 WebContents/CDP。
-  const assertMainRenderer = async (senderId: number): Promise<void> => {
-    const { getMainWindow } = await import('./index')
-    const mainWindow = getMainWindow()
-    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.id !== senderId) {
+  // 浏览器前台声明必须同步完成：布局 IPC 紧随其后，不能让异步鉴权把新布局
+  // 排在旧 foregroundSessionId 后面，否则切换会话后原生页面会停在空白背景。
+  const assertMainRenderer = (senderId: number): void => {
+    const mainWindow = mainWindowGetter()
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
       throw new Error('仅主窗口可以操作受管浏览器。')
     }
+    const webContents = mainWindow.webContents as typeof mainWindow.webContents & { id: number }
+    if (webContents.id !== senderId) throw new Error('仅主窗口可以操作受管浏览器。')
   }
-  const assertBrowserSessionAccess = async (senderId: number, sessionId: string): Promise<void> => {
-    await assertMainRenderer(senderId)
+  const assertBrowserSessionAccess = (senderId: number, sessionId: string): void => {
+    assertMainRenderer(senderId)
     const session = getAgentSessionMeta(sessionId)
     if (!session) throw new Error('Agent 会话不存在。')
     // 自动任务与协作子会话同样可以使用受管浏览器；仅校验会话仍存在。
@@ -2831,17 +2834,32 @@ export function registerIpcHandlers(): void {
     })
   }
 
+  ipcMain.on(
+    AGENT_IPC_CHANNELS.SET_BROWSER_FOREGROUND,
+    (event, sessionId: unknown): void => {
+      const targetSessionId = sessionId === null ? null : typeof sessionId === 'string' ? sessionId : undefined
+      if (targetSessionId === undefined) return
+      try {
+        if (targetSessionId === null) assertMainRenderer(event.sender.id)
+        else assertBrowserSessionAccess(event.sender.id, targetSessionId)
+        browserController.setForegroundSession(targetSessionId)
+      } catch {
+        // 单向 IPC 没有调用方可接收错误；非法或过期声明直接丢弃。
+      }
+    },
+  )
+
   ipcMain.handle(
     AGENT_IPC_CHANNELS.OPEN_BROWSER,
     async (event, sessionId: string): Promise<BrowserViewState> => {
-      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      assertBrowserSessionAccess(event.sender.id, sessionId)
       return browserController.open(sessionId)
     },
   )
   ipcMain.handle(
     AGENT_IPC_CHANNELS.GET_BROWSER_STATE,
     async (event, sessionId: string): Promise<BrowserViewState | null> => {
-      await assertBrowserSessionAccess(event.sender.id, sessionId)
+      assertBrowserSessionAccess(event.sender.id, sessionId)
       return browserController.getState(sessionId)
     },
   )
@@ -2860,15 +2878,18 @@ export function registerIpcHandlers(): void {
       )
         return
       // 保留原有主窗口/session 校验；布局通道单向发送，但不牺牲 IPC 鉴权。
-      void assertBrowserSessionAccess(event.sender.id, layout.sessionId)
-        .then(() => browserController.setLayout(layout))
-        .catch(() => undefined)
+      try {
+        assertBrowserSessionAccess(event.sender.id, layout.sessionId)
+        browserController.setLayout(layout)
+      } catch {
+        // 单向 IPC 没有调用方可接收错误；非法或过期布局直接丢弃。
+      }
     },
   )
   ipcMain.handle(
     AGENT_IPC_CHANNELS.NAVIGATE_BROWSER,
     async (event, input: BrowserNavigateInput): Promise<BrowserViewState> => {
-      await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+      assertBrowserSessionAccess(event.sender.id, input.sessionId)
       return browserController.navigateDisplay(input.sessionId, input.url, input.tabId)
     },
   )

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { MessageSquarePlus, Quote } from 'lucide-react'
 
 interface SelectionActionPopoverProps {
@@ -86,7 +87,7 @@ export function SelectionActionPopover({
     }
   }, [x, y, direction])
 
-  return (
+  return createPortal(
     <div
       ref={rootRef}
       data-selection-action-popover
@@ -114,6 +115,7 @@ export function SelectionActionPopover({
           </button>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

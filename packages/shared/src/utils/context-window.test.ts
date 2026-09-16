@@ -9,7 +9,10 @@ import {
   isNextGeneration1MContextModel,
   normalizeContextModelId,
   resolveAgentSdkModelId,
+  resolveAgentSdk1MSelection,
   resolveContextWindowFromModelUsage,
+  resolveOneMillionContextDecision,
+  strip1MContextSuffix,
   supports1MContext,
   supportsVerified1MContext,
 } from './context-window'
@@ -211,5 +214,76 @@ describe('多模型 result 上下文窗口解析', () => {
     expect(resolveContextWindowFromModelUsage({
       'glm-x-preview': {},
     }, 'glm-x-preview[1m]')).toBe(ONE_MILLION_CONTEXT_WINDOW)
+  })
+})
+
+describe('渠道模型 1M 三态偏好', () => {
+  test('Given 已验证组合未手动设置 When 解析 Then 回落到自动判定', () => {
+    expect(resolveOneMillionContextDecision('deepseek-v4-pro', 'deepseek', undefined)).toEqual({
+      enabled: true,
+      source: 'auto',
+      autoEnabled: true,
+    })
+  })
+
+  test('Given 未验证的第三方网关 When 强制开启 Then 生效且标记来源', () => {
+    expect(resolveOneMillionContextDecision('deepseek-v4-pro', 'custom', true)).toEqual({
+      enabled: true,
+      source: 'forced-on',
+      autoEnabled: false,
+    })
+  })
+
+  test('Given 已验证组合 When 手动关闭 Then 按非 1M 处理', () => {
+    expect(resolveOneMillionContextDecision('deepseek-v4-pro', 'deepseek', false)).toEqual({
+      enabled: false,
+      source: 'forced-off',
+      autoEnabled: true,
+    })
+  })
+
+  test('Given 缺省的 null When 解析 Then 等同于未设置', () => {
+    expect(resolveOneMillionContextDecision('deepseek-v4-pro', 'deepseek', null).source).toBe('auto')
+  })
+})
+
+describe('Agent SDK 1M 选择（模型 ID + beta 同步）', () => {
+  test('Given 模型 ID 带 SDK 专用后缀 When 去除 Then 只去掉 [1m] 后缀', () => {
+    expect(strip1MContextSuffix('deepseek-v4-pro[1m]')).toBe('deepseek-v4-pro')
+    expect(strip1MContextSuffix('gateway/deepseek-v4-flash[1M]')).toBe('gateway/deepseek-v4-flash')
+    // 网关路径前缀必须保留：标题生成等请求需要完整真实 ID
+    expect(strip1MContextSuffix('gateway/deepseek-v4-pro')).toBe('gateway/deepseek-v4-pro')
+  })
+
+  test('Given 已验证组合 When 未手动设置 Then 追加后缀并开启 beta', () => {
+    expect(resolveAgentSdk1MSelection('deepseek-v4-pro', 'deepseek')).toEqual({
+      modelId: 'deepseek-v4-pro[1m]',
+      oneMillionContextEnabled: true,
+      source: 'auto',
+    })
+  })
+
+  test('Given 未验证网关 When 强制开启 Then 也追加后缀并开启 beta', () => {
+    expect(resolveAgentSdk1MSelection('glm-4.6', 'custom', true)).toEqual({
+      modelId: 'glm-4.6[1m]',
+      oneMillionContextEnabled: true,
+      source: 'forced-on',
+    })
+  })
+
+  test('Given 已验证组合 When 手动关闭 Then 不改模型 ID 也不发 beta', () => {
+    expect(resolveAgentSdk1MSelection('deepseek-v4-pro', 'deepseek', false)).toEqual({
+      modelId: 'deepseek-v4-pro',
+      oneMillionContextEnabled: false,
+      source: 'forced-off',
+    })
+  })
+
+  test('Given 模型 ID 已带 [1m] When 自动判定生效 Then 不重复追加且补上 beta', () => {
+    expect(resolveAgentSdk1MSelection('deepseek-v4-pro[1m]', 'deepseek')).toEqual({
+      modelId: 'deepseek-v4-pro[1m]',
+      oneMillionContextEnabled: true,
+      source: 'auto',
+    })
   })
 })

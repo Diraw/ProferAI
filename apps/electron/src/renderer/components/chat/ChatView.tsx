@@ -352,9 +352,11 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
     }
 
     // 初始化当前对话的流式状态
+    const runId = crypto.randomUUID()
     setStreamingStates((prev) => {
       const map = new Map(prev)
       map.set(conversationId, {
+        runId,
         streaming: true,
         content: '',
         reasoning: '',
@@ -380,6 +382,7 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
 
     const input: ChatSendInput = {
       conversationId,
+      runId,
       userMessage: content,
       messageHistory: [], // 后端已改为从磁盘读取完整历史，无需前端传入
       channelId: selectedModel.channelId,
@@ -722,14 +725,12 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
   }, [conversationId])
 
   return (
-    <div className="flex h-full min-h-0 overflow-hidden">
+    <div className="flex h-full overflow-hidden">
       {/* 主内容区域 */}
-      <div data-profer-navigation-region="conversation" tabIndex={-1} className="flex flex-col h-full min-h-0 flex-1 min-w-0">
+      <div data-profer-navigation-region="conversation" tabIndex={-1} className="flex flex-col h-full flex-1 min-w-0">
         {/* Header 在 max-w 外，按钮可到达最右侧 */}
-        <div className="shrink-0">
-          <ChatHeader conversation={conversation} onOpenHistory={() => setHistoryDrawerOpen(true)} />
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col w-full max-w-[min(72rem,100%)] mx-auto overflow-hidden">
+        <ChatHeader conversation={conversation} onOpenHistory={() => setHistoryDrawerOpen(true)} />
+        <div className="flex flex-col flex-1 w-full max-w-[min(72rem,100%)] mx-auto overflow-hidden min-h-0">
           {/* 中间：消息区域 */}
           <ChatMessages
             conversationId={conversationId}
@@ -756,7 +757,6 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
 
           {/* 错误提示 */}
           {chatError && (
-            <div className="shrink-0">
             <div className={`mx-4 mb-2 px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 ${isInsufficientCredits ? 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400' : 'bg-destructive/10 text-destructive'}`}>
               {isInsufficientCredits ? <Wallet className="size-4 shrink-0" /> : <AlertCircle className="size-4 shrink-0" />}
               <span className="flex-1 break-all">{chatError}</span>
@@ -786,28 +786,23 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
                 <X className="size-3.5" />
               </button>
             </div>
-            </div>
           )}
 
           {/* Agent 模式推荐横幅 */}
-          <div className="shrink-0">
-            <AgentRecommendBanner />
-          </div>
+          <AgentRecommendBanner />
 
           {/* 底部：输入框 */}
-          <div className="shrink-0">
-            <ChatInput
-              conversationId={conversationId}
-              streaming={isStreaming}
-              pendingAttachments={pendingAttachments}
-              onSetPendingAttachments={setPendingAttachments}
-              pendingKnowledgeReferences={pendingKnowledgeReferences}
-              onSetPendingKnowledgeReferences={setPendingKnowledgeReferences}
-              onSend={handleSend}
-              onStop={handleStop}
-              onClearContext={handleClearContext}
-            />
-          </div>
+          <ChatInput
+            conversationId={conversationId}
+            streaming={isStreaming}
+            pendingAttachments={pendingAttachments}
+            onSetPendingAttachments={setPendingAttachments}
+            pendingKnowledgeReferences={pendingKnowledgeReferences}
+            onSetPendingKnowledgeReferences={setPendingKnowledgeReferences}
+            onSend={handleSend}
+            onStop={handleStop}
+            onClearContext={handleClearContext}
+          />
         </div>
       </div>
 

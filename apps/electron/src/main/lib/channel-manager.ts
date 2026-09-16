@@ -6,7 +6,7 @@
  * 数据持久化到 ~/.proma/channels.json。
  */
 
-import { readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { getChannelsPath } from './config-paths'
 import { encryptToken, decryptToken } from './token-crypto'
@@ -23,7 +23,7 @@ import type {
   ProviderType,
   XaiOAuthCredentials,
 } from '@profer/shared'
-import { PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, isAgentEnabledForChannel, isCodexCredentialExpired, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
+import { isAgentEnabledForChannel, isCodexCredentialExpired, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { normalizeBaseUrl, normalizeAnthropicProviderUrl, normalizeOpenAIBaseUrlForSdk, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
@@ -101,6 +101,28 @@ function withPlanQuotaTimeout(init: RequestInit): RequestInit {
 
 export function resolveChannelAgentBaseUrl(channel: Pick<Channel, 'provider' | 'baseUrl' | 'agentBaseUrl'>): string | undefined {
   return inferAgentBaseUrl(channel.provider, channel.baseUrl, channel.agentBaseUrl)
+}
+
+/**
+ * 合并服务端下发的渠道模型与本地状态。
+ *
+ * 服务端只负责「有哪些模型」，以下两项属于用户本地决定，不得被同步洗掉：
+ * - 模型级 enabled（用户启停）
+ * - 模型上的 1M 勾选（context1m）
+ */
+export function mergeServerChannelModels(
+  serverModels: readonly Partial<ChannelModel>[],
+  localModels: readonly ChannelModel[] | undefined,
+): ChannelModel[] {
+  return serverModels.map((model) => {
+    const modelKey = model.id ?? model.name
+    const localModel = localModels?.find((candidate) => candidate.id === modelKey)
+    return {
+      ...model,
+      enabled: localModel ? localModel.enabled : model.enabled !== false,
+      ...(localModel?.context1m !== undefined && { context1m: localModel.context1m }),
+    } as ChannelModel
+  })
 }
 
 /**
@@ -185,23 +207,6 @@ function decryptKey(encryptedKey: string): string {
 export function getChannelsLogoutBackupPath(accountId: string): string {
   const safeId = accountId.replace(/[^A-Za-z0-9._-]/g, '_')
   return `${getChannelsPath()}.logout-backup-${safeId}`
-}
-
-/**
- * 判断是否存在待恢复的登出备份。
- *
- * 登出后渲染进程仍会刷新一次渠道列表；如果此时自动创建 DeepSeek
- * 占位渠道，登录恢复会误判“当前已有渠道”而跳过真正的备份。
- */
-export function hasPendingLogoutChannelBackup(): boolean {
-  const channelsPath = getChannelsPath()
-  const path = require('node:path') as typeof import('node:path')
-  const prefix = `${path.basename(channelsPath)}.logout-backup-`
-  try {
-    return readdirSync(path.dirname(channelsPath)).some((name) => name.startsWith(prefix))
-  } catch {
-    return false
-  }
 }
 
 /** 登出备份只保存用户自配渠道，官方渠道由登录后的服务端同步重新生成。 */
@@ -419,12 +424,10 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
   const config: ChannelsConfig = { version: 1, channels: [...localChannels] }
 
   for (const ch of data.channels) {
-    // 本地已有同 ID 渠道时：保留用户启停状态（enabled + 模型级 enabled）
+    // 本地已有同 ID 渠道时：保留用户启停状态（enabled + 模型级 enabled）与模型上的 1M 偏好，
+    // 否则一次服务端同步就会把用户在渠道配置里的 1M 勾选洗掉。
     const localExisting = existingConfig.channels.find((c) => c.id === ch.id)
-    const mergedModels = ch.models.map((m: any) => {
-      const localModel = localExisting?.models?.find((lm: any) => lm.id === (m.id || m.name))
-      return { ...m, enabled: localModel ? localModel.enabled : (m.enabled !== false) }
-    })
+    const mergedModels = mergeServerChannelModels(ch.models, localExisting?.models)
     const result = normalizeChannelForCurrentSchema({
       id: ch.id,
       name: ch.name,
@@ -497,42 +500,13 @@ export function canSelfConfig(): boolean {
  * 获取所有渠道
  *
  * 返回的渠道中 apiKey 保持加密状态。
- * 首次调用时，如果没有任何 DeepSeek 渠道，自动创建预设渠道。
+ *
+ * 渠道与模型只来自「用户自配」或「服务端下发」两种来源：这里不生成任何占位渠道，
+ * 也不预置模型清单——替用户假设他要使用某个供应商，会让他看到从未配置过的渠道，
+ * 并让预置清单冒充真实的端点能力。模型清单由渠道表单从供应商端点发现后写入。
  */
 export function listChannels(): Channel[] {
-  const config = readConfig()
-
-  // 登出后如果存在待恢复备份，不能创建占位渠道，否则会让登录恢复误判为“已有渠道”。
-  const hasPendingLogoutBackup = hasPendingLogoutChannelBackup()
-
-  // 首次使用：如果没有 DeepSeek 渠道，自动创建预设
-  const hasDeepSeek = config.channels.some(
-    (c) => c.provider === 'deepseek' || c.baseUrl.includes('api.deepseek.com'),
-  )
-  if (!hasDeepSeek && !hasPendingLogoutBackup) {
-    const now = Date.now()
-    const presetChannel: Channel = {
-      id: randomUUID(),
-      name: 'DeepSeek',
-      provider: 'deepseek',
-      baseUrl: PROVIDER_DEFAULT_URLS.deepseek,
-      agentBaseUrl: PROVIDER_DEFAULT_AGENT_URLS.deepseek,
-      apiKey: encryptApiKey(''),
-      models: [
-        { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true },
-        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', enabled: true },
-      ],
-      enabled: false,
-      createdAt: now,
-      updatedAt: now,
-    }
-    config.channels.push(presetChannel)
-    writeConfig(config)
-    console.log('[渠道管理] 已自动创建 DeepSeek 预设渠道')
-    return config.channels
-  }
-
-  return config.channels
+  return readConfig().channels
 }
 
 /**
@@ -564,6 +538,7 @@ export function createChannel(input: ChannelCreateInput): Channel {
     ...(input.provider === 'xai' && input.credentialMode ? { credentialMode: input.credentialMode } : {}),
     ...(input.provider === 'xai' && input.agentExperimentalEnabled ? { agentExperimentalEnabled: true } : {}),
     agentBaseUrl: input.agentBaseUrl,
+    ...(input.agentRuntimes ? { agentRuntimes: input.agentRuntimes } : {}),
     apiKey: encryptApiKey(input.apiKey),
     models: input.models,
     enabled: input.enabled,
@@ -591,6 +566,7 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
   if (isOfficialManagedChannel({ id })) {
     if (input.name !== undefined || input.provider !== undefined ||
         input.baseUrl !== undefined || input.agentBaseUrl !== undefined ||
+        input.agentRuntimes !== undefined ||
         input.apiKey !== undefined) {
       throw new Error('官方渠道由平台统一管理，不可修改')
     }
@@ -613,6 +589,7 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
       input.provider !== undefined ||
       input.baseUrl !== undefined ||
       input.agentBaseUrl !== undefined ||
+      input.agentRuntimes !== undefined ||
       input.credentialMode !== undefined ||
       input.agentExperimentalEnabled !== undefined ||
       input.apiKey !== undefined ||
@@ -644,15 +621,30 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
     }
   }
 
+  // Agent URL 属于按 Base URL 推导的派生值，历史实现把它单独持久化。若用户改了
+  // Base URL / 供应商但没显式指定 Agent URL，继续保留旧值会让 Agent 请求打到
+  // 上一个地址（典型现象：换了 Base URL 后 Agent 依旧请求不到）。此处丢弃派生值，
+  // 交给 normalizeChannelForCurrentSchema 按新配置重新推导。
+  const nextProvider = input.provider ?? existing.provider
+  const nextBaseUrl = input.baseUrl ?? existing.baseUrl
+  const endpointChanged = nextProvider !== existing.provider || nextBaseUrl !== existing.baseUrl
+  const nextAgentBaseUrl = input.agentBaseUrl !== undefined
+    ? input.agentBaseUrl
+    : endpointChanged
+      ? undefined
+      : existing.agentBaseUrl
+
   const rawUpdated: Channel = {
     ...existing,
     name: input.name ?? existing.name,
-    provider: input.provider ?? existing.provider,
-    baseUrl: input.baseUrl ?? existing.baseUrl,
+    provider: nextProvider,
+    baseUrl: nextBaseUrl,
     ...(input.provider === 'xai'
       ? { credentialMode: input.credentialMode ?? existing.credentialMode, agentExperimentalEnabled: input.agentExperimentalEnabled ?? existing.agentExperimentalEnabled }
       : { credentialMode: undefined, agentExperimentalEnabled: undefined }),
-    agentBaseUrl: input.agentBaseUrl !== undefined ? input.agentBaseUrl : existing.agentBaseUrl,
+    agentBaseUrl: nextAgentBaseUrl,
+    // 未显式传入时保留原勾选；老配置的推导由 normalizeChannelForCurrentSchema 负责。
+    agentRuntimes: input.agentRuntimes !== undefined ? input.agentRuntimes : existing.agentRuntimes,
     apiKey: input.apiKey ? encryptApiKey(input.apiKey) : existing.apiKey,
     models: input.models ?? existing.models,
     enabled: input.enabled ?? existing.enabled,

@@ -6,7 +6,7 @@
  */
 
 import * as React from 'react'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Volume2, Plus, X, Music, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -57,7 +57,23 @@ import {
   updateLongTextPasteAsAttachmentEnabled,
   richTextRenderingEnabledAtom,
   updateRichTextRenderingEnabled,
+  composerCompactModeAtom,
+  updateComposerCompactMode,
 } from '@/atoms/ui-preferences'
+import {
+  COMPACT_MAX_HEIGHT_RANGE,
+  COMPACT_MIN_HEIGHT_RANGE,
+  COMPACT_VIEWPORT_HEIGHT_RANGE,
+  COMPOSER_EDITOR_MIN_HEIGHT,
+  COMPOSER_TIER_HEIGHTS,
+  DEFAULT_COMPACT_MAX_HEIGHT,
+  DEFAULT_COMPACT_MIN_HEIGHT,
+  DEFAULT_COMPACT_VIEWPORT_HEIGHT,
+  normalizeCompactMaxHeight,
+  normalizeCompactMinHeight,
+  normalizeCompactViewportHeight,
+} from '@/lib/composer-compact-height'
+import { useWindowInnerHeight } from '@/hooks/use-window-inner-height'
 import { cn } from '@/lib/utils'
 import { detectIsWindows } from '@/lib/platform'
 import { shortcutOverridesAtom } from '@/atoms/shortcut-atoms'
@@ -75,6 +91,18 @@ export function GeneralSettings(): React.ReactElement {
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
   const [longTextPasteAsAttachmentEnabled, setLongTextPasteAsAttachmentEnabled] = useAtom(longTextPasteAsAttachmentEnabledAtom)
   const [richTextRenderingEnabled, setRichTextRenderingEnabled] = useAtom(richTextRenderingEnabledAtom)
+  const setComposerCompactMode = useSetAtom(composerCompactModeAtom)
+  // 「矮窗口压缩输入框」三个数值字段用本地字符串态：允许中途输入空值/非法值，失焦时归一化落盘
+  const [compactViewportHeightDraft, setCompactViewportHeightDraft] = React.useState(String(DEFAULT_COMPACT_VIEWPORT_HEIGHT))
+  const [compactMinHeightDraft, setCompactMinHeightDraft] = React.useState(String(DEFAULT_COMPACT_MIN_HEIGHT))
+  const [compactMaxHeightDraft, setCompactMaxHeightDraft] = React.useState(String(DEFAULT_COMPACT_MAX_HEIGHT))
+  // 实时窗口内高：直接告诉用户当前是否达到触发条件（窗口最大化时高度可能远高于阈值）
+  const viewportHeight = useWindowInnerHeight()
+  // 阈值草稿是否已触发紧凑档（仅用于文案提示；实际切换还带 60px 退出迟滞）
+  const compactThresholdDraftNumber = Number(compactViewportHeightDraft.trim())
+  const compactTriggered = Number.isFinite(compactThresholdDraftNumber)
+    && compactThresholdDraftNumber > 0
+    && viewportHeight < compactThresholdDraftNumber
   const [shellRuntimeStatus, setShellRuntimeStatus] = React.useState<RuntimeStatus | null>(null)
   const [archiveAfterDays, setArchiveAfterDays] = React.useState<number>(7)
   const [autoLaunch, setAutoLaunch] = React.useState(false)
@@ -201,6 +229,9 @@ export function GeneralSettings(): React.ReactElement {
       setQuickTaskEnabled(settings.quickTaskEnabled === true)
       setShellPreference(settings.agentShellPreference ?? 'auto')
       setBrowserHomeUrl(settings.browserHomeUrl ?? '')
+      setCompactViewportHeightDraft(String(normalizeCompactViewportHeight(settings.inputCompactViewportHeight)))
+      setCompactMinHeightDraft(String(normalizeCompactMinHeight(settings.inputCompactMinHeight)))
+      setCompactMaxHeightDraft(String(normalizeCompactMaxHeight(settings.inputCompactMaxHeight)))
     }).catch(console.error)
 
     // 登录项以系统实际状态为准，不使用可能过期的配置缓存。
@@ -234,6 +265,36 @@ export function GeneralSettings(): React.ReactElement {
     } finally {
       setAutoLaunchBusy(false)
     }
+  }
+
+  /**
+   * 保存「触发窗口高度」（失焦时归一化落盘）。
+   * 空输入视为回退默认；0 是合法值，表示关闭紧凑档。
+   */
+  const handleCompactViewportHeightBlur = async (): Promise<void> => {
+    const raw = compactViewportHeightDraft.trim()
+    const normalized = normalizeCompactViewportHeight(raw === '' ? undefined : Number(raw))
+    setCompactViewportHeightDraft(String(normalized))
+    setComposerCompactMode((prev) => ({ ...prev, viewportHeight: normalized }))
+    await updateComposerCompactMode({ viewportHeight: normalized })
+  }
+
+  /** 保存「紧凑档输入框最小高度」（失焦时归一化落盘）。 */
+  const handleCompactMinHeightBlur = async (): Promise<void> => {
+    const raw = compactMinHeightDraft.trim()
+    const normalized = normalizeCompactMinHeight(raw === '' ? undefined : Number(raw))
+    setCompactMinHeightDraft(String(normalized))
+    setComposerCompactMode((prev) => ({ ...prev, minHeight: normalized }))
+    await updateComposerCompactMode({ minHeight: normalized })
+  }
+
+  /** 保存「紧凑档输入框上限」（失焦时归一化落盘）。 */
+  const handleCompactMaxHeightBlur = async (): Promise<void> => {
+    const raw = compactMaxHeightDraft.trim()
+    const normalized = normalizeCompactMaxHeight(raw === '' ? undefined : Number(raw))
+    setCompactMaxHeightDraft(String(normalized))
+    setComposerCompactMode((prev) => ({ ...prev, maxHeight: normalized }))
+    await updateComposerCompactMode({ maxHeight: normalized })
   }
 
   /** 更新归档天数 */
@@ -436,6 +497,33 @@ export function GeneralSettings(): React.ReactElement {
               setRichTextRenderingEnabled(checked)
               updateRichTextRenderingEnabled(checked)
             }}
+          />
+          <SettingsInput
+            label="矮窗口压缩输入框"
+            description={`窗口内高（px，${COMPACT_VIEWPORT_HEIGHT_RANGE.min}–${COMPACT_VIEWPORT_HEIGHT_RANGE.max}）低于该值时输入框整体变矮，给消息区让出空间；0 = 关闭。默认 ${DEFAULT_COMPACT_VIEWPORT_HEIGHT}。当前窗口内高 ${viewportHeight}px${compactTriggered ? '，已进入紧凑档' : '，未触发'}（退出需回到阈值 + 60px 以上）`}
+            type="number"
+            value={compactViewportHeightDraft}
+            onChange={setCompactViewportHeightDraft}
+            onBlur={handleCompactViewportHeightBlur}
+            placeholder={String(DEFAULT_COMPACT_VIEWPORT_HEIGHT)}
+          />
+          <SettingsInput
+            label="紧凑档输入框高度"
+            description={`紧凑档下输入框空内容时的高度（px，${COMPACT_MIN_HEIGHT_RANGE.min}–${COMPACT_MIN_HEIGHT_RANGE.max}）；常规为 ${COMPOSER_EDITOR_MIN_HEIGHT}，默认压到 ${DEFAULT_COMPACT_MIN_HEIGHT}（变矮约 ${COMPOSER_EDITOR_MIN_HEIGHT - DEFAULT_COMPACT_MIN_HEIGHT}px）。这就是“看得见”的变矮量`}
+            type="number"
+            value={compactMinHeightDraft}
+            onChange={setCompactMinHeightDraft}
+            onBlur={handleCompactMinHeightBlur}
+            placeholder={String(DEFAULT_COMPACT_MIN_HEIGHT)}
+          />
+          <SettingsInput
+            label="紧凑档输入框上限"
+            description={`紧凑档下输入框最大高度（px，${COMPACT_MAX_HEIGHT_RANGE.min}–${COMPACT_MAX_HEIGHT_RANGE.max}）；输入超过 5 行时的展开档为该值的 2 倍（不超过 ${COMPOSER_TIER_HEIGHTS.expanded}）。默认 ${DEFAULT_COMPACT_MAX_HEIGHT}`}
+            type="number"
+            value={compactMaxHeightDraft}
+            onChange={setCompactMaxHeightDraft}
+            onBlur={handleCompactMaxHeightBlur}
+            placeholder={String(DEFAULT_COMPACT_MAX_HEIGHT)}
           />
         </SettingsCard>
       </SettingsSection>

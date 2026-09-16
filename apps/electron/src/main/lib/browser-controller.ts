@@ -1,7 +1,7 @@
 import { app, BrowserWindow, View, WebContentsView, session as electronSession, clipboard as electronClipboard, type Session } from 'electron'
 import type { BrowserDownloadBlockedEvent, BrowserExecutionSource, BrowserOperationStatus, BrowserTraceAction, BrowserTraceItem, BrowserTranslateResult, BrowserViewLayout, BrowserViewState, BrowserTabListResult, BrowserTabState } from '@profer/shared'
 import { AGENT_IPC_CHANNELS, promoteMru, removeMruId, selectMruFallbackId } from '@profer/shared'
-import { assertSafeBrowserDestination, assertSafeBrowserUrl } from './browser-policy'
+import { assertSafeBrowserDestination, assertSafeBrowserUrl, isSafeBrowserSubresourceUrl } from './browser-policy'
 import { createAuthorizedPreviewUrl, isAuthorizedPreviewProtocol } from './browser-preview-service'
 import { handleProferFileRequest } from './local-file-protocol'
 import { BrowserCdpTimeoutError, BrowserOperationAbortedError, BROWSER_OBSERVE_TIMEOUT_MS, resolveBrowserObserveAxDepth, throwIfBrowserOperationAborted, withBrowserCdpTimeout } from './browser-cdp'
@@ -56,6 +56,8 @@ type BrowserTabRecord = {
   openedByAgent: boolean
   /** 用于在超限时优先回收最久未使用的 Agent 标签。 */
   lastActivityAt: number
+  /** 最近一次已通过策略的主框架导航目标；错误页不应污染地址栏和 Agent 状态。 */
+  lastRequestedUrl: string | null
   zoomFactor: number
   highlightTimer?: ReturnType<typeof setTimeout>
 }
@@ -127,7 +129,7 @@ export interface BrowserObservation {
 }
 
 function emptyTabState(tabId: string): BrowserTabState {
-  return { tabId, url: '', title: '新建标签页', loading: false, visible: false, canGoBack: false, canGoForward: false, zoomFactor: 1, translated: false, trace: [] }
+  return { tabId, url: '', title: '新建标签页', loading: false, visible: false, canGoBack: false, canGoForward: false, zoomFactor: 1, translated: false, loadError: null, trace: [] }
 }
 
 function rememberInvalidatedLayoutRenderer(browserSession: BrowserSessionRecord, rendererInstanceId: string): void {
@@ -311,6 +313,7 @@ export class BrowserController {
       canGoForward: active.state.canGoForward,
       zoomFactor: active.zoomFactor,
       translated: active.state.translated,
+      loadError: active.state.loadError,
       trace,
       activity: trace.at(-1) ?? null,
     }
@@ -375,8 +378,12 @@ export class BrowserController {
     // 再 emit 会因 activeTabId 指向已关闭标签而让主进程抛出未捕获异常。
     if (browserSession.tabs.get(tab.tabId) !== tab || tab.view.webContents.isDestroyed()) return
     const contents = tab.view.webContents
-    tab.state.url = contents.getURL()
-    tab.state.title = contents.getTitle() || '未命名页面'
+    const currentUrl = contents.getURL()
+    // 导航失败时 Chromium 可能把 WebContents URL 改成 chrome-error://chromewebdata/；
+    // 这不是可操作的用户地址，保留上一次合法目标，防止状态回推污染地址栏。
+    if (!currentUrl.startsWith('chrome-error://')) tab.state.url = currentUrl
+    if (!tab.state.url && tab.lastRequestedUrl) tab.state.url = tab.lastRequestedUrl
+    tab.state.title = contents.getTitle() || (currentUrl.startsWith('chrome-error://') ? '页面加载失败' : '未命名页面')
     tab.state.loading = contents.isLoading()
     try {
       tab.state.canGoBack = contents.canGoBack()
@@ -491,8 +498,19 @@ export class BrowserController {
     browserSession.webRequest.onBeforeRequest((details, callback) => {
       let protocol = ''
       try { protocol = new URL(details.url).protocol } catch { callback({ cancel: true }); return }
+      // 页面里的图片、脚本、字体和 XHR 可能来自不同 CDN；对每个子资源重复做
+      // DNS 查询会把正常页面变成“资源全被取消”的白屏。主框架仍做完整公网校验，
+      // 子资源只拦截明显的非 HTTP(S) 和同步可判定的私网地址。
       if (protocol !== 'http:' && protocol !== 'https:') {
         callback({ cancel: false })
+        return
+      }
+      if (details.resourceType !== 'mainFrame') {
+        try {
+          callback({ cancel: !isSafeBrowserSubresourceUrl(details.url) })
+        } catch {
+          callback({ cancel: true })
+        }
         return
       }
       void assertSafeBrowserDestination(details.url)
@@ -586,6 +604,7 @@ export class BrowserController {
       isLocalPreview,
       openedByAgent: claimAsAgent,
       lastActivityAt: Date.now(),
+      lastRequestedUrl: null,
       zoomFactor: 1,
     }
     browserSession.hostView.addChildView(view)
@@ -602,15 +621,29 @@ export class BrowserController {
       this.invalidateTabDocument(tab)
       try {
         if (isAuthorizedPreviewProtocol(url) && tab.isLocalPreview) return
-        assertSafeBrowserUrl(url)
+        tab.lastRequestedUrl = assertSafeBrowserUrl(url)
       } catch {
         event.preventDefault()
         this.trace(browserSession, tab, 'navigate', '已阻止不安全的页面跳转', 'failed')
       }
     })
+    view.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedURL, isMainFrame) => {
+      if (!isMainFrame || this.sessions.get(browserSession.sessionId) !== browserSession || !browserSession.tabs.has(tab.tabId)) return
+      // Chromium 失败页的 chrome-error:// URL 不属于受管浏览器地址；只保留导航前
+      // 已通过策略的目标，让用户可以直接重试，也避免内部协议进入 BrowserNavigate。
+      tab.state.loading = false
+      // -3（ERR_ABORTED）是“旧导航被新导航/停止取代”的正常取消，不是页面失败；
+      // 把它当成错误态会让快速导航和点 Stop 时面板弹出假的失败提示。
+      tab.state.loadError = errorCode === -3
+        ? null
+        : `${errorDescription || '页面加载失败'}（${errorCode}）`
+      this.emit(browserSession)
+    })
     view.webContents.on('did-start-loading', () => {
       // 新文档会重建 DOM，翻译标记与原文备份随之丢失，翻译态复位。
       tab.state.translated = false
+      // 重新开始加载意味着用户已重试或发起了新导航，旧的失败态不应继续遮住页面。
+      tab.state.loadError = null
       this.invalidateTabDocument(tab)
       this.updateNavigationState(browserSession, tab)
     })
@@ -620,7 +653,7 @@ export class BrowserController {
       this.updateNavigationState(browserSession, tab)
     })
     view.webContents.on('page-title-updated', () => this.updateNavigationState(browserSession, tab))
-    view.webContents.on('did-navigate', () => { this.invalidateTabDocument(tab); this.updateNavigationState(browserSession, tab) })
+    view.webContents.on('did-navigate', () => { tab.state.loadError = null; this.invalidateTabDocument(tab); this.updateNavigationState(browserSession, tab) })
     view.webContents.on('did-navigate-in-page', () => { this.invalidateTabDocument(tab); this.updateNavigationState(browserSession, tab) })
     view.webContents.on('destroyed', () => {
       if (this.sessions.get(browserSession.sessionId) !== browserSession || !browserSession.tabs.has(tab.tabId)) return
@@ -719,11 +752,9 @@ export class BrowserController {
 
   open(sessionId: string): BrowserViewState {
     // 用户从界面手动打开浏览器时，初始标签不应伪装成 Agent 标签。
-    // 这是用户面板的显式打开动作，必须无条件重新声明当前 session 的前台所有权：
-    // 主进程重启 / renderer 重载后旧的 foregroundSessionId 可能仍指向已销毁的 View，
-    // 仅在它为 null 时恢复会让新创建的网页永远被布局判定为后台而不显示。
+    // 前台所有权由 IPC 层的 SET_BROWSER_FOREGROUND 序号统一仲裁；这里仅创建/读取
+    // 当前浏览器状态，避免 open 的异步鉴权晚于 Chat/其他会话切换时重新抢回前台。
     const browserSession = this.getOrCreateSession(sessionId, [], false)
-    this.setForegroundSession(sessionId)
     this.markUserBrowserContext(browserSession)
     this.emit(browserSession)
     return structuredClone(this.buildState(browserSession))
@@ -875,26 +906,30 @@ export class BrowserController {
     browserSession.activeTabId = tab.tabId
     browserSession.tabMru = promoteMru(browserSession.tabMru, tab.tabId)
     for (const other of browserSession.tabs.values()) {
-      if (other.tabId !== tab.tabId) other.view.setVisible(false)
+      if (other.tabId !== tab.tabId) {
+        other.view.setVisible(false)
+        other.state.visible = false
+      }
     }
-    if (browserSession.lastPageBounds) {
-      tab.view.setBounds({
-        x: 0,
-        y: 0,
-        width: browserSession.lastPageBounds.width,
-        height: browserSession.lastPageBounds.height,
-      })
+    const pageBounds = browserSession.lastPageBounds
+    if (pageBounds) {
+      tab.view.setBounds({ x: 0, y: 0, width: pageBounds.width, height: pageBounds.height })
     }
     tab.view.webContents.setZoomFactor(tab.zoomFactor)
     const visible = browserSession.sessionId === this.foregroundSessionId
       && !!browserSession.lastViewportBounds
-      && !!browserSession.lastPageBounds
+      && !!pageBounds
+      && hasUsableBrowserBounds(pageBounds)
       && !!this.owner
       && !this.owner.isDestroyed()
       && this.owner.isVisible()
     if (visible) this.hideOtherBrowserSessions(browserSession.sessionId)
     browserSession.hostView.setVisible(visible)
     tab.view.setVisible(visible)
+    if (visible) {
+      // 标签切换不会重新挂载 BrowserViewport；强制刷新 native 合成，避免只看到背景色。
+      try { tab.view.webContents.invalidate() } catch { /* 页面可能已销毁 */ }
+    }
     if (tab.state.visible !== visible) tab.state.visible = visible
     this.emit(browserSession)
   }
@@ -1042,7 +1077,32 @@ export class BrowserController {
 
   private async loadUrl(tab: BrowserTabRecord, url: string, signal?: AbortSignal): Promise<void> {
     throwIfBrowserOperationAborted(signal)
-    await withBrowserCdpTimeout(() => tab.view.webContents.loadURL(url), 'Page.navigate', BROWSER_OBSERVE_TIMEOUT_MS + 3_000, signal)
+    const contents = tab.view.webContents
+    // loadURL 的 Promise 可能要等到子资源全部完成；页面主框架已经可用时就应
+    // 立即结束 BrowserNavigate，否则一个慢字体/CDN 会被误报为协议或导航失败。
+    await withBrowserCdpTimeout(() => new Promise<void>((resolve, reject) => {
+      let settled = false
+      const cleanup = (): void => {
+        contents.removeListener('did-navigate', onNavigate)
+        contents.removeListener('did-fail-load', onFail)
+      }
+      const finish = (callback: () => void): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        callback()
+      }
+      const onNavigate = (): void => {
+        // Electron 的 did-navigate 只针对主框架触发；子框架应使用 did-frame-navigate。
+        finish(resolve)
+      }
+      const onFail = (_event: Electron.Event, errorCode: number, description: string, _validatedURL: string, isMainFrame: boolean): void => {
+        if (isMainFrame) finish(() => reject(new Error(`页面导航失败（${errorCode}）：${description}`)))
+      }
+      contents.on('did-navigate', onNavigate)
+      contents.on('did-fail-load', onFail)
+      void contents.loadURL(url).catch((error: unknown) => finish(() => reject(error)))
+    }), 'Page.navigate', BROWSER_OBSERVE_TIMEOUT_MS + 3_000, signal)
   }
 
   async navigate(sessionId: string, url: string, tabId?: string, signal?: AbortSignal): Promise<BrowserViewState> {
@@ -1050,6 +1110,7 @@ export class BrowserController {
     this.assertRiskDisclaimerAcknowledged()
     const tab = this.getAgentTab(browserSession, tabId)
     const safeUrl = await assertSafeBrowserDestination(url)
+    tab.lastRequestedUrl = safeUrl
     const host = new URL(safeUrl).host
     return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
       tab.isLocalPreview = false
@@ -1104,6 +1165,7 @@ export class BrowserController {
     this.markUserBrowserContext(browserSession)
     const tab = this.getDisplayTab(browserSession, tabId)
     const safeUrl = await assertSafeBrowserDestination(url)
+    tab.lastRequestedUrl = safeUrl
     const host = new URL(safeUrl).host
     return this.runTabOperation(browserSession, tab, undefined, async () => {
       tab.isLocalPreview = false

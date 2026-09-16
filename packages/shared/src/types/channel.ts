@@ -140,6 +140,41 @@ export function isAgentCompatibleProvider(provider: ProviderType): boolean {
   return AGENT_COMPATIBLE_PROVIDERS.has(provider)
 }
 
+/** Agent 内核标识。 */
+export type AgentRuntimeMode = 'pi' | 'claude'
+
+/**
+ * 按现有 provider 规则推导渠支持的内核集合（老配置静默迁移用）。
+ *
+ * 必须与迁移前的行为等价，否则升级会翻车：
+ * - Pi 能用任何启用渠道（历史上 Pi 渠道不受白名单限制）。
+ * - Claude 仅能走 Anthropic 协议，沿用历史白名单；xAI 无 Anthropic 端点，
+ *   且编排层本身就拒绝 xAI + Claude，因此不给它 claude。
+ * - xAI 的 Pi 需要「启用实验性 Agent」开关。
+ */
+export function inferAgentRuntimeModes(
+  channel: Pick<Channel, 'provider' | 'agentExperimentalEnabled'>,
+): AgentRuntimeMode[] {
+  if (channel.provider === 'xai') {
+    return channel.agentExperimentalEnabled === true ? ['pi'] : []
+  }
+  return isAgentCompatibleProvider(channel.provider) ? ['pi', 'claude'] : ['pi']
+}
+
+/**
+ * 该渠道在指定 Agent 内核下是否可用。
+ *
+ * 勾选优先；缺失时回退到 provider 推导，保证未迁移的老配置行为不变。
+ */
+export function isChannelEnabledForRuntime(
+  channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'>,
+  runtime: AgentRuntimeMode,
+): boolean {
+  if (!channel.enabled) return false
+  const modes = channel.agentRuntimes ?? inferAgentRuntimeModes(channel)
+  return modes.includes(runtime)
+}
+
 /** 解析 xAI 渠道的认证模式；历史渠道按密文内容兼容识别。 */
 export function resolveXaiCredentialMode(mode: XaiCredentialMode | undefined, secret: string): XaiCredentialMode {
   // 结构化 OAuth 凭据优先，避免坏配置把 refresh token 当作 API Key 发到 Chat。
@@ -148,10 +183,11 @@ export function resolveXaiCredentialMode(mode: XaiCredentialMode | undefined, se
 }
 
 /** xAI API Key 模式可使用 Pi 原生 provider；订阅 OAuth 仅在显式实验开关开启时进入 Agent。 */
-export function isAgentEnabledForChannel(channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled'>): boolean {
-  if (!channel.enabled) return false
-  if (channel.provider === 'xai') return channel.agentExperimentalEnabled === true
-  return isAgentCompatibleProvider(channel.provider)
+/** @deprecated 语义上等价于「该渠道是否勾选了 Claude 内核」，保留供旧调用方使用。 */
+export function isAgentEnabledForChannel(
+  channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'>,
+): boolean {
+  return isChannelEnabledForRuntime(channel, 'claude')
 }
 
 
@@ -289,6 +325,13 @@ export interface ChannelModel {
   name: string
   /** 是否启用 */
   enabled: boolean
+  /**
+   * 1M 上下文偏好（三态，由渠道配置里的「1M」勾选控制）：
+   * - 缺省：按模型 + provider 白名单自动判定（历史行为）
+   * - true：强制开启（未验证的第三方网关也允许，能否真协商由端点决定）
+   * - false：强制关闭（即使模型 / 渠道验证支持也不按 1M 处理）
+   */
+  context1m?: boolean
   /** 来源标记：手动添加的模型在拉取供应商列表时保留，不会被覆盖清除 */
   source?: 'manual' | 'fetched'
   /** 服务端代管模式下，当前登录用户实际可见的模型倍率。 */
@@ -315,6 +358,13 @@ export interface Channel {
   agentExperimentalEnabled?: boolean
   /** Agent 模式 Anthropic 兼容端点（为空则自动推导） */
   agentBaseUrl?: string
+  /**
+   * 该渠道允许用于哪些 Agent 内核，由用户在配置页勾选。
+   *
+   * 目的是取消「按渠道类型推断能不能用」的门禁：能不能用由用户填写的地址与勾选决定。
+   * 缺失（undefined）表示尚未迁移的老配置，读取时按 provider 规则推导后静默写回。
+   */
+  agentRuntimes?: AgentRuntimeMode[]
   /** 加密后的 API Key（base64 编码） */
   apiKey: string
   /** 可用模型列表 */
@@ -343,6 +393,8 @@ export interface ChannelCreateInput {
   credentialMode?: XaiCredentialMode
   agentExperimentalEnabled?: boolean
   agentBaseUrl?: string
+  /** 该渠道允许用于哪些 Agent 内核；不传则按 provider 规则推导。 */
+  agentRuntimes?: AgentRuntimeMode[]
   /** 明文 API Key，主进程会加密后存储 */
   apiKey: string
   models: ChannelModel[]
@@ -359,6 +411,8 @@ export interface ChannelUpdateInput {
   credentialMode?: XaiCredentialMode
   agentExperimentalEnabled?: boolean
   agentBaseUrl?: string
+  /** 该渠道允许用于哪些 Agent 内核。 */
+  agentRuntimes?: AgentRuntimeMode[]
   /** 明文 API Key，为空字符串表示不更新 */
   apiKey?: string
   models?: ChannelModel[]

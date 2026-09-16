@@ -469,8 +469,6 @@ export function TurnFileMapProvider({ map, children }: { map?: Map<string, strin
 interface MessageResponseProps {
   /** Markdown 内容 */
   children: string
-  /** 流式阶段使用稳定的纯文本布局，避免未闭合 Markdown 语法反复改变 DOM 结构。 */
-  streaming?: boolean
   className?: string
   /** 基础目录路径，用于解析相对文件路径（如 Agent 会话工作目录） */
   basePath?: string
@@ -880,7 +878,7 @@ const MarkdownInlineCode = React.memo(function MarkdownInlineCode({
 
 /** 使用 react-markdown 渲染 assistant 消息内容，代码块使用 Shiki 语法高亮 */
 export const MessageResponse = React.memo(
-  function MessageResponse({ children, className, basePath, basePaths, remarkPlugins, streaming = false }: MessageResponseProps): React.ReactElement {
+  function MessageResponse({ children, className, basePath, basePaths, remarkPlugins }: MessageResponseProps): React.ReactElement {
     // 预处理后的 Markdown 文本（供 remarkTableSource 用 position 精确定位表格源码）
     const processed = React.useMemo(
       () => normalizeMarkdownEmphasisWhitespace(
@@ -910,23 +908,16 @@ export const MessageResponse = React.memo(
       table: MarkdownTable,
     }), [basePath, basePaths])
 
-    const containerClassName = cn(
-      'prose dark:prose-invert max-w-none text-[length:var(--md-preview-font-size,15px)]',
-      'prose-p:my-1.5 prose-p:leading-[1.6] prose-li:leading-[1.6] prose-pre:my-0 prose-headings:my-2 prose-hr:my-3',
-      '[&_.code-block-wrapper+.code-block-wrapper]:mt-4',
-      '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
-      className,
-    )
-
-    // 流式文本可能暂时处于未闭合的 code fence、表格、列表或 emphasis 中。
-    // 每个 chunk 都交给完整 Markdown AST 会让 DOM 结构在段落/代码块之间反复切换，
-    // 进而引起整条会话 reflow。流式阶段保持纯文本盒模型，完成后只重排一次。
-    if (streaming) {
-      return <div className={cn(containerClassName, 'whitespace-pre-wrap break-words')}>{processed}</div>
-    }
-
     return (
-      <div className={containerClassName}>
+      <div
+        className={cn(
+          'prose dark:prose-invert max-w-none text-[length:var(--md-preview-font-size,15px)]',
+          'prose-p:my-1.5 prose-p:leading-[1.6] prose-li:leading-[1.6] prose-pre:my-0 prose-headings:my-2 prose-hr:my-3',
+          '[&_.code-block-wrapper+.code-block-wrapper]:mt-4',
+          '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+          className
+        )}
+      >
         <Markdown
           remarkPlugins={mergedRemarkPlugins}
           rehypePlugins={REHYPE_PLUGINS}
@@ -942,8 +933,7 @@ export const MessageResponse = React.memo(
     prevProps.children === nextProps.children &&
     prevProps.basePath === nextProps.basePath &&
     prevProps.basePaths === nextProps.basePaths &&
-    prevProps.remarkPlugins === nextProps.remarkPlugins &&
-    prevProps.streaming === nextProps.streaming
+    prevProps.remarkPlugins === nextProps.remarkPlugins
 )
 
 // ===== UserMessageContent 可折叠用户消息 =====

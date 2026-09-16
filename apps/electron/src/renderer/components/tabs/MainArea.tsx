@@ -316,11 +316,15 @@ export function MainArea(): React.ReactElement {
             className="flex flex-col min-w-0 h-full relative"
             style={leftFlexStyle}
           >
-            {/* 无 TabBar 的全屏/空状态视图使用通用主内容宿主；右侧分栏打开时由其更高优先级接管。 */}
+            {/* 通用兜底宿主：凡是 TabBar 不持有窗口按钮的分支（定时任务表单、无 Tab
+                空态、以及所有全屏视图）都必须能提供按钮；页面自己声明的宿主
+                priority 更高时会自动接管（planning / agent-skills 均为 20）。
+                priority 5 < TabBar 的 10：相同优先级会让两个宿主争抢按钮（按注册
+                顺序决出），表现为按钮在两处之间跳位。兜底只在没有其他宿主时接管。 */}
             <WindowControlsHost
               id="main-content"
-              active={automationFormOpen || tabs.length === 0}
-              priority={10}
+              active={automationFormOpen || tabs.length === 0 || activeView !== 'conversations'}
+              priority={5}
               className="absolute right-2 top-[3px] z-20"
             />
             {activeView === 'planning' ? (

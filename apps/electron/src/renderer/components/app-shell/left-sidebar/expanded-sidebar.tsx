@@ -13,9 +13,9 @@ import { ModeSwitcher } from '../ModeSwitcher'
 import { SidebarBalanceBar } from '@/components/app-shell/SidebarBalanceBar'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { SidebarWindowDragStrip, SIDEBAR_DRAG_STRIP_HEIGHT, AutomationSidebarEntry, SkillsSidebarEntry, renderWorkspaceSortIcon } from './navigation-items'
-import { ConversationItem, AgentSessionItem, DelegatedChildSessionItem, AgentProjectGroupItem, PINNED_SESSION_MAX_HEIGHT, getSessionLeftAccent } from './session-items'
+import { ConversationItem, AgentSessionItem, RelatedChildSessionItem, AgentProjectGroupItem, PINNED_SESSION_MAX_HEIGHT, getSessionLeftAccent } from './session-items'
 import { WORKSPACE_SORT_LABEL } from './sidebar-utils'
-import { getDelegationSummary, getSessionTreeStatus, treeContainsSessionId } from './session-tree'
+import { getRelatedSessionSummary, getSessionTreeStatus, treeContainsSessionId } from './session-tree'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import type { SidebarModel } from './use-left-sidebar'
 
@@ -44,7 +44,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     handleToggleArchive,
     pinnedAgentSessionTrees,
     agentIndicatorMap,
-    expandedDelegationParentIds,
+    expandedRelatedParentIds,
     agentDraftIds,
     workspaceNameMap,
     handleSelectAgentSession,
@@ -52,7 +52,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     handleAgentRename,
     handleTogglePinAgent,
     handleToggleArchiveAgent,
-    handleToggleDelegationParent,
+    handleToggleRelatedParent,
     handleMarkUnread,
     relativeTimeNow,
     workspaceSortMode,
@@ -264,7 +264,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                       const rowStatus = getSessionTreeStatus(item, agentIndicatorMap)
                       const treeActive = treeContainsSessionId(item, activeSessionId)
                       const activeChildVisible = item.childSessions.some((child) => child.id === activeSessionId)
-                      const expandedChildren = expandedDelegationParentIds.has(item.session.id) || activeChildVisible
+                      const expandedChildren = expandedRelatedParentIds.has(item.session.id) || activeChildVisible
 
                       return (
                         <div key={`pinned-${item.session.id}`} className="flex flex-col gap-0.5">
@@ -276,9 +276,9 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                             hasDraft={agentDraftIds.has(item.session.id)}
                             delegationSummary={childCount > 0
                               ? {
-                                ...getDelegationSummary(item.childSessions),
+                                ...getRelatedSessionSummary(item.childSessions),
                                 expanded: expandedChildren,
-                                onToggle: () => handleToggleDelegationParent(item.session.id),
+                                onToggle: () => handleToggleRelatedParent(item.session.id),
                               }
                               : undefined}
                             leftAccent={getSessionLeftAccent(rowStatus)}
@@ -296,7 +296,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                           {childCount > 0 && expandedChildren && (
                             <div className="ml-3 border-l border-foreground/10 pl-2 flex flex-col gap-0.5">
                               {item.childSessions.map((childSession) => (
-                                <DelegatedChildSessionItem
+                                <RelatedChildSessionItem
                                   key={childSession.id}
                                   session={childSession}
                                   activeSessionId={activeSessionId}
@@ -409,7 +409,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   activeSessionId={activeSessionId}
                   agentIndicatorMap={agentIndicatorMap}
                   agentDraftIds={agentDraftIds}
-                  expandedDelegationParentIds={expandedDelegationParentIds}
+                  expandedRelatedParentIds={expandedRelatedParentIds}
                   relativeTimeNow={relativeTimeNow}
                   dragging={dragProjectId === group.workspace.id}
                   dropPosition={projectDropIndicator?.id === group.workspace.id ? projectDropIndicator.position : null}
@@ -437,7 +437,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   onRename={handleAgentRename}
                   onTogglePin={handleTogglePinAgent}
                   onToggleArchive={handleToggleArchiveAgent}
-                  onToggleDelegationParent={handleToggleDelegationParent}
+                  onToggleRelatedParent={handleToggleRelatedParent}
                   onMarkUnread={handleMarkUnread}
                   workspaceSwitchTs={workspaceSwitchTs}
                 />

@@ -1,12 +1,10 @@
 import * as React from 'react'
 import { WindowControls } from '@/components/WindowControls'
 import { detectIsWindows } from '@/lib/platform'
-
-interface WindowControlsHostRegistration {
-  id: string
-  active: boolean
-  priority: number
-}
+import {
+  selectActiveWindowControlsHost,
+  type WindowControlsHostRegistration,
+} from '@/lib/window-controls-layout'
 
 interface WindowControlsTemplateContextValue {
   registerHost: (registration: WindowControlsHostRegistration) => () => void
@@ -20,7 +18,9 @@ const WindowControlsTemplateContext = React.createContext<WindowControlsTemplate
  * 全局窗口按钮模板：同一时刻只将 Windows 最小化/最大化/关闭按钮渲染给优先级最高的可见宿主。
  *
  * 页面只需放置 WindowControlsHost 并声明 active/priority，不再各自判断平台或维护重复按钮。
- * priority 按物理窗口右缘排序：右侧文件栏 > 右侧浏览器 > 团队工作区 > 普通内容顶栏。
+ * priority 按物理窗口右缘排序：右侧文件栏(30) > 右侧浏览器(20) >
+ * 方案/全屏视图(20) > 普通内容顶栏(10) > MainArea 兜底(5)。
+ * 不要出现相同 priority 的 active 宿主：同优先级只能按注册顺序决出，按钮会在两者之间跳位。
  */
 export function WindowControlsTemplateProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   const [hosts, setHosts] = React.useState<Map<string, WindowControlsHostRegistration>>(() => new Map())
@@ -51,14 +51,9 @@ export function WindowControlsTemplateProvider({ children }: { children: React.R
     })
   }, [])
 
-  const activeHostId = React.useMemo(() => {
-    let selected: WindowControlsHostRegistration | null = null
-    for (const host of hosts.values()) {
-      if (!host.active || (selected && host.priority <= selected.priority)) continue
-      selected = host
-    }
-    return selected?.id ?? null
-  }, [hosts])
+  // 选择规则收敛到纯函数：① 便于单测覆盖（宿主全挂时 Windows 会整组丢按钮）；
+  // ② 避免在这里散落第二份优先级判断。
+  const activeHostId = React.useMemo(() => selectActiveWindowControlsHost(hosts.values()), [hosts])
 
   const value = React.useMemo(() => ({ registerHost, updateHost, activeHostId }), [registerHost, updateHost, activeHostId])
   return <WindowControlsTemplateContext.Provider value={value}>{children}</WindowControlsTemplateContext.Provider>

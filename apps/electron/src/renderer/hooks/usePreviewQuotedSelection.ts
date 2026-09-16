@@ -16,27 +16,35 @@ function isSelectionInside(container: HTMLElement, selection: Selection): boolea
   return false
 }
 
-function getDeepSelection(container: HTMLElement, shadowRoots: Set<ShadowRoot>): { text: string } | null {
+function getSelectionRect(selection: Selection): DOMRect | null {
+  if (selection.rangeCount === 0) return null
+  const range = selection.getRangeAt(0)
+  const rect = range.getBoundingClientRect()
+  if (rect.width > 0 || rect.height > 0) return rect
+  return range.getClientRects()[0] ?? null
+}
+
+function getDeepSelection(container: HTMLElement, shadowRoots: Set<ShadowRoot>): PreviewSelectionSnapshot | null {
   const documentSelection = document.getSelection()
   if (documentSelection && !documentSelection.isCollapsed && documentSelection.rangeCount > 0 && isSelectionInside(container, documentSelection)) {
     const text = documentSelection.toString().trim()
-    if (text) return { text }
+    if (text) return { text, rect: getSelectionRect(documentSelection) }
   }
   for (const shadowRoot of shadowRoots) {
     if (!container.contains(shadowRoot.host)) continue
     const selection = (shadowRoot as ShadowRoot & { getSelection?: () => Selection | null }).getSelection?.()
     if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
       const text = selection.toString().trim()
-      if (text) return { text }
+      if (text) return { text, rect: getSelectionRect(selection) }
     }
   }
   // 与原生文件预览的兜底一致：缓存尚未建立时递归寻找开放 Shadow DOM。
-  const walk = (node: Node): { text: string } | null => {
+  const walk = (node: Node): PreviewSelectionSnapshot | null => {
     if (node instanceof HTMLElement && node.shadowRoot) {
       const selection = (node.shadowRoot as ShadowRoot & { getSelection?: () => Selection | null }).getSelection?.()
       if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
         const text = selection.toString().trim()
-        if (text) return { text }
+        if (text) return { text, rect: getSelectionRect(selection) }
       }
       const nested = walk(node.shadowRoot)
       if (nested) return nested
@@ -48,6 +56,11 @@ function getDeepSelection(container: HTMLElement, shadowRoots: Set<ShadowRoot>):
     return null
   }
   return walk(container)
+}
+
+export interface PreviewSelectionSnapshot {
+  text: string
+  rect: DOMRect | null
 }
 
 function discoverShadowRoots(root: Node, target: Set<ShadowRoot>): void {
@@ -65,6 +78,7 @@ export function usePreviewQuotedSelection({
   filePath,
   sourceType = 'file',
   sourceLabel,
+  onSelectionChange,
   enabled = true,
 }: {
   containerRef: React.RefObject<HTMLElement>
@@ -72,11 +86,14 @@ export function usePreviewQuotedSelection({
   filePath: string
   sourceType?: QuotedSelectionSourceType
   sourceLabel?: string
+  onSelectionChange?: (selection: PreviewSelectionSnapshot | null) => void
   enabled?: boolean
 }): void {
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
   const shadowRootsRef = React.useRef<Set<ShadowRoot>>(new Set())
   const toastIdRef = React.useRef<string | null>(null)
+  const onSelectionChangeRef = React.useRef(onSelectionChange)
+  onSelectionChangeRef.current = onSelectionChange
 
   const dismissToast = React.useCallback(() => {
     if (toastIdRef.current) toast.dismiss(toastIdRef.current)
@@ -94,6 +111,7 @@ export function usePreviewQuotedSelection({
       return next
     })
     if (!deepSelection) {
+      onSelectionChangeRef.current?.(null)
       dismissToast()
       const activeElement = document.activeElement
       if (!activeElement?.closest?.('.ProseMirror, [data-input-mode]')) clear()
@@ -101,6 +119,7 @@ export function usePreviewQuotedSelection({
     }
     const truncated = deepSelection.text.length > MAX_QUOTED_CHARS
     const text = truncated ? deepSelection.text.slice(0, MAX_QUOTED_CHARS) : deepSelection.text
+    onSelectionChangeRef.current?.({ text, rect: deepSelection.rect })
     setQuotedSelectionMap((previous) => {
       const existing = previous.get(sessionId)
       if (existing?.text === text && existing.filePath === filePath) return previous
@@ -146,6 +165,7 @@ export function usePreviewQuotedSelection({
     document.addEventListener('selectionchange', onSelectionChange)
     return () => {
       if (frame) cancelAnimationFrame(frame)
+      onSelectionChangeRef.current?.(null)
       observer.disconnect(); roots.clear(); dismissToast()
       container.removeEventListener('mousedown', onMouseDown)
       document.removeEventListener('mousemove', onMouseMove)

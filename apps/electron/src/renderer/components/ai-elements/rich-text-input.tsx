@@ -28,7 +28,13 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { lowlight } from '@/lib/lowlight'
 import { htmlToMarkdown, markdownToHtml, normalizeClipboardHtml } from '@/lib/markdown-rich-text'
-import { richTextRenderingEnabledAtom } from '@/atoms/ui-preferences'
+import { composerCompactModeAtom, richTextRenderingEnabledAtom } from '@/atoms/ui-preferences'
+import {
+  resolveCompactViewport,
+  resolveComposerMaxHeight,
+  resolveComposerMinHeight,
+} from '@/lib/composer-compact-height'
+import { useWindowInnerHeight } from '@/hooks/use-window-inner-height'
 import { createFileMentionSuggestion } from '@/components/file-browser/file-mention-suggestion'
 import { createSkillMentionSuggestion, createMcpMentionSuggestion, createSessionMentionSuggestion } from '@/components/agent/mention-suggestions'
 import { shouldConvertClipboardTextToAttachment } from '@/lib/clipboard-text-attachment'
@@ -118,6 +124,28 @@ function countEditorLines(editor: ReturnType<typeof useEditor>): number {
   })
 
   return lineCount
+}
+
+// ===== 视口紧凑档 =====
+
+/**
+ * 视口高度驱动的「紧凑档」：窗口内高低于设置阈值时把输入框整体压矮。
+ *
+ * 两个防抖动措施（2026-09-13 曾经因为反复跳档而移除过这个能力）：
+ * 1) 迟滞：进入/退出用不同阈值（见 resolveCompactViewport），窗口停在阈值附近不会反复切换；
+ * 2) 高度变化由 useWindowInnerHeight 统一 rAF 节流，一帧最多判定一次。
+ * 状态未变化时返回原值，React 会跳过重渲染。
+ */
+function useCompactViewport(threshold: number, viewportHeight: number): boolean {
+  const [isCompact, setIsCompact] = useState(() =>
+    resolveCompactViewport(false, viewportHeight, threshold)
+  )
+
+  useEffect(() => {
+    setIsCompact((previous: boolean) => resolveCompactViewport(previous, viewportHeight, threshold))
+  }, [viewportHeight, threshold])
+
+  return isCompact
 }
 
 // ===== 组件接口 =====
@@ -265,6 +293,11 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
   const richTextEnabledRef = useRef(richTextEnabled)
   richTextEnabledRef.current = richTextEnabled
 
+  // 矮窗口压缩：阈值/高度来自设置（0 = 关闭），默认 < 700px 时输入框 101px → 60px、上限 200px → 140px
+  const composerCompactMode = useAtomValue(composerCompactModeAtom)
+  const viewportHeight = useWindowInnerHeight()
+  const isCompactViewport = useCompactViewport(composerCompactMode.viewportHeight, viewportHeight)
+
   // Mention Suggestion 配置（稳定引用，不随 workspacePath 变化重建）
   const mentionSuggestion = useMemo(
     () => createFileMentionSuggestion(workspacePathRef, mentionActiveRef, attachedDirsRef, mentionItemCountRef, sessionAttachedDirsRef),
@@ -388,7 +421,8 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         tabindex: '0',
         class: cn(
           'prose dark:prose-invert max-w-none focus:outline-none',
-          'min-h-[101px] w-full text-[15px] leading-[1.6]',
+          // min-height 不用 Tailwind 固定类：紧凑档要按窗口高度变（见 .rich-text-input .ProseMirror 规则）
+          'w-full text-[15px] leading-[1.6]',
           '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
           '[&_pre]:rounded-md [&_pre]:p-3',
           '[&_code]:bg-muted [&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-sm [&_code]:text-foreground',
@@ -755,6 +789,19 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
   // 是否显示折叠按钮：启用 collapsible 且内容已自动扩展
   const showCollapseToggle = collapsible && isExpanded
 
+  // 当前档位的 max-height：手动折叠 > 紧凑档（视口矮）> 展开/默认档
+  const composerMaxHeight = resolveComposerMaxHeight({
+    manuallyCollapsed: isManuallyCollapsed,
+    expanded: isExpanded,
+    compact: isCompactViewport,
+    compactMaxHeight: composerCompactMode.maxHeight,
+  })
+  // 编辑器 min-height：空内容时的可见高度，紧凑档下变矮（默认 101 → 60）
+  const composerMinHeight = resolveComposerMinHeight({
+    compact: isCompactViewport,
+    compactMinHeight: composerCompactMode.minHeight,
+  })
+
   useImperativeHandle(ref, () => ({
     getMarkdown: () => htmlToMarkdown(editor?.getHTML() ?? ''),
     insertFileMentions: (items) => {
@@ -775,15 +822,19 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
   return (
     <div
       className={cn(
-        // 不再使用 max-height 过渡：紧凑档切换发生在 resize 收敛点，若再叠加 200ms
-        // 动画会把一次离散重排拉长成连续 reflow，持续推动滚动容器 ResizeObserver。
+        // 保留 class 供 CSS 选择器（.rich-text-input .tiptap）和调用方 className 覆盖尺寸
         'rich-text-input relative w-full overflow-y-auto scrollbar-thin',
-        isManuallyCollapsed
-          ? 'rich-text-input-collapsed'
-          : isExpanded ? 'rich-text-input-expanded' : 'rich-text-input-default',
         disabled && 'opacity-50 cursor-not-allowed',
         className
       )}
+      // 高度用内联 style：紧凑档由视口高度驱动，档位随时可变，不适合穷举成 class。
+      // 不给 max-height 加过渡：档位切换发生在窗口 resize 收敛点，叠加动画会把一次离散
+      // 重排拉长成连续 reflow，反过来推动滚动容器的 ResizeObserver。
+      style={{
+        maxHeight: `${composerMaxHeight}px`,
+        // 供 <style> 里的 .rich-text-input .ProseMirror 规则读取（每个实例各自生效）
+        '--composer-editor-min-height': `${composerMinHeight}px`,
+      } as React.CSSProperties}
     >
       <EditorContent editor={editor} className="w-full" />
       {/* 折叠/展开切换按钮 — sticky 悬浮在滚动区域内 */}
@@ -808,18 +859,10 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         </Tooltip>
       )}
       <style>{`
-        .rich-text-input {
-          max-height: 200px;
+        /* 编辑器最小高度由 CSS 变量驱动：紧凑档下矮窗口把输入框压矮（默认 101 → 60）。 */
+        .rich-text-input .ProseMirror {
+          min-height: var(--composer-editor-min-height, 101px);
         }
-        .rich-text-input.rich-text-input-expanded {
-          max-height: 500px;
-        }
-        .rich-text-input.rich-text-input-collapsed {
-          max-height: 101px;
-        }
-        /* 窗口高度驱动的“紧凑档”已移除（2026-09-13）：它每次切换会让消息区/composer
-         * 的边界相对不动的窗口底边跳约 40px，实测单次拖拽可触发 4 次，表现为底部边界
-         * 反复跳动。输入区高度改为恒定，边界不再随窗口高度变化。 */
         .ProseMirror {
           outline: none;
           padding: 9px 15px 0px;

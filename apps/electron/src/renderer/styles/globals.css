@@ -721,6 +721,35 @@
   color: #fff;
 }
 
+/* Windows 高对比度（设置 → 辅助功能 → 对比度主题）。
+ *
+ * 自绘按钮不能依赖主题色表达状态：forced-colors 会把背景/文字重映射为系统色，
+ * 自定义的 hover 红色会失效。显式使用系统色关键字，保证按钮边界、hover/active
+ * 与焦点环在任意对比度主题下都可见（Windows High Contrast 真机仍需验收）。 */
+@media (forced-colors: active) {
+  .window-controls {
+    border-color: ButtonBorder;
+    background-color: ButtonFace;
+  }
+
+  .window-control-btn {
+    color: ButtonText;
+  }
+
+  .window-control-btn:hover,
+  .window-control-btn:active,
+  .window-control-close:hover,
+  .window-control-close:active {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+
+  .window-control-btn:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
 /* 深色特殊主题 dialog 光晕效果 */
 .theme-ocean-dark [data-radix-dialog-content],
 .theme-forest-dark [data-radix-dialog-content],
@@ -1153,29 +1182,38 @@
   display: none;
 }
 
-.topbar-editorial .app-tab-active,
-.topbar-editorial .app-tab-inactive {
+/* 顶栏 Tab 使用独立视觉层；active 不绘制实体背景，避免被 viewport 裁成直角。 */
+.topbar-editorial .topbar-tab-active,
+.topbar-editorial .topbar-tab-inactive {
   border-radius: 8px;
   box-shadow: none;
 }
 
-/* 草稿复用普通 Tab 的背景、边框和圆角。 */
-/* ???????????????????????????? */
-.dark .topbar-editorial .app-tab-inactive {
-  background-color: hsl(var(--tab-surface) / 0.5);
-  border-color: hsl(var(--border) / 0.22);
+.topbar-editorial .topbar-tab-active {
+  background-color: hsl(var(--muted-foreground));
+  border-color: transparent;
+  color: hsl(var(--tab-surface));
 }
 
-.dark .topbar-editorial .app-tab-inactive:hover {
-  background-color: hsl(var(--tab-surface) / 0.78);
-  border-color: hsl(var(--border) / 0.42);
+/* 选中态恢复反色内容，但背景仍限制在顶栏 Tab 本体的圆角范围内。 */
+.topbar-editorial .topbar-tab-active :is(svg, span, input) {
+  color: hsl(var(--tab-surface));
 }
 
-.topbar-editorial .app-tab-active {
-  border-color: hsl(var(--border) / 0.6);
-  background-color: hsl(var(--tab-surface) / 0.88);
-  /* 仅使用内阴影，避免外部投影越过 8px 圆角后显得发方。 */
-  box-shadow: inset 0 1px 0 hsl(var(--foreground) / 0.06), inset 0 -1px 0 hsl(0 0% 0% / 0.08);
+.topbar-editorial .topbar-tab-active .workspace-badge,
+.topbar-editorial .topbar-tab-active [role="button"] {
+  background-color: hsl(var(--tab-surface) / 0.18);
+  color: hsl(var(--tab-surface));
+}
+
+.topbar-editorial .topbar-tab-inactive {
+  border-color: hsl(var(--border) / 0.5);
+  background-color: hsl(var(--tab-surface) / 0.28);
+}
+
+.topbar-editorial .topbar-tab-inactive:hover {
+  border-color: hsl(var(--border) / 0.75);
+  background-color: hsl(var(--selected-surface) / 0.7);
 }
 
 /* 焦点和会话状态都使用完整圆角边框，不再叠加旧的金色顶线。 */
@@ -1204,19 +1242,19 @@
 }
 
 /* 深色主题的 inactive 规则选择器更具体；这里用相同语义层级确保状态色不会被覆盖。 */
-.dark .topbar-editorial .app-tab-inactive.topbar-tab-status-running {
+.dark .topbar-editorial .topbar-tab-inactive.topbar-tab-status-running {
   border-color: hsl(217 91% 60%);
 }
 
-.dark .topbar-editorial .app-tab-inactive.topbar-tab-focused {
+.dark .topbar-editorial .topbar-tab-inactive.topbar-tab-focused {
   border-color: hsl(var(--primary));
 }
 
-.dark .topbar-editorial .app-tab-inactive.topbar-tab-status-blocked {
+.dark .topbar-editorial .topbar-tab-inactive.topbar-tab-status-blocked {
   border-color: hsl(25 95% 53%);
 }
 
-.dark .topbar-editorial .app-tab-inactive.topbar-tab-status-completed {
+.dark .topbar-editorial .topbar-tab-inactive.topbar-tab-status-completed {
   border-color: hsl(142 71% 45%);
 }
 
@@ -1230,66 +1268,107 @@
   }
 }
 
-.topbar-editorial .app-tab-inactive {
-  border-color: hsl(var(--border) / 0.5);
-  background-color: hsl(var(--tab-surface) / 0.28);
-}
-
-.topbar-editorial .app-tab-inactive:hover {
-  border-color: hsl(var(--border) / 0.75);
-  background-color: hsl(var(--selected-surface) / 0.7);
-}
-
-/* 放在通用 inactive 规则之后，避免普通灰框覆盖焦点或会话状态框。 */
-.topbar-editorial .app-tab-inactive.topbar-tab-focused {
+/* 状态边框只作用于顶栏 Tab，不重新引入 active 的实体背景。 */
+.topbar-editorial .topbar-tab-inactive.topbar-tab-focused,
+.topbar-editorial .topbar-tab-active.topbar-tab-focused {
   border-color: hsl(var(--primary));
 }
 
-.topbar-editorial .app-tab-inactive.topbar-tab-status-running {
+.topbar-editorial .topbar-tab-status-running {
   border-color: hsl(217 91% 60%);
 }
 
-.topbar-editorial .app-tab-inactive.topbar-tab-status-blocked {
+.topbar-editorial .topbar-tab-status-blocked {
   border-color: hsl(25 95% 53%);
 }
 
-.topbar-editorial .app-tab-inactive.topbar-tab-status-completed {
+.topbar-editorial .topbar-tab-status-completed {
   border-color: hsl(142 71% 45%);
 }
 
+/* 高对比度下选中 Tab 仍须可辨。
+ *
+ * forced-colors 会禁用选中态的背景色（统一成 Canvas），只靠背景区分选中会失效。
+ * 这里把选中态固定映射到系统 Highlight 对，并关闭该子树的强制色彩调整，
+ * 让内部图标/文字也跟随 HighlightText 而不是被再次重映射。 */
+@media (forced-colors: active) {
+  .topbar-editorial .topbar-tab-active {
+    forced-color-adjust: none;
+    background-color: Highlight;
+    color: HighlightText;
+  }
+
+  .topbar-editorial .topbar-tab-active :is(svg, span, input),
+  .topbar-editorial .topbar-tab-active [role="button"] {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+
+  .topbar-editorial .topbar-tab-inactive {
+    background-color: Canvas;
+    border-color: ButtonBorder;
+  }
+
+  /* 会话状态环保留可见的 2px 描边；具体状态不再用颜色区分（颜色单通道表达
+     在无色彩环境下不可用），仅确保环本身可见。 */
+  .topbar-editorial .topbar-tab-status-running,
+  .topbar-editorial .topbar-tab-status-blocked,
+  .topbar-editorial .topbar-tab-status-completed,
+  .topbar-editorial .topbar-tab-focused {
+    border-color: ButtonText;
+  }
+}
+
+/* 顶栏唯一的拖拽层。
+ *
+ * 右边界紧贴右侧操作胶囊左缘：胶囊宽度由 --topbar-actions-width 实测（含 Windows
+ * 窗口按钮），因此 drag 矩形与操作胶囊几何相邻、不重叠。
+ * 过去「整条顶栏 drag + 滚动层 drag」只能靠 no-drag 从大矩形里扣除按钮小块，
+ * 在 Windows 125%/150%/175% 缩放下会被 OS 判成标题栏点击（按钮单击无效/需双击）。
+ * 这里的 12px 必须与 .topbar-actions-slot 的 right 偏移保持一致。 */
+.topbar-editorial .topbar-drag-surface {
+  right: calc(var(--topbar-actions-width, 0px) + 12px);
+}
+
+.topbar-editorial .topbar-tabs-scroll {
+  padding-right: calc(var(--topbar-actions-width, 0px) + 12px);
+}
+
 .topbar-editorial .topbar-actions-slot {
-  position: relative;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 12px;
   isolation: isolate;
   min-width: max-content;
-  justify-self: end;
-  /* 胶囊外壳右缘对齐原有页面内侧基线，不贴到窗口最外缘。 */
-  margin-right: 12px;
-  height: 37px;
-  padding: 2px 3px 2px 5px;
-  border: 1px solid hsl(var(--border) / 0.5);
-  border-radius: 12px;
-  background: hsl(var(--panel-surface));
-  box-shadow: inset 0 1px 0 hsl(var(--foreground) / 0.08), 0 1px 3px hsl(0 0% 0% / 0.06);
+  padding: 3px 4px;
+  border: 1px solid hsl(var(--surface-border) / 0.72);
+  border-radius: 999px;
+  background: hsl(var(--control-surface) / 0.96);
+  box-shadow:
+    inset 0 1px 0 hsl(var(--foreground) / 0.06),
+    0 1px 3px hsl(var(--overlay) / 0.08);
   overflow: visible;
 }
 
-/* 第二层胶囊：工具组与外壳之间保留一圈细微层次。 */
+/* 工具组只负责排列；视觉容器只有上面的单层胶囊。 */
 .topbar-editorial .topbar-tool-group {
+  position: relative;
+  z-index: 1;
   height: 31px;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid hsl(var(--border) / 0.42);
-  border-radius: 10px;
-  background: hsl(var(--tab-surface) / 0.58);
-  box-shadow: inset 0 1px 0 hsl(var(--foreground) / 0.07);
+  gap: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
-/* 第三层胶囊：每个工具保留独立的圆润命中面，图标按钮在内圈中保持紧凑。 */
 .topbar-editorial .topbar-tool-button {
-  width: 27px;
-  height: 27px;
-  color: hsl(var(--muted-foreground) / 0.82);
-  border-radius: 9px;
+  width: 30px;
+  height: 30px;
+  color: hsl(var(--muted-foreground) / 0.88);
+  border-radius: 999px;
   background: transparent !important;
   border: 0;
   box-shadow: none;
@@ -1303,34 +1382,39 @@
   color: hsl(var(--foreground));
 }
 
-/* Windows 控件也收进外层胶囊，保持与工具组相同的层次。 */
+/* Windows 控件共享外层胶囊，不再额外绘制一层内框。 */
 .topbar-editorial .topbar-actions-slot .window-controls {
   height: 31px;
   padding: 0;
-  border: 1px solid hsl(var(--border) / 0.28);
-  border-radius: 10px;
-  background: hsl(var(--tab-surface) / 0.46);
-  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
 }
 
 .topbar-editorial .topbar-actions-slot .window-control-btn {
   width: 34px;
   height: 29px;
-  border-radius: 9px;
+  border-radius: 999px;
 }
 
 .topbar-editorial .topbar-tool-button:focus-visible,
-.topbar-editorial .app-tab-active:focus-visible,
-.topbar-editorial .app-tab-inactive:focus-visible {
+.topbar-editorial .topbar-tab-active:focus-visible,
+.topbar-editorial .topbar-tab-inactive:focus-visible {
   outline: 2px solid hsl(var(--ring));
   outline-offset: -2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .topbar-editorial .app-tab-active,
-  .topbar-editorial .app-tab-inactive,
+  .topbar-editorial .topbar-tab-active,
+  .topbar-editorial .topbar-tab-inactive,
   .topbar-editorial .topbar-tool-button {
     transition: none;
+  }
+
+  /* 会话状态环的无限脉冲属于自动播放动画，必须跟随系统的「减少动态效果」。 */
+  .topbar-editorial .topbar-tab-status-running {
+    animation: none;
   }
 
   .topbar-editorial .topbar-tab-status-running {
@@ -1427,28 +1511,9 @@
   border-color: hsl(var(--border) / 0.5) !important;
 }
 
-/* 经典主题的 active 边框使用 !important；顶栏状态需要在其后明确覆盖。 */
-.ui-classic .topbar-editorial .app-tab-active.topbar-tab-focused {
-  border-color: hsl(var(--primary)) !important;
-}
-
-.ui-classic .topbar-editorial .app-tab-active.topbar-tab-status-running {
-  border-color: hsl(217 91% 60%) !important;
-}
-
-.ui-classic .topbar-editorial .app-tab-active.topbar-tab-status-blocked {
-  border-color: hsl(25 95% 53%) !important;
-}
-
-.ui-classic .topbar-editorial .app-tab-active.topbar-tab-status-completed {
-  border-color: hsl(142 71% 45%) !important;
-}
-
-/* 顶栏 Tab 最终状态覆盖：聚焦使用主题 primary（对应左侧栏选中状态条），
- * 运行/阻塞/完成沿用左侧会话列表的蓝/橙/绿，避免透明边框或主题规则覆盖。 */
+/* 顶栏专用状态覆盖：状态边框保留，active 不再恢复实体背景。 */
 .topbar-editorial button.topbar-tab-focused {
   border: 2px solid hsl(var(--primary)) !important;
-  box-shadow: inset 0 1px 0 hsl(var(--foreground) / 0.06), inset 0 -1px 0 hsl(0 0% 0% / 0.08) !important;
 }
 
 .topbar-editorial button.topbar-tab-status-running {
@@ -1462,20 +1527,6 @@
 
 .topbar-editorial button.topbar-tab-status-completed {
   border: 2px solid hsl(142 71% 45%) !important;
-}
-
-/* 选中态采用未选中态的颜色反转：背景使用未选中文字色，内容使用未选中背景色。 */
-.topbar-editorial button.app-tab-active {
-  background-color: hsl(var(--muted-foreground)) !important;
-  color: hsl(var(--tab-surface)) !important;
-}
-.topbar-editorial button.app-tab-active :is(svg, span, input) {
-  color: hsl(var(--tab-surface)) !important;
-}
-.topbar-editorial button.app-tab-active .workspace-badge,
-.topbar-editorial button.app-tab-active [role="button"] {
-  background-color: hsl(var(--tab-surface) / 0.18) !important;
-  color: hsl(var(--tab-surface)) !important;
 }
 
 .managed-browser-tab-active {
@@ -1630,12 +1681,6 @@
   background: hsl(var(--raised-surface));
   box-shadow: var(--shadow-sm);
   border-color: hsl(var(--surface-border) / 0.65);
-}
-
-/* 对话滚动由 use-stick-to-bottom 唯一负责；浏览器原生 scroll anchoring
- * 会与它在内容 reflow 时抢夺 scrollTop，导致消息列表上下抖动。 */
-.overflow-anchor-none {
-  overflow-anchor: none;
 }
 
 /* 隐藏滚动条但保留滚动功能 */

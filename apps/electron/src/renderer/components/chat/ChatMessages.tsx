@@ -135,9 +135,7 @@ function StreamScrollFollow({ streaming }: { streaming: boolean }): React.ReactE
     prevStreamingRef.current = streaming
     // 仅在 streaming false → true（新一轮对话开始）时把视口拉回底部并恢复跟随。
     if (streaming && !wasStreaming) {
-      // 新一轮开始只需一次性定位；流式内容后续由 instant resize 跟随，
-      // 避免 smooth 与内容高度持续变化叠加。
-      scrollToBottom({ animation: 'instant', wait: true })
+      scrollToBottom({ animation: 'smooth', wait: true })
     }
   }, [streaming, scrollToBottom])
 
@@ -240,6 +238,32 @@ export function ChatMessages({
 
   /** 是否正在加载更多历史 */
   const [loadingMore, setLoadingMore] = React.useState(false)
+
+  /**
+   * 流式完成过渡：streaming 结束到持久化消息加载完成之间，
+   * 强制 resize="instant" 避免中间高度变化触发平滑滚动动画。
+   *
+   * render-phase 计算保证第一帧就能切到 instant（不依赖 useEffect 延迟）。
+   */
+  const [transitioningCooldown, setTransitioningCooldown] = React.useState(false)
+  const wasStreamingRef = React.useRef(streaming)
+
+  const needsInstant = !streaming && (!!streamingContent || !!smoothContent)
+
+  React.useEffect(() => {
+    if (wasStreamingRef.current && !streaming) {
+      setTransitioningCooldown(true)
+    }
+    wasStreamingRef.current = streaming
+  }, [streaming])
+
+  React.useEffect(() => {
+    if (needsInstant) return
+    const timer = setTimeout(() => setTransitioningCooldown(false), 150)
+    return () => clearTimeout(timer)
+  }, [needsInstant])
+
+  const transitioning = needsInstant || transitioningCooldown
 
   // 缓存 streaming MessageHeader 的 props，避免每帧 re-render 导致闪烁
   const streamingTime = React.useMemo(
@@ -365,7 +389,7 @@ export function ChatMessages({
   const dividerSet = new Set(contextDividers)
 
   return (
-    <Conversation resize="instant" className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
+    <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={conversationId} ready={ready} />
       {/* 滚动到顶部时自动加载更多历史 */}
       <ScrollTopLoader
@@ -434,7 +458,7 @@ export function ChatMessages({
                   {/* 流式内容（经过平滑处理） */}
                   {smoothContent ? (
                     <>
-                      <MessageResponse streaming={streaming}>{smoothContent}</MessageResponse>
+                      <MessageResponse>{smoothContent}</MessageResponse>
                       {streaming && <StreamingIndicator />}
                     </>
                   ) : (

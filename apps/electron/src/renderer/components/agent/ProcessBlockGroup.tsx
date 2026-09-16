@@ -55,15 +55,45 @@ export function buildCompletedToolResultIds(turnMessages: SDKMessage[]): Set<str
   return ids
 }
 
-function getTrailingTextStartIndex(blocks: SDKContentBlock[]): number | null {
-  const lastBlock = blocks[blocks.length - 1]
-  if (lastBlock?.type !== 'text') return null
+interface TrailingOutputSplit {
+  /** 最终正文（最后一段连续 text）在原数组中的起始下标 */
+  textStartIndex: number
+  /** 最终正文结束下标（含） */
+  textEndIndex: number
+}
 
-  let finalStartIndex = blocks.length - 1
-  while (finalStartIndex > 0 && blocks[finalStartIndex - 1]?.type === 'text') {
-    finalStartIndex -= 1
+/**
+ * 定位「最终正文」区间：数组里最后一段连续的 text 块。
+ *
+ * 旧实现要求数组最后一个块必须是 text，否则整轮（含最终回复）会被整体折叠进「执行过程」。
+ * 但真实流式数据里存在 text 之后又追加 thinking 的形态：
+ *  - 同一条 assistant 消息里 reasoning 晚于正文到达（`[text, thinking]`）；
+ *  - 正文之后紧跟一条只含 thinking 的收尾消息（turn 内聚合后同样以 thinking 结尾）。
+ * 这两种情况下正文才是应当直接可见的交付内容，必须外置；末尾 thinking 归入过程组。
+ * 若正文之后还跟着 tool_use 等块，说明这段 text 更可能是给工具看的中间说明，保持整组折叠。
+ *
+ * 注意：Pi runtime 下 thinking 块不渲染（showThinking={agentRuntime !== 'pi'}），
+ * 一旦正文被一起折叠，用户会看到整轮只剩「执行过程：N 条消息」一行、正文彻底看不见。
+ */
+function getTrailingOutputSplit(blocks: SDKContentBlock[]): TrailingOutputSplit | null {
+  let textEndIndex = -1
+  for (let index = blocks.length - 1; index >= 0; index--) {
+    if (blocks[index]?.type === 'text') {
+      textEndIndex = index
+      break
+    }
   }
-  return finalStartIndex
+  if (textEndIndex < 0) return null
+
+  for (let index = textEndIndex + 1; index < blocks.length; index++) {
+    if (blocks[index]?.type !== 'thinking') return null
+  }
+
+  let textStartIndex = textEndIndex
+  while (textStartIndex > 0 && blocks[textStartIndex - 1]?.type === 'text') {
+    textStartIndex -= 1
+  }
+  return { textStartIndex, textEndIndex }
 }
 
 function areToolsBeforeIndexCompleted(
@@ -109,12 +139,12 @@ export function buildAssistantTurnRenderItems(
   // 流式阶段最后的 text 还不稳定，后续工具调用可能会把它变成中间过程。
   // 只有当前面所有工具都有结果时，才把尾部 text 视作交付输出提前外置，降低完成瞬间的跳动。
   const hasProcessBlock = blocks.some((block) => block.type === 'tool_use' || block.type === 'thinking')
-  const trailingTextStartIndex = getTrailingTextStartIndex(blocks)
+  const outputSplit = getTrailingOutputSplit(blocks)
   const canSplitStreamingFinalOutput = options.isStreaming
     && hasProcessBlock
-    && trailingTextStartIndex !== null
-    && trailingTextStartIndex > 0
-    && areToolsBeforeIndexCompleted(blocks, trailingTextStartIndex, options.completedToolResultIds)
+    && outputSplit !== null
+    && outputSplit.textStartIndex > 0
+    && areToolsBeforeIndexCompleted(blocks, outputSplit.textStartIndex, options.completedToolResultIds)
 
   if (options.isStreaming && hasProcessBlock && !canSplitStreamingFinalOutput) {
     return [{
@@ -123,22 +153,34 @@ export function buildAssistantTurnRenderItems(
     }]
   }
 
-  if (trailingTextStartIndex === null) {
+  if (outputSplit === null) {
     return [{
       type: 'process-group',
       items: blocks.map((block, index) => ({ block, index })),
     }]
   }
 
-  const items: AssistantTurnRenderItem[] = []
-  if (trailingTextStartIndex > 0) {
-    items.push({
-      type: 'process-group',
-      items: blocks.slice(0, trailingTextStartIndex).map((block, index) => ({ block, index })),
-    })
+  const { textStartIndex, textEndIndex } = outputSplit
+  // 正文之前的步骤 + 正文之后仅剩的 thinking（收尾思考）统一归入过程组，
+  // 保证最终正文始终作为过程组之外可见的交付内容渲染。
+  const processItems: IndexedContentBlock[] = []
+  for (let index = 0; index < textStartIndex; index++) {
+    const block = blocks[index]
+    if (!block) continue
+    processItems.push({ block, index })
+  }
+  for (let index = textEndIndex + 1; index < blocks.length; index++) {
+    const block = blocks[index]
+    if (!block) continue
+    processItems.push({ block, index })
   }
 
-  for (let index = trailingTextStartIndex; index < blocks.length; index++) {
+  const items: AssistantTurnRenderItem[] = []
+  if (processItems.length > 0) {
+    items.push({ type: 'process-group', items: processItems })
+  }
+
+  for (let index = textStartIndex; index <= textEndIndex; index++) {
     const block = blocks[index]
     if (!block) continue
     items.push({ type: 'block', item: { block, index } })
@@ -304,8 +346,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, keepExpandedAfterComple
           key={i}
           className={cn(
             dimmed && 'opacity-80',
-            // 流式过程中不使用入场位移动画；新块高度变化本身已经会触发滚动，
-            // slide-in-from-top 会让同一段内容出现二次位移，看起来像页面抖动。
+            isStreaming && 'animate-in fade-in slide-in-from-top-1 duration-200',
           )}
         >
           {child}
@@ -371,9 +412,9 @@ export function ProcessBlockGroup({ blocks, isStreaming, keepExpandedAfterComple
           style={{
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',
             opacity: expanded ? 1 : 0,
-            // 自动收起是结构性变化，禁止 height transition；否则消息区会在 500ms
-            // 内持续变化并与滚动锚点互相作用。手动展开/收起仍由内容状态直接收敛。
-            transition: 'none',
+            transition: measuredHeight !== undefined
+              ? `height ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out, opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`
+              : `opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`,
           }}
         >
           <div className="space-y-2">

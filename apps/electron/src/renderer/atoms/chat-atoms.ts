@@ -50,6 +50,8 @@ export const currentMessagesAtom = atom<ChatMessage[]>([])
 
 /** 单个对话的流式状态 */
 export interface ConversationStreamState {
+  /** 当前流式运行的唯一代次。 */
+  runId?: string
   streaming: boolean
   content: string
   reasoning: string

@@ -66,6 +66,27 @@ function removePathSuffixForSdkBaseUrl(rawUrl: string, suffix: string): string {
 }
 
 /**
+ * 判断端点是否为 Anthropic 协议形态（路径含 `/anthropic`）。
+ *
+ * 供「同一 provider 同时提供 OpenAI 与 Anthropic 两套入口」的供应商使用（典型是 DeepSeek）。
+ * 这类供应商的协议必须跟随**端点形态**，不能写死 provider：
+ * - 官方 Anthropic 入口（`…/anthropic`）→ Anthropic 协议
+ * - 第三方 OpenAI 兼容网关（`…/v1`）→ OpenAI 协议
+ *
+ * 商业代管 relay（如 `…/v1/proxy`）由服务端路由决定协议，不适用本判定，
+ * 调用方需自行排除。
+ */
+export function isAnthropicShapedEndpoint(baseUrl?: string): boolean {
+  const raw = baseUrl?.trim()
+  if (!raw) return false
+  try {
+    return new URL(raw).pathname.toLowerCase().includes('/anthropic')
+  } catch {
+    return raw.toLowerCase().includes('/anthropic')
+  }
+}
+
+/**
  * 规范化 Anthropic Base URL（用于 Proma Chat 直接调用 API）
  *
  * 去除尾部斜杠，去除误填的 /messages 后缀，如果没有版本路径则追加 /v1。

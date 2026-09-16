@@ -582,13 +582,12 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
 interface ThinkingBlockProps {
   block: SDKThinkingBlock
   dimmed?: boolean
-  streaming?: boolean
 }
 
 /** 思考块折叠行数阈值 */
 const THINKING_COLLAPSE_LINE_THRESHOLD = 4
 
-function ThinkingBlock({ block, dimmed = false, streaming = false }: ThinkingBlockProps): React.ReactElement {
+function ThinkingBlock({ block, dimmed = false }: ThinkingBlockProps): React.ReactElement {
   const thinkingExpanded = useAtomValue(thinkingExpandedAtom)
   const [isExpanded, setIsExpanded] = React.useState(thinkingExpanded)
   const [shouldCollapse, setShouldCollapse] = React.useState(false)
@@ -596,12 +595,12 @@ function ThinkingBlock({ block, dimmed = false, streaming = false }: ThinkingBlo
 
   // 检测内容是否超过阈值行数（useLayoutEffect：在 paint 前同步执行，避免「展开→收起」闪屏）
   React.useLayoutEffect(() => {
-    if (streaming || !contentRef.current) return
+    if (!contentRef.current) return
     const el = contentRef.current
     const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 22
     const maxHeight = lineHeight * THINKING_COLLAPSE_LINE_THRESHOLD
     setShouldCollapse(el.scrollHeight > maxHeight + 10)
-  }, [block.thinking, streaming])
+  }, [block.thinking])
 
   // 当全局偏好变更时同步（仅在"应折叠"时生效）
   React.useEffect(() => {
@@ -634,12 +633,12 @@ function ThinkingBlock({ block, dimmed = false, streaming = false }: ThinkingBlo
         <div
           ref={contentRef}
           className={cn(
-            'prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-[14px] leading-relaxed [&_.prose]:text-[14px] [&_.prose_strong]:font-medium overflow-hidden',
+            'prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-[14px] leading-relaxed [&_.prose]:text-[14px] [&_.prose_strong]:font-medium overflow-hidden transition-[max-height] duration-200',
             dimmed ? 'text-muted-foreground' : 'text-foreground/90',
             shouldCollapse && !isExpanded && 'max-h-[5.6em]',
           )}
         >
-          <MessageResponse streaming={streaming}>{block.thinking}</MessageResponse>
+          <MessageResponse>{block.thinking}</MessageResponse>
         </div>
         {shouldCollapse && (
           <button
@@ -720,7 +719,7 @@ function GeneratedImageThumb({ image }: { image: ParsedAgentImageAttachment }): 
 
 // ===== ContentBlock 主组件 =====
 
-function ContentBlockView({ block, allMessages, basePath, basePaths, animate = false, index = 0, dimmed = false, childBlocks, isStreaming, showThinking = true }: ContentBlockProps): React.ReactElement | null {
+export function ContentBlock({ block, allMessages, basePath, basePaths, animate = false, index = 0, dimmed = false, childBlocks, isStreaming, showThinking = true }: ContentBlockProps): React.ReactElement | null {
   // text 块 — 主要内容，不受 dimmed 影响
   if (block.type === 'text') {
     const textBlock = block as SDKTextBlock
@@ -739,7 +738,7 @@ function ContentBlockView({ block, allMessages, basePath, basePaths, animate = f
           </div>
         )}
         {cleanText && (
-          <MessageResponse basePath={basePath} basePaths={basePaths} streaming={isStreaming}>{cleanText}</MessageResponse>
+          <MessageResponse basePath={basePath} basePaths={basePaths}>{cleanText}</MessageResponse>
         )}
       </>
     )
@@ -766,25 +765,8 @@ function ContentBlockView({ block, allMessages, basePath, basePaths, animate = f
   if (block.type === 'thinking') {
     const thinkingBlock = block as SDKThinkingBlock
     if (!showThinking || !thinkingBlock.thinking) return null
-    return <ThinkingBlock block={thinkingBlock} dimmed={dimmed} streaming={isStreaming} />
+    return <ThinkingBlock block={thinkingBlock} dimmed={dimmed} />
   }
 
   return null
 }
-
-/**
- * 历史内容不应随实时消息数组更新而重新测量/重绘；实时块的 block 引用会在
- * 新 partial 到达时变化，因此仍会正常更新。工具结果也随 live block 一起替换，
- * 不依赖全局 allMessages 的引用变化触发历史内容重渲染。
- */
-export const ContentBlock = React.memo(ContentBlockView, (prev, next) => (
-  prev.block === next.block
-  && prev.basePath === next.basePath
-  && prev.basePaths === next.basePaths
-  && prev.animate === next.animate
-  && prev.index === next.index
-  && prev.dimmed === next.dimmed
-  && prev.childBlocks === next.childBlocks
-  && prev.isStreaming === next.isStreaming
-  && prev.showThinking === next.showThinking
-))
