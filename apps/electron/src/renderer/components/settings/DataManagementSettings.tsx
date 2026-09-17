@@ -630,7 +630,7 @@ function StorageSection(): React.ReactElement {
     setLastResult(null)
     try {
       const result = await window.electronAPI.cleanupStorage({
-        categories: ['agent-sessions', 'sdk-config', 'workspaces'],
+        categories: ['agent-sessions', 'sdk-config', 'workspaces', 'session-blobs'],
         orphansOnly: true,
         archivedBeforeDays: 0,
       }) as CleanupResult
