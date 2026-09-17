@@ -107,6 +107,9 @@ interface SessionCompactionResult {
   failedFiles: number
   charsBefore: number
   charsAfter: number
+  blobRefs: number
+  blobCount: number
+  blobBytes: number
   backupDir?: string
   errors: string[]
 }
@@ -825,15 +828,15 @@ function StorageSection(): React.ReactElement {
         </SettingsCard>
       </SettingsSection>
 
-      {/* 整理历史数据（与「清理」不同：就地收敛超限行，不删除任何会话） */}
+      {/* 整理历史数据（与「清理」不同：把载荷搬出会话文件，不删任何东西） */}
       <SettingsSection
         title="整理历史数据"
-        description="把历史会话里过大的工具输出与内嵌图片换成预览，释放磁盘与内存占用；不会删除任何会话"
+        description="把历史会话里过大的工具输出与内嵌图片搬到独立存储，会话文件里只留片段；原文完整保留可随时取回，不删任何内容"
       >
         <SettingsCard>
           <SettingsRow
             label="可整理的会话数据"
-            description="检测历史会话中超过存储上限的单条消息（通常是体积很大的工具输出或内嵌图片）"
+            description="检测历史会话中超过存储上限的单条消息（通常是体积很大的工具输出或内嵌图片）。整理后打开这些会话不再需要把巨型内容读进内存"
           >
             <div className="flex items-center gap-3">
               {compactionPreview && (
@@ -844,7 +847,7 @@ function StorageSection(): React.ReactElement {
                   )}
                 >
                   {compactionPreview.rewrittenFiles > 0
-                    ? `${compactionPreview.rewrittenFiles} 个文件 · ${formatBytes(compactionPreview.charsBefore)} → ${formatBytes(compactionPreview.charsAfter)}`
+                    ? `${compactionPreview.rewrittenFiles} 个文件 · 会话体积 ${formatBytes(compactionPreview.charsBefore)} → ${formatBytes(compactionPreview.charsAfter)}`
                     : '无需整理'}
                 </span>
               )}
@@ -877,9 +880,16 @@ function StorageSection(): React.ReactElement {
             {compactionResult.rewrittenFiles > 0 ? (
               <>
                 <span className="text-emerald-600 dark:text-emerald-400">
-                  已整理 {compactionResult.rewrittenFiles} 个会话文件、{compactionResult.rewrittenLines} 条消息，
-                  {formatBytes(compactionResult.charsBefore)} → {formatBytes(compactionResult.charsAfter)}
+                  已整理 {compactionResult.rewrittenFiles} 个会话文件、{compactionResult.rewrittenLines} 条消息；
+                  会话体积 {formatBytes(compactionResult.charsBefore)} → {formatBytes(compactionResult.charsAfter)}
                 </span>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  原文 {formatBytes(compactionResult.blobBytes)} 已搬到独立存储
+                  {compactionResult.blobRefs > compactionResult.blobCount
+                    ? `（${compactionResult.blobCount} 份，重复内容已自动合并）`
+                    : ''}
+                  ；在会话里点「加载全文」即可取回
+                </div>
                 {compactionResult.backupDir && (
                   <div className="mt-1 break-all text-xs text-muted-foreground">
                     原文件已备份至 {compactionResult.backupDir}

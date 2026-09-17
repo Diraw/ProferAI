@@ -1,18 +1,17 @@
 /**
- * 历史会话存储「整理」（compaction）——把已落盘的过大工具输出/内嵌图片换成预览。
+ * 历史会话存储「整理」——把已落盘的过大载荷**搬出 JSONL 行**，而不是删掉。
  *
- * 背景：落盘截断逻辑此前有 4 个覆盖缺口（顶层 `tool_use_result` 未处理、扁平 `data`
- * 图片漏过、数组内 text 无分支、阈值按原文长度而非序列化长度判断），导致真机上积累
- * 了超限行（实测 1107 文件中 167 条，合计 169 MB）。补洞只保证「此后不再产生」，
- * 已经在磁盘上的必须另行整理一次——否则打开这类会话时仍要把整条巨型行读进内存。
+ * 与截断式迁移的区别（这是本模块存在的全部意义）：
+ * - 旧版：超出上限的内容直接截断丢弃，只留 2000 字预览。**数据永久丢失。**
+ * - 现在：原文完整搬到 blob（内容寻址存储），行内只留片段与引用，**可完整还原**。
  *
- * 与截断逻辑的关系：本模块**不自己实现截断**，而是调用
- * `agent-session-manager.sanitizeSerializedSessionLine`。写入路径与整理路径共用同一个
- * 入口，规则只会有一份；4 个缺口那次的教训正是「同一套规则散在多处、各自漏一处」。
+ * 用户 2026-09-17 明确否掉了截断路线：
+ * > 不应该为了读取速度而丢失掉部分较长的数据，而应该改变的是存放规则，从而加快读取速度
  *
- * 为什么全部用异步 fs：整理由用户在设置页触发，真机全量约 4~16 秒。用同步 fs 会把
- * 主进程（进而整个 UI）卡住；异步 fs 在 I/O 之间让出事件循环，界面仍可响应。
- * 这与既有的 `calculateStorageStats` 保持同一取舍。
+ * 与写入路径的关系：本模块**不自己实现外部化**，而是调用
+ * `agent-session-manager.externalizeSerializedSessionLine`。写入路径与整理路径共用同一个
+ * 入口——历史上「同一套规则散在多处、各自漏一处」已经造成过一次事故（落盘截断的 4 个
+ * 覆盖缺口），这里不重蹈。截断仍作为兜底保留在该函数内部（抽不动或 blob 写失败时使用）。
  *
  * 安全约束：
  * 1. 只改超限行，其余行逐字节原样保留（按 `\n` 切分再拼回，不动换行风格）。
@@ -24,12 +23,20 @@
  *
  * 闸门：用**内容自闸**（扫到超限行才动手）而不是版本标记文件。标记会失配——用户从
  * 备份恢复旧文件后标记仍在，就永远不会再整理。自闸不存在这种漏网，代价只是一次扫描。
+ *
+ * 为什么是异步：由用户在设置页触发，真机全量约数秒。同步 fs 会把主进程进而整个 UI
+ * 卡住；异步 fs 在 I/O 之间让出事件循环。逐行外部化本身是同步的（与写入路径共用同一
+ * 实现），因此在行与行之间显式让出一次，避免单个会话文件长时间独占主线程。
  */
 
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getAgentSessionsDir, getConfigDir } from './config-paths'
-import { MAX_SDK_MESSAGE_LENGTH, sanitizeSerializedSessionLine } from './agent-session-manager'
+import {
+  MAX_SDK_MESSAGE_LENGTH,
+  externalizeSerializedSessionLine,
+  readSerializedBlobRefs,
+} from './agent-session-manager'
 
 export interface SessionCompactionResult {
   /** 扫描的会话文件数 */
@@ -44,8 +51,14 @@ export interface SessionCompactionResult {
   failedFiles: number
   /** 被改写行的整理前字符数 */
   charsBefore: number
-  /** 被改写行的整理后字符数 */
+  /** 被改写行的整理后字符数（行内） */
   charsAfter: number
+  /** 本次搬进独立存储的载荷条数（含重复引用） */
+  blobRefs: number
+  /** 本次搬进独立存储的**不同**载荷数（内容寻址 ⇒ 同内容只写一份） */
+  blobCount: number
+  /** 本次写入的载荷总字节数 */
+  blobBytes: number
   /** 备份目录（本次无改写时为 undefined） */
   backupDir?: string
   /** 逐文件错误信息（最多保留 20 条，避免异常时刷屏） */
@@ -64,6 +77,9 @@ function createEmptyResult(): SessionCompactionResult {
     failedFiles: 0,
     charsBefore: 0,
     charsAfter: 0,
+    blobRefs: 0,
+    blobCount: 0,
+    blobBytes: 0,
     errors: [],
   }
 }
@@ -92,12 +108,36 @@ function recordError(result: SessionCompactionResult, name: string, error: unkno
   }
 }
 
+/** 让出一次事件循环，避免单个会话文件长时间独占主线程 */
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+
+/** 把一行搬去独立存储，并把本次写入的载荷计入统计 */
+function externalizeLineIntoStats(
+  line: string,
+  sessionName: string,
+  result: SessionCompactionResult,
+  seenHashes: Set<string>,
+): string {
+  const compacted = externalizeSerializedSessionLine(line, sessionName)
+  if (compacted === line) return line
+
+  for (const ref of readSerializedBlobRefs(compacted)) {
+    result.blobRefs++
+    if (seenHashes.has(ref.hash)) continue          // 内容寻址 ⇒ 同内容只写一份
+    seenHashes.add(ref.hash)
+    result.blobCount++
+    result.blobBytes += ref.bytes || 0
+  }
+  return compacted
+}
+
 /**
  * 仅统计不写入：用于先给用户看「整理能省多少」再决定是否执行。
  */
 export async function previewAgentSessionCompaction(): Promise<SessionCompactionResult> {
   const result = createEmptyResult()
   const sessionsDir = getAgentSessionsDir()
+  const seenHashes = new Set<string>()
 
   for (const name of await listSessionFiles(sessionsDir)) {
     result.scannedFiles++
@@ -109,7 +149,7 @@ export async function previewAgentSessionCompaction(): Promise<SessionCompaction
       let touched = false
       for (const line of lines) {
         if (line.length <= MAX_SDK_MESSAGE_LENGTH) continue
-        const compacted = sanitizeSerializedSessionLine(line, name)
+        const compacted = externalizeLineIntoStats(line, name, result, seenHashes)
         if (compacted === line) continue
         touched = true
         result.rewrittenLines++
@@ -131,6 +171,7 @@ export async function previewAgentSessionCompaction(): Promise<SessionCompaction
 export async function compactAgentSessionStorage(): Promise<SessionCompactionResult> {
   const result = createEmptyResult()
   const sessionsDir = getAgentSessionsDir()
+  const seenHashes = new Set<string>()
 
   for (const name of await listSessionFiles(sessionsDir)) {
     const filePath = join(sessionsDir, name)
@@ -143,21 +184,31 @@ export async function compactAgentSessionStorage(): Promise<SessionCompactionRes
       if (sizeBeforeRead <= MAX_SDK_MESSAGE_LENGTH) continue
 
       const lines = (await readFile(filePath, 'utf-8')).split('\n')
+      const compactedLines: string[] = []
       let fileChanged = false
+      let fileLinesRewritten = 0
       let fileCharsBefore = 0
       let fileCharsAfter = 0
-      let fileLinesRewritten = 0
 
-      const compactedLines = lines.map((line) => {
-        if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
-        const compacted = sanitizeSerializedSessionLine(line, name)
-        if (compacted === line) return line
+      for (const line of lines) {
+        if (line.length <= MAX_SDK_MESSAGE_LENGTH) {
+          compactedLines.push(line)
+          continue
+        }
+        // 逐行外部化是同步的（与写入路径共用同一实现）；行与行之间让出一次，
+        // 避免一个塞满巨型行的会话文件长时间卡住主进程。
+        await yieldToEventLoop()
+        const compacted = externalizeLineIntoStats(line, name, result, seenHashes)
+        if (compacted === line) {
+          compactedLines.push(line)
+          continue
+        }
         fileChanged = true
         fileLinesRewritten++
         fileCharsBefore += line.length
         fileCharsAfter += compacted.length
-        return compacted
-      })
+        compactedLines.push(compacted)
+      }
 
       if (!fileChanged) continue
 

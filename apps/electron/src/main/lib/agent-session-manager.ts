@@ -67,6 +67,7 @@ import {
   type RewindSessionResult,
   SESSION_BLOB_REFS_FIELD,
   SESSION_BLOB_MISSING_FIELD,
+  readSessionBlobRefs,
 } from '@profer/shared'
 import { getConversationMessages } from './conversation-manager'
 import { isUserInputMessage } from '@profer/session-core'
@@ -822,6 +823,19 @@ export function externalizeSerializedSessionLine(line: string, sessionId?: strin
     // blob 写失败不能让写入失败：退回截断，保住行上限
     console.warn(`[Agent 会话] 载荷外部化失败，退回截断${sessionId ? ` session=${sessionId}` : ''}:`, error)
     return sanitizeSerializedSessionLine(line, sessionId)
+  }
+}
+
+/**
+ * 从一条**已序列化**的会话行里读出引用表。
+ * 供存量迁移统计「本次搬了多少载荷」使用；解析失败返回空数组（不抛异常）。
+ * 复用 shared 的 readSessionBlobRefs，避免同一形状在两处各自实现。
+ */
+export function readSerializedBlobRefs(line: string): StoredBlobRef[] {
+  try {
+    return readSessionBlobRefs(JSON.parse(line)) as StoredBlobRef[]
+  } catch {
+    return []
   }
 }
 

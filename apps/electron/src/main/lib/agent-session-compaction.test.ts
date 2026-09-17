@@ -25,6 +25,7 @@ const MAX = 256 * 1024
 let root = ''
 let sessionsDir = ''
 let compaction: typeof import('./agent-session-compaction')
+let sessions: typeof import('./agent-session-manager')
 let configPaths: typeof import('./config-paths')
 
 beforeEach(async () => {
@@ -32,6 +33,7 @@ beforeEach(async () => {
   process.env.PROFER_CONFIG_DIR = root
   const cacheKey = `${Date.now()}-${Math.random()}`
   compaction = await import(`./agent-session-compaction?compaction-test=${cacheKey}`)
+  sessions = await import(`./agent-session-manager?compaction-test=${cacheKey}`)
   configPaths = await import(`./config-paths?compaction-test=${cacheKey}`)
   sessionsDir = configPaths.getAgentSessionsDir()
   mkdirSync(sessionsDir, { recursive: true })
@@ -105,6 +107,55 @@ describe('历史会话整理 · 只动超限行', () => {
     expect(result.charsBefore).toBeGreaterThan(800 * 1024)
     expect(result.charsAfter).toBeLessThan(result.charsBefore)
     expect(readLines(path).every((line) => line.length <= MAX)).toBe(true)
+  })
+})
+
+describe('历史会话整理 · 不丢数据（本模块存在的全部意义）', () => {
+  test('Given 超限行 When 整理 Then 原文可完整还原，与整理前逐字节一致', async () => {
+    const line = oversizedLine('KEEP-')
+    const path = writeSession('recover.jsonl', [line])
+
+    await compaction.compactAgentSessionStorage()
+
+    const after = readLines(path)[0]!
+    expect(after.length).toBeLessThanOrEqual(MAX)
+
+    const parsed = JSON.parse(after) as Record<string, unknown>
+    expect(Array.isArray(parsed._proferBlobs)).toBe(true)
+
+    // 关键断言：整理【没有丢数据】——还原回去必须等于整理前那一行
+    const resolved = await sessions.resolveMessageBlobs(parsed as never)
+    expect(JSON.stringify(resolved)).toBe(JSON.stringify(JSON.parse(line)))
+  })
+
+  test('Given 整理发生 When 看统计 Then 报出搬到独立存储的份数与字节数', async () => {
+    // 同一条内容在同一行里出现两次（message.content 与顶层 tool_use_result 互为副本）
+    const shared = 'M'.repeat(400 * 1024)
+    const line = JSON.stringify({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', content: [{ type: 'text', text: shared }] }] },
+      tool_use_result: { content: [{ type: 'text', text: shared }] },
+    })
+    writeSession('stats.jsonl', [line])
+
+    const result = await compaction.compactAgentSessionStorage()
+
+    expect(result.blobRefs).toBeGreaterThanOrEqual(2)   // 两处引用
+    expect(result.blobCount).toBe(1)                     // 内容寻址 ⇒ 只写一份
+    expect(result.blobBytes).toBeGreaterThan(0)
+    // 行内降得多，但搬到独立存储的只有一份
+    expect(result.charsAfter).toBeLessThan(result.charsBefore)
+  })
+
+  test('Given 预览 When 看统计 Then 也报出将要搬出的量（不写入）', async () => {
+    writeSession('preview-stats.jsonl', [oversizedLine('PVE-')])
+    const before = readFileSync(join(sessionsDir, 'preview-stats.jsonl'), 'utf-8')
+
+    const preview = await compaction.previewAgentSessionCompaction()
+
+    expect(preview.blobCount).toBeGreaterThan(0)
+    expect(preview.blobBytes).toBeGreaterThan(0)
+    expect(readFileSync(join(sessionsDir, 'preview-stats.jsonl'), 'utf-8')).toBe(before)
   })
 })
 
