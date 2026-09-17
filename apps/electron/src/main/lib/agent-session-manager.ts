@@ -598,8 +598,205 @@ export function sanitizeSerializedSessionLine(line: string, sessionId?: string):
   return sanitized
 }
 
+// ===== 大载荷外部化（把载荷搬出 JSONL 行，而不是删掉） =====
+
 /**
- * 追加 SDKMessage 到会话的 JSONL 文件（Phase 4 新持久化格式）
+ * 消息级引用表字段名。放在消息顶层，不影响任何已有字段。
+ * 为什么不把字段本身换成对象：那会把类型从 string 变成联合类型，
+ * 老版本读到新数据会渲染成 `[object Object]` 甚至崩；
+ * 保持 string（值为片段）则老代码只是显示得短一点——降级而非崩坏。
+ */
+const BLOB_REFS_FIELD = '_proferBlobs'
+/** 还原失败时记录缺失引用，供上层提示「原文不可用」 */
+const BLOB_REFS_MISSING_FIELD = '_proferBlobsMissing'
+
+/** 行内保留的片段长度：与截断预览同长 */
+const INLINE_PREVIEW_CHARS = TRUNCATED_PREVIEW_LENGTH
+/**
+ * 可抽取的下限。短于片段长度的字符串抽了等于没抽（片段就是全文），因此不碰。
+ * 同时也是「抽不动了」的终止条件：候选已按长度降序，一旦遇到不达下限的就必然全部不达标。
+ */
+const MIN_EXTRACTABLE_CHARS = INLINE_PREVIEW_CHARS
+/** 遍历深度上限，防止异常结构导致栈过深 */
+const MAX_BLOB_WALK_DEPTH = 12
+
+interface StoredBlobRef {
+  /** 相对消息根的对象路径，如 `tool_use_result.content.0.text` */
+  path: string
+  hash: string
+  chars: number
+  bytes: number
+}
+
+interface ExtractableString {
+  path: string
+  length: number
+}
+
+/** 路径 tokenizer：`a.b[0].c` → ['a','b',0,'c'] */
+function tokenizeBlobPath(path: string): (string | number)[] {
+  const tokens: (string | number)[] = []
+  const pattern = /([^.[\]]+)|\[(\d+)\]/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(path)) !== null) {
+    tokens.push(match[2] !== undefined ? Number(match[2]) : match[1]!)
+  }
+  return tokens
+}
+
+function getStringAtPath(root: unknown, path: string): string | undefined {
+  let node: unknown = root
+  for (const token of tokenizeBlobPath(path)) {
+    if (typeof token === 'number') {
+      if (!Array.isArray(node)) return undefined
+      node = node[token]
+    } else {
+      if (!isPlainRecord(node)) return undefined
+      node = node[token]
+    }
+  }
+  return typeof node === 'string' ? node : undefined
+}
+
+function setStringAtPath(root: unknown, path: string, value: string): boolean {
+  const tokens = tokenizeBlobPath(path)
+  if (tokens.length === 0) return false
+  let node: unknown = root
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const token = tokens[i]!
+    if (typeof token === 'number') {
+      if (!Array.isArray(node)) return false
+      node = node[token]
+    } else {
+      if (!isPlainRecord(node)) return false
+      node = node[token]
+    }
+  }
+  const last = tokens[tokens.length - 1]!
+  if (typeof last === 'number') {
+    if (!Array.isArray(node)) return false
+    node[last] = value
+    return true
+  }
+  if (!isPlainRecord(node)) return false
+  node[last] = value
+  return true
+}
+
+/** 递归收集所有超过片段长度的字符串及其路径（不进入引用表自身） */
+function collectExtractableStrings(
+  value: unknown,
+  path: string,
+  out: ExtractableString[],
+  depth = 0,
+): void {
+  if (depth > MAX_BLOB_WALK_DEPTH) return
+
+  if (typeof value === 'string') {
+    if (value.length > MIN_EXTRACTABLE_CHARS) out.push({ path, length: value.length })
+    return
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      collectExtractableStrings(value[i], `${path}[${i}]`, out, depth + 1)
+    }
+    return
+  }
+  if (!isPlainRecord(value)) return
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === BLOB_REFS_FIELD || key === BLOB_REFS_MISSING_FIELD) continue
+    collectExtractableStrings(child, path ? `${path}.${key}` : key, out, depth + 1)
+  }
+}
+
+/**
+ * 把超限行里的超大字符串搬到 blob，行内只留片段 + 引用。
+ *
+ * 规则（用户 2026-09-17 确认）：
+ * 1. 行未超限 → 原样返回，**一个字节都不动**
+ * 2. 超了 → 从最大字符串开始抽，原位留前 2000 字片段，再量一次，还超就继续抽
+ * 3. 抽不动了（候选已不足片段长度）或 blob 写失败 → 退回截断兜底
+ *
+ * 为什么「从最大开始抽」：抽一个 12 MB 的字符串就解决问题，不需要动其他字段，干预面最小。
+ */
+export function externalizeSerializedSessionLine(line: string, sessionId?: string): string {
+  if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
+
+  let message: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(line)
+    if (!isPlainRecord(parsed)) return sanitizeSerializedSessionLine(line, sessionId)
+    message = parsed
+  } catch {
+    return sanitizeSerializedSessionLine(line, sessionId)
+  }
+
+  const candidates: ExtractableString[] = []
+  collectExtractableStrings(message, '', candidates)
+  if (candidates.length === 0) return sanitizeSerializedSessionLine(line, sessionId)
+
+  candidates.sort((a, b) => b.length - a.length)
+
+  const refs: StoredBlobRef[] = []
+  try {
+    for (const candidate of candidates) {
+      if (JSON.stringify(message).length <= MAX_SDK_MESSAGE_LENGTH) break
+
+      const value = getStringAtPath(message, candidate.path)
+      if (typeof value !== 'string' || value.length <= MIN_EXTRACTABLE_CHARS) break
+
+      const { hash, bytes } = writeBlobSync(value)
+      if (!setStringAtPath(message, candidate.path, value.slice(0, INLINE_PREVIEW_CHARS))) break
+      refs.push({ path: candidate.path, hash, chars: value.length, bytes })
+    }
+  } catch (error) {
+    // blob 写失败不能让写入失败：退回截断，保住行上限
+    console.warn(`[Agent 会话] 载荷外部化失败，退回截断${sessionId ? ` session=${sessionId}` : ''}:`, error)
+    return sanitizeSerializedSessionLine(line, sessionId)
+  }
+
+  if (refs.length === 0) return sanitizeSerializedSessionLine(line, sessionId)
+
+  const serialized = JSON.stringify({ ...message, [BLOB_REFS_FIELD]: refs })
+  if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
+
+  // 抽到最后仍不达标（剩下的都是小字符串）→ 交给截断兜底
+  return sanitizeSerializedSessionLine(line, sessionId)
+}
+
+/**
+ * 把一条消息里的引用一次性还原为原文，返回原始形状。
+ *
+ * 这是对外**唯一**的还原入口：消费方不需要知道路径与哈希的存在。
+ * blob 缺失或哈希不匹配时保留片段并记入 `_proferBlobsMissing`，绝不抛异常
+ * ——任何「读历史数据可能崩」的设计都不该上线。
+ */
+export async function resolveMessageBlobs(message: SDKMessage): Promise<SDKMessage> {
+  const rawRefs = (message as unknown as Record<string, unknown>)[BLOB_REFS_FIELD]
+  if (!Array.isArray(rawRefs) || rawRefs.length === 0) return message
+
+  const clone = JSON.parse(JSON.stringify(message)) as Record<string, unknown>
+  const refs = clone[BLOB_REFS_FIELD] as StoredBlobRef[]
+  delete clone[BLOB_REFS_FIELD]
+
+  const missing: string[] = []
+  for (const ref of refs) {
+    const content = await readBlob(ref.hash)
+    if (content === null) {
+      missing.push(ref.path)
+      continue
+    }
+    if (!setStringAtPath(clone, ref.path, content)) missing.push(ref.path)
+  }
+
+  if (missing.length > 0) clone[BLOB_REFS_MISSING_FIELD] = missing
+  return clone as unknown as SDKMessage
+}
+
+import { readBlob, writeBlobSync } from './blob-store'
+
+/**
  *
  * 每条 SDKMessage 单独一行 JSON。读取时通过 `type` 字段区分新旧格式。
  * 超过 256K chars 的消息会被自动截断以防止存储膨胀。
@@ -616,7 +813,7 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
 
   try {
     const lines = persistentMessages
-      .map((m) => sanitizeSerializedSessionLine(JSON.stringify(m), id))
+      .map((m) => externalizeSerializedSessionLine(JSON.stringify(m), id))
       .join('\n') + '\n'
     appendFileSync(filePath, lines, 'utf-8')
   } catch (error) {
@@ -1775,11 +1972,11 @@ function serializeSDKMessageForStorage(
   }
   if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
 
-  let sanitized = sanitizeSerializedSessionLine(serialized)
+  let externalized = externalizeSerializedSessionLine(serialized)
   if (sourceDir && destDir) {
-    sanitized = rewriteSourceToDest(sanitized, sourceDir, destDir)
+    externalized = rewriteSourceToDest(externalized, sourceDir, destDir)
   }
-  return sanitized
+  return externalized
 }
 
 async function writeJsonlLine(stream: WriteStream, line: string): Promise<void> {

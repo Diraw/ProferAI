@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SDKMessage } from '@profer/shared'
@@ -21,12 +21,16 @@ mock.module('electron', () => ({
   systemPreferences: {},
 }))
 
-/** 与源码保持一致：单行序列化上限 256K chars，截断阈值取其一半 */
+/** 与源码保持一致：单行序列化上限 256K chars */
 const MAX_SDK_MESSAGE_LENGTH = 256 * 1024
 const TRUNCATION_MARK = '内容已截断'
+/** 行内片段长度 = 可抽取下限 */
+const PREVIEW = 2000
+const REFS_FIELD = '_proferBlobs'
 
 let root = ''
 let sessions: typeof import('./agent-session-manager')
+let blobStore: typeof import('./blob-store')
 let configPaths: typeof import('./config-paths')
 
 beforeEach(async () => {
@@ -34,7 +38,9 @@ beforeEach(async () => {
   process.env.PROFER_CONFIG_DIR = root
   const cacheKey = `${Date.now()}-${Math.random()}`
   sessions = await import(`./agent-session-manager?oversized-test=${cacheKey}`)
+  blobStore = await import(`./blob-store?oversized-test=${cacheKey}`)
   configPaths = await import(`./config-paths?oversized-test=${cacheKey}`)
+  mkdirSync(configPaths.getAgentSessionsDir(), { recursive: true })
 })
 
 afterEach(() => {
@@ -55,42 +61,81 @@ function writeAndReadLine(message: SDKMessage): Record<string, unknown> {
 
 const bigString = (n: number): string => 'A'.repeat(n)
 
-describe('超大消息落盘收敛', () => {
-  test('Given 顶层 tool_use_result 携带整页 HTML When 落盘 Then 被截断且整行不超限', () => {
+interface StoredRef { path: string; hash: string; chars: number }
+const refsOf = (line: Record<string, unknown>): StoredRef[] => (line[REFS_FIELD] ?? []) as StoredRef[]
+
+/** 按 `a.b[0].c` 取值（与源码同一套路径语法） */
+function valueAtPath(rootValue: unknown, path: string): unknown {
+  const tokens: (string | number)[] = []
+  const pattern = /([^.[\]]+)|\[(\d+)\]/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(path)) !== null) {
+    tokens.push(match[2] !== undefined ? Number(match[2]) : match[1]!)
+  }
+  let node: unknown = rootValue
+  for (const token of tokens) {
+    if (node === null || node === undefined) return undefined
+    node = (node as Record<string | number, unknown>)[token]
+  }
+  return node
+}
+
+/**
+ * 断言某个路径被**外部化**：行内是片段、引用表里有它、blob 里能逐字节取回原文。
+ * 这是写入路径的现在行为——超限载荷搬到 blob，而不是删掉。
+ */
+function expectExternalized(line: Record<string, unknown>, path: string, original: string): void {
+  const ref = refsOf(line).find((item) => item.path === path)
+  expect(ref).toBeDefined()
+  expect(ref!.chars).toBe(original.length)
+
+  const inline = valueAtPath(line, path)
+  expect(typeof inline).toBe('string')
+  expect((inline as string).length).toBe(PREVIEW)      // 片段，不是空白
+  expect(original.startsWith(inline as string)).toBe(true)
+
+  expect(blobStore.readBlobSync(ref!.hash)).toBe(original)   // 原文可完整还原
+}
+
+describe('超限消息落盘：外部化（写入路径现在的行为）', () => {
+  test('Given 顶层 tool_use_result 携带整页 HTML When 落盘 Then 搬到 blob 且整行不超限', () => {
     // 真实形态：{content:[{type:'text',text:'<!DOCTYPE html>...'}], isError}
+    const html = bigString(400_000)
     const message = {
       type: 'user',
       message: { content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'ok' }] },
-      tool_use_result: { content: [{ type: 'text', text: bigString(400_000) }], isError: false },
+      tool_use_result: { content: [{ type: 'text', text: html }], isError: false },
       parent_tool_use_id: null,
     } as unknown as SDKMessage
 
     const persisted = writeAndReadLine(message)
-    const details = persisted.tool_use_result as { content: Array<{ type: string; text: string }> }
 
-    expect(details.content[0]!.text.length).toBeLessThan(3000)
-    expect(details.content[0]!.text).toContain(TRUNCATION_MARK)
+    expectExternalized(persisted, 'tool_use_result.content[0].text', html)
+    // 非载荷字段原样保留
+    expect((persisted.tool_use_result as { isError: boolean }).isError).toBe(false)
+    expect((persisted.message as { content: Array<{ content: string }> }).content[0]!.content).toBe('ok')
   })
 
-  test('Given 顶层 tool_use_result 携带 PDF base64 When 落盘 Then base64 被截断', () => {
+  test('Given 顶层 tool_use_result 携带 PDF base64 When 落盘 Then 搬到 blob', () => {
     // 真实形态：{type:'pdf', file:{filePath, base64}}（实测单条最大 9.4 MB）
+    const base64 = `JVBERi0${bigString(400_000)}`
     const message = {
       type: 'user',
       message: { content: [{ type: 'tool_result', tool_use_id: 'call_2', content: 'ok' }] },
-      tool_use_result: { type: 'pdf', file: { filePath: 'W:\spec.pdf', base64: `JVBERi0${bigString(400_000)}` } },
+      tool_use_result: { type: 'pdf', file: { filePath: 'W:\\spec.pdf', base64 } },
       parent_tool_use_id: null,
     } as unknown as SDKMessage
 
     const persisted = writeAndReadLine(message)
-    const details = persisted.tool_use_result as { file: { filePath: string; base64: string } }
 
-    expect(details.file.filePath).toBe('W:\spec.pdf')
-    expect(details.file.base64).toContain(TRUNCATION_MARK)
-    expect(details.file.base64.length).toBeLessThan(3000)
+    expectExternalized(persisted, 'tool_use_result.file.base64', base64)
+    // 路径型标记必须留着——渲染侧靠它定位文件
+    expect((persisted.tool_use_result as { file: { filePath: string } }).file.filePath).toBe('W:\\spec.pdf')
   })
 
-  test('Given message.content 内嵌扁平 data 图片 When 落盘 Then base64 被剥离为轻量标记', () => {
-    // Pi 风格：{type:'image', data, mimeType}；此前代码只认 source.data，实测约 95 MB 漏处理
+  test('Given message.content 内嵌扁平 data 图片 When 落盘 Then 搬到 blob（此前约 95 MB 漏处理）', () => {
+    // Pi 风格：{type:'image', data, mimeType}；此前代码只认 source.data
+    const data = `iVBORw0KGgo${bigString(400_000)}`
     const message = {
       type: 'user',
       message: {
@@ -99,7 +144,7 @@ describe('超大消息落盘收敛', () => {
           tool_use_id: 'call_3',
           content: [
             { type: 'text', text: 'Screenshot rendered (returned inline).' },
-            { type: 'image', data: `iVBORw0KGgo${bigString(400_000)}`, mimeType: 'image/png' },
+            { type: 'image', data, mimeType: 'image/png' },
           ],
         }],
       },
@@ -107,55 +152,50 @@ describe('超大消息落盘收敛', () => {
     } as unknown as SDKMessage
 
     const persisted = writeAndReadLine(message)
-    const blocks = (persisted.message as { content: Array<{ content: unknown[] }> }).content
-    const image = blocks[0]!.content[1] as Record<string, unknown>
 
+    expectExternalized(persisted, 'message.content[0].content[1].data', data)
+    // 图片块本身仍是图片块，媒体类型保留
+    const image = valueAtPath(persisted, 'message.content[0].content[1]') as Record<string, unknown>
     expect(image.type).toBe('image')
-    expect(image._truncated).toBe(true)
-    expect(image._originalLength).toBeGreaterThan(400_000)
-    expect(image.data).toBeUndefined()
+    expect(image.mimeType).toBe('image/png')
   })
 
-  test('Given Anthropic 风格 source.data 图片 When 落盘 Then 原有剥离行为保持不变', () => {
+  test('Given Anthropic 风格 source.data 图片 When 落盘 Then 同样搬到 blob', () => {
+    const data = `iVBORw0KGgo${bigString(400_000)}`
     const message = {
       type: 'user',
       message: {
         content: [{
           type: 'tool_result',
           tool_use_id: 'call_4',
-          content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: `iVBORw0KGgo${bigString(400_000)}` } }],
+          content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }],
         }],
       },
       parent_tool_use_id: null,
     } as unknown as SDKMessage
 
     const persisted = writeAndReadLine(message)
-    const blocks = (persisted.message as { content: Array<{ content: unknown[] }> }).content
-    const image = blocks[0]!.content[0] as Record<string, unknown>
 
-    expect(image._truncated).toBe(true)
-    expect(image._originalLength).toBeGreaterThan(400_000)
+    expectExternalized(persisted, 'message.content[0].content[0].source.data', data)
   })
 
-  test('Given 嵌套在数组里的超长 text block When 落盘 Then 被截断（此前不受限）', () => {
+  test('Given 嵌套在数组里的超长 text block When 落盘 Then 搬到 blob（此前不受限）', () => {
+    const text = bigString(400_000)
     const message = {
       type: 'user',
       message: {
         content: [{
           type: 'tool_result',
           tool_use_id: 'call_5',
-          content: [{ type: 'text', text: bigString(400_000) }],
+          content: [{ type: 'text', text }],
         }],
       },
       parent_tool_use_id: null,
     } as unknown as SDKMessage
 
     const persisted = writeAndReadLine(message)
-    const blocks = (persisted.message as { content: Array<{ content: Array<{ text: string }> }> }).content
-    const text = blocks[0]!.content[0]!.text
 
-    expect(text.length).toBeLessThan(3000)
-    expect(text).toContain(TRUNCATION_MARK)
+    expectExternalized(persisted, 'message.content[0].content[0].text', text)
   })
 
   test('Given 未超限的普通消息 When 落盘 Then 内容与结构完全不被改动', () => {
@@ -173,18 +213,18 @@ describe('超大消息落盘收敛', () => {
     } as unknown as SDKMessage
 
     const persisted = writeAndReadLine(message)
-    const blocks = (persisted.message as { content: Array<{ content: unknown[] }> }).content
 
-    expect((blocks[0]!.content[0] as { text: string }).text).toBe('短文本')
-    expect((blocks[0]!.content[1] as { data: string }).data).toBe('short')
-    expect((persisted.tool_use_result as { content: Array<{ text: string }> }).content[0]!.text).toBe('同样很短')
+    expect(refsOf(persisted)).toHaveLength(0)      // 一个字节都不动，也不建 blob
+    expect(valueAtPath(persisted, 'message.content[0].content[0].text')).toBe('短文本')
+    expect(valueAtPath(persisted, 'message.content[0].content[1].data')).toBe('short')
+    expect(valueAtPath(persisted, 'tool_use_result.content[0].text')).toBe('同样很短')
   })
 })
 
-describe('转义膨胀场景', () => {
-  test('Given 原文未超阈值但 JSON 转义后膨胀 When 落盘 Then 逐级收紧后仍落入限内', () => {
+describe('转义膨胀与多字段累加', () => {
+  test('Given 原文未超阈值但 JSON 转义后膨胀 When 落盘 Then 按序列化结果判定并搬到 blob', () => {
     // 每个 U+0001 序列化后变成 6 个字符（\u0001），100K 原文 → 约 600K JSON。
-    // 只按原文长度判断会漏掉这种情况，必须按实际序列化结果逐级收紧。
+    // 只按原文长度判断会漏掉这种情况。
     const controlHeavy = '\u0001'.repeat(100_000)
     expect(controlHeavy.length).toBeLessThan(MAX_SDK_MESSAGE_LENGTH / 2)
     expect(JSON.stringify(controlHeavy).length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
@@ -199,15 +239,12 @@ describe('转义膨胀场景', () => {
 
     // writeAndReadLine 内部会断言落盘行 ≤ 上限
     const persisted = writeAndReadLine(message)
-    const blocks = (persisted.message as { content: Array<{ content: Array<{ text: string }> }> }).content
-    const text = blocks[0]!.content[0]!.text
 
-    expect(text.length).toBeLessThan(3000)
-    expect(text).toContain(TRUNCATION_MARK)
+    expectExternalized(persisted, 'message.content[0].content[0].text', controlHeavy)
   })
 
-  test('Given 多个中等字段累加超限 When 落盘 Then 也被收敛（非单个巨字段场景）', () => {
-    // 参考真机残留样本：单字段均低于阈值，但多字段累加超过上限
+  test('Given 多个中等字段累加超限 When 落盘 Then 逐个大字段搬走直到落入限内', () => {
+    // 参考真机残留样本：单字段均低于上限，但多字段累加超过上限
     const mid = 'B'.repeat(60_000)
     const message = {
       type: 'user',
@@ -222,10 +259,84 @@ describe('转义膨胀场景', () => {
       parent_tool_use_id: null,
     } as unknown as SDKMessage
 
-    const rawLineLength = JSON.stringify(message).length
-    expect(rawLineLength).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
+    expect(JSON.stringify(message).length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
 
     const persisted = writeAndReadLine(message)
+
     expect(JSON.stringify(persisted).length).toBeLessThanOrEqual(MAX_SDK_MESSAGE_LENGTH)
+    // 确实动用了外部化（而不是整条丢掉）
+    expect(refsOf(persisted).length).toBeGreaterThan(0)
+    // 每个被搬走的字段都能完整取回
+    for (const ref of refsOf(persisted)) {
+      expect(blobStore.readBlobSync(ref.hash)).toHaveLength(ref.chars)
+    }
+  })
+})
+
+describe('截断兜底（不再走主路径，但仍必须可用）', () => {
+  // 外部化抽不动时（剩下的字符串都不足片段长度）或 blob 写失败时，退回截断。
+  // 这条路径由 sanitizeSerializedSessionLine 直接承载。
+  test('Given 大字符串场景 When 调用兜底 Then 仍收敛到限内并留下截断标记', () => {
+    // 3 × 100K：均高于截断的阈值下限 4K，逐级收紧后可以截断
+    const chunk = 'C'.repeat(100_000)
+    const message = {
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'call_9',
+          content: [{ type: 'text', text: chunk }, { type: 'text', text: chunk }, { type: 'text', text: chunk }],
+        }],
+      },
+      parent_tool_use_id: null,
+    } as unknown as SDKMessage
+
+    const serialized = JSON.stringify(message)
+    expect(serialized.length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
+
+    const result = sessions.sanitizeSerializedSessionLine(serialized)
+
+    expect(result.length).toBeLessThanOrEqual(MAX_SDK_MESSAGE_LENGTH)
+    expect(result).toContain(TRUNCATION_MARK)
+  })
+
+  test('Given 未超限的行 When 调用兜底 Then 原样返回', () => {
+    const serialized = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } })
+    expect(sessions.sanitizeSerializedSessionLine(serialized)).toBe(serialized)
+  })
+})
+
+describe('已知限制：极多中等字符串的行无法收敛', () => {
+  // 这一节【故意断言现状】，把缺口记录下来而不是隐藏它。
+  //
+  // 两个下限造成的空隙：
+  //   外部化：字符串必须 > 2000（= 片段长度）才抽，抽了才有意义
+  //   截断：  字符串必须 > 4000（= 阈值下限）才截
+  // ⇒ 一行全由 2000 以下字符串累加超限时，两条路径都动不了。
+  //
+  // 真机 167 条超限行全是单个巨型字符串（整页 HTML / PDF base64 / 截图 base64），
+  // 不属此形态；但这是一个真实的不变量缺口，需单独拍板是否补（如：抽不动时改抽整容器）。
+  test('Given 全是 1500 字符的字符串累加超限 When 落盘 Then 两条路径均无法收敛（现状）', () => {
+    const small = 'D'.repeat(1500)
+    const blocks = Array.from({ length: 200 }, () => ({ type: 'text', text: small }))
+    const message = {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'call_10', content: blocks }] },
+      parent_tool_use_id: null,
+    } as unknown as SDKMessage
+
+    const serialized = JSON.stringify(message)
+    expect(serialized.length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
+
+    // 外部化：无可抽项（全部低于 2000）→ 不产生引用
+    const externalized = sessions.externalizeSerializedSessionLine(serialized)
+    expect((JSON.parse(externalized)[REFS_FIELD] ?? [])).toHaveLength(0)
+
+    // 截断：最细只能到 4000，1500 的字符串够不着 → 仍超限
+    const truncated = sessions.sanitizeSerializedSessionLine(serialized)
+    expect(truncated.length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
+
+    // 重要：虽然超限，但【没有丢数据】——原样保留，不截断
+    expect(truncated).toBe(serialized)
   })
 })
