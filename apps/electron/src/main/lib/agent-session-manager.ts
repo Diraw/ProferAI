@@ -610,13 +610,25 @@ const BLOB_REFS_FIELD = '_proferBlobs'
 /** 还原失败时记录缺失引用，供上层提示「原文不可用」 */
 const BLOB_REFS_MISSING_FIELD = '_proferBlobsMissing'
 
-/** 行内保留的片段长度：与截断预览同长 */
+/** 第一级：行内保留的片段长度（与截断预览同长） */
 const INLINE_PREVIEW_CHARS = TRUNCATED_PREVIEW_LENGTH
 /**
- * 可抽取的下限。短于片段长度的字符串抽了等于没抽（片段就是全文），因此不碰。
- * 同时也是「抽不动了」的终止条件：候选已按长度降序，一旦遇到不达下限的就必然全部不达标。
+ * 第一级可抽取下限。短于片段长度的字符串抽了等于没抽（片段就是全文），因此第一级不碰。
+ * 同时也是第一级「抽不动了」的终止条件：候选已按长度降序，遇到不达下限的就必然全部不达标。
  */
-const MIN_EXTRACTABLE_CHARS = INLINE_PREVIEW_CHARS
+const FIRST_TIER_MIN_CHARS = INLINE_PREVIEW_CHARS
+/**
+ * 第二级片段长度：第一级抽完仍超限时，把中等字符串也抽走，只留更短的片段。
+ *
+ * 存在一个真实形态会让第一级无解：**一个工具返回大量（约 150~200 条以上）结构化记录，
+ * 每条带一个约 1500 字符的字段**，而整条消息里没有任何字符串超过 2000。
+ * 真机的委派列表工具已出现过 25 条记录的实例（每条 resultSummary 3K~12K），
+ * 规模再大一个数量级即命中——见工作包 design.md 第 11 节。
+ *
+ * 抽走之后原文仍在 blob，不丢数据；代价只是片段更短，折叠态可读性下降。
+ */
+const SHORT_PREVIEW_CHARS = 200
+const SECOND_TIER_MIN_CHARS = 512
 /** 遍历深度上限，防止异常结构导致栈过深 */
 const MAX_BLOB_WALK_DEPTH = 12
 
@@ -683,22 +695,28 @@ function setStringAtPath(root: unknown, path: string, value: string): boolean {
   return true
 }
 
-/** 递归收集所有超过片段长度的字符串及其路径（不进入引用表自身） */
+/**
+ * 递归收集超过 `minChars` 的字符串及其路径（不进入引用表自身，跳过已抽过的路径）。
+ * 已抽过的路径必须跳过：第一级留下的片段（2000 字）仍 ≥ 第二级下限，
+ * 不跳就会被第二级再抽一遍，把片段也搬走。
+ */
 function collectExtractableStrings(
   value: unknown,
   path: string,
   out: ExtractableString[],
+  minChars: number,
+  skipPaths: Set<string>,
   depth = 0,
 ): void {
   if (depth > MAX_BLOB_WALK_DEPTH) return
 
   if (typeof value === 'string') {
-    if (value.length > MIN_EXTRACTABLE_CHARS) out.push({ path, length: value.length })
+    if (value.length > minChars && !skipPaths.has(path)) out.push({ path, length: value.length })
     return
   }
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      collectExtractableStrings(value[i], `${path}[${i}]`, out, depth + 1)
+      collectExtractableStrings(value[i], `${path}[${i}]`, out, minChars, skipPaths, depth + 1)
     }
     return
   }
@@ -706,8 +724,53 @@ function collectExtractableStrings(
 
   for (const [key, child] of Object.entries(value)) {
     if (key === BLOB_REFS_FIELD || key === BLOB_REFS_MISSING_FIELD) continue
-    collectExtractableStrings(child, path ? `${path}.${key}` : key, out, depth + 1)
+    collectExtractableStrings(child, path ? `${path}.${key}` : key, out, minChars, skipPaths, depth + 1)
   }
+}
+
+/**
+ * 把消息连同引用表一起序列化。
+ *
+ * 判定预算时【必须】带上引用表：否则循环会在「消息刚好落回上限」时停下，
+ * 而附加上引用表后又挠出去几十条引用的大小，最终校验失败导致整个外部化被丢弃。
+ */
+function serializeMessageWithRefs(message: Record<string, unknown>, refs: StoredBlobRef[]): string {
+  return refs.length === 0 ? JSON.stringify(message) : JSON.stringify({ ...message, [BLOB_REFS_FIELD]: refs })
+}
+
+/**
+ * 按给定片段长度与下限，从最大的字符串开始抽，直到（含引用表）落回行预算内。
+ * 返回是否达标，以及达标时可直接落盘的序列化结果。
+ */
+function extractUntilUnderBudget(
+  message: Record<string, unknown>,
+  refs: StoredBlobRef[],
+  extractedPaths: Set<string>,
+  fragmentChars: number,
+  minChars: number,
+): { converged: boolean; serialized: string } {
+  let serialized = serializeMessageWithRefs(message, refs)
+  if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return { converged: true, serialized }
+
+  const candidates: ExtractableString[] = []
+  collectExtractableStrings(message, '', candidates, minChars, extractedPaths)
+  if (candidates.length === 0) return { converged: false, serialized }
+  candidates.sort((a, b) => b.length - a.length)
+
+  for (const candidate of candidates) {
+    if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return { converged: true, serialized }
+
+    const value = getStringAtPath(message, candidate.path)
+    if (typeof value !== 'string' || value.length <= minChars) break
+
+    const { hash, bytes } = writeBlobSync(value)
+    if (!setStringAtPath(message, candidate.path, value.slice(0, fragmentChars))) break
+    extractedPaths.add(candidate.path)
+    refs.push({ path: candidate.path, hash, chars: value.length, bytes })
+    serialized = serializeMessageWithRefs(message, refs)
+  }
+
+  return { converged: serialized.length <= MAX_SDK_MESSAGE_LENGTH, serialized }
 }
 
 /**
@@ -732,37 +795,32 @@ export function externalizeSerializedSessionLine(line: string, sessionId?: strin
     return sanitizeSerializedSessionLine(line, sessionId)
   }
 
-  const candidates: ExtractableString[] = []
-  collectExtractableStrings(message, '', candidates)
-  if (candidates.length === 0) return sanitizeSerializedSessionLine(line, sessionId)
-
-  candidates.sort((a, b) => b.length - a.length)
-
   const refs: StoredBlobRef[] = []
+  const extractedPaths = new Set<string>()
   try {
-    for (const candidate of candidates) {
-      if (JSON.stringify(message).length <= MAX_SDK_MESSAGE_LENGTH) break
+    // 第一级：只抽明显的大字符串（≥ 2000），片段长度也是 2000
+    let { converged, serialized } = extractUntilUnderBudget(
+      message, refs, extractedPaths, INLINE_PREVIEW_CHARS, FIRST_TIER_MIN_CHARS,
+    )
 
-      const value = getStringAtPath(message, candidate.path)
-      if (typeof value !== 'string' || value.length <= MIN_EXTRACTABLE_CHARS) break
-
-      const { hash, bytes } = writeBlobSync(value)
-      if (!setStringAtPath(message, candidate.path, value.slice(0, INLINE_PREVIEW_CHARS))) break
-      refs.push({ path: candidate.path, hash, chars: value.length, bytes })
+    // 第二级：第一级无解时（典型形态：一条消息里全是中等字符串，无一超过 2000）
+    // 把中等字符串也抽走，只留更短的片段——原文仍在 blob，不丢数据
+    if (!converged) {
+      ;({ converged, serialized } = extractUntilUnderBudget(
+        message, refs, extractedPaths, SHORT_PREVIEW_CHARS, SECOND_TIER_MIN_CHARS,
+      ))
     }
+
+    // 达标且确实搬走了东西 → 直接用（serialized 已含引用表，无需再拼一次）
+    if (converged && refs.length > 0) return serialized
+
+    // 两级都抽不动（没有超过 512 的字符串）或抽完仍超限 → 交给截断兜底
+    return sanitizeSerializedSessionLine(line, sessionId)
   } catch (error) {
     // blob 写失败不能让写入失败：退回截断，保住行上限
     console.warn(`[Agent 会话] 载荷外部化失败，退回截断${sessionId ? ` session=${sessionId}` : ''}:`, error)
     return sanitizeSerializedSessionLine(line, sessionId)
   }
-
-  if (refs.length === 0) return sanitizeSerializedSessionLine(line, sessionId)
-
-  const serialized = JSON.stringify({ ...message, [BLOB_REFS_FIELD]: refs })
-  if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
-
-  // 抽到最后仍不达标（剩下的都是小字符串）→ 交给截断兜底
-  return sanitizeSerializedSessionLine(line, sessionId)
 }
 
 /**

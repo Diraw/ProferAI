@@ -306,17 +306,11 @@ describe('截断兜底（不再走主路径，但仍必须可用）', () => {
   })
 })
 
-describe('已知限制：极多中等字符串的行无法收敛', () => {
-  // 这一节【故意断言现状】，把缺口记录下来而不是隐藏它。
-  //
-  // 两个下限造成的空隙：
-  //   外部化：字符串必须 > 2000（= 片段长度）才抽，抽了才有意义
-  //   截断：  字符串必须 > 4000（= 阈值下限）才截
-  // ⇒ 一行全由 2000 以下字符串累加超限时，两条路径都动不了。
-  //
-  // 真机 167 条超限行全是单个巨型字符串（整页 HTML / PDF base64 / 截图 base64），
-  // 不属此形态；但这是一个真实的不变量缺口，需单独拍板是否补（如：抽不动时改抽整容器）。
-  test('Given 全是 1500 字符的字符串累加超限 When 落盘 Then 两条路径均无法收敛（现状）', () => {
+describe('第二级阈值：极多中等字符串的行也能收敛', () => {
+  // 形态来源（真机确实存在雏形）：一个工具返回大量结构化记录，每条带一个中等长度字段。
+  // 真机的委派列表工具已出现过 25 条记录的实例；规模再大一个数量级即命中。
+  // 第一级（下限 2000）对这些字符串无解，因此需要第二级（下限 512、片段 200）。
+  test('Given 全是 1500 字符的字符串累加超限 When 落盘 Then 第二级搬走它们且收敛', () => {
     const small = 'D'.repeat(1500)
     const blocks = Array.from({ length: 200 }, () => ({ type: 'text', text: small }))
     const message = {
@@ -328,15 +322,56 @@ describe('已知限制：极多中等字符串的行无法收敛', () => {
     const serialized = JSON.stringify(message)
     expect(serialized.length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
 
-    // 外部化：无可抽项（全部低于 2000）→ 不产生引用
     const externalized = sessions.externalizeSerializedSessionLine(serialized)
-    expect((JSON.parse(externalized)[REFS_FIELD] ?? [])).toHaveLength(0)
+    const parsed = JSON.parse(externalized) as Record<string, unknown>
 
-    // 截断：最细只能到 4000，1500 的字符串够不着 → 仍超限
-    const truncated = sessions.sanitizeSerializedSessionLine(serialized)
-    expect(truncated.length).toBeGreaterThan(MAX_SDK_MESSAGE_LENGTH)
+    // 收敛了——这是第一级做不到的
+    expect(externalized.length).toBeLessThanOrEqual(MAX_SDK_MESSAGE_LENGTH)
+    expect(refsOf(parsed).length).toBeGreaterThan(0)
 
-    // 重要：虽然超限，但【没有丢数据】——原样保留，不截断
-    expect(truncated).toBe(serialized)
+    // 留的是【短片段】而不是 2000 字片段——第二级的标志
+    expect((valueAtPath(parsed, 'message.content[0].content[0].text') as string).length)
+      .toBe(200)
+  })
+
+  test('Given 第二级抽走的中等字符串 When 还原 Then 每条都能完整取回', async () => {
+    const small = 'E'.repeat(1500)
+    const blocks = Array.from({ length: 200 }, () => ({ type: 'text', text: small }))
+    const message = {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'call_11', content: blocks }] },
+      parent_tool_use_id: null,
+    } as unknown as SDKMessage
+
+    const parsed = JSON.parse(sessions.externalizeSerializedSessionLine(JSON.stringify(message))) as Record<string, unknown>
+    const refs = refsOf(parsed)
+
+    // 200 条内容完全相同 → 内容寻址让它们共用一个 blob
+    expect(new Set(refs.map((r) => r.hash)).size).toBe(1)
+
+    const resolved = await sessions.resolveMessageBlobs(parsed as unknown as SDKMessage) as unknown as {
+      message: { content: { content: { text: string }[] }[] }
+    }
+    for (const ref of refs) {
+      const index = Number(ref.path.match(/content\[(\d+)\]\.text$/)![1])
+      expect(resolved.message.content[0]!.content[index]!.text).toBe(small)
+    }
+  })
+
+  test('Given 两级都抽不动 When 落盘 Then 不丢数据（原样保留）', () => {
+    // 300 个 400 字符的字符串：低于第二级下限 512 → 两级都动不了
+    const tiny = 'F'.repeat(400)
+    const blocks = Array.from({ length: 300 }, () => ({ type: 'text', text: tiny }))
+    const message = {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'call_12', content: blocks }] },
+      parent_tool_use_id: null,
+    } as unknown as SDKMessage
+
+    const serialized = JSON.stringify(message)
+    const externalized = sessions.externalizeSerializedSessionLine(serialized)
+
+    // 不抽、不截——原样保留，完整无损
+    expect(externalized).toBe(serialized)
   })
 })
