@@ -65,6 +65,8 @@ import {
   type SessionHealth,
   type AgentRuntime,
   type RewindSessionResult,
+  SESSION_BLOB_REFS_FIELD,
+  SESSION_BLOB_MISSING_FIELD,
 } from '@profer/shared'
 import { getConversationMessages } from './conversation-manager'
 import { isUserInputMessage } from '@profer/session-core'
@@ -606,9 +608,9 @@ export function sanitizeSerializedSessionLine(line: string, sessionId?: string):
  * 老版本读到新数据会渲染成 `[object Object]` 甚至崩；
  * 保持 string（值为片段）则老代码只是显示得短一点——降级而非崩坏。
  */
-const BLOB_REFS_FIELD = '_proferBlobs'
+const BLOB_REFS_FIELD = SESSION_BLOB_REFS_FIELD
 /** 还原失败时记录缺失引用，供上层提示「原文不可用」 */
-const BLOB_REFS_MISSING_FIELD = '_proferBlobsMissing'
+const BLOB_REFS_MISSING_FIELD = SESSION_BLOB_MISSING_FIELD
 
 /** 第一级：行内保留的片段长度（与截断预览同长） */
 const INLINE_PREVIEW_CHARS = TRUNCATED_PREVIEW_LENGTH

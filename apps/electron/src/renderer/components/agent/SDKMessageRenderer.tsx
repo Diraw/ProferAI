@@ -14,7 +14,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -45,7 +45,7 @@ import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom, requestModelSelectorOpen } from '@/atoms/chat-atoms'
-import { agentProcessGroupsKeepExpandedAtom, agentSessionsAtom, currentAgentSessionIdAtom } from '@/atoms/agent-atoms'
+import { agentProcessGroupsKeepExpandedAtom, agentSessionsAtom, currentAgentSessionIdAtom, resolvedBlobMessagesAtom } from '@/atoms/agent-atoms'
 import { agentInterruptionMapAtom } from '@/atoms/preview-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { automationsAtom, automationFormAtom, automationToDraft } from '@/atoms/automation-atoms'
@@ -70,6 +70,7 @@ import {
   THINKING_SIGNATURE_ERROR_TITLE,
   THINKING_SIGNATURE_ERROR_MESSAGE,
   isThinkingSignatureError,
+  readSessionBlobRefs,
   resolveContextWindowFromModelUsage,
 } from '@profer/shared'
 import type { ToolActivity } from '@/atoms/agent-atoms'
@@ -531,6 +532,92 @@ export function buildHistoricalTaskSubjects(allMessages: SDKMessage[]): Map<stri
   return historicalTaskSubjects
 }
 
+// ===== 被外部化内容的「加载全文」入口 =====
+
+function formatBlobBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 一轮里被外部化的消息。
+ *
+ * 落盘时超限消息里的大载荷被搬到 blob，行内只留前 2000 字片段
+ * （见 `main/lib/blob-store.ts`）。这里给用户一个明确的入口，保证两件事：
+ * 1. 「内容只剩片段」**不静默**——用户必须知道它被截过；
+ * 2. 大内容**只在用户主动点击时**才读回渲染进程，不重新引发内存问题。
+ *
+ * 取回后写进 `resolvedBlobMessagesAtom`，由 `allSDKMessages` 覆盖回消息流，
+ * 于是所有下游（工具结果查找、工具卡片的「显示全部」）自动看到完整内容。
+ */
+function ExternalizedContentNotice({ messages }: { messages: SDKMessage[] }): React.ReactElement | null {
+  const setResolvedMessages = useSetAtom(resolvedBlobMessagesAtom)
+  const [loading, setLoading] = React.useState(false)
+  const [failed, setFailed] = React.useState(0)
+
+  const targets = React.useMemo(
+    () => messages
+      .map((message) => ({ message, refs: readSessionBlobRefs(message) }))
+      .filter((entry) => entry.refs.length > 0 && typeof (entry.message as { uuid?: string }).uuid === 'string'),
+    [messages],
+  )
+
+  const handleLoadAll = React.useCallback(async (): Promise<void> => {
+    setLoading(true)
+    setFailed(0)
+    let failures = 0
+    for (const { message } of targets) {
+      const uuid = (message as { uuid?: string }).uuid
+      try {
+        const resolved = await window.electronAPI.resolveSessionMessageBlobs?.(message)
+        if (resolved && uuid) {
+          setResolvedMessages((prev) => {
+            const next = new Map(prev)
+            next.set(uuid, resolved as SDKMessage)
+            return next
+          })
+        } else {
+          failures++
+        }
+      } catch (e) {
+        console.error('[会话存储] 取回外置内容失败:', e)
+        failures++
+      }
+    }
+    setFailed(failures)
+    setLoading(false)
+  }, [targets, setResolvedMessages])
+
+  if (targets.length === 0) return null
+
+  const segmentCount = targets.reduce((sum, entry) => sum + entry.refs.length, 0)
+  const totalBytes = targets.reduce(
+    (sum, entry) => sum + entry.refs.reduce((inner, ref) => inner + (ref.bytes || 0), 0),
+    0,
+  )
+
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-[12px] text-muted-foreground/70">
+      <PackageOpen className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1">
+        {segmentCount} 段内容已外置（{formatBlobBytes(totalBytes)}），当前显示前 2000 字片段
+      </span>
+      <button
+        type="button"
+        onClick={handleLoadAll}
+        disabled={loading}
+        className="shrink-0 rounded px-2 py-0.5 text-[11px] transition-colors hover:bg-muted/60 disabled:opacity-50"
+      >
+        {loading ? '加载中…' : '加载全文'}
+      </button>
+      {failed > 0 && (
+        <span className="shrink-0 text-destructive">{failed} 段原文不可用</span>
+      )}
+    </div>
+  )
+}
+
 // ===== AssistantTurnRenderer — 渲染一个完整的 assistant turn =====
 
 export interface AssistantTurnRendererProps {
@@ -736,6 +823,7 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       <MessageContent>
         <TurnFileMapProvider map={turnFileMap}>
           <div className={cn('space-y-2')}>
+            <ExternalizedContentNotice messages={turn.turnMessages} />
             {renderItems.map((item, itemIndex) => {
               if (item.type === 'block') {
                 return renderTopLevelBlock(item.item.block, item.item.index)

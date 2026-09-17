@@ -1417,6 +1417,8 @@ export interface ElectronAPI {
   previewSessionCompaction: () => Promise<unknown>
   /** 执行历史会话整理：就地收敛超限行，不删除任何会话 */
   applySessionCompaction: () => Promise<unknown>
+  /** 按需取回被外部化的会话消息完整内容 */
+  resolveSessionMessageBlobs: (message: unknown) => Promise<unknown>
   /** 取消迁移导入（清理临时解压目录） */
   migrationCancelImport: (tempDir: string) => Promise<void>
 
@@ -3444,6 +3446,10 @@ const electronAPI: ElectronAPI = {
 
   applySessionCompaction: () => {
     return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_APPLY)
+  },
+
+  resolveSessionMessageBlobs: (message: unknown) => {
+    return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.SESSION_RESOLVE_BLOBS, message)
   },
 
   migrationCancelImport: (tempDir: string) => {
