@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep, parse } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { PluginFileEntry, PluginFileRead, PluginFileWriteInput, PluginFileWriteResult, PluginWorkspaceSummary } from '@profer/plugin-api'
 import { PluginRpcError } from '../plugin-rpc-errors'
 
@@ -63,18 +63,23 @@ function assertNotAborted(signal?: AbortSignal): void {
   }
 }
 
+/**
+ * 校验 workspace 根。
+ *
+ * 只拒绝「根自身是链接」（否则插件可借由根的重定向访问宿主未声明的目录），
+ * 根的**祖先**允许是链接：macOS 的 `/var -> private/var`（`os.tmpdir()` 就在其下）、
+ * 外置卷挂载点、`~/projects -> /Volumes/Data/projects` 等均属正常布局，
+ * 逐段 lstat 祖先会把它们全部误拒。
+ *
+ * 因此修正为：只检查根自身 + 根内路径段（根内仍逐段禁止穿越链接，见 resolveSafePath）。
+ */
 function ensureDirectory(rootPath: string): string {
-  const root = resolve(rootPath)
   if (!isAbsolute(rootPath)) throw new PluginRpcError('PLUGIN_PERMISSION_DENIED', 'workspace 根必须是绝对路径')
-  const rootName = parse(root).root
-  const segments = root.slice(rootName.length).split(sep).filter(Boolean)
-  let current = rootName
-  for (const segment of segments) {
-    current = join(current, segment)
-    let stat
-    try { stat = lstatSync(current) } catch { throw new PluginRpcError('PLUGIN_WORKSPACE_NOT_FOUND', 'workspace 不存在') }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new PluginRpcError('PLUGIN_PERMISSION_DENIED', 'workspace 根或祖先不能是链接')
-  }
+  const root = resolve(rootPath)
+  let stat
+  try { stat = lstatSync(root) } catch { throw new PluginRpcError('PLUGIN_WORKSPACE_NOT_FOUND', 'workspace 不存在') }
+  if (stat.isSymbolicLink()) throw new PluginRpcError('PLUGIN_PERMISSION_DENIED', 'workspace 根不能是链接')
+  if (!stat.isDirectory()) throw new PluginRpcError('PLUGIN_WORKSPACE_NOT_FOUND', 'workspace 不存在')
   return root
 }
 

@@ -26,6 +26,10 @@
 
 除下表既有 API 外，Slice 3 在 Slice 1/2 基础上冻结了通用工作区、session/preset metadata、runtime capability reference、opaque secret reference 和统一 RPC 生命周期契约。它们均要求细粒度 permission、workspace/resource scope、owner/page 绑定、requestId、取消/超时、整数 revision/CAS 与稳定错误码；当前只建立安全边界，provider 尚未接入时不会伪造成功。
 
+**当前不可用（等宿主接入 provider）**：`workspace.files.write`、`sessions.create/configure/cancel`、`runtime.capabilities.inject`、`secrets.requestConfigure` 在生产代码里尚无 provider 接入点（`setPluginWorkspaceProvider` / `setPluginCapabilityProviders` 无调用者，`pluginConfirmations.issue()` 只出现在测试中），调用会稳定返回 `PLUGIN_CONFIRMATION_REQUIRED` 或 `PLUGIN_OPERATION_NOT_SUPPORTED`，不会伪造成功。它们已进入公开契约，属预留能力。
+
+**授权与撤权**：`revokePluginPermissions` 保留 grant 内容但写入 `revoked: true`；此后 `getGrantedPermissions` 返回空数组、`listInstalledPlugins()` 返回 `revoked: true`，所有 RPC 与已加载的 Agent 工具调用均返回 `PLUGIN_REVOKED`。插件设置页对本状态显示「已撤销」，与「待授权」区分。
+
 | API | 权限 | 行为 |
 | --- | --- | --- |
 | `getContext()`、`onContextChanged(callback)` | 无 | 插件信息、语言、主题；主题变化时自动更新 `data-profer-theme` 并通知监听器 |
@@ -47,7 +51,7 @@
 
 生成输入：`{requestId,channelId,modelId,prompt,system?,maxTokens?}`。默认输出上限 2048 token，最多 8192；最长 120 秒。
 网络输入：`{requestId,url,method?:"GET"|"POST",headers?,body?,credentialId?}`，返回 `{status,headers,body}`；最长 60 秒，响应最多 2 MB，不跟随重定向，不支持内网地址。
-每个插件最多 4 项并发调用，每分钟最多 30 项。关闭单个页面只取消该页面的调用。
+每个插件最多 4 项并发调用，每分钟最多 30 项。**该配额对全部 RPC operation 生效**（含 `workspace.list`、`sessions.get`、`context.read` 等轻量 metadata 调用），越限返回 `PLUGIN_RATE_LIMITED`（`retryable: true`，`details.limit` 为 `rate` 或 `concurrency`），插件可据此退避重试；参数非法仍是不可重试的 `PLUGIN_INVALID_ARGUMENT`。关闭单个页面只取消该页面的调用。
 
 上下文最多返回最近 100 条文本消息、合计 10 万字符。消息操作只交付指定消息；有选中文本时只交付选中内容。附件每次最多 5 个、每个不超过 8 MB，总提取文本最多 50 万字符。当前上下文是显式交付的任务引用，不随用户切换其他任务自动扩大范围。
 
@@ -109,4 +113,5 @@ await window.profer.tools.register('summarize', async ({ text }, call) => {
 
 - `bun test --isolate apps/electron/src/main/lib/plugins/`：清单、安装回滚、授权、路由、网络边界、凭据、并发和取消。
 - 在 `apps/electron` 运行 `bun run test:plugins:electron`：真实 Electron 页面、preload、工具、宿主模型调用、主题通知、页面隔离和撤权；只使用临时配置与本地模拟模型。
+- 在 `apps/electron` 运行 `bun run test:plugins:rpc-smoke`：真实 preload/IPC envelope、sender owner、跨页拒绝、同 owner cancel、timeout、revoke、page-close abort 与 late-result 抑制。
 - 使用现有 `build:plugin-preload` 构建插件专属 preload。修改主进程或 preload 后需要重启开发版 Profer。

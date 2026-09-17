@@ -1,6 +1,13 @@
 /** 插件调用的并发、限流与取消独立于页面代码，撤权后立即终止。 */
 import { PluginRpcError } from './plugin-rpc-errors'
 
+/**
+ * 每个插件的 RPC 配额（对所有 operation 生效，含轻量 metadata 调用）。
+ * 超限一律抛 `PLUGIN_RATE_LIMITED` 且 `retryable: true`，插件可据此退避重试，
+ * 与参数错误（`PLUGIN_INVALID_ARGUMENT`，不可重试）区分开。
+ */
+export const PLUGIN_RPC_QUOTA = { maxConcurrent: 4, maxPerMinute: 30 } as const
+
 interface ActiveCall { controller: AbortController; ownerId?: number }
 
 export class PluginRequests {
@@ -10,9 +17,13 @@ export class PluginRequests {
   async run<T>(pluginId: string, requestId: string, operation: (signal: AbortSignal) => Promise<T>, timeoutMs = 60_000, ownerId?: number, parentSignal?: AbortSignal): Promise<T> {
     const calls = this.active.get(pluginId) ?? new Map<string, ActiveCall>()
     if (calls.has(requestId)) throw new PluginRpcError('PLUGIN_INVALID_ARGUMENT', 'requestId 已在使用')
-    if (calls.size >= 4) throw new PluginRpcError('PLUGIN_INVALID_ARGUMENT', '插件最多同时进行 4 项调用')
+    if (calls.size >= PLUGIN_RPC_QUOTA.maxConcurrent) {
+      throw new PluginRpcError('PLUGIN_RATE_LIMITED', `插件最多同时进行 ${PLUGIN_RPC_QUOTA.maxConcurrent} 项调用`, true, { limit: 'concurrency', maxConcurrent: PLUGIN_RPC_QUOTA.maxConcurrent })
+    }
     const recent = (this.recent.get(pluginId) ?? []).filter((time) => Date.now() - time < 60_000)
-    if (recent.length >= 30) throw new PluginRpcError('PLUGIN_INVALID_ARGUMENT', '插件调用过于频繁，请稍后重试')
+    if (recent.length >= PLUGIN_RPC_QUOTA.maxPerMinute) {
+      throw new PluginRpcError('PLUGIN_RATE_LIMITED', '插件调用过于频繁，请稍后重试', true, { limit: 'rate', maxPerMinute: PLUGIN_RPC_QUOTA.maxPerMinute })
+    }
     recent.push(Date.now()); this.recent.set(pluginId, recent)
     const controller = new AbortController()
     calls.set(requestId, { controller, ownerId }); this.active.set(pluginId, calls)

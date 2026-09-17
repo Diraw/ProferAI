@@ -13,10 +13,10 @@ mock.module('electron', () => ({
 const { canonicalizePluginScopePrefix, canonicalizePluginWorkspaceScopes } = await import('./plugin-capability-boundary')
 const { PluginConfirmations } = await import('./plugin-confirmation')
 const { validatePluginRpcRequest, dispatchPluginRpc } = await import('./plugin-host-rpc')
-const { PluginRequests } = await import('./plugin-requests')
+const { PluginRequests, PLUGIN_RPC_QUOTA } = await import('./plugin-requests')
 const { callPluginHost } = await import('./plugin-host')
 const { installPluginPackage, setPluginEnabled } = await import('./plugin-manager')
-const { revokePluginPermissions } = await import('./plugin-permissions')
+const { getGrantedPermissions, isPluginRevoked, revokePluginPermissions } = await import('./plugin-permissions')
 
 type PluginHostContext = Parameters<typeof callPluginHost>[1]
 const pluginId = 'com.example.priority'
@@ -95,6 +95,33 @@ test('requests.cancel 只能取消宿主解析出的同一 owner 请求', async 
   expect(requests.cancel('com.example.plugin', 'request-1', 8)).toBe(false)
   expect(requests.cancel('com.example.plugin', 'request-1', 7)).toBe(true)
   await expect(first).rejects.toMatchObject({ code: 'PLUGIN_REQUEST_CANCELLED' })
+})
+
+test('撤销授权后 getGrantedPermissions 立即为空（Agent 工具 / 设置页 / 模型路由共用判据）', () => {
+  installPriorityPlugin()
+  grantPriorityPlugin()
+  expect(isPluginRevoked(pluginId)).toBe(false)
+  expect(getGrantedPermissions(pluginId)).toEqual(['workspace.read'])
+
+  revokePluginPermissions(pluginId)
+
+  // 旧行为只写 revoked 标记却在 getGrantedPermissions 里返回残留 grant，
+  // 导致撤权后插件 Agent 工具仍注册、设置页仍显示“已授权”。
+  expect(isPluginRevoked(pluginId)).toBe(true)
+  expect(getGrantedPermissions(pluginId)).toEqual([])
+})
+
+test('配额超限返回可重试的 PLUGIN_RATE_LIMITED，与参数错误可区分', async () => {
+  const requests = new PluginRequests()
+  for (let index = 0; index < PLUGIN_RPC_QUOTA.maxPerMinute; index += 1) {
+    await expect(requests.run('com.example.plugin', `rate-${index}`, async () => 'ok')).resolves.toBe('ok')
+  }
+  await expect(requests.run('com.example.plugin', 'rate-overflow', async () => 'ok')).rejects.toMatchObject({ code: 'PLUGIN_RATE_LIMITED', retryable: true, details: { limit: 'rate' } })
+
+  const holding = Array.from({ length: PLUGIN_RPC_QUOTA.maxConcurrent }, (_, index) => requests.run('com.example.other', `hold-${index}`, async () => new Promise(() => undefined), 5_000))
+  await expect(requests.run('com.example.other', 'hold-overflow', async () => 'ok', 5_000)).rejects.toMatchObject({ code: 'PLUGIN_RATE_LIMITED', retryable: true, details: { limit: 'concurrency' } })
+  requests.cancelPlugin('com.example.other')
+  await Promise.allSettled(holding)
 })
 
 test('直接 host handler 在 provider 缺失时保持生命周期和权限错误优先级', async () => {

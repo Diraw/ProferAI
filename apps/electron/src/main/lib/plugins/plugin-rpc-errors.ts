@@ -39,5 +39,6 @@ export function toPluginRpcFailure(error: unknown): Omit<ProferPluginRpcFailure,
 }
 
 export function pluginRpcErrorFromCode(code: ProferPluginErrorCode, message?: string): PluginRpcError {
-  return new PluginRpcError(code, message ?? code, code === 'PLUGIN_REQUEST_TIMEOUT' || code === 'PLUGIN_HOST_NOT_READY')
+  const retryable = code === 'PLUGIN_REQUEST_TIMEOUT' || code === 'PLUGIN_HOST_NOT_READY' || code === 'PLUGIN_RATE_LIMITED'
+  return new PluginRpcError(code, message ?? code, retryable)
 }

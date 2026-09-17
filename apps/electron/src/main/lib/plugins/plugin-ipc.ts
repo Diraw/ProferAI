@@ -1,5 +1,5 @@
 import { setPluginCredential, removePluginCredentials } from './plugin-credentials'
-import { authorizePlugin, getGrantedPermissions, revokePluginPermissions } from './plugin-permissions'
+import { authorizePlugin, getGrantedPermissions, isPluginRevoked, revokePluginPermissions } from './plugin-permissions'
 import { getTaskRouting, setTaskRouting } from './plugin-routing'
 import { pluginRequests } from './plugin-requests'
 import { taskReferenceSchema } from './plugin-capabilities'
@@ -72,7 +72,7 @@ export function registerPluginIpcHandlers(): void {
 
   ipcMain.handle(PROFER_PLUGIN_IPC_CHANNELS.LIST, (event) => {
     assertPluginManagerSender(event)
-    return listInstalledPlugins().map((plugin) => ({ ...plugin, grantedPermissions: getGrantedPermissions(plugin.manifest.id) }))
+    return listInstalledPlugins().map((plugin) => ({ ...plugin, grantedPermissions: getGrantedPermissions(plugin.manifest.id), revoked: isPluginRevoked(plugin.manifest.id) }))
   })
   ipcMain.handle(PROFER_PLUGIN_IPC_CHANNELS.SET_CREDENTIAL, (event, pluginId: unknown, id: unknown, secret: unknown) => {
     assertPluginManagerSender(event)

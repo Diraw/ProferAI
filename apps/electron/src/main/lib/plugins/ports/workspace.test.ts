@@ -60,6 +60,28 @@ test('abort before commit prevents write and symlink ancestors are rejected', as
   await expect(port.read({ workspaceId: 'editor', path: 'link/first.txt' })).rejects.toMatchObject({ code: 'PLUGIN_PERMISSION_DENIED' })
 })
 
+test('系统临时目录下的 workspace 可用：根祖先允许是链接（macOS /var → private/var）', async () => {
+  // os.tmpdir() 在 macOS 返回 /var/folders/...，其祖先 /var 是指向 private/var 的链接；
+  // 逐段 lstat 祖先会整批误拒（review 实测 4 个用例失败）。真实用户侧同类场景：
+  // ~/projects -> /Volumes/Data/projects、外置卷挂载点。
+  const provider = createLocalWorkspaceProvider([workspace])
+  const files = await provider.files.list({ workspaceId: 'editor', path: 'notes', depth: 1 })
+  expect(files.entries.map((entry) => entry.path)).toEqual(['notes/first.txt'])
+  await expect(provider.files.read({ workspaceId: 'editor', path: 'notes/first.txt' })).resolves.toMatchObject({ content: 'hello' })
+})
+
+test('workspace 根自身是链接时仍拒绝，避免根被重定向到未声明目录', async () => {
+  const linkParent = mkdtempSync(join(tmpdir(), 'profer-plugin-link-root-'))
+  try {
+    const linkedRoot = join(linkParent, 'workspace-link')
+    expect(() => symlinkSync(workspace.rootPath, linkedRoot, 'junction')).not.toThrow()
+    const port = new LocalWorkspaceFilePort(new StaticWorkspaceResolver([{ ...workspace, rootPath: linkedRoot }]))
+    await expect(port.list({ workspaceId: 'editor' })).rejects.toMatchObject({ code: 'PLUGIN_PERMISSION_DENIED' })
+  } finally {
+    rmSync(linkParent, { recursive: true, force: true })
+  }
+})
+
 test('two provider-neutral consumers can implement the same port without domain fields', async () => {
   const local = createLocalWorkspaceProvider([workspace])
   const external: WorkspaceProvider = {

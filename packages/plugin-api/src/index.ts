@@ -101,7 +101,10 @@ export interface ProferPluginManifest {
 export interface ProferInstalledPlugin {
   manifest: ProferPluginManifest
   enabled: boolean
+  /** 当前实际生效的能力；用户撤销授权后恒为空数组。 */
   grantedPermissions?: ProferPluginPermission[]
+  /** 用户是否已撤销该插件的授权；撤销后 `grantedPermissions` 为空且所有调用返回 `PLUGIN_REVOKED`。 */
+  revoked?: boolean
   installedAt: number
   updatedAt: number
 }
@@ -291,7 +294,7 @@ export interface PluginCapabilityDeclaration { references: PluginCapabilityRef[]
 export interface PluginRuntimeCapabilityView { snapshotId: string; fingerprint: string; runtime: 'claude' | 'pi'; references: PluginCapabilityRef[]; revision: number; effectiveFrom: 'next_turn' | 'new_session'; outcome?: 'committed' | 'rolled_back' | 'unknown' }
 export interface PluginSecretRef { secretId: string; providerId: string; field: string }
 export interface PluginSecretMetadata extends PluginSecretRef { configured: boolean; updatedAt: string }
-export type ProferPluginErrorCode = 'PLUGIN_PERMISSION_DENIED' | 'PLUGIN_CONFIRMATION_REQUIRED' | 'PLUGIN_REVOKED' | 'PLUGIN_DISABLED' | 'PLUGIN_PAGE_CLOSED' | 'PLUGIN_REQUEST_CANCELLED' | 'PLUGIN_REQUEST_TIMEOUT' | 'PLUGIN_INVALID_ARGUMENT' | 'PLUGIN_WORKSPACE_NOT_FOUND' | 'PLUGIN_SESSION_NOT_FOUND' | 'PLUGIN_REFERENCE_NOT_FOUND' | 'PLUGIN_REVISION_CONFLICT' | 'PLUGIN_CAPABILITY_VERSION_CONFLICT' | 'PLUGIN_SECRET_STORAGE_UNAVAILABLE' | 'PLUGIN_SECRET_NOT_CONFIGURED' | 'PLUGIN_RUNTIME_UNAVAILABLE' | 'PLUGIN_RUNTIME_INJECTION_FAILED' | 'PLUGIN_OPERATION_NOT_SUPPORTED' | 'PLUGIN_HOST_NOT_READY' | 'PLUGIN_INTERNAL_ERROR'
+export type ProferPluginErrorCode = 'PLUGIN_PERMISSION_DENIED' | 'PLUGIN_CONFIRMATION_REQUIRED' | 'PLUGIN_REVOKED' | 'PLUGIN_DISABLED' | 'PLUGIN_PAGE_CLOSED' | 'PLUGIN_REQUEST_CANCELLED' | 'PLUGIN_REQUEST_TIMEOUT' | 'PLUGIN_RATE_LIMITED' | 'PLUGIN_INVALID_ARGUMENT' | 'PLUGIN_WORKSPACE_NOT_FOUND' | 'PLUGIN_SESSION_NOT_FOUND' | 'PLUGIN_REFERENCE_NOT_FOUND' | 'PLUGIN_REVISION_CONFLICT' | 'PLUGIN_CAPABILITY_VERSION_CONFLICT' | 'PLUGIN_SECRET_STORAGE_UNAVAILABLE' | 'PLUGIN_SECRET_NOT_CONFIGURED' | 'PLUGIN_RUNTIME_UNAVAILABLE' | 'PLUGIN_RUNTIME_INJECTION_FAILED' | 'PLUGIN_OPERATION_NOT_SUPPORTED' | 'PLUGIN_HOST_NOT_READY' | 'PLUGIN_INTERNAL_ERROR'
 export interface ProferPluginRpcRequest<T> { protocol: 'plugin-host.rpc.v1'; requestId: string; operation: string; payload: T; timeoutMs?: number }
 export interface ProferPluginRpcSuccess<T> { protocol: 'plugin-host.rpc.v1'; ok: true; requestId: string; operation: string; value: T; revision?: number; auditEventId?: string }
 export interface ProferPluginRpcFailure { protocol: 'plugin-host.rpc.v1'; ok: false; requestId: string; operation: string; error: { code: ProferPluginErrorCode; message: string; retryable: boolean; details?: Record<string, string | number | boolean> } }
