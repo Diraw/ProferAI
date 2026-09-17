@@ -11,7 +11,7 @@
 import * as React from "react";
 import { useLayoutEffect } from "react";
 import { useAtom, useAtomValue, useSetAtom, useStore } from "jotai";
-import { Globe2, PanelRight } from "lucide-react";
+import { Globe2, PanelRight, Ungroup } from "lucide-react";
 import { toast } from "sonner";
 import {
   tabsAtom,
@@ -44,6 +44,19 @@ import {
 } from "@/atoms/browser-atoms";
 import { appModeAtom } from "@/atoms/app-mode";
 import { openBrowserFromPush, openFilePanel } from "@/hooks/usePanelAutoLayout";
+import {
+  emptyGroupSide,
+  groupTabIds,
+  isGroupActive,
+  isGroupEligibleTab,
+  isGroupMember,
+  planGroupDrop,
+  ratioForEmptySide,
+  tabGroupAtom,
+  tabGroupDragAtom,
+  tabGroupRatioAtom,
+  type TabGroupSide,
+} from "@/atoms/tab-group-atoms";
 import { panelVisibilityAtom } from "@/atoms/panel-layout-atoms";
 import { automationFormAtom } from "@/atoms/automation-atoms";
 import { previewPanelOpenMapAtom } from "@/atoms/preview-atoms";
@@ -56,6 +69,7 @@ import {
 } from "@/components/ui/tooltip";
 import { WindowControlsHost } from "@/components/WindowControlsTemplate";
 import { TabBarItem } from "./TabBarItem";
+import { TabGroupItem } from "./TabGroupItem";
 import { useCloseTab } from "@/hooks/useCloseTab";
 import { detectIsWindows } from "@/lib/platform";
 import { registerShortcut } from "@/lib/shortcut-registry";
@@ -178,6 +192,8 @@ export function TabBar({
   }, [activeTabId, agentSessions, requestClose, store, tabs]);
 
   // 拖拽状态
+  /** 进行中的标签排序的取消句柄（合并手势中途接管时调用） */
+  const sortCancelRef = React.useRef<(() => void) | null>(null);
   const dragState = React.useRef<{
     dragging: boolean;
     tabId: string;
@@ -397,10 +413,37 @@ export function TabBar({
         });
       };
 
-      const handleUp = (): void => {
+      /** 让被拖标签回到自然位置（松手回落 / 中途取消共用） */
+      const settleDraggedNode = (tabId: string): void => {
+        const node = document.querySelector<HTMLElement>(
+          `[data-tab-id="${CSS.escape(tabId)}"]`,
+        );
+        if (!node) return;
+        node.style.transition =
+          "transform 180ms cubic-bezier(0.22, 1, 0.36, 1)";
+        node.style.transform = "translate3d(0, 0, 0)";
+        node.style.willChange = "transform";
+        if (dragSettleCleanupRef.current !== null)
+          clearTimeout(dragSettleCleanupRef.current);
+        dragSettleCleanupRef.current = setTimeout(() => {
+          node.dataset.tabDragging = "";
+          node.style.transition = "";
+          node.style.transform = "";
+          node.style.willChange = "";
+          node.style.zIndex = "";
+          dragSettleCleanupRef.current = null;
+        }, 200);
+      };
+
+      const detachListeners = (): void => {
         document.removeEventListener("pointermove", handleMove);
         document.removeEventListener("pointerup", handleUp);
         document.removeEventListener("pointercancel", handleUp);
+      };
+
+      const handleUp = (): void => {
+        detachListeners();
+        sortCancelRef.current = null;
         if (moveFrame !== null) {
           cancelAnimationFrame(moveFrame);
           moveFrame = null;
@@ -411,27 +454,22 @@ export function TabBar({
         if (latestMove) processMove(latestMove);
 
         const current = dragState.current;
-        if (current?.dragging) {
-          const node = document.querySelector<HTMLElement>(
-            `[data-tab-id="${CSS.escape(current.tabId)}"]`,
-          );
-          if (node) {
-            node.style.transition =
-              "transform 180ms cubic-bezier(0.22, 1, 0.36, 1)";
-            node.style.transform = "translate3d(0, 0, 0)";
-            node.style.willChange = "transform";
-            if (dragSettleCleanupRef.current !== null)
-              clearTimeout(dragSettleCleanupRef.current);
-            dragSettleCleanupRef.current = setTimeout(() => {
-              node.dataset.tabDragging = "";
-              node.style.transition = "";
-              node.style.transform = "";
-              node.style.willChange = "";
-              node.style.zIndex = "";
-              dragSettleCleanupRef.current = null;
-            }, 200);
-          }
+        if (current?.dragging) settleDraggedNode(current.tabId);
+        dragState.current = null;
+      };
+
+      // 中途取消：排序已触发后合并手势接管时调用，避免两个手势同时生效。
+      // 注意：已经发生的顺序调换不回滚（标签可能已移动一格），但不会再继续跟随指针。
+      sortCancelRef.current = (): void => {
+        detachListeners();
+        sortCancelRef.current = null;
+        if (moveFrame !== null) {
+          cancelAnimationFrame(moveFrame);
+          moveFrame = null;
         }
+        pendingMove = null;
+        const current = dragState.current;
+        if (current?.dragging) settleDraggedNode(current.tabId);
         dragState.current = null;
       };
 
@@ -478,6 +516,7 @@ export function TabBar({
         onActivate={handleActivate}
         onClose={requestClose}
         onDragStart={handleDragStart}
+        onCancelSort={() => sortCancelRef.current?.()}
         onTearOff={handleTearOff}
         teamMode={teamMode}
       />
@@ -495,6 +534,7 @@ function TabBarInner({
   onActivate,
   onClose,
   onDragStart,
+  onCancelSort,
   onTearOff,
   teamMode,
 }: {
@@ -506,10 +546,14 @@ function TabBarInner({
   onActivate: (tabId: string) => void;
   onClose: (tabId: string) => void;
   onDragStart: (tabId: string, e: React.PointerEvent) => void;
+  /** 取消进行中的标签排序（合并手势中途接管时调用） */
+  onCancelSort: () => void;
   onTearOff: (tabId: string) => void;
   teamMode: boolean;
 }): React.ReactElement {
   const [hoveredTabId, setHoveredTabId] = React.useState<string | null>(null);
+  const store = useStore();
+  const setTabMru = useSetAtom(tabMruAtom);
   const setTabs = useSetAtom(tabsAtom);
   const setAgentSessions = useSetAtom(agentSessionsAtom);
   const [isLeaving, setIsLeaving] = React.useState(false);
@@ -646,6 +690,35 @@ function TabBarInner({
     setBrowserOpenMap,
   ]);
 
+  // ===== 组合 tab =====
+  // 唯一创建入口是手势：把标签向下拖出标签栏，在主区左右投放区选位置。
+  // 顶栏只在"已处于左右双栏"时提供一个解散按钮（常态不显示任何入口按钮）。
+  const [tabGroup, setTabGroup] = useAtom(tabGroupAtom);
+  const setTabGroupRatio = useSetAtom(tabGroupRatioAtom);
+  const setTabGroupDrag = useSetAtom(tabGroupDragAtom);
+  const groupActive = isGroupActive(tabGroup, activeTabId);
+  // 组合在顶栏的锚点：两个成员中在 tabsAtom 里靠前的那个（另一个折叠隐藏）
+  const groupAnchorTabId = React.useMemo(() => {
+    if (!tabGroup) return null;
+    // 只按非空成员定位：组合允许一侧为空（等用户选择）
+    const present = groupTabIds(tabGroup)
+      .map((id) => ({ id, index: tabs.findIndex((tab) => tab.id === id) }))
+      .filter((entry) => entry.index >= 0);
+    if (present.length === 0) return null;
+    present.sort((a, b) => a.index - b.index);
+    return present[0]!.id;
+  }, [tabGroup, tabs]);
+
+  const dissolveGroup = React.useCallback(() => {
+    setTabGroup(null);
+  }, [setTabGroup]);
+
+  // 关闭整组：两个标签都关闭（运行中的会话仍按既有语义保留在后台）
+  const closeGroup = React.useCallback((groupTabIds: string[]) => {
+    setTabGroup(null);
+    for (const tabId of groupTabIds) onClose(tabId);
+  }, [onClose, setTabGroup]);
+
   const topBarTools: TopBarTool[] = [
     {
       id: "managed-browser",
@@ -669,6 +742,15 @@ function TabBarInner({
       badge: hasFileChanges ? (
         <span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-primary animate-pulse" />
       ) : undefined,
+    },
+    {
+      id: "tab-group",
+      // 只在左右双栏（组合）状态下出现：常态不提供入口按钮，创建入口只有"把标签向下拖"手势。
+      visible: !teamMode && !!tabGroup,
+      label: "解散组合",
+      tooltip: "解散组合（两个标签都保留）",
+      icon: <Ungroup className="size-3.5" />,
+      onClick: dissolveGroup,
     },
   ];
   React.useEffect(() => {
@@ -754,12 +836,133 @@ function TabBarInner({
   // 拖出 TabBar 区域时给出视觉提示（仅 preview Tab 可 tear-off）
   const [tearingOff, setTearingOff] = React.useState<string | null>(null);
 
-  // 拦截外层 handleDragStart：若拖出 TabBar 区域且是 preview Tab，触发 tear-off
+  /** 落定前需要在标签栏下方越过的距离，避免一次潦草的纵向拖动就误合并 */
+  const GROUP_DROP_COMMIT_MARGIN = 8;
+
+  /**
+   * 合并手势：把标签向下拖出标签栏，在主区左右投放区里选位置。
+   *
+   * 关键：合并与标签排序共用同一次 pointerdown，而排序逻辑按 max(|dx|,|dy|) > 5 起手，
+   * 所以必须在这里做**轴向判定**——首次位移超阈值时，纵向（向下）→ 合并手势，
+   * 横向 → 交回原有排序，本函数此后不再介入。否则向下拖会先被排序接管，
+   * 合并永远触发不了（表现为"只有顶栏按钮生效"）。
+   */
+  const handleGroupTabDrag = React.useCallback(
+    (tabId: string, e: React.PointerEvent): void => {
+      if (e.button !== 0) return;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let mode: "pending" | "group" | "sorting" = "pending";
+      let hoveredSide: TabGroupSide | null = null;
+      let committable = false;
+
+      const clearDropState = (): void => {
+        hoveredSide = null;
+        committable = false;
+        setTabGroupDrag({ draggingTabId: null, hoveredPosition: null });
+      };
+
+      const handleMove = (me: PointerEvent): void => {
+        const dx = me.clientX - startX;
+        const dy = me.clientY - startY;
+
+        if (mode === "pending") {
+          if (Math.abs(dx) <= 5 && Math.abs(dy) <= 5) return;
+          if (dy > 0 && Math.abs(dy) > Math.abs(dx)) {
+            mode = "group";
+            // 复用 tear-off 的高亮反馈：让用户知道这个标签已被"拿起来"
+            setTearingOff(tabId);
+          } else {
+            mode = "sorting";
+            onDragStart(tabId, e);
+            return;
+          }
+        }
+
+        const barRect = barRef.current?.getBoundingClientRect();
+        // 主区把容器坐标发布在 data-group-drop-region 上；不允许组合的视图（规划中心 /
+        // Agent 技能页）没有该节点，因此不会出现无效果的投放区。
+        const region = document.querySelector<HTMLElement>("[data-group-drop-region]");
+        if (!barRect || !region) return;
+        const regionRect = region.getBoundingClientRect();
+        const insideRegion =
+          me.clientY >= barRect.bottom &&
+          me.clientY <= regionRect.bottom &&
+          me.clientX >= regionRect.left &&
+          me.clientX <= regionRect.right;
+
+        // 已经进入排序后仍允许"改主意"：指针落到标签栏下方主区 → 取消排序，改为合并手势。
+        // 否则横向一动就会被排序占住，再也下拉不到投放区。
+        if (mode === "sorting") {
+          if (!insideRegion) return;
+          mode = "group";
+          onCancelSort();
+          setTearingOff(tabId);
+        }
+
+        if (!insideRegion) {
+          if (hoveredSide) clearDropState();
+          return;
+        }
+
+        // 左右落点以真实分界线为准（由 MainArea 发布在 data-group-drop-split 上）：
+        // 比例拖过、或空栏只占 1/3 时，容器中点与两栏实际边界并不重合。
+        const splitOffset = Number(region.dataset.groupDropSplit ?? "");
+        const splitX = regionRect.left + (Number.isFinite(splitOffset) ? splitOffset : regionRect.width / 2);
+        hoveredSide = me.clientX < splitX ? "left" : "right";
+        committable = me.clientY >= barRect.bottom + GROUP_DROP_COMMIT_MARGIN;
+        setTabGroupDrag({ draggingTabId: tabId, hoveredPosition: hoveredSide });
+      };
+
+      const handleUp = (): void => {
+        document.removeEventListener("pointermove", handleMove);
+        document.removeEventListener("pointerup", handleUp);
+        document.removeEventListener("pointercancel", handleUp);
+        setTearingOff(null);
+
+        const side = committable ? hoveredSide : null;
+        clearDropState();
+        if (mode !== "group" || !side) return;
+
+        // 落定规则集中在 planGroupDrop（纯函数，已单测），此处只负责写状态。
+        const plan = planGroupDrop({
+          group: store.get(tabGroupAtom),
+          activeTabId: store.get(activeTabIdAtom),
+          draggedTabId: tabId,
+          position: side,
+        });
+        if (!plan) return;
+        store.set(tabGroupAtom, plan.group);
+        store.set(activeTabIdAtom, plan.activeTabId);
+        // 空栏给一个较小的初始占比；之后用户可以自由拖分栏缝
+        const emptySide = emptyGroupSide(plan.group);
+        if (emptySide) setTabGroupRatio(ratioForEmptySide(emptySide));
+        setTabMru((previous) => promoteMru(previous, plan.activeTabId));
+      };
+
+      document.addEventListener("pointermove", handleMove);
+      document.addEventListener("pointerup", handleUp);
+      document.addEventListener("pointercancel", handleUp);
+    },
+    [onCancelSort, onDragStart, setTabGroupDrag, setTabGroupRatio, setTabMru],
+  );
+
+  // 拦截外层 handleDragStart：
+  // - agent/chat 标签向下拖 → 合并手势（主区出现左右投放区，落点决定左右顺序）；
+  // - preview 标签拖出标签栏 → 原有 tear-off（转预览分屏）。
   const handleDragStartWithTearOff = React.useCallback(
     (tabId: string, e: React.PointerEvent) => {
       const tab = tabs.find((t) => t.id === tabId);
+      if (!tab) {
+        onDragStart(tabId, e);
+        return;
+      }
       // 仅 preview Tab 支持拖出转分屏
-      if (!tab || tab.type !== "preview") {
+      if (tab.type !== "preview") {
+        if (isGroupEligibleTab(tab)) {
+          handleGroupTabDrag(tabId, e);
+          return;
+        }
         onDragStart(tabId, e);
         return;
       }
@@ -809,7 +1012,7 @@ function TabBarInner({
       document.addEventListener("pointermove", handleMove);
       document.addEventListener("pointerup", handleUp);
     },
-    [tabs, onDragStart, onTearOff],
+    [tabs, onDragStart, onTearOff, handleGroupTabDrag],
   );
 
   // 鼠标滚轮横向滚动（使用原生事件监听器以支持 preventDefault）
@@ -1031,7 +1234,40 @@ function TabBarInner({
             className="topbar-tabs-scroll flex min-w-0 items-center gap-1 overflow-x-auto px-1 scrollbar-none"
             style={{ height: TOPBAR_CONTENT_HEIGHT }}
           >
-            {tabs.map((tab) => (
+            {tabs.map((tab) => {
+              // 组合的两个成员在顶栏折叠成一个条目：跳过另一个成员，
+              // 在锚点（列表中靠前的那个成员）位置渲染组合条目。
+              if (tabGroup && groupAnchorTabId && isGroupMember(tabGroup, tab.id)) {
+                if (tab.id !== groupAnchorTabId) return null;
+                const leftTab = tabGroup.leftTabId
+                  ? tabs.find((item) => item.id === tabGroup.leftTabId) ?? null
+                  : null;
+                const rightTab = tabGroup.rightTabId
+                  ? tabs.find((item) => item.id === tabGroup.rightTabId) ?? null
+                  : null;
+                if (leftTab || rightTab) {
+                  return (
+                    <TabGroupItem
+                      key={tab.id}
+                      id={tab.id}
+                      leftTitle={leftTab?.title ?? null}
+                      rightTitle={rightTab?.title ?? null}
+                      leftStatus={leftTab ? streamingMap.get(leftTab.id) ?? "idle" : "idle"}
+                      rightStatus={rightTab ? streamingMap.get(rightTab.id) ?? "idle" : "idle"}
+                      isActive={groupActive}
+                      focusedSide={rightTab && activeTabId === rightTab.id ? "right" : "left"}
+                      onActivate={() => onActivate(tabGroup.focusedTabId)}
+                      onDissolve={dissolveGroup}
+                      onCloseGroup={() => closeGroup(groupTabIds(tabGroup))}
+                      onDragStart={(e) => handleDragStartWithTearOff(tab.id, e)}
+                      onHoverEnter={() => handleTabHoverEnter(tab.id)}
+                      onHoverLeave={handleTabHoverLeave}
+                    />
+                  );
+                }
+              }
+
+              return (
               <TabBarItem
                 key={tab.id}
                 id={tab.id}
@@ -1066,7 +1302,8 @@ function TabBarInner({
                 onPanelHoverEnter={handlePanelHoverEnter}
                 onPanelHoverLeave={handleTabHoverLeave}
               />
-            ))}
+              );
+            })}
           </div>
         </div>
 
