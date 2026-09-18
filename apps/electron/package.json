@@ -70,6 +70,7 @@
     "@earendil-works/pi-agent-core": "0.84.3",
     "@earendil-works/pi-ai": "0.84.3",
     "@earendil-works/pi-coding-agent": "0.84.3",
+    "@open-file-viewer/core": "^0.1.47",
     "@silurus/ooxml": "0.71.0",
     "pdfjs-dist": "^4.10.38",
     "pptxgenjs": "4.0.1"
