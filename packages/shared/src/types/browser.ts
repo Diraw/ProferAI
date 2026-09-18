@@ -47,10 +47,26 @@ export interface BrowserTraceItem {
   executionSource: BrowserExecutionSource
 }
 
+/**
+ * 本地文件预览标签的展示信息。
+ *
+ * 浏览器列里的"文件面"（HTML 直载、或非 HTML 走内置 viewer 页）都用它描述：
+ * 渲染侧据此把地址栏换成「本地文件 · 只读 + 文件名」，而不是显示 profer-file token URL。
+ * 不含绝对路径 —— 路径边界留在主进程。
+ */
+export interface BrowserLocalFileInfo {
+  /** 文件名（不含目录） */
+  name: string
+  /** 只读预览：地址栏不可编辑、不写浏览历史 */
+  readOnly: true
+}
+
 export interface BrowserTabState {
   tabId: string
   url: string
   title: string
+  /** 本地文件预览标签的展示信息；普通网页为 null */
+  localFile: BrowserLocalFileInfo | null
   loading: boolean
   visible: boolean
   canGoBack: boolean
@@ -68,6 +84,8 @@ export interface BrowserTabSummary {
   tabId: string
   url: string
   title: string
+  /** 本地文件预览标签的展示信息；普通网页为 null */
+  localFile: BrowserLocalFileInfo | null
   loading: boolean
   /** 当前网页标签的独立缩放倍率，1 = 100%。 */
   zoomFactor: number
@@ -105,6 +123,8 @@ export interface BrowserViewState {
   /** 当前 active tab 的投影，保留扁平字段方便工具和旧 renderer 使用。 */
   url: string
   title: string
+  /** 当前 active tab 是本地文件预览时的展示信息；普通网页为 null */
+  localFile: BrowserLocalFileInfo | null
   loading: boolean
   visible: boolean
   canGoBack: boolean
@@ -186,4 +206,21 @@ export interface BrowserDownloadBlockedEvent {
   fileName: string
   /** 触发下载的页面 URL，仅用于“在系统浏览器打开”动作。 */
   url: string
+}
+
+/**
+ * 用户在浏览器列的本地文件预览里划词。
+ *
+ * 那条链路跨越了进程边界：选区在**无 preload 的沙箱 viewer 页**里，
+ * 页面只能把文本以哨兵 URL 回投给主进程，主进程再转给渲染进程，
+ * 渲染进程按预览面板同一套字段写进 `quotedSelectionMapAtom`。
+ */
+export interface BrowserLocalFileSelectionEvent {
+  sessionId: string
+  /** 选中的文本（已按上限截断）；空串表示选区已清空，渲染进程据此撤掉引用胶囊。 */
+  text: string
+  /** 预览中的文件绝对路径，与预览面板引用的 filePath 同口径。 */
+  filePath: string
+  /** 文件名，用于引用胶囊的展示名。 */
+  fileName: string
 }

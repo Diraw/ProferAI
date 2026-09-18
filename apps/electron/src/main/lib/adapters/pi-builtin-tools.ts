@@ -1432,8 +1432,8 @@ function buildBrowserTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefiniti
     }),
     sdk.defineTool({
       name: 'BrowserPreviewOpen',
-      label: '打开本地网页预览',
-      description: 'Open an HTML file or a directory containing index.html from the current project or an authorized attached directory in a dedicated, visible in-app browser tab. This is read-only preview access; do not use it to read arbitrary local files.',
+      label: '打开本地文件预览',
+      description: 'Open an authorized local file (HTML, or any format the built-in viewer supports: documents, archives, designs, 3D, GIS, media) in a dedicated, visible in-app browser tab. HTML files load directly; other extensions render through the built-in viewer page. This is read-only preview access; do not use it to read arbitrary local files.',
       parameters: Type.Object({ path: Type.String({ description: 'Absolute or current-workspace-relative path to an HTML file or directory with index.html.' }), tabId: Type.Optional(Type.String({ description: 'Optional tab id. Defaults to a new preview tab.' })) }),
       async execute(_id, params, signal?: AbortSignal) {
         const args = params as Record<string, unknown>

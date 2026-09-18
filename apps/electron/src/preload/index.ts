@@ -219,10 +219,39 @@ export interface ElectronAPI {
   pasteAgentBrowserClipboard: (input: import('@profer/shared').BrowserTabInput) => Promise<import('@profer/shared').BrowserTranslateResult>
   /** 订阅受管网页下载被拦截的脱敏事件。 */
   onAgentBrowserDownloadBlocked: (callback: (event: import('@profer/shared').BrowserDownloadBlockedEvent) => void) => () => void
+  /**
+   * 订阅「用户在浏览器列的文件预览里划词」。
+   * 选区本身发生在无 preload 的沙箱 viewer 页，只能由主进程转投过来。
+   */
+  onAgentBrowserLocalFileSelection: (callback: (event: import('@profer/shared').BrowserLocalFileSelectionEvent) => void) => () => void
   /** 同步切换浏览器原生视图的前台会话所有权。 */
   setAgentBrowserForeground: (sessionId: string | null) => void
   hideAgentBrowser: (sessionId: string) => Promise<void>
+  /**
+   * 用户侧：把已授权文件在受管浏览器里打开（非 HTML 走内置 viewer 页）。
+   *
+   * `theme` / `tokens` 由渲染进程算好一起送来：viewer 页跑在无 preload 的沙箱
+   * webContents 里，读不到 app 的主题，只能把"实际生效的 token 值"烘进 URL。
+   * 不传时主进程用最近一次同步的主题兜底（Agent 打开的预览走这条路）。
+   */
+  openFileInBrowser: (input: {
+    sessionId: string
+    filePath: string
+    theme?: 'light' | 'dark'
+    tokens?: import('@profer/shared').OfvThemeTokens
+    access?: import('@profer/shared').FileAccessOptions
+  }) => Promise<import('@profer/shared').BrowserViewState>
   closeAgentBrowser: (sessionId: string) => Promise<void>
+  /**
+   * 把当前主题同步给已打开的本地预览，并让主进程记住它（供之后新建的预览使用）。
+   *
+   * 为什么是重载：viewer 页的 theme 只能在打开时烘进 URL，那一页没有修改主题的接口。
+   * 返回被重载的预览个数；普通网页不受影响。
+   */
+  refreshBrowserPreviewTheme: (input: {
+    theme: 'light' | 'dark'
+    tokens?: import('@profer/shared').OfvThemeTokens
+  }) => Promise<number>
   setAgentBrowserZoom: (input: import('@profer/shared').BrowserTabInput & { zoomFactor: number }) => Promise<import('@profer/shared').BrowserViewState>
   onAgentBrowserStateChanged: (callback: (state: import('@profer/shared').BrowserViewState) => void) => () => void
 
@@ -1706,8 +1735,27 @@ const electronAPI: ElectronAPI = {
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
   },
   getBrowserStartPage: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_BROWSER_START_PAGE),
+  onAgentBrowserLocalFileSelection: (
+    callback: (event: import('@profer/shared').BrowserLocalFileSelectionEvent) => void,
+  ) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: import('@profer/shared').BrowserLocalFileSelectionEvent) => callback(payload)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_LOCAL_FILE_SELECTION, listener)
+    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_LOCAL_FILE_SELECTION, listener)
+  },
   addBrowserBookmark: (input: import('@profer/shared').BrowserAddBookmarkInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.ADD_BROWSER_BOOKMARK, input),
+  openFileInBrowser: (input: {
+    sessionId: string
+    filePath: string
+    theme?: 'light' | 'dark'
+    tokens?: import('@profer/shared').OfvThemeTokens
+    access?: import('@profer/shared').FileAccessOptions
+  }) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_FILE_IN_BROWSER, input),
   removeBrowserBookmark: (id: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.REMOVE_BROWSER_BOOKMARK, id),
+  refreshBrowserPreviewTheme: (input: {
+    theme: 'light' | 'dark'
+    tokens?: import('@profer/shared').OfvThemeTokens
+  }) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.REFRESH_BROWSER_PREVIEW_THEME, input),
   updateBrowserHomeUrl: (url: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_BROWSER_HOME_URL, url),
   clearBrowserHistory: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLEAR_BROWSER_HISTORY),
 

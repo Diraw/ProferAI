@@ -68,6 +68,12 @@ import {
 } from '@/atoms/agent-atoms'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import { previewPanelOpenMapAtom, previewFileMapAtom } from '@/atoms/preview-atoms'
+import {
+  browserInlinePreviewMapAtom,
+  browserPanelDismissedSessionIdsAtom,
+  browserPanelOpenMapAtom,
+  browserStateMapAtom,
+} from '@/atoms/browser-atoms'
 import { clearPreviewCacheForSession } from '@/components/diff/DiffTabContent'
 import {
   tabsAtom,
@@ -370,6 +376,10 @@ export function useLeftSidebar() {
   const setPreviewPanelOpen = useSetAtom(previewPanelOpenMapAtom)
   const setPreviewFile = useSetAtom(previewFileMapAtom)
   const setDiffPanelTab = useSetAtom(agentDiffPanelTabAtom)
+  const setBrowserInlinePreview = useSetAtom(browserInlinePreviewMapAtom)
+  const setBrowserPanelOpen = useSetAtom(browserPanelOpenMapAtom)
+  const setBrowserState = useSetAtom(browserStateMapAtom)
+  const setBrowserDismissed = useSetAtom(browserPanelDismissedSessionIdsAtom)
   const setDiffRefreshVersion = useSetAtom(agentDiffRefreshVersionAtom)
   const setDiffUnseen = useSetAtom(agentDiffUnseenChangesAtom)
   const setDiffUnseenFiles = useSetAtom(agentDiffUnseenFilesAtom)
@@ -401,6 +411,15 @@ export function useLeftSidebar() {
     setPreviewPanelOpen(deleteKey)
     setPreviewFile(deleteKey)
     setDiffPanelTab(deleteKey)
+    setBrowserInlinePreview(deleteKey)
+    setBrowserPanelOpen(deleteKey)
+    setBrowserState(deleteKey)
+    setBrowserDismissed((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
     setExplorationMap(deleteKey)
     setDiffRefreshVersion(deleteKey)
     setDiffUnseen(deleteKey)
@@ -458,7 +477,8 @@ export function useLeftSidebar() {
     sessionExistsAtom.remove(id)
 
     clearPreviewCacheForSession(id)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setBrowserInlinePreview, setBrowserPanelOpen, setBrowserState, setBrowserDismissed, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
+
 
   const currentWorkspaceSlug = React.useMemo(() => {
     if (!currentWorkspaceId) return null

@@ -11,6 +11,7 @@ function browserState(overrides: Partial<BrowserViewState> = {}): BrowserViewSta
     tabs: [],
     url: '',
     title: '新建标签页',
+    localFile: null,
     loading: false,
     visible: false,
     canGoBack: false,

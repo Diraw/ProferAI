@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, nativeTheme, powerMonitor, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, powerMonitor, protocol, screen, shell } from 'electron'
 import { join } from 'path'
 import { createConnection } from 'net'
 import { existsSync, cpSync, mkdirSync, readdirSync } from 'fs'
@@ -141,6 +141,7 @@ function registerProtocolsAndHandlers(): void {
 
 
 import { getSettings, updateSettings } from './lib/settings-service'
+import { resolveAppThemeIsDark } from './lib/app-theme-service'
 import { INTRO_FLUID_FRAGMENT_SHADER, INTRO_FLUID_VERTEX_SHADER } from '../shared/intro-fluid-shader'
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
@@ -335,13 +336,8 @@ let startupSplashWindow: BrowserWindow | null = null
 
 const STARTUP_SPLASH_MIN_MS = 1200
 
-function resolveStartupSplashDark(): boolean {
-  const settings = getSettings()
-  if (settings.themeMode === 'light') return false
-  if (settings.themeMode === 'system') return nativeTheme.shouldUseDarkColors
-  if (settings.themeMode === 'special') return !settings.themeStyle?.endsWith('-light')
-  return true
-}
+/** 启动闪屏的背景明暗：与「Agent 打开的本地预览」共用同一套解析（皮肤 tone 优先于 id 后缀启发式） */
+const resolveStartupSplashDark = resolveAppThemeIsDark
 
 function createStartupSplashHtml(isDark: boolean): string {
   const background = isDark ? '#0b0b0c' : '#f7f7f5'

@@ -1953,10 +1953,18 @@ export const AGENT_IPC_CHANNELS = {
 
   // 后台任务管理
   /** 获取任务输出 */
+  BROWSER_LOCAL_FILE_SELECTION: 'agent:browser-local-file-selection',
+  REFRESH_BROWSER_PREVIEW_THEME: 'agent:refresh-browser-preview-theme',
   GET_TASK_OUTPUT: 'agent:get-task-output',
   /** 获取 Claude/Pi runtime 能力快照 */
   GET_RUNTIME_CAPABILITIES: 'agent:get-runtime-capabilities',
   /** 停止任务 */
+  /**
+   * 用户侧：把已授权的本地文件在**受管浏览器**里打开。
+   * HTML 直接加载文件本身；其它扩展名加载内置 viewer 页（Open File Viewer 渲染），
+   * 文件以 profer-file:// token 作为 src 传入，绝对路径不进渲染进程。
+   */
+  OPEN_FILE_IN_BROWSER: 'agent:open-file-in-browser',
   STOP_TASK: 'agent:stop-task',
 
   // 工作区能力（MCP + Skill）

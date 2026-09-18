@@ -144,6 +144,8 @@ import { KNOWLEDGE_IPC_CHANNELS } from '@profer/shared'
 import type { UserProfile, AppSettings } from '../types'
 import { getRuntimeStatus, getGitRepoStatus, reinitializeRuntime } from './lib/runtime-init'
 import { browserController } from './lib/browser-controller'
+import { normalizeOfvThemePayload, type OfvThemeTokens } from '@profer/shared'
+import type { ViewerPreviewTheme } from './lib/browser-preview-service'
 import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import { listBookmarks, addBookmark, removeBookmark, listHistory, clearHistory } from './lib/browser-start-page-store'
 import { getUnstagedChanges, getFileDiff, getUntrackedContent, revertFile, getDiffContents, listWorktrees, getWorktreeChanges, getMainRepoRoot, invalidateGitDiffCache } from './lib/git-diff-service'
@@ -2918,6 +2920,47 @@ export function registerIpcHandlers(): void {
     if (!input.tabId || typeof input.zoomFactor !== 'number') throw new Error('tabId 和 zoomFactor 必填。')
     return browserController.setZoom(input.sessionId, input.tabId, input.zoomFactor)
   })
+  // 用户侧：把已授权文件在受管浏览器里打开（HTML 直接加载；其它扩展名走内置 viewer 页 → Open File Viewer）。
+  // 主题由渲染进程算好一起送来（viewer 页无 preload，主题只能烘进 URL）：
+  // theme = 明暗，tokens = app 文档上真实生效的 token 值（皮肤配色由此到达预览页）。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.OPEN_FILE_IN_BROWSER,
+    async (
+      event,
+      input: {
+        sessionId: string
+        filePath: string
+        theme?: 'light' | 'dark'
+        tokens?: OfvThemeTokens
+        access?: FileAccessOptions
+      },
+    ): Promise<import('@profer/shared').BrowserViewState> => {
+      if (
+        !input
+        || typeof input.sessionId !== 'string'
+        || input.sessionId.length === 0
+        || typeof input.filePath !== 'string'
+        || input.filePath.trim().length === 0
+      ) {
+        throw new Error('文件预览参数无效。')
+      }
+      await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+      const options = normalizeFileAccessOptions(input.access)
+      // getAllowedCandidateBasePaths 在没有候选根时返回 undefined；浏览器侧要求 string[]。
+      const allowedRoots = getAllowedCandidateBasePaths(options) ?? []
+      return browserController.previewOpen(
+        input.sessionId,
+        input.filePath,
+        undefined,
+        allowedRoots,
+        undefined,
+        undefined,
+        // IPC 边界收口（未知 token / 可疑值在这里被丢掉，见 shared 的 ofv-theme-bridge）
+        normalizeOfvThemePayload(input) ?? undefined,
+      )
+    },
+  )
+
   ipcMain.handle(AGENT_IPC_CHANNELS.HIDE_BROWSER, async (event, sessionId: string): Promise<void> => {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     browserController.hide(sessionId)
@@ -2926,6 +2969,18 @@ export function registerIpcHandlers(): void {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     await browserController.close(sessionId)
   })
+  // 皮肤切换：viewer 页的主题烘在 URL 里（那页无 preload），只能按新主题重载本地预览。
+  // 全局生效且只影响本地预览标签 —— 普通网页永远不跟随 app 皮肤。
+  // 除了重载已打开的预览，主进程还会记住这次的主题，供之后由 Agent 打开、没有主题来源的预览使用。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.REFRESH_BROWSER_PREVIEW_THEME,
+    async (event, input: { theme?: unknown; tokens?: unknown }): Promise<number> => {
+      assertMainRenderer(event.sender.id)
+      const previewTheme = normalizeOfvThemePayload(input)
+      if (!previewTheme) return 0
+      return browserController.refreshLocalPreviewThemes(previewTheme)
+    },
+  )
   ipcMain.handle(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, async (event, sessionId: string): Promise<BrowserTabListResult> => {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     return browserController.listTabs(sessionId)
