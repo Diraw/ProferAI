@@ -14,7 +14,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -45,7 +45,7 @@ import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom, requestModelSelectorOpen } from '@/atoms/chat-atoms'
-import { agentProcessGroupsKeepExpandedAtom, agentSessionsAtom, currentAgentSessionIdAtom } from '@/atoms/agent-atoms'
+import { agentProcessGroupsKeepExpandedAtom, agentSessionsAtom, currentAgentSessionIdAtom, resolvedBlobMessagesAtom } from '@/atoms/agent-atoms'
 import { agentInterruptionMapAtom } from '@/atoms/preview-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { automationsAtom, automationFormAtom, automationToDraft } from '@/atoms/automation-atoms'
@@ -70,6 +70,7 @@ import {
   THINKING_SIGNATURE_ERROR_TITLE,
   THINKING_SIGNATURE_ERROR_MESSAGE,
   isThinkingSignatureError,
+  readSessionBlobRefs,
   resolveContextWindowFromModelUsage,
 } from '@profer/shared'
 import type { ToolActivity } from '@/atoms/agent-atoms'
@@ -239,6 +240,35 @@ function extractStructuredToolResultText(message: SDKUserMessage): string | unde
 
 function extractToolResultForTask(message: SDKUserMessage, resultBlock: SDKToolResultBlock): string | undefined {
   return extractStructuredToolResultText(message) ?? extractToolResultText(resultBlock.content)
+}
+
+/**
+ * 从结构化 tool_result 直接解析 TaskCreate 输出。
+ *
+ * 与 `parseTaskCreateResult(JSON.stringify(value))` 结果一致，但优先直接读取对象，
+ * 避免为了取 id/subject 两个字段而序列化整个 tool_use_result —— 该字段在 Pi runtime 下
+ * 是 tool_result 正文的完整副本，单条可达数 MB，在流式期间逐帧序列化会造成大量临时分配。
+ */
+function parseTaskCreateResultFromStructuredValue(
+  value: Record<string, unknown>,
+): { id: string; subject?: string } | null {
+  const task = value.task
+  if (isRecord(task) && (typeof task.id === 'string' || typeof task.id === 'number')) {
+    return {
+      id: String(task.id),
+      subject: typeof task.subject === 'string' ? task.subject : undefined,
+    }
+  }
+
+  // result 可能被包在 content block 数组里：[{type:"text",text:'{"task":{...}}'}]
+  const extracted = extractToolResultText(value)
+  if (extracted) {
+    const parsed = parseTaskCreateResult(extracted)
+    if (parsed) return parsed
+  }
+
+  // 兜底：与 parseTaskCreateResult(JSON.stringify(value)) 完全一致（仅在上述快路径均未命中时执行）
+  return parseTaskCreateResult(JSON.stringify(value))
 }
 
 // ===== 辅助：判断 user 消息是否为真正的人类用户输入（非工具结果/子代理提示） =====
@@ -453,15 +483,20 @@ function buildTaskProgressData(
     }
   }
 
+  // 只提取 task 工具对应的 tool_result：turn 内其余工具结果不会被本函数消费，
+  // 提前跳过可避免对它们做无谓的文本提取与大对象序列化。
   const toolResultMap = new Map<string, string>()
-  for (const msg of turnMessages) {
-    if (msg.type !== 'user') continue
-    const userMsg = msg as SDKUserMessage
-    const blocks = userMsg.message?.content
-    if (!Array.isArray(blocks)) continue
-    for (const b of blocks) {
-      if (b.type === 'tool_result') {
+  if (taskBlocks.length > 0) {
+    const wantedToolUseIds = new Set(taskBlocks.map((tb) => tb.id))
+    for (const msg of turnMessages) {
+      if (msg.type !== 'user') continue
+      const userMsg = msg as SDKUserMessage
+      const blocks = userMsg.message?.content
+      if (!Array.isArray(blocks)) continue
+      for (const b of blocks) {
+        if (b.type !== 'tool_result') continue
         const rb = b as SDKToolResultBlock
+        if (!wantedToolUseIds.has(rb.tool_use_id)) continue
         const text = extractToolResultForTask(userMsg, rb)
         if (text) toolResultMap.set(rb.tool_use_id, text)
       }
@@ -488,47 +523,143 @@ function buildTaskProgressData(
  */
 export function buildHistoricalTaskSubjects(allMessages: SDKMessage[]): Map<string, string> {
   const historicalTaskSubjects = new Map<string, string>()
-  const globalResultMap = new Map<string, string>()
-  const pendingTaskCreates: SDKToolUseBlock[] = []
 
+  // 第一轮：收集带 subject/description 的 TaskCreate（原实现在收尾阶段才 continue，
+  // 这里提前筛选，等价但避免为不会被消费的 TaskCreate 解析结果）。
+  const subjectFallbackByToolUseId = new Map<string, string>()
   for (const msg of allMessages) {
-    if (msg.type === 'user') {
-      const userMsg = msg as SDKUserMessage
-      const blocks = userMsg.message?.content
-      if (!Array.isArray(blocks)) continue
-      for (const b of blocks) {
-        if (b.type === 'tool_result') {
-          const rb = b as SDKToolResultBlock
-          const text = extractToolResultForTask(userMsg, rb)
-          if (text) globalResultMap.set(rb.tool_use_id, text)
-        }
-      }
-    } else if (msg.type === 'assistant') {
-      const aMsg = msg as SDKAssistantMessage
-      const blocks = aMsg.message?.content
-      if (!Array.isArray(blocks)) continue
-      for (const b of blocks) {
-        if (b.type === 'tool_use' && (b as SDKToolUseBlock).name === 'TaskCreate') {
-          pendingTaskCreates.push(b as SDKToolUseBlock)
-        }
-      }
+    if (msg.type !== 'assistant') continue
+    const blocks = (msg as SDKAssistantMessage).message?.content
+    if (!Array.isArray(blocks)) continue
+    for (const b of blocks) {
+      if (b.type !== 'tool_use' || (b as SDKToolUseBlock).name !== 'TaskCreate') continue
+      const tb = b as SDKToolUseBlock
+      const input = tb.input as Record<string, unknown>
+      const subject = typeof input.subject === 'string'
+        ? input.subject
+        : typeof input.description === 'string'
+          ? input.description
+          : undefined
+      if (subject) subjectFallbackByToolUseId.set(tb.id, subject)
+    }
+  }
+  if (subjectFallbackByToolUseId.size === 0) return historicalTaskSubjects
+
+  // 第二轮：只解析上述 TaskCreate 对应的 tool_result，其余工具结果一律跳过
+  // （原实现对全部 tool_result 提取并序列化，其中绝大多数从未被消费）。
+  const parsedByToolUseId = new Map<string, { id: string; subject?: string }>()
+  for (const msg of allMessages) {
+    if (msg.type !== 'user') continue
+    const userMsg = msg as SDKUserMessage
+    const blocks = userMsg.message?.content
+    if (!Array.isArray(blocks)) continue
+    for (const b of blocks) {
+      if (b.type !== 'tool_result') continue
+      const rb = b as SDKToolResultBlock
+      if (!subjectFallbackByToolUseId.has(rb.tool_use_id)) continue
+      const raw = userMsg as unknown as Record<string, unknown>
+      const structured = raw.toolUseResult ?? raw.tool_use_result
+      const parsed = isRecord(structured)
+        ? parseTaskCreateResultFromStructuredValue(structured)
+        : parseTaskCreateResult(extractToolResultText(rb.content))
+      if (parsed) parsedByToolUseId.set(rb.tool_use_id, parsed)
     }
   }
 
-  for (const tb of pendingTaskCreates) {
-    const input = tb.input as Record<string, unknown>
-    const subject = typeof input.subject === 'string'
-      ? input.subject
-      : typeof input.description === 'string'
-        ? input.description
-        : undefined
-    if (!subject) continue
-    const resultText = globalResultMap.get(tb.id)
-    const parsedResult = parseTaskCreateResult(resultText)
-    if (parsedResult?.id) historicalTaskSubjects.set(parsedResult.id, parsedResult.subject ?? subject)
+  for (const [toolUseId, fallbackSubject] of subjectFallbackByToolUseId) {
+    const parsedResult = parsedByToolUseId.get(toolUseId)
+    if (parsedResult?.id) {
+      historicalTaskSubjects.set(parsedResult.id, parsedResult.subject ?? fallbackSubject)
+    }
   }
 
   return historicalTaskSubjects
+}
+
+// ===== 被外部化内容的「加载全文」入口 =====
+
+function formatBlobBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 一轮里被外部化的消息。
+ *
+ * 落盘时超限消息里的大载荷被搬到 blob，行内只留前 2000 字片段
+ * （见 `main/lib/blob-store.ts`）。这里给用户一个明确的入口，保证两件事：
+ * 1. 「内容只剩片段」**不静默**——用户必须知道它被截过；
+ * 2. 大内容**只在用户主动点击时**才读回渲染进程，不重新引发内存问题。
+ *
+ * 取回后写进 `resolvedBlobMessagesAtom`，由 `allSDKMessages` 覆盖回消息流，
+ * 于是所有下游（工具结果查找、工具卡片的「显示全部」）自动看到完整内容。
+ */
+function ExternalizedContentNotice({ messages }: { messages: SDKMessage[] }): React.ReactElement | null {
+  const setResolvedMessages = useSetAtom(resolvedBlobMessagesAtom)
+  const [loading, setLoading] = React.useState(false)
+  const [failed, setFailed] = React.useState(0)
+
+  const targets = React.useMemo(
+    () => messages
+      .map((message) => ({ message, refs: readSessionBlobRefs(message) }))
+      .filter((entry) => entry.refs.length > 0 && typeof (entry.message as { uuid?: string }).uuid === 'string'),
+    [messages],
+  )
+
+  const handleLoadAll = React.useCallback(async (): Promise<void> => {
+    setLoading(true)
+    setFailed(0)
+    let failures = 0
+    for (const { message } of targets) {
+      const uuid = (message as { uuid?: string }).uuid
+      try {
+        const resolved = await window.electronAPI.resolveSessionMessageBlobs?.(message)
+        if (resolved && uuid) {
+          setResolvedMessages((prev) => {
+            const next = new Map(prev)
+            next.set(uuid, resolved as SDKMessage)
+            return next
+          })
+        } else {
+          failures++
+        }
+      } catch (e) {
+        console.error('[会话存储] 取回外置内容失败:', e)
+        failures++
+      }
+    }
+    setFailed(failures)
+    setLoading(false)
+  }, [targets, setResolvedMessages])
+
+  if (targets.length === 0) return null
+
+  const segmentCount = targets.reduce((sum, entry) => sum + entry.refs.length, 0)
+  const totalBytes = targets.reduce(
+    (sum, entry) => sum + entry.refs.reduce((inner, ref) => inner + (ref.bytes || 0), 0),
+    0,
+  )
+
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-dashed border-border/60 px-3 py-2 text-[12px] text-muted-foreground/70">
+      <PackageOpen className="size-3.5 shrink-0" />
+      <span className="min-w-0 flex-1">
+        {segmentCount} 段内容已外置（{formatBlobBytes(totalBytes)}），当前显示前 2000 字片段
+      </span>
+      <button
+        type="button"
+        onClick={handleLoadAll}
+        disabled={loading}
+        className="shrink-0 rounded px-2 py-0.5 text-[11px] transition-colors hover:bg-muted/60 disabled:opacity-50"
+      >
+        {loading ? '加载中…' : '加载全文'}
+      </button>
+      {failed > 0 && (
+        <span className="shrink-0 text-destructive">{failed} 段原文不可用</span>
+      )}
+    </div>
+  )
 }
 
 // ===== AssistantTurnRenderer — 渲染一个完整的 assistant turn =====
@@ -736,6 +867,7 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       <MessageContent>
         <TurnFileMapProvider map={turnFileMap}>
           <div className={cn('space-y-2')}>
+            <ExternalizedContentNotice messages={turn.turnMessages} />
             {renderItems.map((item, itemIndex) => {
               if (item.type === 'block') {
                 return renderTopLevelBlock(item.item.block, item.item.index)
@@ -1455,12 +1587,15 @@ export function getGroupId(group: MessageGroup): string {
   return `turn-empty-${++fallbackIdCounter}`
 }
 
+/** 预览文本最大长度（user 与 assistant-turn 共用） */
+const GROUP_PREVIEW_LIMIT = 200
+
 /**
  * 从 MessageGroup 中提取纯文本预览，供迷你地图使用
  */
 export function getGroupPreview(group: MessageGroup): string {
   if (group.type === 'user') {
-    return parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text.slice(0, 200)
+    return parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text.slice(0, GROUP_PREVIEW_LIMIT)
   }
   if (group.type === 'system') {
     if (group.message.subtype === 'compact_boundary') return '上下文已压缩'
@@ -1469,18 +1604,23 @@ export function getGroupPreview(group: MessageGroup): string {
     if (group.message.subtype === 'interruption_record') return group.message.message ?? '任务中断'
     return ''
   }
-  // assistant-turn：收集所有 text 块
-  const texts: string[] = []
+  // assistant-turn：按顺序累加 text 块，达到预览上限即返回。
+  // 与原 `texts.join(' ').slice(0, 200)` 结果一致，区别在于不再为 200 字符拼接整轮全文。
+  let preview = ''
+  let hasText = false
   for (const aMsg of group.assistantMessages) {
     const rawBlocks = aMsg.message?.content
     if (!Array.isArray(rawBlocks)) continue
     for (const block of normalizeThinkTagsInContentBlocks(rawBlocks)) {
       if (block.type === 'text' && 'text' in block) {
-        texts.push((block as { text: string }).text)
+        const text = (block as { text: string }).text
+        preview = hasText ? `${preview} ${text}` : text
+        hasText = true
+        if (preview.length >= GROUP_PREVIEW_LIMIT) return preview.slice(0, GROUP_PREVIEW_LIMIT)
       }
     }
   }
-  return texts.join(' ').slice(0, 200)
+  return preview.slice(0, GROUP_PREVIEW_LIMIT)
 }
 
 function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {

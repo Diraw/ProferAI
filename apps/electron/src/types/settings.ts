@@ -551,4 +551,10 @@ export const STORAGE_IPC_CHANNELS = {
   CLEANUP: 'storage:cleanup',
   /** 仅清理临时文件（启动时/快速清理） */
   CLEANUP_TEMP: 'storage:cleanup-temp',
+  /** 预览历史会话整理：只统计可收敛的超限行与体积，不写入 */
+  SESSION_COMPACTION_PREVIEW: 'storage:session-compaction-preview',
+  /** 执行历史会话整理：就地收敛超限行，不删除任何会话 */
+  SESSION_COMPACTION_APPLY: 'storage:session-compaction-apply',
+  /** 按需取回被外部化的会话消息完整内容（用户点击时调用） */
+  SESSION_RESOLVE_BLOBS: 'storage:session-resolve-blobs',
 } as const
