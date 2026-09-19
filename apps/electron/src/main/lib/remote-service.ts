@@ -560,13 +560,33 @@ export function validateWorkspaceHeatmapRequest(workspaceId: unknown): string | 
   return null
 }
 
+/** 探索分支的缺省来源标签（对齐桌面「从此处探索」主入口文案）。 */
+export const DEFAULT_EXPLORATION_SOURCE_LABEL = '这条 Agent 回复'
+/** 来源标签服务端强制截断长度：桌面侧最长来源为选区文本 slice(0, 80)，120 字符足够。 */
+export const EXPLORATION_SOURCE_LABEL_MAX_LENGTH = 120
+
+/**
+ * 归一化移动端传入的探索来源标签。
+ *
+ * 该标签会持久化进会话 meta，并随每次 `session_updated` 广播，因此不能只靠客户端自律：
+ * 非字符串/空值回落缺省值，其余折叠连续空白（含换行）后截断，避免超长选区文本放大事件体积。
+ */
+export function normalizeExplorationSourceLabel(raw: unknown): string {
+  if (typeof raw !== 'string') return DEFAULT_EXPLORATION_SOURCE_LABEL
+  const collapsed = raw.replace(/\s+/g, ' ').trim()
+  if (!collapsed) return DEFAULT_EXPLORATION_SOURCE_LABEL
+  return collapsed.length > EXPLORATION_SOURCE_LABEL_MAX_LENGTH
+    ? collapsed.slice(0, EXPLORATION_SOURCE_LABEL_MAX_LENGTH)
+    : collapsed
+}
+
 /** 单个会话对象（脱敏，仅暴露移动端需要的字段；与桌面 AgentSessionMeta 移动端所需子集兼容）。
  * 注意：必须包含 id/updatedAt/title/pinned/archived/draft 等完整字段——桌面复用组件
  * （AgentView/LeftSidebar）按桌面 IPC 返回完整对象的契约处理 .then((updated) => updated.id)
  * 等；若缺字段（旧实现只回 { channelId, modelId }）会导致切换模型后列表不更新甚至
  * 在 Promise 回调里读 undefined.updatedAt 报错。
  */
-function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]) {
+export function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]) {
   return {
     id: s.id,
     title: s.title,
@@ -577,6 +597,12 @@ function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]) {
     // 与桌面 LeftSidebar 相同的父子 Agent 会话关联；仅用于树形导航，不暴露委派内容。
     parentSessionId: s.parentSessionId,
     sourceDelegationId: s.sourceDelegationId,
+    // 探索分支血缘：移动端需要它把分支挂回主线，而不是当成独立会话。
+    // 与委派血缘是两套独立字段（探索分支不参与委派删除级联），因此必须一并下沉；
+    // explorationTitleInitializedAt 是主进程内部的重复请求守卫，属 UI 之外的数据，不下发。
+    explorationParentSessionId: s.explorationParentSessionId,
+    explorationSourceMessageId: s.explorationSourceMessageId,
+    explorationSourceLabel: s.explorationSourceLabel,
     agentRuntime: s.agentRuntime,
     permissionMode: s.permissionMode,
     createdAt: s.createdAt,
@@ -1183,6 +1209,29 @@ export async function handleRemoteCommand(
       } catch (error) {
         console.error('[Remote] fork_session 失败:', error)
         return { ok: false, error: error instanceof Error ? error.message : '分叉会话失败' }
+      }
+    }
+
+    // 探索分支：从指定 assistant 消息处分叉出一条 Pi `/tree` 探索分支。
+    // 与 fork_session 是两种语义（fork = 重建独立顶层会话；explore = 挂在主线血缘下的分支），
+    // 因此独立成命令，不给 fork_session 加可选参数以免把「可选字段」变成隐式模式开关。
+    // 失败路径由 forkPiAgentSession 内部的 deleteAgentSession 回滚，不留半成品会话。
+    case 'create_exploration_session': {
+      const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId.trim() : ''
+      const upToMessageUuid = typeof parsed.upToMessageUuid === 'string' ? parsed.upToMessageUuid.trim() : ''
+      if (!sessionId || !upToMessageUuid) return { ok: false, error: '缺少 sessionId 或 upToMessageUuid' }
+      try {
+        const meta = await forkAgentSession({
+          sessionId,
+          upToMessageUuid,
+          // 不传 modelId：探索必须继承源会话渠道与模型（与桌面入口一致）。
+          explorationSourceLabel: normalizeExplorationSourceLabel(parsed.explorationSourceLabel),
+        })
+        publishSessionUpdated(meta)
+        return { ok: true, data: buildSessionItem(meta) }
+      } catch (error) {
+        console.error('[Remote] create_exploration_session 失败:', error)
+        return { ok: false, error: error instanceof Error ? error.message : '创建探索分支失败' }
       }
     }
 
