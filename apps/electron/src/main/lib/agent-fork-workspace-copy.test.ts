@@ -6,6 +6,7 @@ import {
   copyForkWorkspaceFiles,
   shouldCopyForkWorkspacePath,
 } from './agent-fork-workspace-copy'
+import { buildForkProjectKey } from './fork-file-ops'
 
 const tempRoots: string[] = []
 
@@ -59,6 +60,28 @@ describe('fork 工作区复制', () => {
     expect(existsSync(join(destDir, 'node_modules'))).toBe(false)
     expect(existsSync(join(destDir, '.venv'))).toBe(false)
     expect(existsSync(join(destDir, 'nested-repo', '.git'))).toBe(false)
+  })
+
+  test('Given 源目录不存在 When 复制 fork 工作区 Then 返回结构化失败路径而不是抛异常', () => {
+    const root = makeTempRoot()
+    const sourceDir = join(root, 'missing-source')
+    const destDir = join(root, 'dest')
+
+    const result = copyForkWorkspaceFiles(sourceDir, destDir)
+
+    expect(result.copiedCount).toBe(0)
+    expect(result.skippedCount).toBe(0)
+    expect(result.failedCount).toBe(1)
+    expect(result.failedPaths).toEqual([{ path: sourceDir, reason: expect.stringContaining('ENOENT') }])
+  })
+
+  test('Given Windows 风格的超长工作区路径 When 生成 project key Then 长度受控且稳定', () => {
+    const longPath = `C:/Users/test/${'nested/'.repeat(80)}session`
+    const first = buildForkProjectKey(longPath)
+    const second = buildForkProjectKey(longPath)
+
+    expect(first).toBe(second)
+    expect(first.length).toBeLessThanOrEqual(240)
   })
 
   test('Given 路径是会话上下文或依赖目录 When 判断是否复制 Then 只放行上下文', () => {

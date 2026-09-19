@@ -26,6 +26,7 @@ import {
 import { getAgentWorkspace } from './agent-workspace-manager'
 import { assertEnabledModelForChannel } from './agent-model-selection'
 import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
+import { copyForkFile, buildForkProjectKey, renameForkFile, removeForkPath } from './fork-file-ops'
 import { listAgentPresets, normalizeSessionPresetId, presetReferenceForId } from './agent-preset-manager'
 import { copySettledPiHarnessEventsForFork } from './pi-harness/pi-harness-store'
 import { forkPiSessionArtifact } from './pi-session-fork'
@@ -71,6 +72,18 @@ import {
 } from '@profer/shared'
 import { getConversationMessages } from './conversation-manager'
 import { isUserInputMessage } from '@profer/session-core'
+
+const activeForkSessionIds = new Set<string>()
+let agentSessionActiveChecker: ((sessionId: string) => boolean) | undefined
+
+/** 由 agent-service 注入运行时活跃状态，避免 manager 反向依赖 orchestrator。 */
+export function setAgentSessionActiveChecker(checker: ((sessionId: string) => boolean) | undefined): void {
+  agentSessionActiveChecker = checker
+}
+
+export function isAgentSessionForking(sessionId: string): boolean {
+  return activeForkSessionIds.has(sessionId)
+}
 
 interface PersistedAssistantMessage {
   type?: string
@@ -1389,7 +1402,7 @@ export function deleteAgentSession(id: string): void {
       try {
         const sessionDir = getAgentSessionWorkspacePath(ws.slug, id)
         if (existsSync(sessionDir)) {
-          rmSync(sessionDir, { recursive: true, force: true })
+          removeForkPath(sessionDir)
           console.log(`[Agent 会话] 已清理 session 工作目录: ${sessionDir}`)
         }
       } catch (error) {
@@ -1771,7 +1784,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
     if (Object.keys(branchCheckpoints).length > 0) newMeta.piFileCheckpoints = branchCheckpoints
     Object.assign(newMeta, explorationMeta)
 
-    if (sourceDir && destDir) copyForkWorkspaceFiles(sourceDir, destDir)
+    if (sourceDir && destDir) {
+      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
+      if (copyResult.failedCount > 0) {
+        console.warn(`[Agent 会话] Pi fork 工作区有 ${copyResult.failedCount} 个条目未复制:`, copyResult.failedPaths)
+      }
+    }
     await copyForkStoredSDKMessages({
       sourceSessionId: sourceMeta.id,
       destSessionId: newMeta.id,
@@ -2121,13 +2139,29 @@ async function endWriteStream(stream: WriteStream): Promise<void> {
  * @returns 新创建的会话元数据
  */
 export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSessionMeta> {
-  const { sessionId, upToMessageUuid } = input
-
-  // 1. 获取源会话元数据
+  const { sessionId } = input
   const sourceMeta = getAgentSessionMeta(sessionId)
   if (!sourceMeta) {
     throw new Error(`源 Agent 会话不存在: ${sessionId}`)
   }
+  if (agentSessionActiveChecker?.(sessionId)) {
+    throw new Error('Agent 正在运行，完成后再分叉')
+  }
+  if (activeForkSessionIds.has(sessionId)) {
+    throw new Error('该会话正在创建分叉，请稍候再试')
+  }
+
+  activeForkSessionIds.add(sessionId)
+  try {
+    return await forkAgentSessionUnlocked(sourceMeta, input)
+  } finally {
+    activeForkSessionIds.delete(sessionId)
+  }
+}
+
+async function forkAgentSessionUnlocked(sourceMeta: AgentSessionMeta, input: ForkSessionInput): Promise<AgentSessionMeta> {
+  const { sessionId, upToMessageUuid } = input
+
   // Pi 会话走 Pi 原生分叉（SessionManager branch + forkFrom）；Claude 会话走下方 Claude SDK fork。
   if (normalizeAgentRuntime(sourceMeta.agentRuntime) === 'pi') {
     return forkPiAgentSession(sourceMeta, input)
@@ -2286,11 +2320,11 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     // 继续在源目录下读写文件。
     if (sourceDir && destDir) {
       // 复用 step 3.5 已确认的 JSONL 路径，避免重复扫描
-      const destProjectHash = destDir.replace(/[^a-zA-Z0-9]/g, '-')
+      const destProjectHash = buildForkProjectKey(destDir)
       const sdkProjectsDir = join(getSdkConfigDir(), 'projects', destProjectHash)
       if (!existsSync(sdkProjectsDir)) mkdirSync(sdkProjectsDir, { recursive: true })
       const destJsonl = join(sdkProjectsDir, `${forkResult.sessionId}.jsonl`)
-      copyFileSync(forkJsonlPath, destJsonl)
+      copyForkFile(forkJsonlPath, destJsonl)
       rewritePathsInJsonlFile(destJsonl, sourceDir, destDir)
       console.log(`[Agent 会话] 已将 SDK session JSONL 复制到 fork 目标目录并改写路径: ${destJsonl}`)
     }
@@ -2300,22 +2334,9 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     // .context/ 必须保留 — Profer 约定 .context/note.md、todo.md、plan/ 等是会话上下文，
     // 如果不复制，fork 后这些参考资料会丢失或被 Claude 误回源目录读取。
     if (sourceDir && destDir) {
-      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-      try {
-        const entries = readdirSync(sourceDir)
-        const skip = (entry: string) => entry === '.claude' || entry === '.DS_Store' || entry === '.git'
-        let copiedCount = 0
-        for (const entry of entries) {
-          if (skip(entry)) continue
-          const srcPath = join(sourceDir, entry)
-          const destPath = join(destDir, entry)
-          cpSync(srcPath, destPath, { recursive: true })
-          copiedCount += 1
-        }
-        console.log(`[Agent 会话] 已复制工作区文件: ${sourceDir} → ${destDir} (${copiedCount} 个条目)`)
-      } catch (err) {
-        // 工作区文件复制失败不触发回滚——fork 会话功能完整，仅缺上下文文件
-        console.warn(`[Agent 会话] 复制工作区文件失败，fork 会话缺少源会话的上下文文件:`, err)
+      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
+      if (copyResult.failedCount > 0) {
+        console.warn(`[Agent 会话] Claude fork 工作区有 ${copyResult.failedCount} 个条目未复制:`, copyResult.failedPaths)
       }
     }
 
@@ -2402,7 +2423,7 @@ function rewritePathsInJsonlFile(filePath: string, sourceDir: string, destDir: s
   if (rewritten !== content) {
     const tmpPath = filePath + '.tmp.' + Date.now()
     writeFileSync(tmpPath, rewritten, 'utf-8')
-    renameSync(tmpPath, filePath)
+    renameForkFile(tmpPath, filePath)
   }
 }
 

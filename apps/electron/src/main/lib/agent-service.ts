@@ -37,7 +37,7 @@ import { AgentCatalogInvalidationPublisher } from './agent-catalog-invalidation'
 import { AgentOrchestrator, serializeErrorDetail } from './agent-orchestrator'
 import { forwardHeadlessAgentCompletion, setHeadlessAgentRunner, type HeadlessAgentRunCallbacks } from './agent-headless-runner-registry'
 import { getAgentSessionWorkspacePath, getWorkspaceFilesDir } from './config-paths'
-import { getAgentSessionMeta, updateAgentSessionMeta } from './agent-session-manager'
+import { getAgentSessionMeta, setAgentSessionActiveChecker, updateAgentSessionMeta } from './agent-session-manager'
 import { AgentRuntimeContextStore } from './agent-runtime-context'
 
 // ===== 实例创建 =====
@@ -51,6 +51,7 @@ const piAdapter = new PiAgentAdapter()
 // Both runtimes remain behind the same orchestrator, credential gate, P0 lifecycle and Plan-mode boundary.
 const adapter = new RuntimeRoutingAgentAdapter({ claude: claudeAdapter, pi: piAdapter })
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
+setAgentSessionActiveChecker((sessionId) => orchestrator.isActive(sessionId))
 const runtimeContextStore = new AgentRuntimeContextStore()
 
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */

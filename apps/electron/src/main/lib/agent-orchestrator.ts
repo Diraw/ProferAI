@@ -105,6 +105,7 @@ import {
   getAgentSessionMeta,
   getAgentSessionMessages,
   getAgentSessionSDKMessages,
+  isAgentSessionForking,
   truncateSDKMessages,
   resolveUserUuidFromSDK,
   rewindFilesFromSnapshot,
@@ -902,6 +903,11 @@ export class AgentOrchestrator {
     const streamStartedAt = input.startedAt ?? Date.now()
     if (this.deletingSessions.has(sessionId)) {
       callbacks.onError('会话正在删除，无法发送消息')
+      callbacks.onComplete([], { startedAt: input.startedAt })
+      return
+    }
+    if (isAgentSessionForking(sessionId)) {
+      callbacks.onError('会话正在创建分叉，请稍候再试')
       callbacks.onComplete([], { startedAt: input.startedAt })
       return
     }
