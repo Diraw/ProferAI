@@ -1717,7 +1717,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
   // 未显式换模型时继承源会话模型；即使源渠道后来被删除/停用，也允许复制
   // 已存在的 Pi artifact。只有用户主动选择新模型时才需要重新校验渠道能力。
   const forkModelId = input.modelId !== undefined
-    ? assertEnabledModelForChannel({ channelId: sourceMeta.channelId, modelId: input.modelId, purpose: '分叉 Pi Agent 会话' })
+    ? assertEnabledModelForChannel({
+        channelId: sourceMeta.channelId,
+        modelId: input.modelId,
+        runtime: 'pi',
+        purpose: '分叉 Pi Agent 会话',
+      })
     : sourceMeta.modelId
   const workspace = sourceMeta.workspaceId ? getAgentWorkspace(sourceMeta.workspaceId) : undefined
   const sourceDir = workspace ? getAgentSessionWorkspacePath(workspace.slug, sourceMeta.id) : undefined

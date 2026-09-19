@@ -695,7 +695,11 @@ function getCurrentParentPermissionMode(
 
 function getAvailableAgentModels(ctx: CollaborationToolContext): Record<string, unknown> {
   const currentModelId = ctx.modelId?.trim() || undefined
-  const summary = listEnabledAgentModelsForChannel(ctx.channelId, '读取协作子会话可用模型')
+  const summary = listEnabledAgentModelsForChannel(
+    ctx.channelId,
+    '读取协作子会话可用模型',
+    ctx.agentRuntime ?? 'claude',
+  )
   return {
     channelId: summary.channelId,
     channelName: summary.channelName,
@@ -780,18 +784,19 @@ function startDelegation(
   const role = args.role ?? 'custom'
   const title = normalizeTitle(args.title, `协作：${task}`)
   const goal = truncateText(task, DELEGATION_GOAL_CHAR_LIMIT)
+  // 优先从持久化父会话继承，旧会话/无父上下文才安全回退 Claude。
+  const inheritedRuntime = parent?.agentRuntime ?? ctx.agentRuntime ?? 'claude'
   const effectiveModelId = args.modelId !== undefined
     ? assertEnabledModelForChannel({
         channelId: ctx.channelId,
         modelId: args.modelId,
+        runtime: inheritedRuntime,
         purpose: '创建协作子会话',
       })
     : ctx.modelId?.trim() || undefined
 
   const { completion, resolveCompletion } = createDelegationCompletion()
 
-  // 优先从持久化父会话继承，旧会话/无父上下文才安全回退 Claude。
-  const inheritedRuntime = parent?.agentRuntime ?? ctx.agentRuntime ?? 'claude'
   // 会话持久化后的工作区是唯一权威来源。工具调用上下文可能来自已切换项目的旧流，
   // 不能让它把子会话创建或执行到另一个项目中。
   const workspaceId = parent?.workspaceId ?? ctx.workspaceId
