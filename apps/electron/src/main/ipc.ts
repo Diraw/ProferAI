@@ -285,6 +285,8 @@ import type { MainWindowGetter } from './lib/ipc-sender-guard'
 import { getMainWindow } from './lib/main-window-state'
 import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCustomSoundsDir, getAgentWorkspacePath } from './lib/config-paths'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
+import { compactAgentSessionStorage, previewAgentSessionCompaction } from './lib/agent-session-compaction'
+import { resolveMessageBlobs } from './lib/agent-session-manager'
 import { listTeamMemories, readTeamMemory, createTeamMemory, updateTeamMemory, listTeamMemoryRevisions, archiveTeamMemory } from './lib/team-memory-service'
 import type { CleanupOptions } from './lib/storage-service'
 import {
@@ -6047,6 +6049,21 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(STORAGE_IPC_CHANNELS.CLEANUP_TEMP, async () => {
     return cleanupTempFiles()
+  })
+
+  // 历史会话整理：与「清理」不同，这是就地收敛超限行，不删除任何会话。
+  ipcMain.handle(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_PREVIEW, async () => {
+    return previewAgentSessionCompaction()
+  })
+
+  ipcMain.handle(STORAGE_IPC_CHANNELS.SESSION_COMPACTION_APPLY, async () => {
+    return compactAgentSessionStorage()
+  })
+
+  // 外部化载荷的按需取回：只拿到【片段】的渲染层在用户点击时调它，
+  // 把片段换成原文。大内容只在用户主动要求时进渲染进程。
+  ipcMain.handle(STORAGE_IPC_CHANNELS.SESSION_RESOLVE_BLOBS, async (_, message: SDKMessage) => {
+    return resolveMessageBlobs(message)
   })
 
   // ===== 工作区热力图 =====
