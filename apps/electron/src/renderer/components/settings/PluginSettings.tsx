@@ -187,7 +187,7 @@ export function PluginSettings(): React.ReactElement {
                           <span>{plugin.manifest.contributes.pages?.length ?? 0} 个页面</span>
                         </div>
                         <div className="mt-3 flex flex-wrap gap-1.5">
-                          {(plugin.manifest.permissions ?? []).map((permission) => <Badge key={permission} variant="outline">{PROFER_PLUGIN_PERMISSION_LABELS[permission]}{plugin.grantedPermissions?.includes(permission) ? ' · 已授权' : ' · 待授权'}</Badge>)}
+                          {(plugin.manifest.permissions ?? []).map((permission) => <Badge key={permission} variant="outline">{PROFER_PLUGIN_PERMISSION_LABELS[permission]}{plugin.revoked ? ' · 已撤销' : plugin.grantedPermissions?.includes(permission) ? ' · 已授权' : ' · 待授权'}</Badge>)}
                         </div>
                         {!!plugin.manifest.network?.origins.length && <p className="mt-2 text-xs text-muted-foreground">网络服务：{plugin.manifest.network.origins.join('、')}</p>}
                         {plugin.manifest.network?.credentials?.map((credential) => <PluginCredentialField key={credential.id} pluginId={plugin.manifest.id} {...credential} />)}
