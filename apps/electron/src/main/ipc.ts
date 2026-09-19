@@ -268,7 +268,7 @@ import {
   countArchivedAgentSessions,
 } from './lib/agent-session-manager'
 import { listAgentPresets, listGlobalAgentPresets, getDefaultPresetId, setDefaultPresetId, setDefaultPresetReference, enableGlobalPresetInWorkspace, disableGlobalPresetInWorkspace, rebindAndDisableGlobalPresetScope, setWorkspacePresetEnabled, rebindAgentSessionPreset, rebindAutomationPreset, createAgentPreset, createGlobalAgentPreset, promoteWorkspacePresetToGlobal, copyAgentPreset, copyPresetToWorkspace, updateAgentPreset, updateGlobalAgentPreset, deleteAgentPreset, deleteGlobalAgentPreset, getAgentPreset, getPresetReferenceReport, serializeAgentPresetsForExport, importAgentPresets } from './lib/agent-preset-manager'
-import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, agentCatalogInvalidationPublisher } from './lib/agent-service'
+import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, emitSessionStreamEvent, agentCatalogInvalidationPublisher } from './lib/agent-service'
 import { mapSdkShellTasks, isSameProcess, terminateProcessTreeGracefully, type MonitoredProcess } from './lib/process-monitor'
 import { listOwnedRuntimeProcesses, markOwnedRuntimeProcessExited, onRuntimeProcessRegistryChanged } from './lib/runtime-process-registry'
 import { coordinateAgentSend } from './lib/agent-send-coordinator'
@@ -3788,10 +3788,16 @@ export function registerIpcHandlers(): void {
 
       // 发送 permission_resolved 事件给渲染进程
       if (sessionId) {
-        event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
-          sessionId,
-          payload: { kind: 'profer_event', event: { type: 'permission_resolved', requestId, behavior } },
-        })
+        const payload: import('@profer/shared').AgentStreamPayload = {
+          kind: 'profer_event',
+          event: { type: 'permission_resolved', requestId, behavior },
+        }
+        // 必须进事件总线：remote-service 订阅 agentEventBus 后广播给所有 Pocket 客户端，
+        // 并写入 WS 事件重放日志。若只走 event.sender.send，桌面端作答后移动端横幅不会消失
+        //（与 WS 路径 respond_permission 的事件名/载荷保持一致）。
+        // 统一出口仅在“该 session 未绑定 / 绑定已销毁 / 绑定不是本窗口”时补一次直发；
+        // 已绑定时中间件已送达，不再直发，避免同一窗口渲染层收到两份同事件。
+        emitSessionStreamEvent(sessionId, payload, event.sender)
       }
     }
   )
@@ -4128,10 +4134,13 @@ export function registerIpcHandlers(): void {
       const sessionId = await askUserService.respondToAskUser(requestId, answers)
 
       if (sessionId) {
-        event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
-          sessionId,
-          payload: { kind: 'profer_event', event: { type: 'ask_user_resolved', requestId } },
-        })
+        const payload: import('@profer/shared').AgentStreamPayload = {
+          kind: 'profer_event',
+          event: { type: 'ask_user_resolved', requestId },
+        }
+        // 同步进事件总线（广播给 Pocket + 写重放日志），与 WS 路径 respond_ask_user 一致；
+        // 统一出口只在未绑定/绑定已销毁/绑定非本窗口时补直发，避免重复投递。
+        emitSessionStreamEvent(sessionId, payload, event.sender)
       }
     }
   )
@@ -4149,10 +4158,13 @@ export function registerIpcHandlers(): void {
         const { sessionId, targetMode } = result
 
         // 通知渲染进程请求已处理
-        event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
-          sessionId,
-          payload: { kind: 'profer_event', event: { type: 'exit_plan_mode_resolved', requestId: response.requestId } },
-        })
+        const resolvedPayload: import('@profer/shared').AgentStreamPayload = {
+          kind: 'profer_event',
+          event: { type: 'exit_plan_mode_resolved', requestId: response.requestId },
+        }
+        // 同步进事件总线（广播给 Pocket + 写重放日志），与 WS 路径 respond_exit_plan_mode 一致；
+        // 统一出口只在未绑定/绑定已销毁/绑定非本窗口时补直发，避免重复投递。
+        emitSessionStreamEvent(sessionId, resolvedPayload, event.sender)
 
         // 如果用户选择了新的权限模式，通知渲染进程更新 UI
         if (targetMode) {
@@ -4165,10 +4177,13 @@ export function registerIpcHandlers(): void {
               console.warn(`[IPC] ExitPlanMode 持久化 session 权限模式失败: sessionId=${sessionId}`, err)
             }
           }
-          event.sender.send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
-            sessionId,
-            payload: { kind: 'profer_event', event: { type: 'permission_mode_changed', mode: targetMode } },
-          })
+          const modePayload: import('@profer/shared').AgentStreamPayload = {
+            kind: 'profer_event',
+            event: { type: 'permission_mode_changed', mode: targetMode },
+          }
+          // 与 WS 路径同样广播，否则桌面端完成计划审批后 Pocket 侧权限模式仍会滞后；
+          // 统一出口只在未绑定/绑定已销毁/绑定非本窗口时补直发，避免重复投递。
+          emitSessionStreamEvent(sessionId, modePayload, event.sender)
           console.log(`[IPC] ExitPlanMode 权限模式切换: ${targetMode}`)
         }
       }
