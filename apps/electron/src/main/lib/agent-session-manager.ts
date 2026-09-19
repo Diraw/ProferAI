@@ -29,7 +29,7 @@ import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
 import { listAgentPresets, normalizeSessionPresetId, presetReferenceForId } from './agent-preset-manager'
 import { copySettledPiHarnessEventsForFork } from './pi-harness/pi-harness-store'
 import { forkPiSessionArtifact } from './pi-session-fork'
-import { isEphemeralTransportError } from './error-patterns'
+import { isRecoveredEphemeralTransportError } from './error-patterns'
 import { adoptPiFileCheckpoints, loadPiFileCheckpoint, restorePiFileCheckpoint, prunePiFileCheckpoints, removePiFileCheckpoints } from './pi-file-checkpoint'
 
 // 在模块加载时一次性设置 SDK 配置目录，避免在 forkSession 等异步调用中临时修改/恢复
@@ -521,19 +521,29 @@ export function getAgentSessionMessages(id: string): AgentMessage[] {
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const lines = raw.split('\n').filter((line) => line.trim())
-    const messages: AgentMessage[] = []
+    const parsedMessages: AgentMessage[] = []
     for (const line of lines) {
       try {
-        const parsed = JSON.parse(line) as AgentMessage
-        const assistantError = getPersistedAssistantError(parsed)
-        if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) continue
-        messages.push(parsed)
+        parsedMessages.push(JSON.parse(line) as AgentMessage)
       } catch {
         // 单行损坏不丢整文件：跳过坏行继续解析后续
         console.warn(`[Agent 会话] 跳过损坏的消息行 (${id})`)
       }
     }
-    return messages
+    // 瞬时断流错误卡只在「之后已恢复」时才丢弃；会话尾部的失败必须保留可见。
+    return parsedMessages.filter((message, index) => {
+      const assistantError = getPersistedAssistantError(message)
+      if (!assistantError) return true
+      const recoveredLater = parsedMessages.slice(index + 1).some((later) => {
+        if (later.role !== 'assistant') return false
+        return getPersistedAssistantError(later) === null
+      })
+      return !isRecoveredEphemeralTransportError(
+        recoveredLater,
+        assistantError.errorCode,
+        assistantError.errorText,
+      )
+    })
   } catch (error) {
     console.error(`[Agent 会话] 读取消息文件失败 (${id}):`, error)
     return []
@@ -577,11 +587,10 @@ const TRUNCATED_PREVIEW_LENGTH = 2000
  * 超过 256K chars 的消息会被自动截断以防止存储膨胀。
  */
 export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
-  const persistentMessages = messages.filter((message) => {
-    if (message.type !== 'assistant') return true
-    const assistantError = getPersistedAssistantError(message)
-    return !assistantError || !isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)
-  })
+  // 注意：这里不再丢弃「瞬时断流」错误卡。丢弃必须在读取时结合「之后是否已恢复」判断
+  // （见 dropRecoveredEphemeralTransportErrors）——写入时就丢掉，会让一次最终失败的
+  // 网络错误在历史里彻底消失，用户看到的是「Agent Running 一闪就什么都没有了」。
+  const persistentMessages = messages
   if (persistentMessages.length === 0) return
 
   const filePath = getAgentSessionMessagesPath(id)
@@ -660,22 +669,50 @@ function parseSDKMessageLine(line: string, id: string): SDKMessage | null {
     const parsed = JSON.parse(line)
     // 旧格式检测：AgentMessage 有 `role` 字段，SDKMessage 有 `type` 字段
     if ('role' in parsed && !('type' in parsed)) {
-      const message = convertLegacyMessage(parsed as AgentMessage)
-      const assistantError = getPersistedAssistantError(message)
-      if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) return null
-      return message
+      return convertLegacyMessage(parsed as AgentMessage)
     }
-    const message = parsed as SDKMessage
-    if (message.type === 'assistant') {
-      const assistantError = getPersistedAssistantError(message)
-      if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) return null
-    }
-    return message
+    return parsed as SDKMessage
   } catch {
     // 单行损坏不丢整文件：跳过坏行继续解析后续
     console.warn(`[Agent 会话] 跳过损坏的 SDKMessage 行 (${id})`)
     return null
   }
+}
+
+/** 该消息是否代表「本轮已恢复/继续产出」——用于判定瞬时断流是否真的已被恢复 */
+function isRecoverySignal(message: SDKMessage): boolean {
+  if (message.type === 'assistant') return getPersistedAssistantError(message) === null
+  return message.type === 'result'
+}
+
+/**
+ * 丢弃「已恢复」的瞬时断流错误卡。
+ *
+ * 会话尾部仍处于失败状态的错误卡必须保留：否则失败在界面上没有任何可见痕迹
+ * （表现为「Agent Running 一闪就什么都没有了」）。只有该错误之后确实还有正常产出
+ * （干净 assistant 消息 / result）时，才按原设计把它从历史里去掉。
+ */
+function dropRecoveredEphemeralTransportErrors(messages: SDKMessage[]): SDKMessage[] {
+  if (messages.length === 0) return messages
+  let dropped = false
+  const kept: SDKMessage[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!
+    const assistantError = message.type === 'assistant' ? getPersistedAssistantError(message) : null
+    if (
+      assistantError &&
+      isRecoveredEphemeralTransportError(
+        messages.slice(i + 1).some((later) => isRecoverySignal(later)),
+        assistantError.errorCode,
+        assistantError.errorText,
+      )
+    ) {
+      dropped = true
+      continue
+    }
+    kept.push(message)
+  }
+  return dropped ? kept : messages
 }
 
 /**
@@ -717,7 +754,7 @@ export function getAgentSessionSDKMessages(
         if (parsed) messages.push(parsed)
       }
       return {
-        messages,
+        messages: dropRecoveredEphemeralTransportErrors(messages),
         total,
         startIndex: startLine,
         endIndex: before - 1,
@@ -731,7 +768,7 @@ export function getAgentSessionSDKMessages(
       const parsed = parseSDKMessageLine(line, id)
       if (parsed) messages.push(parsed)
     }
-    return messages
+    return dropRecoveredEphemeralTransportErrors(messages)
   } catch (error) {
     console.error(`[Agent 会话] 读取 SDKMessage 文件失败 (${id}):`, error)
     return opts ? emptyPage : []
@@ -803,7 +840,7 @@ function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
  */
 export function updateAgentSessionMeta(
   id: string,
-  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
+  updates: Partial<Pick<AgentSessionMeta, 'title' | 'titleAutoGeneratedAt' | 'titleRefineAttempts' | 'titleLockedAt' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
 ): AgentSessionMeta {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)

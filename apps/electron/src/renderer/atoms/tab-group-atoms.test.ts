@@ -32,11 +32,12 @@ import {
 
 // ===== 白名单 =====
 
-test('只有 agent/chat 可以参与组合', () => {
+test('agent/chat/preview 可以参与组合，单例与插件视口不行', () => {
   expect(isGroupEligibleTab({ type: 'agent' })).toBe(true)
   expect(isGroupEligibleTab({ type: 'chat' })).toBe(true)
-  // preview 已有自己的分屏通道，拖出标签栏必须保持"转预览分屏"语义
-  expect(isGroupEligibleTab({ type: 'preview' })).toBe(false)
+  // preview 有独立内容身份（一个文件），可以当作一栏展示；
+  // 它的"转预览分屏"路径由落点判定保留（见 TabBar 的合并手势回落）
+  expect(isGroupEligibleTab({ type: 'preview' })).toBe(true)
   expect(isGroupEligibleTab({ type: 'scratch' })).toBe(false)
   expect(isGroupEligibleTab({ type: 'tutorial' })).toBe(false)
   expect(isGroupEligibleTab({ type: 'plugin' })).toBe(false)

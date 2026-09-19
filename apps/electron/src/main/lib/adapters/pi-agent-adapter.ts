@@ -36,7 +36,7 @@ import {
   isThinkingSignatureError as matchesThinkingSignatureError,
 } from '@profer/shared'
 import type { CanUseToolOptions, PermissionResult } from '../agent-permission-service'
-import { TRANSIENT_NETWORK_PATTERN, isMalformedResponseError } from '../error-patterns'
+import { TRANSIENT_NETWORK_PATTERN, isMalformedResponseError, isTransientUpstreamText } from '../error-patterns'
 import { normalizeDefaultSkillSlug, normalizeDefaultSkillSlugs, RENAMED_DEFAULT_SKILLS } from '../default-skill-slugs'
 
 import type {
@@ -581,6 +581,11 @@ function extractHttpStatusFromErrorText(...messages: Array<string | undefined>):
     /API error[^:]*:\s+(\d{3})/i,
     /\b(?:HTTP|status|statusCode)\s*[:=]?\s*(\d{3})\b/i,
     /\b(\d{3})\s+\{[^}]*"error"/is,
+    // 部分中转/SDK 只给出 "503: {...}" / "520 status code (no body)" 形态：
+    // 没有 HTTP/status 前缀、响应体也不含字面量 "error"，旧规则全部漏判，
+    // 导致 5xx 被归为不可重试的 unknown_error（线上真实出现：520/503）。
+    /(?:^|\n)\s*(\d{3})\s*[:\-]/,
+    /\b(\d{3})\s+status code\b/i,
   ]
   for (const pattern of patterns) {
     const match = combined.match(pattern)
@@ -630,11 +635,22 @@ export function mapSDKErrorToTypedError(errorCode: string, message: string, orig
     code = 'network_error'
   } else if (/overloaded/i.test(diagnosticText) || httpStatus === 529) {
     code = 'provider_error'
-  } else if (/service unavailable/i.test(diagnosticText) || httpStatus === 503) {
+  } else if (/service\s+(?:temporarily\s+)?unavailable/i.test(diagnosticText) || httpStatus === 503) {
+    // 兼容中转文案 "Service temporarily unavailable"（旧正则 /service unavailable/ 漏判）
     code = 'service_unavailable'
-  } else if (httpStatus === 500 || httpStatus === 502 || (httpStatus != null && httpStatus >= 500)) {
-    // HTTP 5xx（含 500 内部错误 / 502 网关异常）通常为上游瞬时故障，可重试
+  } else if (
+    (httpStatus != null && httpStatus >= 500) ||
+    // 裸 5xx：中转只回状态码文本（如 "520 status code (no body)"）时的兜底
+    /\b5\d{2}\b/.test(diagnosticText)
+  ) {
+    // HTTP 5xx（含 500 内部错误 / 502 网关异常 / 520-524 中转异常）通常为上游瞬时故障，可重试
     code = 'service_error'
+  } else if (/request could not be completed/i.test(diagnosticText)) {
+    // 中转/网关的通用瞬时文案：请求未能完成属于上游抖动，允许自动重试
+    code = 'service_error'
+  } else if (isTransientUpstreamText(diagnosticText)) {
+    // 中转中文瞬时文案（服务繁忙 / 请求量较大 / 请稍后重试）：与 pi-ai patch 的可重试语义对齐
+    code = 'provider_error'
   } else if (/invalid request|bad request|400|schema|validation/i.test(diagnosticText)) {
     code = 'invalid_request'
   } else if (/network|fetch|socket|terminated|ECONNRESET/i.test(diagnosticText)) {

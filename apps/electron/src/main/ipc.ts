@@ -190,7 +190,7 @@ import {
   searchConversationMessages,
   countArchivedConversations,
 } from './lib/conversation-manager'
-import { sendMessage, stopGeneration, generateTitle } from './lib/chat-service'
+import { sendMessage, stopGeneration, generateTitle, autoTitleConversation, regenerateConversationTitle, type AutoTitleConversationInput } from './lib/chat-service'
 import {
   saveAttachment,
   readAttachmentAsBase64,
@@ -270,7 +270,7 @@ import {
   countArchivedAgentSessions,
 } from './lib/agent-session-manager'
 import { listAgentPresets, listGlobalAgentPresets, getDefaultPresetId, setDefaultPresetId, setDefaultPresetReference, enableGlobalPresetInWorkspace, disableGlobalPresetInWorkspace, rebindAndDisableGlobalPresetScope, setWorkspacePresetEnabled, rebindAgentSessionPreset, rebindAutomationPreset, createAgentPreset, createGlobalAgentPreset, promoteWorkspacePresetToGlobal, copyAgentPreset, copyPresetToWorkspace, updateAgentPreset, updateGlobalAgentPreset, deleteAgentPreset, deleteGlobalAgentPreset, getAgentPreset, getPresetReferenceReport, serializeAgentPresetsForExport, importAgentPresets } from './lib/agent-preset-manager'
-import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, agentCatalogInvalidationPublisher } from './lib/agent-service'
+import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, regenerateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, agentCatalogInvalidationPublisher } from './lib/agent-service'
 import { mapSdkShellTasks, isSameProcess, terminateProcessTreeGracefully, type MonitoredProcess } from './lib/process-monitor'
 import { listOwnedRuntimeProcesses, markOwnedRuntimeProcessExited, onRuntimeProcessRegistryChanged } from './lib/runtime-process-registry'
 import { coordinateAgentSend } from './lib/agent-send-coordinator'
@@ -1761,11 +1761,28 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 更新对话标题
+  // 更新对话标题（用户手动命名：同时定稿锁定，自动命名窗口永久退让）
   ipcMain.handle(
     CHAT_IPC_CHANNELS.UPDATE_TITLE,
     async (_, id: string, title: string): Promise<ConversationMeta> => {
-      return updateConversationMeta(id, { title })
+      return updateConversationMeta(id, { title, titleLockedAt: Date.now() })
+    }
+  )
+
+  // 自动命名窗口（Chat）：流结束后由主进程按前几轮有效用户消息生成/精修标题
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.AUTO_TITLE,
+    async (_, input: AutoTitleConversationInput): Promise<ConversationMeta | null> => {
+      if (!input || typeof input.conversationId !== 'string' || !input.conversationId.trim()) return null
+      return autoTitleConversation(input)
+    }
+  )
+
+  // 手动重新生成对话标题：绕过定稿锁定，用前几轮有效消息重命名并重新锁定
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.REGENERATE_TITLE,
+    async (_, id: string, channelId?: string, modelId?: string): Promise<ConversationMeta | null> => {
+      return regenerateConversationTitle(id, channelId, modelId)
     }
   )
 
@@ -3058,11 +3075,11 @@ export function registerIpcHandlers(): void {
     return agentFilePreviewSessionManager.reportInspection(result)
   })
 
-  // 更新 Agent 会话标题
+  // 更新 Agent 会话标题（用户手动命名：同时定稿锁定，自动命名窗口永久退让）
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_TITLE,
     async (_, id: string, title: string): Promise<AgentSessionMeta> => {
-      return updateAgentSessionMeta(id, { title })
+      return updateAgentSessionMeta(id, { title, titleLockedAt: Date.now() })
     }
   )
 
@@ -3101,6 +3118,15 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.GENERATE_TITLE,
     async (_, input: AgentGenerateTitleInput): Promise<string | null> => {
       return generateAgentTitle(input)
+    }
+  )
+
+  // 手动重新生成 Agent 会话标题：绕过定稿锁定，用前几轮有效消息重命名并重新锁定
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.REGENERATE_TITLE,
+    async (_, id: string, channelId?: string, modelId?: string): Promise<AgentSessionMeta | null> => {
+      const result = await regenerateAgentTitle(id, channelId, modelId)
+      return result?.session ?? null
     }
   )
 

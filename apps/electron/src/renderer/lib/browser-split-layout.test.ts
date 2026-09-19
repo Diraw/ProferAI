@@ -1,7 +1,20 @@
 import { expect, test } from 'bun:test'
-import { resolveBrowserSplitGeometry } from './browser-split-layout'
+import { resolveBrowserSplitGeometry, shouldAnimateBrowserSplitWidth } from './browser-split-layout'
 
 const options = { resizeGap: 8, minConversationWidth: 420, minBrowserWidth: 360 }
+
+test('相邻面板改变容器宽度时不启用浏览器宽度过渡', () => {
+  expect(shouldAnimateBrowserSplitWidth(true, true, false)).toBe(false)
+})
+
+test('浏览器自身开关变化时启用宽度过渡', () => {
+  expect(shouldAnimateBrowserSplitWidth(false, true, false)).toBe(true)
+  expect(shouldAnimateBrowserSplitWidth(true, false, false)).toBe(true)
+})
+
+test('拖拽浏览器分栏时禁用宽度过渡', () => {
+  expect(shouldAnimateBrowserSplitWidth(false, true, true)).toBe(false)
+})
 
 test('浏览器隐藏时对话区占满容器', () => {
   expect(resolveBrowserSplitGeometry(1200, 0.58, false, options)).toEqual({ browserWidth: 0, conversationWidth: 1200, resizeGap: 0 })

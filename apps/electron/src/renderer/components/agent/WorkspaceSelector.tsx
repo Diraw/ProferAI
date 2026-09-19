@@ -26,7 +26,7 @@ import { agentSessionsAtom, agentWorkspacesAtom } from '@/atoms/agent-atoms'
 import type { AgentWorkspace } from '@profer/shared'
 
 export function WorkspaceSelector(): React.ReactElement {
-  const { workspaces, currentWorkspaceId, selectProject, createProject } = useProjectActions()
+  const { workspaces, allWorkspaces, currentWorkspaceId, selectProject, createProject } = useProjectActions()
   const [, setWorkspaces] = useAtom(agentWorkspacesAtom)
   const [, setAgentSessions] = useAtom(agentSessionsAtom)
   const [listHeight, setListHeight] = useAtom(projectListHeightAtom)
@@ -249,18 +249,28 @@ export function WorkspaceSelector(): React.ReactElement {
     const toIdx = workspaces.findIndex((w) => w.id === targetId)
     if (fromIdx === -1 || toIdx === -1) return
 
-    const reordered = [...workspaces]
-    const [moved] = reordered.splice(fromIdx, 1)
+    const reorderedVisible = [...workspaces]
+    const [moved] = reorderedVisible.splice(fromIdx, 1)
     // 从原数组中移除后，目标索引需要调整
     const adjustedToIdx = fromIdx < toIdx ? toIdx - 1 : toIdx
     const insertIdx = dropIndicator.position === 'after' ? adjustedToIdx + 1 : adjustedToIdx
-    reordered.splice(insertIdx, 0, moved!)
+    reorderedVisible.splice(insertIdx, 0, moved!)
 
-    setWorkspaces(reordered)
+    // 团队工作区可能仍保留在底层索引中；只重排可见项目，避免隐藏数据被覆盖丢失。
+    const visibleIds = new Set(reorderedVisible.map((workspace) => workspace.id))
+    let visibleIndex = 0
+    const reorderedAll = allWorkspaces.map((workspace) => {
+      if (!visibleIds.has(workspace.id)) return workspace
+      const next = reorderedVisible[visibleIndex]
+      visibleIndex += 1
+      return next ?? workspace
+    })
+
+    setWorkspaces(reorderedAll)
     setDragId(null)
     setDropIndicator(null)
 
-    window.electronAPI.reorderAgentWorkspaces(reordered.map((w) => w.id)).catch(console.error)
+    window.electronAPI.reorderAgentWorkspaces(reorderedAll.map((w) => w.id)).catch(console.error)
   }
 
   const handleDragEnd = (): void => {

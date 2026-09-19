@@ -447,6 +447,30 @@ export async function generateAgentTitle(input: AgentGenerateTitleInput): Promis
 }
 
 /**
+ * 手动重新生成 Agent 会话标题（不受定稿锁定限制）。
+ *
+ * channelId/modelId 缺省时回退到会话元数据上的上次选择；两者都没有就无法生成，返回 null。
+ */
+export async function regenerateAgentTitle(
+  sessionId: string,
+  channelId?: string,
+  modelId?: string,
+): Promise<{ title: string; session: import('@profer/shared').AgentSessionMeta } | null> {
+  const meta = getAgentSessionMeta(sessionId)
+  if (!meta) return null
+  const resolvedChannelId = channelId || meta.channelId
+  const resolvedModelId = modelId || meta.modelId
+  if (!resolvedChannelId || !resolvedModelId) {
+    console.warn('[Agent 服务] 重新生成标题缺少可用渠道/模型:', { sessionId })
+    return null
+  }
+  const title = await orchestrator.regenerateTitle(sessionId, resolvedChannelId, resolvedModelId)
+  if (!title) return null
+  const session = getAgentSessionMeta(sessionId)
+  return session ? { title, session } : null
+}
+
+/**
  * 中止指定会话的 Agent 执行
  */
 export function stopAgent(sessionId: string): void {

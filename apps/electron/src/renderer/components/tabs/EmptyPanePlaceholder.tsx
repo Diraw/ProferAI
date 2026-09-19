@@ -4,13 +4,13 @@
  * 为什么需要它：把「当前会话」拖进分区时，**不自动补位**——另一栏先空着，由用户自己挑。
  * 空栏本身就是那个选择入口：可以从下拉里选一个已打开的会话，也可以把任意会话标签拖进来。
  *
- * 只提供组合白名单内（agent / chat）的候选，并排除已在栏里的标签；
+ * 只提供组合白名单内的候选（agent / chat / preview），并排除已在栏里的标签；
  * 没有候选时给出"先从左侧栏打开一个会话"的指引，而不是给一个点不动的按钮。
  */
 
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
-import { Bot, Columns2, MessageSquare } from 'lucide-react'
+import { Bot, Columns2, FileText, MessageSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { tabsAtom, type TabItem } from '@/atoms/tab-atoms'
 import { isGroupEligibleTab } from '@/atoms/tab-group-atoms'
@@ -32,6 +32,8 @@ export interface EmptyPanePlaceholderProps {
 function CandidateIcon({ tab }: { tab: TabItem }): React.ReactElement | null {
   if (tab.type === 'agent') return <Bot className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
   if (tab.type === 'chat') return <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+  // 预览标签是一个文件：给个文件图标，避免候选列表里出现没有类型标识的行
+  if (tab.type === 'preview') return <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
   return null
 }
 

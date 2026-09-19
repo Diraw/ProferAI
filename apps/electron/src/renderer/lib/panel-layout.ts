@@ -18,6 +18,12 @@ export interface PanelLayoutState {
   filePanel: boolean
   /** 浏览器展开意图 A */
   browser: boolean
+  /**
+   * 主区对话栏数：组合 tab 激活时为 2，否则 1。
+   * 必须按栏数算，否则「组合 + 文件面板」在 1400px 级窗口上会被判「宽度够」，
+   * 实际结果是面板保住自己的最小宽、两个会话被压到 CONVERSATION_MIN_WIDTH 以下。
+   */
+  mainPaneCount: number
 }
 
 /** 面板实际可见性 B */
@@ -26,8 +32,14 @@ export interface PanelVisibility {
   filePanel: boolean
 }
 
-/** 对话区永不折叠的最小宽 */
+/** 对话区永不折叠的最小宽（单栏） */
 export const CONVERSATION_MIN_WIDTH = 420
+/**
+ * 组合两栏之间的分栏缝。
+ * 必须与 atoms/tab-group-atoms 的 GROUP_SPLIT_GAP 同值（那边渲染、这边算预算）；
+ * panel-layout.test.ts 里有一条断言锁住二者相等，避免将来只改一边。
+ */
+export const PANE_SPLIT_GAP = 8
 /** 左侧栏展开宽（折叠态 60，不参与判定） */
 export const SIDEBAR_WIDTH = 300
 /** 文件面板展开最小宽 */
@@ -40,11 +52,21 @@ export const GAP_BUFFER = 16
 export const HYSTERESIS = 50
 
 /**
+ * 主区（对话区）最小所需宽度：每栏各需 CONVERSATION_MIN_WIDTH，栏间还要让出分栏缝。
+ * 1 栏 = 420；2 栏（组合）= 420×2 + 8 = 848；3 栏 = 1276。
+ */
+export function mainAreaNeed(paneCount: number): number {
+  const panes = Math.max(1, Math.floor(paneCount))
+  return CONVERSATION_MIN_WIDTH * panes + (panes - 1) * PANE_SPLIT_GAP
+}
+
+/**
  * 计算给定展开组合的最小所需窗口宽。
- * 例：三面板全开 420+300+300+360+16=1396；无浏览器 1036；仅侧栏 736；仅对话 436。
+ * 例：单栏三面板全开 420+300+300+360+16=1396；无浏览器 1036；仅侧栏 736；仅对话 436。
+ * 组合（两栏）时对话区换成 848：组合+左栏 1164；再加文件面板 1464。
  */
 export function layoutNeed(layout: PanelLayoutState): number {
-  return CONVERSATION_MIN_WIDTH
+  return mainAreaNeed(layout.mainPaneCount)
     + (layout.sidebar ? SIDEBAR_WIDTH : 0)
     + (layout.filePanel ? FILE_PANEL_MIN_WIDTH : 0)
     + (layout.browser ? BROWSER_MIN_WIDTH : 0)
@@ -62,13 +84,16 @@ export function layoutNeed(layout: PanelLayoutState): number {
  * - 当前可见的面板用收起阈值（W ≥ 所需宽）保持可见；
  * - 当前不可见的面板需达到展开阈值（所需宽 + HYSTERESIS）才恢复可见。
  * 这样窗口停在临界值附近时收起/展开各只触发一次，不会反复横跳。
+ *
+ * 组合（mainPaneCount = 2）只是把对话区所需宽度换成 mainAreaNeed(2)，
+ * 其余优先级与滞后规则不变：窗口不够时先让浏览器，再让文件面板。
  */
 export function computeVisibility(
   windowWidth: number,
   layout: PanelLayoutState,
   prev: PanelVisibility,
 ): PanelVisibility {
-  const base = CONVERSATION_MIN_WIDTH + (layout.sidebar ? SIDEBAR_WIDTH : 0) + GAP_BUFFER
+  const base = mainAreaNeed(layout.mainPaneCount) + (layout.sidebar ? SIDEBAR_WIDTH : 0) + GAP_BUFFER
 
   const filePanelThreshold = base + FILE_PANEL_MIN_WIDTH
   const filePanel = layout.filePanel

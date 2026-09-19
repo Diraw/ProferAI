@@ -26,9 +26,11 @@ import {
   currentAgentSessionIdAtom,
   agentSessionsAtom,
   currentAgentWorkspaceIdAtom,
+  agentWorkspacesAtom,
   unviewedCompletedSessionIdsAtom,
 } from '@/atoms/agent-atoms'
 import { upsertAgentSession } from '@/lib/agent-session-list'
+import { isAgentWorkspaceIdVisible } from '@/lib/product-feature-flags'
 
 type OpenSessionFn = (type: TabType, sessionId: string, title: string) => void
 
@@ -43,12 +45,21 @@ export function useOpenSession(): OpenSessionFn {
   const setCurrentConversationId = useSetAtom(currentConversationIdAtom)
   const setCurrentAgentSessionId = useSetAtom(currentAgentSessionIdAtom)
   const agentSessions = useAtomValue(agentSessionsAtom)
+  const agentWorkspaces = useAtomValue(agentWorkspacesAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const setCurrentAgentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const setUnviewedCompleted = useSetAtom(unviewedCompletedSessionIdsAtom)
 
   return React.useCallback(
     (type: TabType, sessionId: string, title: string): void => {
+      const knownSession = type === 'agent' || type === 'preview'
+        ? agentSessions.find((session) => session.id === sessionId)
+        : undefined
+      if ((type === 'agent' || type === 'preview')
+        && !isAgentWorkspaceIdVisible(knownSession?.workspaceId, agentWorkspaces)) {
+        return
+      }
+
       // 切回 agent 会话时，若该会话上次开着预览 Tab 则一并重建并回到上次视图
       const restore = type === 'agent'
         ? buildOpenTabRestore(
@@ -115,6 +126,6 @@ export function useOpenSession(): OpenSessionFn {
         setCurrentAgentSessionId(null)
       }
     },
-    [tabs, setTabs, setActiveTabId, setTabMru, setAutomationForm, setActiveView, setAppMode, setCurrentConversationId, setCurrentAgentSessionId, agentSessions, setCurrentAgentWorkspaceId, setUnviewedCompleted, setAgentSessions],
+    [tabs, setTabs, setActiveTabId, setTabMru, setAutomationForm, setActiveView, setAppMode, setCurrentConversationId, setCurrentAgentSessionId, agentSessions, agentWorkspaces, setCurrentAgentWorkspaceId, setUnviewedCompleted, setAgentSessions],
   )
 }

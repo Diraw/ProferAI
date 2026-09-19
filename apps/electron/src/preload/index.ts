@@ -346,6 +346,12 @@ export interface ElectronAPI {
   /** 更新对话标题 */
   updateConversationTitle: (id: string, title: string) => Promise<ConversationMeta>
 
+  /** 自动命名窗口：流结束后按前几轮有效用户消息生成/精修标题（未改名时返回 null） */
+  autoTitleConversation: (input: { conversationId: string; channelId: string; modelId: string }) => Promise<ConversationMeta | null>
+
+  /** 手动重新生成对话标题（绕过定稿锁定） */
+  regenerateConversationTitle: (id: string, channelId?: string, modelId?: string) => Promise<ConversationMeta | null>
+
   /** 更新对话使用的模型/渠道 */
   updateConversationModel: (id: string, modelId?: string, channelId?: string) => Promise<ConversationMeta>
 
@@ -713,6 +719,9 @@ export interface ElectronAPI {
 
   /** 更新 Agent 会话标题 */
   updateAgentSessionTitle: (id: string, title: string) => Promise<AgentSessionMeta>
+
+  /** 手动重新生成 Agent 会话标题（绕过定稿锁定） */
+  regenerateAgentSessionTitle: (id: string, channelId?: string, modelId?: string) => Promise<AgentSessionMeta | null>
 
   /** 更新空闲 Agent 会话的渠道与模型 */
   updateAgentSessionModel: (id: string, channelId?: string, modelId?: string) => Promise<AgentSessionMeta>
@@ -1726,15 +1735,6 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_DOWNLOAD_BLOCKED, listener)
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_DOWNLOAD_BLOCKED, listener)
   },
-  hideAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.HIDE_BROWSER, sessionId),
-  closeAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER, sessionId),
-  setAgentBrowserZoom: (input: import('@profer/shared').BrowserTabInput & { zoomFactor: number }) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_BROWSER_ZOOM, input),
-  onAgentBrowserStateChanged: (callback: (state: import('@profer/shared').BrowserViewState) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, state: import('@profer/shared').BrowserViewState) => callback(state)
-    ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
-    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
-  },
-  getBrowserStartPage: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_BROWSER_START_PAGE),
   onAgentBrowserLocalFileSelection: (
     callback: (event: import('@profer/shared').BrowserLocalFileSelectionEvent) => void,
   ) => {
@@ -1742,7 +1742,7 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_LOCAL_FILE_SELECTION, listener)
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_LOCAL_FILE_SELECTION, listener)
   },
-  addBrowserBookmark: (input: import('@profer/shared').BrowserAddBookmarkInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.ADD_BROWSER_BOOKMARK, input),
+  hideAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.HIDE_BROWSER, sessionId),
   openFileInBrowser: (input: {
     sessionId: string
     filePath: string
@@ -1751,11 +1751,20 @@ const electronAPI: ElectronAPI = {
     access?: import('@profer/shared').FileAccessOptions
   }) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_FILE_IN_BROWSER, input),
-  removeBrowserBookmark: (id: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.REMOVE_BROWSER_BOOKMARK, id),
+  closeAgentBrowser: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLOSE_BROWSER, sessionId),
   refreshBrowserPreviewTheme: (input: {
     theme: 'light' | 'dark'
     tokens?: import('@profer/shared').OfvThemeTokens
   }) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.REFRESH_BROWSER_PREVIEW_THEME, input),
+  setAgentBrowserZoom: (input: import('@profer/shared').BrowserTabInput & { zoomFactor: number }) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_BROWSER_ZOOM, input),
+  onAgentBrowserStateChanged: (callback: (state: import('@profer/shared').BrowserViewState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: import('@profer/shared').BrowserViewState) => callback(state)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
+    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_STATE_CHANGED, listener)
+  },
+  getBrowserStartPage: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_BROWSER_START_PAGE),
+  addBrowserBookmark: (input: import('@profer/shared').BrowserAddBookmarkInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.ADD_BROWSER_BOOKMARK, input),
+  removeBrowserBookmark: (id: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.REMOVE_BROWSER_BOOKMARK, id),
   updateBrowserHomeUrl: (url: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_BROWSER_HOME_URL, url),
   clearBrowserHistory: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.CLEAR_BROWSER_HISTORY),
 
@@ -1881,6 +1890,14 @@ const electronAPI: ElectronAPI = {
 
   updateConversationTitle: (id: string, title: string) => {
     return ipcRenderer.invoke(CHAT_IPC_CHANNELS.UPDATE_TITLE, id, title)
+  },
+
+  autoTitleConversation: (input: { conversationId: string; channelId: string; modelId: string }) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.AUTO_TITLE, input)
+  },
+
+  regenerateConversationTitle: (id: string, channelId?: string, modelId?: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.REGENERATE_TITLE, id, channelId, modelId)
   },
 
   updateConversationModel: (id: string, modelId?: string, channelId?: string) => {
@@ -2355,6 +2372,10 @@ const electronAPI: ElectronAPI = {
 
   updateAgentSessionTitle: (id: string, title: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_TITLE, id, title)
+  },
+
+  regenerateAgentSessionTitle: (id: string, channelId?: string, modelId?: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.REGENERATE_TITLE, id, channelId, modelId)
   },
 
   updateAgentSessionModel: (id: string, channelId?: string, modelId?: string) => {

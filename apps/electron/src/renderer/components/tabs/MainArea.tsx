@@ -8,11 +8,12 @@
 
 import * as React from 'react'
 import { useAtomValue, useSetAtom, useAtom } from 'jotai'
-import { tabsAtom, activeTabIdAtom, activeTabAtom, tabIndicatorMapAtom } from '@/atoms/tab-atoms'
+import { tabsAtom, activeTabIdAtom, activeTabAtom, tabIndicatorMapAtom, isPreviewTab } from '@/atoms/tab-atoms'
 import { Panel } from '@/components/app-shell/Panel'
 import { WelcomeView } from '@/components/welcome/WelcomeView'
 import { previewPanelOpenMapAtom, previewSplitRatioAtom } from '@/atoms/preview-atoms'
 import { PreviewPanel } from '@/components/diff/PreviewPanel'
+import { closeInlinePreview, closeBrowserInlinePreview } from '@/components/diff/preview-opener'
 import { browserPanelDismissedSessionIdsAtom, browserPanelOpenMapAtom, browserSplitRatioAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
 import { panelVisibilityAtom } from '@/atoms/panel-layout-atoms'
 import { openBrowserFromPush } from '@/hooks/usePanelAutoLayout'
@@ -30,11 +31,12 @@ import { activeViewAtom } from '@/atoms/active-view'
 import { appModeAtom } from '@/atoms/app-mode'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { cn } from '@/lib/utils'
-import { resolveBrowserSplitGeometry } from '@/lib/browser-split-layout'
+import { resolveBrowserSplitGeometry, shouldAnimateBrowserSplitWidth } from '@/lib/browser-split-layout'
 import { WindowControlsHost } from '@/components/WindowControlsTemplate'
 import { PaneHeader } from './PaneHeader'
 import { EmptyPanePlaceholder } from './EmptyPanePlaceholder'
 import { useCloseTab } from '@/hooks/useCloseTab'
+import { useSyncActiveTabSideEffects } from '@/hooks/useSyncActiveTabSideEffects'
 import {
   GROUP_SPLIT_GAP,
   fillGroupSide,
@@ -62,6 +64,7 @@ export function MainArea(): React.ReactElement {
   const appMode = useAtomValue(appModeAtom)
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
+  const syncActiveTabSideEffects = useSyncActiveTabSideEffects()
 
   // Tab 内容渲染降级为非紧急：TabBar 立即高亮新 tab，主区域昂贵渲染（含 PreviewPanel 中
   // DiffTabContent → ProseMirror editor mount + Shiki tokenize）让出主线程，避免点击 tab
@@ -180,6 +183,28 @@ export function MainArea(): React.ReactElement {
   const visibility = useAtomValue(panelVisibilityAtom)
   const browserVisible = !!browserSessionId && visibility.browser
   const filePanelVisible = visibility.filePanel
+
+  const previousBrowserVisibleRef = React.useRef(browserVisible)
+  const [browserWidthTransitioning, setBrowserWidthTransitioning] = React.useState(false)
+  const browserWidthTransitionActive = shouldAnimateBrowserSplitWidth(
+    previousBrowserVisibleRef.current,
+    browserVisible,
+    isDraggingBrowser,
+  ) || browserWidthTransitioning
+
+  // 在本次提交完成后记录可见性，并为浏览器自身开关保留完整过渡窗口。
+  // 相邻面板/窗口尺寸变化不会改 browserVisible，因此不会进入这个分支。
+  React.useLayoutEffect(() => {
+    const changed = previousBrowserVisibleRef.current !== browserVisible
+    previousBrowserVisibleRef.current = browserVisible
+    if (!changed || isDraggingBrowser) {
+      if (isDraggingBrowser) setBrowserWidthTransitioning(false)
+      return
+    }
+    setBrowserWidthTransitioning(true)
+    const timeoutId = window.setTimeout(() => setBrowserWidthTransitioning(false), 300)
+    return () => window.clearTimeout(timeoutId)
+  }, [browserVisible, isDraggingBrowser])
 
   // 以 MainArea 实际可用宽度决定浏览器分栏比例 clamp（与自适应判定正交，保留现有拖拽行为）。
   React.useLayoutEffect(() => {
@@ -303,6 +328,12 @@ export function MainArea(): React.ReactElement {
     if (reconciled !== tabGroup) setTabGroup(reconciled)
   }, [tabGroup, tabs, setTabGroup])
 
+  const activateGroupTab = React.useCallback((tabId: string): void => {
+    setActiveTabId(tabId)
+    const target = tabs.find((tab) => tab.id === tabId)
+    if (target) syncActiveTabSideEffects(target)
+  }, [setActiveTabId, syncActiveTabSideEffects, tabs])
+
   /** 聚焦某一栏：把 activeTabId 指向该侧成员，让"当前会话"跟随焦点 */
   const focusGroupSide = React.useCallback((side: TabGroupSide): void => {
     if (!tabGroup) return
@@ -310,14 +341,17 @@ export function MainArea(): React.ReactElement {
     // 空栏没有可聚焦的标签（焦点只能落在非空成员上）
     if (!targetId || activeTabId === targetId) return
     setTabGroup((previous) => focusGroupMember(previous, targetId))
-    setActiveTabId(targetId)
-  }, [activeTabId, setActiveTabId, setTabGroup, tabGroup])
+    activateGroupTab(targetId)
+  }, [activateGroupTab, activeTabId, setTabGroup, tabGroup])
 
-  /** 空栏里选中一个会话：放进去并把焦点交给它 */
+  /** 空栏里选中一个标签（会话或预览）：放进去并把焦点交给它 */
   const fillGroupPane = React.useCallback((side: TabGroupSide, tabId: string): void => {
     setTabGroup((previous) => fillGroupSide(previous, side, tabId))
-    setActiveTabId(tabId)
-  }, [setActiveTabId, setTabGroup])
+    activateGroupTab(tabId)
+    // 预览成员自带"用一栏展示这个文件"的语义，关掉该会话的内联分屏，避免同一文件两处显示
+    const filled = tabs.find((tab) => tab.id === tabId)
+    if (filled && isPreviewTab(filled)) closeInlinePreview(filled.sessionId)
+  }, [activateGroupTab, setTabGroup, tabs])
 
   const dissolveGroup = React.useCallback((): void => {
     setTabGroup(null)
@@ -332,8 +366,8 @@ export function MainArea(): React.ReactElement {
     setTabGroup(null)
     executeClose(rightTabId)
     // 右栏关掉后焦点回到左栏（若左栏也空着则保持现状，由标签列表决定激活项）
-    if (fallbackTabId && activeTabId !== fallbackTabId) setActiveTabId(fallbackTabId)
-  }, [activeTabId, executeClose, setActiveTabId, setTabGroup, tabGroup])
+    if (fallbackTabId && activeTabId !== fallbackTabId) activateGroupTab(fallbackTabId)
+  }, [activateGroupTab, activeTabId, executeClose, setTabGroup, tabGroup])
 
   const handleGroupDragStart = React.useCallback((e: React.MouseEvent): void => {
     const container = groupContainerRef.current
@@ -642,7 +676,10 @@ export function MainArea(): React.ReactElement {
           {/* 浏览器分栏常驻渲染：width 过渡形成展开/收起动画；隐藏时内容 opacity 淡出且不可交互，
               原生 WebContentsView 由 BrowserViewport 依据容器尺寸（width 0 → visible:false）自动隐藏，不销毁会话。 */}
           <div
-            className={cn('flex-shrink-0 min-w-0 overflow-hidden', isDraggingBrowser ? '' : 'transition-[width] duration-300')}
+            className={cn(
+              'flex-shrink-0 min-w-0 overflow-hidden',
+              browserWidthTransitionActive && 'transition-[width] duration-300',
+            )}
             style={{ width: browserWidthPx }}
           >
             <div className={cn('h-full transition-[opacity,visibility] duration-300', browserVisible ? 'opacity-100 visible' : 'opacity-0 pointer-events-none invisible')}>
@@ -661,6 +698,7 @@ export function MainArea(): React.ReactElement {
                 // WebContentsView 不在 React DOM 层级内；先让主进程同步隐藏，
                 // 再卸载 BrowserViewport，避免 effect cleanup IPC 晚到时网页仍覆盖界面。
                 void (window.electronAPI as Partial<typeof window.electronAPI>).hideAgentBrowser?.(browserSessionId)
+                closeBrowserInlinePreview(browserSessionId)
                 setBrowserOpenMap((previous) => { const next = new Map(previous); next.set(browserSessionId, false); return next })
                 setBrowserStateMap((previous) => { const next = new Map(previous); next.delete(browserSessionId); return next })
                 setBrowserDismissed((previous) => { const next = new Set(previous); next.add(browserSessionId); return next })

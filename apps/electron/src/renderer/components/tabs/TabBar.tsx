@@ -18,6 +18,7 @@ import {
   activeTabIdAtom,
   tabIndicatorMapAtom,
   closeTab,
+  isPreviewTab,
   reorderTabs,
   updateTabTitle,
   tabMruAtom,
@@ -58,6 +59,7 @@ import {
   type TabGroupSide,
 } from "@/atoms/tab-group-atoms";
 import { panelVisibilityAtom } from "@/atoms/panel-layout-atoms";
+import { closeInlinePreview } from "@/components/diff/preview-opener";
 import { automationFormAtom } from "@/atoms/automation-atoms";
 import { previewPanelOpenMapAtom } from "@/atoms/preview-atoms";
 import { tearOffPreviewToSplit } from "@/components/diff/preview-opener";
@@ -75,6 +77,7 @@ import { detectIsWindows } from "@/lib/platform";
 import { registerShortcut } from "@/lib/shortcut-registry";
 import { cn } from "@/lib/utils";
 import { replaceAgentSessionInFreshnessOrder } from "@/lib/agent-session-list";
+import { isAgentWorkspaceIdVisible } from "@/lib/product-feature-flags";
 
 import { promoteMru } from "@profer/shared";
 import { resolveWindowControlsRightInset } from "@/lib/window-controls-layout";
@@ -110,7 +113,8 @@ export function TabBar({
   const store = useStore();
 
   /**
-   * Tear-off：把 preview Tab 拖出 TabBar 时，转成右侧分屏预览。
+   * Tear-off：把 preview Tab 拖出 TabBar **且未落入组合投放区**时，转成右侧分屏预览。
+   * 落进投放区则走合并手势（成为组合的一栏），见 handleGroupTabDrag 的 tearOffFallback。
    * 公共实现在 preview-opener.ts，PreviewTabContent 顶栏切换按钮共用同一份逻辑。
    */
   const handleTearOff = React.useCallback(
@@ -211,6 +215,10 @@ export function TabBar({
     (tabId: string) => {
       const tab = tabs.find((t) => t.id === tabId);
       if (!tab) return;
+      if (tab.type === "agent" || tab.type === "preview") {
+        const session = agentSessions.find((s) => s.id === tab.sessionId);
+        if (!isAgentWorkspaceIdVisible(session?.workspaceId, agentWorkspaces)) return;
+      }
 
       // 原生 WebContentsView 位于 renderer DOM 之上，不能等 React 重渲染后再隐藏：
       // 顶栏切换标签的瞬间，旧网页可能仍覆盖新 TabBar，甚至继续拦截鼠标命中。
@@ -286,6 +294,7 @@ export function TabBar({
       setTabMru,
       tabs,
       agentSessions,
+      agentWorkspaces,
       appMode,
       teamMode,
       setAppMode,
@@ -848,13 +857,28 @@ function TabBarInner({
    * 合并永远触发不了（表现为"只有顶栏按钮生效"）。
    */
   const handleGroupTabDrag = React.useCallback(
-    (tabId: string, e: React.PointerEvent): void => {
+    (
+      tabId: string,
+      e: React.PointerEvent,
+      options: {
+        /** 未落入投放区且被拖出标签栏时，回落为原有 tear-off（预览标签 = 转内联分屏） */
+        tearOffFallback?: boolean;
+      } = {},
+    ): void => {
       if (e.button !== 0) return;
       const startX = e.clientX;
       const startY = e.clientY;
       let mode: "pending" | "group" | "sorting" = "pending";
       let hoveredSide: TabGroupSide | null = null;
       let committable = false;
+      /** 指针是否到过投放区：到过就说明用户在选落点，松手没选只是取消，不再回落成 tear-off */
+      let enteredRegion = false;
+      /** tear-off 已触发：保证只触发一次，且不再写组合状态 */
+      let torn = false;
+
+      // 拖出 TabBar 上/下边界后还需再越过这段缓冲距离才触发 tear-off，
+      // 避免在水平排序过程中轻微的垂直抖动误触发。
+      const TEAR_OFF_MARGIN = 24;
 
       const clearDropState = (): void => {
         hoveredSide = null;
@@ -862,13 +886,32 @@ function TabBarInner({
         setTabGroupDrag({ draggingTabId: null, hoveredPosition: null });
       };
 
+      /** 原有 tear-off 路径（预览标签拖出标签栏 → 转内联分屏） */
+      const fireTearOff = (): void => {
+        torn = true;
+        clearDropState();
+        setTearingOff(tabId);
+        document.removeEventListener("pointermove", handleMove);
+        document.removeEventListener("pointerup", handleUp);
+        document.removeEventListener("pointercancel", handleUp);
+        // 等下一帧再触发，避免在事件回调中同步重渲染导致 React 警告
+        requestAnimationFrame(() => {
+          onTearOff(tabId);
+          setTearingOff(null);
+        });
+      };
+
       const handleMove = (me: PointerEvent): void => {
+        if (torn) return;
         const dx = me.clientX - startX;
         const dy = me.clientY - startY;
 
         if (mode === "pending") {
           if (Math.abs(dx) <= 5 && Math.abs(dy) <= 5) return;
-          if (dy > 0 && Math.abs(dy) > Math.abs(dx)) {
+          // 轴向判定：纵向起步 → 合并手势；横向 → 交回排序。
+          // 预览标签向上拖也算纵向（它的 tear-off 是"拖出"，方向不限），
+          // 交给下面的越界判定决定是回落 tear-off 还是继续合并。
+          if (Math.abs(dy) > Math.abs(dx) && (dy > 0 || options.tearOffFallback)) {
             mode = "group";
             // 复用 tear-off 的高亮反馈：让用户知道这个标签已被"拿起来"
             setTearingOff(tabId);
@@ -880,16 +923,33 @@ function TabBarInner({
         }
 
         const barRect = barRef.current?.getBoundingClientRect();
+        if (!barRect) return;
         // 主区把容器坐标发布在 data-group-drop-region 上；不允许组合的视图（规划中心 /
         // Agent 技能页）没有该节点，因此不会出现无效果的投放区。
         const region = document.querySelector<HTMLElement>("[data-group-drop-region]");
-        if (!barRect || !region) return;
-        const regionRect = region.getBoundingClientRect();
+        const regionRect = region?.getBoundingClientRect() ?? null;
         const insideRegion =
+          !!regionRect &&
           me.clientY >= barRect.bottom &&
           me.clientY <= regionRect.bottom &&
           me.clientX >= regionRect.left &&
           me.clientX <= regionRect.right;
+
+        if (insideRegion) enteredRegion = true;
+
+        // 预览标签的 tear-off 回落：不依赖投放区是否存在（该视图可能根本不支持组合）。
+        // 只要从未进过投放区、又被拖出标签栏上下边界，就保持原有"转内联分屏"语义。
+        if (options.tearOffFallback && !enteredRegion && !insideRegion) {
+          const outOfBar =
+            me.clientY < barRect.top - TEAR_OFF_MARGIN ||
+            me.clientY > barRect.bottom + TEAR_OFF_MARGIN;
+          if (outOfBar) {
+            fireTearOff();
+            return;
+          }
+        }
+
+        if (!regionRect) return;
 
         // 已经进入排序后仍允许"改主意"：指针落到标签栏下方主区 → 取消排序，改为合并手势。
         // 否则横向一动就会被排序占住，再也下拉不到投放区。
@@ -907,7 +967,7 @@ function TabBarInner({
 
         // 左右落点以真实分界线为准（由 MainArea 发布在 data-group-drop-split 上）：
         // 比例拖过、或空栏只占 1/3 时，容器中点与两栏实际边界并不重合。
-        const splitOffset = Number(region.dataset.groupDropSplit ?? "");
+        const splitOffset = Number(region?.dataset.groupDropSplit ?? "");
         const splitX = regionRect.left + (Number.isFinite(splitOffset) ? splitOffset : regionRect.width / 2);
         hoveredSide = me.clientX < splitX ? "left" : "right";
         committable = me.clientY >= barRect.bottom + GROUP_DROP_COMMIT_MARGIN;
@@ -918,6 +978,7 @@ function TabBarInner({
         document.removeEventListener("pointermove", handleMove);
         document.removeEventListener("pointerup", handleUp);
         document.removeEventListener("pointercancel", handleUp);
+        if (torn) return;
         setTearingOff(null);
 
         const side = committable ? hoveredSide : null;
@@ -938,18 +999,26 @@ function TabBarInner({
         const emptySide = emptyGroupSide(plan.group);
         if (emptySide) setTabGroupRatio(ratioForEmptySide(emptySide));
         setTabMru((previous) => promoteMru(previous, plan.activeTabId));
+        // 预览标签成为组合成员 = "用一栏展示这个文件"：关掉该会话的内联分屏，
+        // 避免同一个文件在两处同时显示（焦点来回切时布局也不再跳动）。
+        const dragged = tabs.find((t) => t.id === tabId);
+        if (dragged && isPreviewTab(dragged)) closeInlinePreview(dragged.sessionId);
       };
 
       document.addEventListener("pointermove", handleMove);
       document.addEventListener("pointerup", handleUp);
       document.addEventListener("pointercancel", handleUp);
     },
-    [onCancelSort, onDragStart, setTabGroupDrag, setTabGroupRatio, setTabMru],
+    [onCancelSort, onDragStart, onTearOff, setTabGroupDrag, setTabGroupRatio, setTabMru, tabs],
   );
 
-  // 拦截外层 handleDragStart：
-  // - agent/chat 标签向下拖 → 合并手势（主区出现左右投放区，落点决定左右顺序）；
-  // - preview 标签拖出标签栏 → 原有 tear-off（转预览分屏）。
+  /**
+   * 标签拖拽入口：可组合的标签统一交给合并手势，落点决定结果。
+   *
+   * - agent / chat：落入投放区 → 组合；没落入 → 取消（与合并手势本身一致）；
+   * - preview：落入投放区 → 成为组合的一栏；没落入且被拖出标签栏 → 回落为原有
+   *   "转预览分屏"（tearOffFallback）。两条路径共用同一次 pointerdown。
+   */
   const handleDragStartWithTearOff = React.useCallback(
     (tabId: string, e: React.PointerEvent) => {
       const tab = tabs.find((t) => t.id === tabId);
@@ -957,62 +1026,13 @@ function TabBarInner({
         onDragStart(tabId, e);
         return;
       }
-      // 仅 preview Tab 支持拖出转分屏
-      if (tab.type !== "preview") {
-        if (isGroupEligibleTab(tab)) {
-          handleGroupTabDrag(tabId, e);
-          return;
-        }
-        onDragStart(tabId, e);
+      if (isGroupEligibleTab(tab)) {
+        handleGroupTabDrag(tabId, e, { tearOffFallback: isPreviewTab(tab) });
         return;
       }
-
-      if (e.button !== 0) return;
-      const startX = e.clientX;
-      let torn = false;
-      let sorting = false;
-
-      // 拖出 TabBar 上下边界后还需再越过这段缓冲距离才触发 tear-off，
-      // 避免在水平排序过程中轻微的垂直抖动误触发转分屏。
-      const TEAR_OFF_MARGIN = 24;
-
-      const handleMove = (me: PointerEvent): void => {
-        if (torn) return;
-        const rect = barRef.current?.getBoundingClientRect();
-        // 拖出 TabBar 上/下边界并越过缓冲距离才视为 tear-off
-        const outOfBar =
-          !!rect &&
-          (me.clientY < rect.top - TEAR_OFF_MARGIN ||
-            me.clientY > rect.bottom + TEAR_OFF_MARGIN);
-        if (outOfBar) {
-          torn = true;
-          setTearingOff(tabId);
-          // 仅停止 move 监听，保留 pointerup 让浏览器自然结束按住状态
-          document.removeEventListener("pointermove", handleMove);
-          // 等下一帧再触发，避免在事件回调中同步重渲染导致 React 警告
-          requestAnimationFrame(() => {
-            onTearOff(tabId);
-            setTearingOff(null);
-          });
-          return;
-        }
-        // 在 TabBar 内水平移动 → 交给原有排序逻辑
-        const dx = Math.abs(me.clientX - startX);
-        if (!sorting && dx > 5) {
-          sorting = true;
-          onDragStart(tabId, e);
-        }
-      };
-
-      const handleUp = (): void => {
-        document.removeEventListener("pointermove", handleMove);
-        document.removeEventListener("pointerup", handleUp);
-      };
-
-      document.addEventListener("pointermove", handleMove);
-      document.addEventListener("pointerup", handleUp);
+      onDragStart(tabId, e);
     },
-    [tabs, onDragStart, onTearOff, handleGroupTabDrag],
+    [tabs, onDragStart, handleGroupTabDrag],
   );
 
   // 鼠标滚轮横向滚动（使用原生事件监听器以支持 preventDefault）

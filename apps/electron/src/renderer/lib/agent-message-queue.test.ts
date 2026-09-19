@@ -11,6 +11,19 @@ describe('queue target lifecycle errors', () => {
     expect(isQueueTargetNoLongerActiveError('会话未运行，无法追加消息')).toBe(false)
   })
 
+  test('回归：真实 IPC 拒绝会带 Electron 包装前缀，仍必须识别为可恢复', () => {
+    // ipcRenderer.invoke 会把主进程错误包成
+    // "Error invoking remote method '<channel>': Error: <主进程文案>"
+    const wrapped = new Error(
+      "Error invoking remote method 'agent:queue-message': Error: [Agent 编排] 会话未运行，无法追加消息: session-1",
+    )
+    expect(isQueueTargetNoLongerActiveError(wrapped)).toBe(true)
+    // 其它主进程拒绝（会话正在停止/删除）不能被误判为可恢复
+    expect(isQueueTargetNoLongerActiveError(new Error(
+      "Error invoking remote method 'agent:queue-message': Error: [Agent 编排] 会话正在停止，无法追加消息: session-1",
+    ))).toBe(false)
+  })
+
   test('仅在未 Stop 的同一 queue epoch 中恢复失败的 in-flight 消息', () => {
     expect(shouldRestoreQueuedMessageAfterFailure(4, 4, false)).toBe(true)
     expect(shouldRestoreQueuedMessageAfterFailure(4, 5, false)).toBe(false)

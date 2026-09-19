@@ -37,6 +37,7 @@ import {
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { Bot, MessageSquare } from 'lucide-react'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 
 type SwitchSectionId = 'recent'
 type SwitchCandidateType = 'chat' | 'agent'
@@ -82,6 +83,10 @@ export function TabSwitcher(): ReactElement | null {
   const agentIndicatorMap = useAtomValue(agentSessionIndicatorMapAtom)
   const unviewedCompletedIds = useAtomValue(unviewedCompletedSessionIdsAtom)
   const draftSessionIds = useAtomValue(draftSessionIdsAtom)
+  const visibleWorkspaceIds = useMemo(
+    () => new Set(getVisibleAgentWorkspaces(agentWorkspaces).map((workspace) => workspace.id)),
+    [agentWorkspaces],
+  )
 
   const setAppMode = useSetAtom(appModeAtom)
   const setCurrentConversationId = useSetAtom(currentConversationIdAtom)
@@ -124,7 +129,12 @@ export function TabSwitcher(): ReactElement | null {
       }))
 
     const agentCandidates = agentSessions
-      .filter((session) => !session.archived && !session.draft && !draftSessionIds.has(session.id))
+      .filter((session) => (
+        !session.archived
+        && !session.draft
+        && !draftSessionIds.has(session.id)
+        && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
+      ))
       .map(buildAgentCandidate)
 
     const allCandidates = [...chatCandidates, ...agentCandidates]
@@ -163,6 +173,7 @@ export function TabSwitcher(): ReactElement | null {
     streamingConversationIds,
     tabMru,
     unviewedCompletedIds,
+    visibleWorkspaceIds,
   ])
 
   // Refs 用于事件回调中读取最新值，避免全局键盘监听闭包过期。

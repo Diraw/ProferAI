@@ -12,7 +12,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, ChevronRight, Cloud, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail,
+  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, ChevronRight, Cloud, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { clearSessionReferenceDragState, setSessionReferenceDragData } from '@/lib/session-reference-drag'
@@ -397,6 +397,8 @@ interface ConversationItemProps {
   onRename: (id: string, newTitle: string) => Promise<void>
   onTogglePin: (id: string) => Promise<void>
   onToggleArchive: (id: string) => Promise<void>
+  /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
+  onRegenerateTitle?: (id: string) => Promise<void>
 }
 
 export const ConversationItem = React.memo(function ConversationItem({
@@ -411,6 +413,7 @@ export const ConversationItem = React.memo(function ConversationItem({
   onRename,
   onTogglePin,
   onToggleArchive,
+  onRegenerateTitle,
 }: ConversationItemProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
@@ -473,6 +476,12 @@ export const ConversationItem = React.memo(function ConversationItem({
         <Pencil size={14} />
         重命名
       </MenuItem>
+      {onRegenerateTitle && (
+        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => { void onRegenerateTitle(conversation.id) }}>
+          <Sparkles size={14} />
+          重新生成标题
+        </MenuItem>
+      )}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onToggleArchive(conversation.id)}>
         {conversation.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
         {conversation.archived ? '取消归档' : '归档'}
@@ -656,6 +665,8 @@ interface AgentSessionItemProps {
   onToggleArchive: (id: string) => Promise<void>
   /** 标记会话为「未读」（恢复绿色完成标记） */
   onMarkUnread?: (id: string) => void
+  /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
+  onRegenerateTitle?: (id: string) => Promise<void>
 }
 
 export const AgentSessionItem = React.memo(function AgentSessionItem({
@@ -676,6 +687,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
   onTogglePin,
   onToggleArchive,
   onMarkUnread,
+  onRegenerateTitle,
 }: AgentSessionItemProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
@@ -748,6 +760,12 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
         <Pencil size={14} />
         重命名
       </MenuItem>
+      {onRegenerateTitle && (
+        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => { void onRegenerateTitle(session.id) }}>
+          <Sparkles size={14} />
+          重新生成标题
+        </MenuItem>
+      )}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onToggleArchive(session.id)}>
         {session.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
         {session.archived ? '取消归档' : '归档'}
@@ -937,6 +955,8 @@ interface RelatedChildSessionItemProps {
   onToggleArchive: (id: string) => Promise<void>
   /** 标记会话为「未读」（恢复绿色完成标记） */
   onMarkUnread?: (id: string) => void
+  /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
+  onRegenerateTitle?: (id: string) => Promise<void>
 }
 
 export const RelatedChildSessionItem = React.memo(function RelatedChildSessionItem({
@@ -953,6 +973,7 @@ export const RelatedChildSessionItem = React.memo(function RelatedChildSessionIt
   onTogglePin,
   onToggleArchive,
   onMarkUnread,
+  onRegenerateTitle,
 }: RelatedChildSessionItemProps): React.ReactElement {
   const status = getRelatedChildStatus(session, agentIndicatorMap)
 
@@ -971,6 +992,7 @@ export const RelatedChildSessionItem = React.memo(function RelatedChildSessionIt
       onTogglePin={onTogglePin}
       onToggleArchive={onToggleArchive}
       onMarkUnread={onMarkUnread}
+      onRegenerateTitle={onRegenerateTitle}
     />
   )
 })
@@ -1015,6 +1037,8 @@ interface AgentProjectGroupItemProps {
   onToggleRelatedParent: (id: string) => void
   /** 标记会话为「未读」（恢复绿色完成标记） */
   onMarkUnread?: (id: string) => void
+  /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
+  onRegenerateTitle?: (id: string) => Promise<void>
   /** 工作区最近一次切换的时间戳，用于短暂高亮 */
   workspaceSwitchTs?: number
 }
@@ -1055,6 +1079,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   onToggleArchive,
   onToggleRelatedParent,
   onMarkUnread,
+  onRegenerateTitle,
 }: AgentProjectGroupItemProps): React.ReactElement {
   const isCurrent = group.workspace.id === currentWorkspaceId
   /** 最近 1.2 秒内切换到此工作区时，短暂高亮 */
@@ -1335,6 +1360,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                       onRequestDelete={onRequestDelete}
                       onRequestMove={onRequestMove}
                       onRename={onRename}
+                      onRegenerateTitle={onRegenerateTitle}
                       onTogglePin={onTogglePin}
                       onToggleArchive={onToggleArchive}
                       onMarkUnread={onMarkUnread}
@@ -1354,6 +1380,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                             onRequestDelete={onRequestDelete}
                             onRequestMove={onRequestMove}
                             onRename={onRename}
+                            onRegenerateTitle={onRegenerateTitle}
                             onTogglePin={onTogglePin}
                             onToggleArchive={onToggleArchive}
                             onMarkUnread={onMarkUnread}

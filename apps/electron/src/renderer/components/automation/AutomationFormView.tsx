@@ -35,6 +35,7 @@ import {
   type AutomationDraft,
 } from '@/atoms/automation-atoms'
 import { agentWorkspacesAtom, agentSessionsAtom, agentChannelIdsAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -252,7 +253,8 @@ export function AutomationFormView(): React.ReactElement | null {
   const isWindows = React.useMemo(() => detectIsWindows(), [])
   const [formState, setFormState] = useAtom(automationFormAtom)
   const setAutomations = useSetAtom(automationsAtom)
-  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const allWorkspaces = useAtomValue(agentWorkspacesAtom)
+  const workspaces = React.useMemo(() => getVisibleAgentWorkspaces(allWorkspaces), [allWorkspaces])
   const automations = useAtomValue(automationsAtom)
   const agentChannelIds = useAtomValue(agentChannelIdsAtom)
   const [agentSessions, setAgentSessions] = useAtom(agentSessionsAtom)

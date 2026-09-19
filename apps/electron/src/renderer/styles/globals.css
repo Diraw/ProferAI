@@ -1211,6 +1211,28 @@
   background-color: hsl(var(--tab-surface) / 0.28);
 }
 
+/* 草稿入口是 37×37 纯图标固定按钮：圆角 10px（比普通标签的 8px 略柔）。
+ * 插在 .topbar-tab-inactive 默认值之后，同时用 :where() 把权重压回 (0,2,0)：
+ * 既能盖过 inactive 的默认描边，又让本文之后的 .topbar-tab-focused /
+ * .topbar-tab-status-* 语义边框（权重同为 (0,2,0)，靠顺序胜出）照常生效；
+ * :hover 权重为 (0,3,0)，也依旧保留 hover 变深的反馈。
+ * 反例：写成 .topbar-tab-scratch.topbar-tab-inactive 得到 (0,3,0)，
+ * 会把聚焦色和 running/blocked/completed 状态环一起压掉。 */
+.topbar-editorial .topbar-tab-scratch {
+  border-radius: 10px;
+}
+
+/* 纯图标按钮没有标题文字分担视觉重量，默认描边比普通标签淡：0.25 而非 0.5。
+ * 实测合成色（--shell-surface 与 --tab-surface 同色，形状完全靠这 1px 描边）：
+ *   浅色 229@0.25 over 白 → rgb(248)，Δ7 = 普通标签 Δ13 的 54%
+ *   深色 38@0.25 over 7% → rgb(23)，Δ5 = 普通标签 Δ9 的 56%
+ * 两个主题淡化比例一致，所以这里只用同一个值；若日后觉得深色太淡，
+ * 再加 :where(.dark) 覆盖单一 alpha 即可（注意用 :where 压低权重，
+ * 否则会把下面的 .topbar-tab-focused / .topbar-tab-status-* 语义边框压掉）。 */
+.topbar-editorial .topbar-tab-inactive:where(.topbar-tab-scratch) {
+  border-color: hsl(var(--border) / 0.25);
+}
+
 .topbar-editorial .topbar-tab-inactive:hover {
   border-color: hsl(var(--border) / 0.75);
   background-color: hsl(var(--selected-surface) / 0.7);

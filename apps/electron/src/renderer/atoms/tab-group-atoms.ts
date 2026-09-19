@@ -49,11 +49,15 @@ export interface PersistedTabGroup {
 
 /**
  * 允许参与组合的 tab 类型白名单。
- * - preview：已有自己的分屏通道（previewPanelOpenMapAtom），拖出标签栏的语义必须保持"转预览分屏"；
+ * 判据是「这个标签有独立的内容身份、可以并排看」：
+ * - agent / chat：会话；
+ * - preview：文件（拖进分区 = 用一栏展示这个文件；落定时会关掉该会话的内联分屏，
+ *   避免同一个文件在两处同时出现）；它拖出标签栏但**未落入投放区**时仍回落为原来的
+ *   "转预览分屏"，两条路径共用同一个 pointerdown，由落点决定结果；
  * - scratch / tutorial：单例固定 tab，不能有两份；
  * - plugin：PluginViewport 是独立宿主视口，同屏两份会冲突。
  */
-export const GROUP_ELIGIBLE_TAB_TYPES: readonly string[] = ['agent', 'chat']
+export const GROUP_ELIGIBLE_TAB_TYPES: readonly string[] = ['agent', 'chat', 'preview']
 
 /** 组合内分栏缝宽度，与浏览器/预览分栏保持一致 */
 export const GROUP_SPLIT_GAP = 8

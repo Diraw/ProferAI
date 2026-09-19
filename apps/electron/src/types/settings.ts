@@ -344,6 +344,8 @@ export interface MainWindowState {
 export interface PersistedTabSettings {
   tabs: import('../renderer/atoms/tab-atoms').TabItem[]
   activeTabId: string | null
+  /** 可选的左右组合布局；缺省表示单栏 */
+  group?: import('../renderer/atoms/tab-group-atoms').PersistedTabGroup
 }
 
 /** 移动模式（Pocket 远程接入）服务状态与连接信息 */

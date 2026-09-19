@@ -42,6 +42,7 @@ import type {
   MessageSearchResult,
   AgentMessageSearchResult,
 } from '@profer/shared'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 
 /** 标题搜索结果项 */
 interface TitleResult {
@@ -232,6 +233,11 @@ export function SearchDialog(): React.ReactElement {
     return map
   }, [agentWorkspaces])
 
+  const visibleWorkspaceIds = React.useMemo(
+    () => new Set(getVisibleAgentWorkspaces(agentWorkspaces).map((workspace) => workspace.id)),
+    [agentWorkspaces],
+  )
+
   const getAgentWorkspaceName = React.useCallback((sessionId: string): string | undefined => {
     const session = agentSessions.find((s) => s.id === sessionId)
     if (!session?.workspaceId) return undefined
@@ -241,10 +247,10 @@ export function SearchDialog(): React.ReactElement {
   const hiddenAgentSessionIds = React.useMemo(() => {
     const ids = new Set(draftSessionIds)
     for (const session of agentSessions) {
-      if (session.draft) ids.add(session.id)
+      if (session.draft || (session.workspaceId && !visibleWorkspaceIds.has(session.workspaceId))) ids.add(session.id)
     }
     return ids
-  }, [agentSessions, draftSessionIds])
+  }, [agentSessions, draftSessionIds, visibleWorkspaceIds])
 
   // query：输入框当前值（实时跟随用户）
   // committedQuery：用户已确认提交的搜索词（点击/回车后才更新），用于结果展示与高亮
@@ -372,13 +378,23 @@ export function SearchDialog(): React.ReactElement {
     const channelId = deepseekChannel?.id ?? currentAgentChannelId ?? undefined
 
     const configDir = import.meta.env.DEV ? '.profer-dev' : '.proma'
-    const prompt = `请帮我在 Profer 的全部会话历史中搜索与以下描述相关的内容：
+    const visibleAgentSessionIds = agentSessions
+      .filter((session) => !hiddenAgentSessionIds.has(session.id))
+      .map((session) => session.id)
+    const visibleConversationIds = conversations
+      .filter((conversation) => !draftSessionIds.has(conversation.id))
+      .map((conversation) => conversation.id)
+    const prompt = `请帮我在 Profer 当前可见的会话历史中搜索与以下描述相关的内容：
 
 "${q}"
 
 搜索范围：
-- Chat 会话消息文件：~/${configDir}/conversations/ 目录下所有 .jsonl 文件
-- Agent 会话消息文件：~/${configDir}/agent-sessions/ 目录下所有 .jsonl 文件
+- Chat 会话消息文件：~/${configDir}/conversations/ 目录下，仅限这些会话 ID：${visibleConversationIds.join(', ') || '无'}
+- Agent 会话消息文件：~/${configDir}/agent-sessions/ 目录下，仅限这些会话 ID：${visibleAgentSessionIds.join(', ') || '无'}
+
+访问边界：
+- 只读取上面列出的会话文件；不要扫描目录中的其他 JSONL 文件。
+- 不要读取、摘要或返回隐藏团队工作区、草稿会话或未列出的任何会话。
 
 要求：
 1. 理解用户描述的语义，不要求关键词完全匹配，根据内容相关性判断
@@ -391,7 +407,7 @@ export function SearchDialog(): React.ReactElement {
     setAgentPendingPrompt({ sessionId, message: prompt })
     setOpen(false)
     setActiveView('conversations')
-  }, [query, channels, currentAgentChannelId, createAgent, setAgentPendingPrompt, setOpen, setActiveView])
+  }, [query, channels, currentAgentChannelId, createAgent, setAgentPendingPrompt, setOpen, setActiveView, agentSessions, conversations, draftSessionIds, hiddenAgentSessionIds])
 
   // 全部结果列表（标题在前、内容在后）
   const allResults = React.useMemo<SearchResult[]>(

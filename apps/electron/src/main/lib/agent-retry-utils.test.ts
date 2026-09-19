@@ -12,6 +12,7 @@ import {
   isInvalidRelayTokenError,
   isSessionNotFoundError,
   getRetryDelayMs,
+  isRetryBudgetExhausted,
   sdkPermissionModeForProferMode,
   MAX_AUTO_RETRY_WAIT_MS,
   RETRY_MAX_DELAY_MS,
@@ -160,6 +161,23 @@ describe('getRetryDelayMs', () => {
     expect(delay).toBeLessThanOrEqual(1200)
   })
 
+  test('stream_interrupted 要求立即重试（0ms），且不等价于预算耗尽', () => {
+    // 回归：重试循环曾把 0ms 当成「预算已耗尽」直接 break，
+    // 导致一次瞬时断流在第 1 次重试之前就终止本轮（表现为“请求不到也不反复请求”）。
+    expect(getRetryDelayMs(1, 0, 'stream_interrupted')).toBe(0)
+    expect(isRetryBudgetExhausted(0)).toBe(false)
+  })
+
+  test('等待预算未耗尽时不停止重试', () => {
+    expect(isRetryBudgetExhausted(0)).toBe(false)
+    expect(isRetryBudgetExhausted(MAX_AUTO_RETRY_WAIT_MS - 1)).toBe(false)
+  })
+
+  test('等待预算达到上限时停止重试', () => {
+    expect(isRetryBudgetExhausted(MAX_AUTO_RETRY_WAIT_MS)).toBe(true)
+    expect(isRetryBudgetExhausted(MAX_AUTO_RETRY_WAIT_MS + 1)).toBe(true)
+  })
+
   test('延迟不超过单次上限 + 20% jitter', () => {
     for (let i = 0; i < 100; i++) {
       const delay = getRetryDelayMs(10, 0)
@@ -176,6 +194,24 @@ describe('getRetryDelayMs', () => {
   test('延迟受剩余预算限制', () => {
     const delay = getRetryDelayMs(1, MAX_AUTO_RETRY_WAIT_MS - 500)
     expect(delay).toBeLessThanOrEqual(500)
+  })
+})
+
+describe('isAutoRetryableCatchError 覆盖中转 5xx / 瞬时文案', () => {
+  test.each([
+    '520 status code (no body)',
+    '503: {"message":"Service temporarily unavailable","type":"api_error"}',
+    'Service temporarily unavailable',
+    'Request could not be completed',
+    '服务繁忙，请稍后重试',
+  ])('Given “%s” Then 判定为可重试的上游瞬时故障', (text) => {
+    expect(isAutoRetryableCatchError(null, text)).toBe(true)
+  })
+
+  test('认证 / 模型类错误不因此变为可重试', () => {
+    expect(isAutoRetryableCatchError(null, 'invalid api key')).toBe(false)
+    expect(isAutoRetryableCatchError(null, 'model not found')).toBe(false)
+    expect(isAutoRetryableCatchError(null, '上下文过长')).toBe(false)
   })
 })
 
