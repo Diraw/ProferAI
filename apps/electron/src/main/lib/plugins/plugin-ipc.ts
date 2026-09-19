@@ -1,5 +1,5 @@
 import { setPluginCredential, removePluginCredentials } from './plugin-credentials'
-import { authorizePlugin, getGrantedPermissions, revokePluginPermissions } from './plugin-permissions'
+import { authorizePlugin, getGrantedPermissions, isPluginRevoked, revokePluginPermissions } from './plugin-permissions'
 import { getTaskRouting, setTaskRouting } from './plugin-routing'
 import { pluginRequests } from './plugin-requests'
 import { taskReferenceSchema } from './plugin-capabilities'
@@ -23,8 +23,22 @@ import {
   setPluginsChangedListener,
 } from './plugin-manager'
 import { pluginViewManager, registerPluginHostIpc } from './plugin-view-manager'
+import { configureWorkspaceProvider } from './workspace-provider'
+import { configurePluginCapabilityProviders } from './provider-registry'
+import type { PluginCapabilityProviders } from './ports/capabilities'
+import type { WorkspaceProvider } from './ports/workspace'
 
 let registered = false
+
+/** 由宿主启动 wiring 注入 workspace provider；未注入时 workspace RPC 保持稳定 not-supported。 */
+export function setPluginWorkspaceProvider(provider: WorkspaceProvider | undefined): void {
+  configureWorkspaceProvider(provider)
+}
+
+/** 由宿主显式注入 provider-neutral 实现；未注入的能力保持 not-supported。 */
+export function setPluginCapabilityProviders(provider: PluginCapabilityProviders): void {
+  configurePluginCapabilityProviders(provider)
+}
 
 function assertPluginManagerSender(event: {
   sender: { isDestroyed(): boolean; mainFrame: unknown }
@@ -58,7 +72,7 @@ export function registerPluginIpcHandlers(): void {
 
   ipcMain.handle(PROFER_PLUGIN_IPC_CHANNELS.LIST, (event) => {
     assertPluginManagerSender(event)
-    return listInstalledPlugins().map((plugin) => ({ ...plugin, grantedPermissions: getGrantedPermissions(plugin.manifest.id) }))
+    return listInstalledPlugins().map((plugin) => ({ ...plugin, grantedPermissions: getGrantedPermissions(plugin.manifest.id), revoked: isPluginRevoked(plugin.manifest.id) }))
   })
   ipcMain.handle(PROFER_PLUGIN_IPC_CHANNELS.SET_CREDENTIAL, (event, pluginId: unknown, id: unknown, secret: unknown) => {
     assertPluginManagerSender(event)
