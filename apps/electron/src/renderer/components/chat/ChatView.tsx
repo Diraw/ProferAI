@@ -290,13 +290,16 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
     const messageCountBeforeSend = options?.messageCountBeforeSend ?? messages.length
     const isFirstMessage = messageCountBeforeSend === 0
     console.log('[ChatView] 发送消息 - isFirstMessage:', isFirstMessage, 'messageCountBeforeSend:', messageCountBeforeSend, 'conversationId:', conversationId)
-    if (isFirstMessage && content) {
-      console.log('[ChatView] 设置待生成标题:', { conversationId, userMessage: content.slice(0, 50) })
+    // 自动命名窗口：每轮发送都登记本轮渠道/模型，由主进程判定该不该命名（未定稿前会被前几轮
+    // 有效消息逐步精修，定稿或用户手动改名后立即停止）。
+    if (content) {
       registerPendingTitle(conversationId, {
         userMessage: content,
         channelId: selectedModel.channelId,
         modelId: selectedModel.modelId,
       })
+    }
+    if (isFirstMessage) {
       // 取消 draft 标记，让会话出现在侧边栏
       setDraftSessionIds((prev: Set<string>) => {
         if (!prev.has(conversationId)) return prev

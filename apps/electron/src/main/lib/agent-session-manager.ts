@@ -26,10 +26,11 @@ import {
 import { getAgentWorkspace } from './agent-workspace-manager'
 import { assertEnabledModelForChannel } from './agent-model-selection'
 import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
+import { copyForkFile, buildForkProjectKey, renameForkFile, removeForkPath } from './fork-file-ops'
 import { listAgentPresets, normalizeSessionPresetId, presetReferenceForId } from './agent-preset-manager'
 import { copySettledPiHarnessEventsForFork } from './pi-harness/pi-harness-store'
 import { forkPiSessionArtifact } from './pi-session-fork'
-import { isEphemeralTransportError } from './error-patterns'
+import { isRecoveredEphemeralTransportError } from './error-patterns'
 import { adoptPiFileCheckpoints, loadPiFileCheckpoint, restorePiFileCheckpoint, prunePiFileCheckpoints, removePiFileCheckpoints } from './pi-file-checkpoint'
 
 // 在模块加载时一次性设置 SDK 配置目录，避免在 forkSession 等异步调用中临时修改/恢复
@@ -71,6 +72,18 @@ import {
 } from '@profer/shared'
 import { getConversationMessages } from './conversation-manager'
 import { isUserInputMessage } from '@profer/session-core'
+
+const activeForkSessionIds = new Set<string>()
+let agentSessionActiveChecker: ((sessionId: string) => boolean) | undefined
+
+/** 由 agent-service 注入运行时活跃状态，避免 manager 反向依赖 orchestrator。 */
+export function setAgentSessionActiveChecker(checker: ((sessionId: string) => boolean) | undefined): void {
+  agentSessionActiveChecker = checker
+}
+
+export function isAgentSessionForking(sessionId: string): boolean {
+  return activeForkSessionIds.has(sessionId)
+}
 
 interface PersistedAssistantMessage {
   type?: string
@@ -524,19 +537,29 @@ export function getAgentSessionMessages(id: string): AgentMessage[] {
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const lines = raw.split('\n').filter((line) => line.trim())
-    const messages: AgentMessage[] = []
+    const parsedMessages: AgentMessage[] = []
     for (const line of lines) {
       try {
-        const parsed = JSON.parse(line) as AgentMessage
-        const assistantError = getPersistedAssistantError(parsed)
-        if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) continue
-        messages.push(parsed)
+        parsedMessages.push(JSON.parse(line) as AgentMessage)
       } catch {
         // 单行损坏不丢整文件：跳过坏行继续解析后续
         console.warn(`[Agent 会话] 跳过损坏的消息行 (${id})`)
       }
     }
-    return messages
+    // 瞬时断流错误卡只在「之后已恢复」时才丢弃；会话尾部的失败必须保留可见。
+    return parsedMessages.filter((message, index) => {
+      const assistantError = getPersistedAssistantError(message)
+      if (!assistantError) return true
+      const recoveredLater = parsedMessages.slice(index + 1).some((later) => {
+        if (later.role !== 'assistant') return false
+        return getPersistedAssistantError(later) === null
+      })
+      return !isRecoveredEphemeralTransportError(
+        recoveredLater,
+        assistantError.errorCode,
+        assistantError.errorText,
+      )
+    })
   } catch (error) {
     console.error(`[Agent 会话] 读取消息文件失败 (${id}):`, error)
     return []
@@ -876,11 +899,10 @@ import { readBlob, writeBlobSync } from './blob-store'
  * 超过 256K chars 的消息会被自动截断以防止存储膨胀。
  */
 export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
-  const persistentMessages = messages.filter((message) => {
-    if (message.type !== 'assistant') return true
-    const assistantError = getPersistedAssistantError(message)
-    return !assistantError || !isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)
-  })
+  // 注意：这里不再丢弃「瞬时断流」错误卡。丢弃必须在读取时结合「之后是否已恢复」判断
+  // （见 dropRecoveredEphemeralTransportErrors）——写入时就丢掉，会让一次最终失败的
+  // 网络错误在历史里彻底消失，用户看到的是「Agent Running 一闪就什么都没有了」。
+  const persistentMessages = messages
   if (persistentMessages.length === 0) return
 
   const filePath = getAgentSessionMessagesPath(id)
@@ -1052,22 +1074,50 @@ function parseSDKMessageLine(line: string, id: string): SDKMessage | null {
     const parsed = JSON.parse(line)
     // 旧格式检测：AgentMessage 有 `role` 字段，SDKMessage 有 `type` 字段
     if ('role' in parsed && !('type' in parsed)) {
-      const message = convertLegacyMessage(parsed as AgentMessage)
-      const assistantError = getPersistedAssistantError(message)
-      if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) return null
-      return message
+      return convertLegacyMessage(parsed as AgentMessage)
     }
-    const message = parsed as SDKMessage
-    if (message.type === 'assistant') {
-      const assistantError = getPersistedAssistantError(message)
-      if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) return null
-    }
-    return message
+    return parsed as SDKMessage
   } catch {
     // 单行损坏不丢整文件：跳过坏行继续解析后续
     console.warn(`[Agent 会话] 跳过损坏的 SDKMessage 行 (${id})`)
     return null
   }
+}
+
+/** 该消息是否代表「本轮已恢复/继续产出」——用于判定瞬时断流是否真的已被恢复 */
+function isRecoverySignal(message: SDKMessage): boolean {
+  if (message.type === 'assistant') return getPersistedAssistantError(message) === null
+  return message.type === 'result'
+}
+
+/**
+ * 丢弃「已恢复」的瞬时断流错误卡。
+ *
+ * 会话尾部仍处于失败状态的错误卡必须保留：否则失败在界面上没有任何可见痕迹
+ * （表现为「Agent Running 一闪就什么都没有了」）。只有该错误之后确实还有正常产出
+ * （干净 assistant 消息 / result）时，才按原设计把它从历史里去掉。
+ */
+function dropRecoveredEphemeralTransportErrors(messages: SDKMessage[]): SDKMessage[] {
+  if (messages.length === 0) return messages
+  let dropped = false
+  const kept: SDKMessage[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!
+    const assistantError = message.type === 'assistant' ? getPersistedAssistantError(message) : null
+    if (
+      assistantError &&
+      isRecoveredEphemeralTransportError(
+        messages.slice(i + 1).some((later) => isRecoverySignal(later)),
+        assistantError.errorCode,
+        assistantError.errorText,
+      )
+    ) {
+      dropped = true
+      continue
+    }
+    kept.push(message)
+  }
+  return dropped ? kept : messages
 }
 
 /**
@@ -1109,7 +1159,7 @@ export function getAgentSessionSDKMessages(
         if (parsed) messages.push(parsed)
       }
       return {
-        messages,
+        messages: dropRecoveredEphemeralTransportErrors(messages),
         total,
         startIndex: startLine,
         endIndex: before - 1,
@@ -1123,7 +1173,7 @@ export function getAgentSessionSDKMessages(
       const parsed = parseSDKMessageLine(line, id)
       if (parsed) messages.push(parsed)
     }
-    return messages
+    return dropRecoveredEphemeralTransportErrors(messages)
   } catch (error) {
     console.error(`[Agent 会话] 读取 SDKMessage 文件失败 (${id}):`, error)
     return opts ? emptyPage : []
@@ -1195,7 +1245,7 @@ function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
  */
 export function updateAgentSessionMeta(
   id: string,
-  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
+  updates: Partial<Pick<AgentSessionMeta, 'title' | 'titleAutoGeneratedAt' | 'titleRefineAttempts' | 'titleLockedAt' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
 ): AgentSessionMeta {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)
@@ -1352,7 +1402,7 @@ export function deleteAgentSession(id: string): void {
       try {
         const sessionDir = getAgentSessionWorkspacePath(ws.slug, id)
         if (existsSync(sessionDir)) {
-          rmSync(sessionDir, { recursive: true, force: true })
+          removeForkPath(sessionDir)
           console.log(`[Agent 会话] 已清理 session 工作目录: ${sessionDir}`)
         }
       } catch (error) {
@@ -1667,7 +1717,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
   // 未显式换模型时继承源会话模型；即使源渠道后来被删除/停用，也允许复制
   // 已存在的 Pi artifact。只有用户主动选择新模型时才需要重新校验渠道能力。
   const forkModelId = input.modelId !== undefined
-    ? assertEnabledModelForChannel({ channelId: sourceMeta.channelId, modelId: input.modelId, purpose: '分叉 Pi Agent 会话' })
+    ? assertEnabledModelForChannel({
+        channelId: sourceMeta.channelId,
+        modelId: input.modelId,
+        runtime: 'pi',
+        purpose: '分叉 Pi Agent 会话',
+      })
     : sourceMeta.modelId
   const workspace = sourceMeta.workspaceId ? getAgentWorkspace(sourceMeta.workspaceId) : undefined
   const sourceDir = workspace ? getAgentSessionWorkspacePath(workspace.slug, sourceMeta.id) : undefined
@@ -1734,7 +1789,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
     if (Object.keys(branchCheckpoints).length > 0) newMeta.piFileCheckpoints = branchCheckpoints
     Object.assign(newMeta, explorationMeta)
 
-    if (sourceDir && destDir) copyForkWorkspaceFiles(sourceDir, destDir)
+    if (sourceDir && destDir) {
+      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
+      if (copyResult.failedCount > 0) {
+        console.warn(`[Agent 会话] Pi fork 工作区有 ${copyResult.failedCount} 个条目未复制:`, copyResult.failedPaths)
+      }
+    }
     await copyForkStoredSDKMessages({
       sourceSessionId: sourceMeta.id,
       destSessionId: newMeta.id,
@@ -2084,13 +2144,29 @@ async function endWriteStream(stream: WriteStream): Promise<void> {
  * @returns 新创建的会话元数据
  */
 export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSessionMeta> {
-  const { sessionId, upToMessageUuid } = input
-
-  // 1. 获取源会话元数据
+  const { sessionId } = input
   const sourceMeta = getAgentSessionMeta(sessionId)
   if (!sourceMeta) {
     throw new Error(`源 Agent 会话不存在: ${sessionId}`)
   }
+  if (agentSessionActiveChecker?.(sessionId)) {
+    throw new Error('Agent 正在运行，完成后再分叉')
+  }
+  if (activeForkSessionIds.has(sessionId)) {
+    throw new Error('该会话正在创建分叉，请稍候再试')
+  }
+
+  activeForkSessionIds.add(sessionId)
+  try {
+    return await forkAgentSessionUnlocked(sourceMeta, input)
+  } finally {
+    activeForkSessionIds.delete(sessionId)
+  }
+}
+
+async function forkAgentSessionUnlocked(sourceMeta: AgentSessionMeta, input: ForkSessionInput): Promise<AgentSessionMeta> {
+  const { sessionId, upToMessageUuid } = input
+
   // Pi 会话走 Pi 原生分叉（SessionManager branch + forkFrom）；Claude 会话走下方 Claude SDK fork。
   if (normalizeAgentRuntime(sourceMeta.agentRuntime) === 'pi') {
     return forkPiAgentSession(sourceMeta, input)
@@ -2249,11 +2325,11 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     // 继续在源目录下读写文件。
     if (sourceDir && destDir) {
       // 复用 step 3.5 已确认的 JSONL 路径，避免重复扫描
-      const destProjectHash = destDir.replace(/[^a-zA-Z0-9]/g, '-')
+      const destProjectHash = buildForkProjectKey(destDir)
       const sdkProjectsDir = join(getSdkConfigDir(), 'projects', destProjectHash)
       if (!existsSync(sdkProjectsDir)) mkdirSync(sdkProjectsDir, { recursive: true })
       const destJsonl = join(sdkProjectsDir, `${forkResult.sessionId}.jsonl`)
-      copyFileSync(forkJsonlPath, destJsonl)
+      copyForkFile(forkJsonlPath, destJsonl)
       rewritePathsInJsonlFile(destJsonl, sourceDir, destDir)
       console.log(`[Agent 会话] 已将 SDK session JSONL 复制到 fork 目标目录并改写路径: ${destJsonl}`)
     }
@@ -2263,22 +2339,9 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     // .context/ 必须保留 — Profer 约定 .context/note.md、todo.md、plan/ 等是会话上下文，
     // 如果不复制，fork 后这些参考资料会丢失或被 Claude 误回源目录读取。
     if (sourceDir && destDir) {
-      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-      try {
-        const entries = readdirSync(sourceDir)
-        const skip = (entry: string) => entry === '.claude' || entry === '.DS_Store' || entry === '.git'
-        let copiedCount = 0
-        for (const entry of entries) {
-          if (skip(entry)) continue
-          const srcPath = join(sourceDir, entry)
-          const destPath = join(destDir, entry)
-          cpSync(srcPath, destPath, { recursive: true })
-          copiedCount += 1
-        }
-        console.log(`[Agent 会话] 已复制工作区文件: ${sourceDir} → ${destDir} (${copiedCount} 个条目)`)
-      } catch (err) {
-        // 工作区文件复制失败不触发回滚——fork 会话功能完整，仅缺上下文文件
-        console.warn(`[Agent 会话] 复制工作区文件失败，fork 会话缺少源会话的上下文文件:`, err)
+      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
+      if (copyResult.failedCount > 0) {
+        console.warn(`[Agent 会话] Claude fork 工作区有 ${copyResult.failedCount} 个条目未复制:`, copyResult.failedPaths)
       }
     }
 
@@ -2365,7 +2428,7 @@ function rewritePathsInJsonlFile(filePath: string, sourceDir: string, destDir: s
   if (rewritten !== content) {
     const tmpPath = filePath + '.tmp.' + Date.now()
     writeFileSync(tmpPath, rewritten, 'utf-8')
-    renameSync(tmpPath, filePath)
+    renameForkFile(tmpPath, filePath)
   }
 }
 

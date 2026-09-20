@@ -26,6 +26,7 @@ import { detectIsWindows } from '@/lib/platform'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { usePanelAutoLayout } from '@/hooks/usePanelAutoLayout'
 import { cn } from '@/lib/utils'
+import { TEAM_WORKSPACE_UI_ENABLED } from '@/lib/product-feature-flags'
 
 const MIN_RIGHT_PANEL_WIDTH = 300
 const MIN_EXPLORATION_PANEL_WIDTH = 480
@@ -74,7 +75,7 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId)
-  const isTeamWorkspace = currentWorkspace?.type === 'team'
+  const isTeamWorkspace = TEAM_WORKSPACE_UI_ENABLED && currentWorkspace?.type === 'team'
   // 定时任务表单打开时隐藏右侧文件面板，让中间区域扩展到全宽（表单内含自己的右栏配置）
   const activeView = useAtomValue(activeViewAtom)
   const showRightPanel = appMode === 'agent' && !!currentSessionId && !automationForm.open && activeView !== 'planning' && activeView !== 'agent-skills'

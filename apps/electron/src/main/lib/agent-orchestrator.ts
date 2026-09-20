@@ -91,10 +91,12 @@ import { appendGraphEvent } from './project-graph-service'
 import { injectAgentCollaborationMcpServer, registerCollaborationEventBus, stopDelegationsForParent } from './agent-collaboration-tools'
 import { setHeadlessAgentRunner, setAgentStopper } from './agent-headless-runner-registry'
 import { getAdapter, fetchTitle } from '@profer/core'
+import { groupIntoTurns, extractUserText, isUserInputMessage } from '@profer/session-core'
+import type { SDKUserMessage } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { generateCodexTitle } from './adapters/pi-codex-title-generator'
-import { buildTitlePrompt, createFallbackTitle, sanitizeGeneratedTitle } from './title-generation'
+import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, createFallbackTitle, createWindowFallbackTitle, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle } from './title-generation'
 import { isCommercialBuild } from './build-target'
 import { isOfficialManagedChannel } from './official-channel'
 import {
@@ -102,6 +104,8 @@ import {
   updateAgentSessionMeta,
   getAgentSessionMeta,
   getAgentSessionMessages,
+  getAgentSessionSDKMessages,
+  isAgentSessionForking,
   truncateSDKMessages,
   resolveUserUuidFromSDK,
   rewindFilesFromSnapshot,
@@ -145,6 +149,7 @@ import {
   isSessionNotFoundError,
   getRetryDelayMs,
   classifyCatchError,
+  isRetryBudgetExhausted,
   MAX_AUTO_RETRIES,
   MAX_AUTO_RETRY_WAIT_MS,
 } from './agent-retry-utils'
@@ -475,13 +480,22 @@ export class AgentOrchestrator {
    * 使用 Provider 适配器系统，支持所有渠道。任何错误返回 null。
    */
   async generateTitle(input: AgentGenerateTitleInput): Promise<string | null> {
-    const { userMessage, channelId } = input
+    const { userMessage, channelId, contextMessages } = input
     // SDK 回报的模型名可能是 `deepseek-v4-pro[1m]` 这类 1M 变体：该后缀只对 Claude Agent SDK
     // 有意义，发给供应商 API 会指向不存在的模型。标题请求必须用真实模型 ID。
     const modelId = strip1MContextSuffix(input.modelId)
+    // 多轮窗口路径：概括前几轮主题，不许照抄某一条原文；单条路径保留旧 prompt。
+    const titlePrompt = contextMessages && contextMessages.length > 0
+      ? buildWindowTitlePrompt(contextMessages)
+      : buildTitlePrompt(userMessage)
+    // 无法调用标题模型时的本地兜底：窗口路径取最早一条有效来源的首行。
+    const localFallbackTitle = contextMessages && contextMessages.length > 0
+      ? createWindowFallbackTitle(contextMessages)
+      : createFallbackTitle(userMessage)
     console.log('[Agent 标题生成] 开始生成标题:', {
       channelId,
       modelId,
+      sourceCount: contextMessages?.length ?? 1,
       userMessage: userMessage.slice(0, 50),
     })
 
@@ -496,16 +510,16 @@ export class AgentOrchestrator {
       if (channel.provider === 'xai') {
         // xAI subscription uses Pi's provider-specific OAuth transport; title generation's
         // generic channel adapter only understands API keys, so retain a local deterministic title.
-        return createFallbackTitle(userMessage)
+        return localFallbackTitle
       }
 
       if (channel.provider === 'openai-codex') {
-        const fallbackTitle = createFallbackTitle(userMessage)
+        const fallbackTitle = localFallbackTitle
         try {
           const [credentials, proxyUrl] = await Promise.all([resolveCodexOAuthCredentials(channelId), getEffectiveProxyUrl()])
           const generatedTitle = await generateCodexTitle({
             modelId,
-            prompt: buildTitlePrompt(userMessage),
+            prompt: titlePrompt,
             credentials,
             proxyUrl,
             onCredentialsRefreshed: (refreshed) => persistCodexOAuthCredentials(channelId, refreshed),
@@ -542,7 +556,7 @@ export class AgentOrchestrator {
         baseUrl: proxyBaseUrl || channel.baseUrl,
         apiKey,
         modelId,
-        prompt: buildTitlePrompt(userMessage),
+        prompt: titlePrompt,
       })
       if (proxyBaseUrl) request.url = proxyBaseUrl
 
@@ -570,48 +584,167 @@ export class AgentOrchestrator {
   }
 
   /**
-   * 流开始后自动生成标题。
+   * 自动命名窗口：从会话转录里收集「有信息量」的用户消息。
    *
-   * 默认会话沿用首条消息自动命名；Pi 探索分支则在首条新增用户消息时命名一次，
-   * 避免把 fork 前复制的历史误当成分支自己的首条消息，也避免后续 turn 覆盖标题。
+   * 与只拿当前这条消息命名不同，窗口把会话最初几轮的有效用户消息攒在一起，
+   * 让模型能在用户还没说清意图时先给一个临时名，等意图明确后再精修。
+   * 寒暄（`hi`）、确认（`提交吧`）与纯斜杠命令（`/compact`）不计入，
+   * 否则就会重现历史里的 `hi`、`/compact`、`ok，现在继续转战…` 这类标题。
+   *
+   * Pi 探索分支的转录里含 fork 前复制的父会话历史，必须从分叉锚点之后开始取，
+   * 否则会把父会话的首条消息当成本分支的意图；锚点找不到时退回只看本次消息。
+   */
+  private collectSessionTitleSources(sessionId: string, meta: AgentSessionMeta, fallbackMessage: string): string[] {
+    let texts: string[] = []
+    try {
+      const messages = getAgentSessionSDKMessages(sessionId)
+      const groups = groupIntoTurns(messages)
+      const anchorId = meta.explorationParentSessionId ? meta.explorationSourceMessageId : undefined
+      let anchorIndex = -1
+      if (anchorId) {
+        anchorIndex = groups.findIndex((group) => group.type === 'assistant-turn'
+          && group.assistantMessages.some((message) => (message as { uuid?: unknown }).uuid === anchorId))
+      }
+      if (anchorId && anchorIndex < 0) {
+        console.warn('[Agent 编排] 探索分支命名未找到分叉锚点，改为仅用本次消息命名')
+      } else {
+        // 找到锚点时只取分叉之后的用户消息。
+        const startIndex = anchorId ? anchorIndex + 1 : 0
+        for (let index = startIndex; index < groups.length; index++) {
+          const group = groups[index]!
+          if (group.type !== 'user') continue
+          const userMessage = group.message as SDKUserMessage
+          if (!isUserInputMessage(userMessage)) continue
+          texts.push(extractUserText(userMessage) ?? '')
+        }
+      }
+    } catch (error) {
+      console.warn('[Agent 编排] 读取会话转录用于命名失败，改为仅用本次消息:', error)
+      texts = []
+    }
+    // 兜底追加本次消息：转录可能尚未落盘（或消息正文被截断），
+    // 重复时由 collectTitleSources 按归一化文本去重。
+    if (fallbackMessage) texts.push(fallbackMessage)
+    return collectTitleSources(texts)
+  }
+
+  /**
+   * 自动命名窗口（Agent 链路）。
+   *
+   * 规则与 Chat 链路一致（见 title-generation.ts）：
+   * - 只在未定稿且当前标题不是「用户手动起的」时才插手；
+   * - 只由寒暄/命令构成的轮次不命名，等真正有内容的轮次；
+   * - 累计到 TITLE_LOCK_MIN_SOURCES 条有效来源即定稿锁定，否则下一轮继续精修；
+   * - 模型调用次数上限 TITLE_REFINE_MAX_ATTEMPTS，用尽后停止自动改名。
    */
   private async autoGenerateTitle(sessionId: string, userMessage: string, channelId: string, modelId: string, callbacks: SessionCallbacks): Promise<void> {
     try {
       const meta = getAgentSessionMeta(sessionId)
       if (!meta) return
 
-      const isDefaultSessionTitle = meta.title === DEFAULT_SESSION_TITLE
-      const isFirstExplorationMessage = Boolean(
+      const isExplorationFirstNaming = Boolean(
         meta.explorationParentSessionId && !meta.explorationTitleInitializedAt,
       )
-      if (!isDefaultSessionTitle && !isFirstExplorationMessage) return
-
-      // 分支的历史已由 Pi fork 复制；先持久化守卫，避免同一分支并发发送时重复请求标题。
-      const explorationTitleInitializedAt = isFirstExplorationMessage ? Date.now() : undefined
-      if (explorationTitleInitializedAt) {
-        updateAgentSessionMeta(sessionId, { explorationTitleInitializedAt })
+      // Pi 探索/分叉分支继承「父标题 (fork)」，需要给分支自己命名一次。
+      const windowInput = {
+        title: meta.title,
+        defaultTitle: DEFAULT_SESSION_TITLE,
+        titleAutoGeneratedAt: meta.titleAutoGeneratedAt,
+        titleRefineAttempts: meta.titleRefineAttempts,
+        titleLockedAt: meta.titleLockedAt,
+        allowNonDefaultTitle: isExplorationFirstNaming,
       }
 
-      const title = await this.generateTitle({ userMessage, channelId, modelId })
-        ?? (isFirstExplorationMessage ? createFallbackTitle(userMessage) : null)
+      // 先做只看元数据的预判：已定稿 / 人工命名 / 次数用尽都不需要读转录。
+      const preflight = preflightTitleWindow(windowInput)
+      if (preflight) {
+        if (preflight.action === 'lock') {
+          console.log(`[Agent 编排] 自动命名窗口关闭（${preflight.reason}）`)
+          updateAgentSessionMeta(sessionId, { titleLockedAt: Date.now() })
+        }
+        return
+      }
+
+      const sources = this.collectSessionTitleSources(sessionId, meta, userMessage)
+      const decision = planTitleWindow({ ...windowInput, sourceCount: sources.length })
+      if (decision.action !== 'generate') {
+        // 此处只可能是「无有效来源」：不消耗调用次数，等下一个有内容的轮次。
+        console.log('[Agent 编排] 标题来源无信息量，跳过本次自动命名')
+        return
+      }
+
+      // 先记尝试次数：生成失败也算一次，避免在渠道不可用时每轮都烧一次请求。
+      // 分支初始化标记与尝试次数同期写入：它只在真的要命名时才代表「分支标题已初始化」，
+      // 否则一个寒暄开场的分支会被误判为已命名而卡在「父标题 (fork)」上。
+      updateAgentSessionMeta(sessionId, {
+        titleRefineAttempts: decision.attempts,
+        ...(isExplorationFirstNaming ? { explorationTitleInitializedAt: Date.now() } : {}),
+      })
+
+      const title = await this.generateTitle({
+        userMessage: sources[0] ?? userMessage,
+        channelId,
+        modelId,
+        contextMessages: sources,
+      })
       if (!title) return
 
-      // 标题请求是异步的；期间用户可能手动重命名，不能覆盖用户决定。
+      // 标题请求是异步的；期间用户可能手动重命名或已定稿，不能覆盖用户决定。
       const latestMeta = getAgentSessionMeta(sessionId)
-      const canApplyDefaultTitle = isDefaultSessionTitle && latestMeta?.title === DEFAULT_SESSION_TITLE
-      const canApplyExplorationTitle = Boolean(
-        isFirstExplorationMessage
-        && latestMeta?.title === meta.title
-        && latestMeta.explorationTitleInitializedAt === explorationTitleInitializedAt,
-      )
-      if (!latestMeta || (!canApplyDefaultTitle && !canApplyExplorationTitle)) return
+      if (!latestMeta || latestMeta.titleLockedAt) return
+      // 探索分支首次命名允许标题从「父标题 (fork)」变为新名字，其余情况要求标题未被改动。
+      const titleUntouched = isExplorationFirstNaming
+        ? latestMeta.title === meta.title && !latestMeta.titleAutoGeneratedAt
+        : latestMeta.title === meta.title
+          && (latestMeta.titleAutoGeneratedAt ?? null) === (meta.titleAutoGeneratedAt ?? null)
+      if (!titleUntouched) return
 
-      updateAgentSessionMeta(sessionId, { title })
+      const lockNow = decision.lockAfterApply
+      updateAgentSessionMeta(sessionId, {
+        title,
+        titleAutoGeneratedAt: Date.now(),
+        ...(lockNow ? { titleLockedAt: Date.now() } : {}),
+      })
       callbacks.onTitleUpdated(title)
-      console.log(`[Agent 编排] 自动标题生成完成: "${title}"`)
+      console.log(`[Agent 编排] 自动标题生成完成: "${title}"（来源 ${sources.length} 条，${lockNow ? '已定稿' : '待精修'}）`)
     } catch (error) {
       console.warn('[Agent 编排] 自动标题生成失败:', error)
     }
+  }
+
+  /**
+   * 手动「重新生成标题」：绕过定稿锁定，用当前会话前几轮有效消息重新命名并重新锁定。
+   *
+   * 与自动窗口的区别是不受 attempts 限制（用户主动要求就允许重试一次），
+   * 且不消耗/不依赖历史尝试次数。
+   */
+  async regenerateTitle(sessionId: string, channelId: string, modelId: string): Promise<string | null> {
+    const meta = getAgentSessionMeta(sessionId)
+    if (!meta) return null
+
+    const sources = this.collectSessionTitleSources(sessionId, meta, '')
+    if (sources.length === 0) {
+      console.log('[Agent 编排] 重新生成标题：没有有效来源')
+      return null
+    }
+
+    const title = await this.generateTitle({
+      userMessage: sources[0] ?? '',
+      channelId,
+      modelId,
+      contextMessages: sources,
+    })
+    if (!title) return null
+
+    const latestMeta = getAgentSessionMeta(sessionId)
+    if (!latestMeta) return null
+    updateAgentSessionMeta(sessionId, {
+      title,
+      titleAutoGeneratedAt: Date.now(),
+      titleLockedAt: Date.now(),
+    })
+    console.log(`[Agent 编排] 手动重新生成标题完成: "${title}"（来源 ${sources.length} 条）`)
+    return title
   }
 
   /**
@@ -770,6 +903,11 @@ export class AgentOrchestrator {
     const streamStartedAt = input.startedAt ?? Date.now()
     if (this.deletingSessions.has(sessionId)) {
       callbacks.onError('会话正在删除，无法发送消息')
+      callbacks.onComplete([], { startedAt: input.startedAt })
+      return
+    }
+    if (isAgentSessionForking(sessionId)) {
+      callbacks.onError('会话正在创建分叉，请稍候再试')
       callbacks.onComplete([], { startedAt: input.startedAt })
       return
     }
@@ -2106,11 +2244,14 @@ ${enrichedMessage}`
           } else {
             const retryAttempt = Math.max(1, attempt - 1 - invisibleRecoveryAttempts)
             const errorCategory = classifyCatchError(lastRetryableError, stderrChunks.join('\n'))
-            const delayMs = getRetryDelayMs(retryAttempt, retryDelayElapsedMs, errorCategory)
-            if (delayMs <= 0) {
+            // 停止重试只看等待预算是否耗尽。delayMs === 0 是「立即重试」的合法语义
+            // （stream_interrupted 的退避乘数为 0），若以它作为停止条件，一次瞬时断流
+            // 会在第 1 次重试之前直接终止本轮，用户侧表现为「请求不到也不反复请求」。
+            if (isRetryBudgetExhausted(retryDelayElapsedMs)) {
               console.log(`[Agent 编排] 自动重试等待预算已耗尽 (${MAX_AUTO_RETRY_WAIT_MS}ms)，停止重试`)
               break
             }
+            const delayMs = getRetryDelayMs(retryAttempt, retryDelayElapsedMs, errorCategory)
             retryDelayElapsedMs += delayMs
             retryAttemptsScheduled = retryAttempt
             const delaySec = delayMs / 1000

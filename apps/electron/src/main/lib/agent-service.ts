@@ -37,7 +37,7 @@ import { AgentCatalogInvalidationPublisher } from './agent-catalog-invalidation'
 import { AgentOrchestrator, serializeErrorDetail } from './agent-orchestrator'
 import { forwardHeadlessAgentCompletion, setHeadlessAgentRunner, type HeadlessAgentRunCallbacks } from './agent-headless-runner-registry'
 import { getAgentSessionWorkspacePath, getWorkspaceFilesDir } from './config-paths'
-import { getAgentSessionMeta, updateAgentSessionMeta } from './agent-session-manager'
+import { getAgentSessionMeta, setAgentSessionActiveChecker, updateAgentSessionMeta } from './agent-session-manager'
 import { AgentRuntimeContextStore } from './agent-runtime-context'
 
 // ===== 实例创建 =====
@@ -51,6 +51,7 @@ const piAdapter = new PiAgentAdapter()
 // Both runtimes remain behind the same orchestrator, credential gate, P0 lifecycle and Plan-mode boundary.
 const adapter = new RuntimeRoutingAgentAdapter({ claude: claudeAdapter, pi: piAdapter })
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
+setAgentSessionActiveChecker((sessionId) => orchestrator.isActive(sessionId))
 const runtimeContextStore = new AgentRuntimeContextStore()
 
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
@@ -490,6 +491,30 @@ setHeadlessAgentRunner((input, callbacks) => runAgentHeadless(input, callbacks))
  */
 export async function generateAgentTitle(input: AgentGenerateTitleInput): Promise<string | null> {
   return orchestrator.generateTitle(input)
+}
+
+/**
+ * 手动重新生成 Agent 会话标题（不受定稿锁定限制）。
+ *
+ * channelId/modelId 缺省时回退到会话元数据上的上次选择；两者都没有就无法生成，返回 null。
+ */
+export async function regenerateAgentTitle(
+  sessionId: string,
+  channelId?: string,
+  modelId?: string,
+): Promise<{ title: string; session: import('@profer/shared').AgentSessionMeta } | null> {
+  const meta = getAgentSessionMeta(sessionId)
+  if (!meta) return null
+  const resolvedChannelId = channelId || meta.channelId
+  const resolvedModelId = modelId || meta.modelId
+  if (!resolvedChannelId || !resolvedModelId) {
+    console.warn('[Agent 服务] 重新生成标题缺少可用渠道/模型:', { sessionId })
+    return null
+  }
+  const title = await orchestrator.regenerateTitle(sessionId, resolvedChannelId, resolvedModelId)
+  if (!title) return null
+  const session = getAgentSessionMeta(sessionId)
+  return session ? { title, session } : null
 }
 
 /**

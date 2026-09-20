@@ -69,6 +69,12 @@ import {
 } from '@/atoms/agent-atoms'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import { previewPanelOpenMapAtom, previewFileMapAtom } from '@/atoms/preview-atoms'
+import {
+  browserInlinePreviewMapAtom,
+  browserPanelDismissedSessionIdsAtom,
+  browserPanelOpenMapAtom,
+  browserStateMapAtom,
+} from '@/atoms/browser-atoms'
 import { clearPreviewCacheForSession } from '@/components/diff/DiffTabContent'
 import {
   tabsAtom,
@@ -99,6 +105,7 @@ import {
   upsertAgentSession,
 } from '@/lib/agent-session-list'
 import type { AgentSessionMeta, AgentWorkspace, WorkspaceCapabilities } from '@profer/shared'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 
 import {
   groupByDate,
@@ -370,6 +377,10 @@ export function useLeftSidebar() {
   const setConvPromptId = useSetAtom(conversationPromptIdAtom)
   const setPreviewPanelOpen = useSetAtom(previewPanelOpenMapAtom)
   const setPreviewFile = useSetAtom(previewFileMapAtom)
+  const setBrowserInlinePreview = useSetAtom(browserInlinePreviewMapAtom)
+  const setBrowserPanelOpen = useSetAtom(browserPanelOpenMapAtom)
+  const setBrowserState = useSetAtom(browserStateMapAtom)
+  const setBrowserDismissed = useSetAtom(browserPanelDismissedSessionIdsAtom)
   const setDiffPanelTab = useSetAtom(agentDiffPanelTabAtom)
   const setDiffRefreshVersion = useSetAtom(agentDiffRefreshVersionAtom)
   const setDiffUnseen = useSetAtom(agentDiffUnseenChangesAtom)
@@ -401,6 +412,15 @@ export function useLeftSidebar() {
     setConvPromptId(deleteKey)
     setPreviewPanelOpen(deleteKey)
     setPreviewFile(deleteKey)
+    setBrowserInlinePreview(deleteKey)
+    setBrowserPanelOpen(deleteKey)
+    setBrowserState(deleteKey)
+    setBrowserDismissed((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
     setDiffPanelTab(deleteKey)
     setExplorationMap(deleteKey)
     setDiffRefreshVersion(deleteKey)
@@ -460,18 +480,27 @@ export function useLeftSidebar() {
     sessionExistsAtom.remove(id)
 
     clearPreviewCacheForSession(id)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setBrowserInlinePreview, setBrowserPanelOpen, setBrowserState, setBrowserDismissed, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
+
 
   const currentWorkspaceSlug = React.useMemo(() => {
     if (!currentWorkspaceId) return null
     return workspaces.find((w) => w.id === currentWorkspaceId)?.slug ?? null
   }, [currentWorkspaceId, workspaces])
 
+  const visibleWorkspaces = React.useMemo(
+    () => getVisibleAgentWorkspaces(workspaces),
+    [workspaces],
+  )
+  const visibleWorkspaceIds = React.useMemo(
+    () => new Set(visibleWorkspaces.map((workspace) => workspace.id)),
+    [visibleWorkspaces],
+  )
   const workspaceNameMap = React.useMemo(() => {
     const map = new Map<string, string>()
-    for (const w of workspaces) map.set(w.id, w.name)
+    for (const workspace of visibleWorkspaces) map.set(workspace.id, workspace.name)
     return map
-  }, [workspaces])
+  }, [visibleWorkspaces])
 
   const pendingDeleteWorkspace = React.useMemo(
     () => workspaces.find((workspace) => workspace.id === pendingDeleteWorkspaceId) ?? null,
@@ -503,11 +532,12 @@ export function useLeftSidebar() {
         s.pinned
         && !s.draft
         && !draftSessionIds.has(s.id)
+        && (!s.workspaceId || visibleWorkspaceIds.has(s.workspaceId))
         && !hasPinnedVisibleParent(s, agentSessions)
       )
       return sortAgentSessionsByUpdatedAtDesc(filtered)
     },
-    [agentSessions, viewMode, draftSessionIds]
+    [agentSessions, viewMode, draftSessionIds, visibleWorkspaceIds]
   )
 
   const pinnedAgentSessionTrees = React.useMemo<AgentSessionTreeItem[]>(
@@ -517,9 +547,10 @@ export function useLeftSidebar() {
         !child.archived
         && !child.draft
         && !draftSessionIds.has(child.id)
+        && (!child.workspaceId || visibleWorkspaceIds.has(child.workspaceId))
       )),
     })),
-    [agentSessions, draftSessionIds, pinnedAgentSessions],
+    [agentSessions, draftSessionIds, pinnedAgentSessions, visibleWorkspaceIds],
   )
 
   /** 对话按日期分组（根据 viewMode 过滤归档状态，排除 draft） */
@@ -705,6 +736,30 @@ export function useLeftSidebar() {
       console.error('[侧边栏] 重命名对话失败:', error)
     }
   }, [setConversations, setTabs])
+
+  /** 手动重新生成对话标题（用激活分支前几轮有效消息重命名） */
+  const handleRegenerateConversationTitle = React.useCallback(async (id: string): Promise<void> => {
+    try {
+      // 侧边栏不在会话内部，模型选择以 composer 的 per-conversation 状态为准；
+      // 取不到时主进程会回退到对话元数据上记录的上次选择。
+      const selection = store.get(conversationModelsAtom).get(id) ?? null
+      const updated = await window.electronAPI.regenerateConversationTitle(
+        id,
+        selection?.channelId,
+        selection?.modelId,
+      )
+      if (!updated) {
+        toast.error('重新生成标题失败：缺少可用模型或有效消息')
+        return
+      }
+      setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
+      setTabs((prev) => updateTabTitle(prev, id, updated.title))
+      toast.success(`标题已更新：${updated.title}`)
+    } catch (error) {
+      console.error('[侧边栏] 重新生成对话标题失败:', error)
+      toast.error('重新生成标题失败')
+    }
+  }, [setConversations, setTabs, store])
 
   /** 切换对话置顶状态 */
   const handleTogglePin = React.useCallback(async (id: string): Promise<void> => {
@@ -899,6 +954,7 @@ export function useLeftSidebar() {
 
   /** 选择项目并打开其隐藏草稿会话；真实 UI 直接复用 AgentView。 */
   const handleSelectProject = React.useCallback(async (workspaceId: string): Promise<void> => {
+    if (!visibleWorkspaceIds.has(workspaceId)) return
     const requestId = ++projectSelectionRequestRef.current
     setCurrentWorkspaceId(workspaceId)
     setActiveView('conversations')
@@ -931,7 +987,7 @@ export function useLeftSidebar() {
       console.error('[侧边栏] 创建项目草稿会话失败:', error)
       toast.error(error instanceof Error ? error.message : '创建项目草稿会话失败')
     }
-  }, [agentChannelId, agentModelId, openSession, setActiveView, setAgentSessions, setCollapsedWorkspaceIds, setCurrentAgentSessionId, setCurrentWorkspaceId, setDraftSessionIds])
+  }, [agentChannelId, agentModelId, openSession, setActiveView, setAgentSessions, setCollapsedWorkspaceIds, setCurrentAgentSessionId, setCurrentWorkspaceId, setDraftSessionIds, visibleWorkspaceIds])
 
   const handleToggleProjectCollapse = React.useCallback((workspaceId: string): void => {
     setCollapsedWorkspaceIds((previous) => toggleSetEntry(previous, workspaceId))
@@ -1132,16 +1188,23 @@ export function useLeftSidebar() {
       return
     }
 
-    const fromIndex = workspaces.findIndex((workspace) => workspace.id === dragProjectId)
-    const toIndex = workspaces.findIndex((workspace) => workspace.id === targetWorkspaceId)
+    if (!visibleWorkspaceIds.has(dragProjectId) || !visibleWorkspaceIds.has(targetWorkspaceId)) {
+      setDragProjectId(null)
+      setProjectDropIndicator(null)
+      return
+    }
+
+    const visible = workspaces.filter((workspace) => visibleWorkspaceIds.has(workspace.id))
+    const fromIndex = visible.findIndex((workspace) => workspace.id === dragProjectId)
+    const toIndex = visible.findIndex((workspace) => workspace.id === targetWorkspaceId)
     if (fromIndex === -1 || toIndex === -1) {
       setDragProjectId(null)
       setProjectDropIndicator(null)
       return
     }
 
-    const reordered = [...workspaces]
-    const [moved] = reordered.splice(fromIndex, 1)
+    const reorderedVisible = [...visible]
+    const [moved] = reorderedVisible.splice(fromIndex, 1)
     if (!moved) {
       setDragProjectId(null)
       setProjectDropIndicator(null)
@@ -1149,7 +1212,13 @@ export function useLeftSidebar() {
     }
     const adjustedToIndex = fromIndex < toIndex ? toIndex - 1 : toIndex
     const insertIndex = projectDropIndicator.position === 'after' ? adjustedToIndex + 1 : adjustedToIndex
-    reordered.splice(insertIndex, 0, moved)
+    reorderedVisible.splice(insertIndex, 0, moved)
+
+    let visibleIndex = 0
+    const reordered = workspaces.map((workspace) => {
+      if (!visibleWorkspaceIds.has(workspace.id)) return workspace
+      return reorderedVisible[visibleIndex++] ?? workspace
+    })
 
     setWorkspaces(reordered)
     setDragProjectId(null)
@@ -1162,7 +1231,7 @@ export function useLeftSidebar() {
         setWorkspaces(workspaces)
         toast.error('项目排序失败')
       })
-  }, [dragProjectId, projectDropIndicator, setWorkspaces, workspaces])
+  }, [dragProjectId, projectDropIndicator, setWorkspaces, visibleWorkspaceIds, workspaces])
 
   const handleProjectDragEnd = React.useCallback((): void => {
     setDragProjectId(null)
@@ -1314,6 +1383,23 @@ export function useLeftSidebar() {
       setTabs((prev) => updateTabTitle(prev, id, newTitle))
     } catch (error) {
       console.error('[侧边栏] 重命名 Agent 会话失败:', error)
+    }
+  }, [setAgentSessions, setTabs])
+
+  /** 手动重新生成 Agent 会话标题（用会话前几轮有效消息重命名） */
+  const handleAgentRegenerateTitle = React.useCallback(async (id: string): Promise<void> => {
+    try {
+      const updated = await window.electronAPI.regenerateAgentSessionTitle(id)
+      if (!updated) {
+        toast.error('重新生成标题失败：缺少可用模型或有效消息')
+        return
+      }
+      setAgentSessions((prev) => replaceAgentSessionInFreshnessOrder(prev, updated))
+      setTabs((prev) => updateTabTitle(prev, id, updated.title))
+      toast.success(`标题已更新：${updated.title}`)
+    } catch (error) {
+      console.error('[侧边栏] 重新生成 Agent 会话标题失败:', error)
+      toast.error('重新生成标题失败')
     }
   }, [setAgentSessions, setTabs])
 
@@ -1479,17 +1565,17 @@ export function useLeftSidebar() {
         const previous = recencyByWorkspace.get(workspaceId) ?? 0
         if (session.updatedAt > previous) recencyByWorkspace.set(workspaceId, session.updatedAt)
       }
-      return [...workspaces].sort((a, b) => {
+      return [...visibleWorkspaces].sort((a, b) => {
         const recencyA = recencyByWorkspace.get(a.id) ?? a.updatedAt
         const recencyB = recencyByWorkspace.get(b.id) ?? b.updatedAt
         return recencyB - recencyA
       })
     }
     if (workspaceSortMode === 'name') {
-      return [...workspaces].sort((a, b) => workspaceNameCollator.compare(a.name, b.name))
+      return [...visibleWorkspaces].sort((a, b) => workspaceNameCollator.compare(a.name, b.name))
     }
-    return workspaces
-  }, [workspaces, workspaceSortMode, agentSessions])
+    return visibleWorkspaces
+  }, [visibleWorkspaces, workspaceSortMode, agentSessions])
 
   /** Agent 普通历史按项目分组（排除置顶 / 归档 / draft） */
   const agentProjectGroups = React.useMemo<AgentProjectGroup[]>(
@@ -1505,6 +1591,7 @@ export function useLeftSidebar() {
           && !session.pinned
           && !session.draft
           && !draftSessionIds.has(session.id)
+          && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
           // 已被置顶母会话收纳的子会话留在置顶区的母会话下面，避免重复显示为项目根会话
           && !hasPinnedVisibleParent(session, agentSessions)
         )
@@ -1524,15 +1611,20 @@ export function useLeftSidebar() {
         sessions: sessionsByWorkspaceId.get(workspace.id) ?? [],
       }))
     },
-    [agentSessions, draftSessionIds, sortedWorkspaces],
+    [agentSessions, draftSessionIds, sortedWorkspaces, visibleWorkspaceIds],
   )
 
   /** Agent 归档会话按日期分组（跨项目） */
   const agentSessionGroups = React.useMemo(
     () => groupByDate(sortAgentSessionsByUpdatedAtDesc(
-      agentSessions.filter((session) => session.archived && !session.draft && !draftSessionIds.has(session.id))
+      agentSessions.filter((session) => (
+        session.archived
+        && !session.draft
+        && !draftSessionIds.has(session.id)
+        && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
+      ))
     )),
-    [agentSessions, draftSessionIds]
+    [agentSessions, draftSessionIds, visibleWorkspaceIds]
   )
 
   /** 归档 Agent 会话渐进切片：先渲染可见数量，空闲补全 */
@@ -1694,6 +1786,7 @@ export function useLeftSidebar() {
     handleSelectConversation,
     handleRequestDelete,
     handleRename,
+    handleRegenerateConversationTitle,
     handleTogglePin,
     handleToggleArchive,
 
@@ -1713,6 +1806,7 @@ export function useLeftSidebar() {
     archivedAgentSessionCount,
     handleSelectAgentSession,
     handleAgentRename,
+    handleAgentRegenerateTitle,
     handleTogglePinAgent,
     handleToggleArchiveAgent,
     handleRequestMove,

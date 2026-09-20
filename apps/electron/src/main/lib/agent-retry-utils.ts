@@ -5,7 +5,7 @@
  */
 import type { TypedError, ProferPermissionMode } from '@profer/shared'
 import { PROFER_PERMISSION_MODE_CONFIG } from '@profer/shared'
-import { isTransientNetworkError, isMalformedResponseError, classifyNetworkError, getCategoryRetryDelayMultiplier, type NetworkErrorCategory } from './error-patterns'
+import { isTransientNetworkError, isMalformedResponseError, isTransientUpstreamText, classifyNetworkError, getCategoryRetryDelayMultiplier, type NetworkErrorCategory } from './error-patterns'
 
 /** 可自动重试的 TypedError 错误码 */
 export const AUTO_RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -93,9 +93,27 @@ export function isAutoRetryableCatchError(
   }
   const text = `${rawErrorMessage ?? ''}\n${stderr ?? ''}`
   if (/\b502\b|\b529\b|overloaded/i.test(text)) return true
+  // 中转网关的裸 5xx / 瞬时文案：没有 "API Error:" 前缀，extractApiError 提不到状态码，
+  // Pi 运行时也没有 stderr 可解析，但语义上仍是上游瞬时故障（历史误判为 unknown_error →
+  // 直接终态、不重试）。
+  if (/\b5\d{2}\b/.test(text)) return true
+  if (/service\s+(?:temporarily\s+)?unavailable/i.test(text)) return true
+  if (/request could not be completed/i.test(text)) return true
+  if (isTransientUpstreamText(rawErrorMessage, stderr)) return true
   if (isTransientNetworkError(rawErrorMessage, stderr)) return true
   if (isMalformedResponseError(rawErrorMessage, stderr)) return true
   return false
+}
+
+/**
+ * 判断重试等待预算是否已耗尽。
+ *
+ * `getRetryDelayMs()` 返回 0 有两种含义：「预算已耗尽」和「该类错误要求立即重试」
+ * （stream_interrupted 的退避乘数就是 0）。停止重试必须以预算为准，不能以延迟为 0 为准，
+ * 否则一次瞬时断流会在第 1 次重试前直接终止本轮（表现为「请求不到也不反复请求」）。
+ */
+export function isRetryBudgetExhausted(elapsedRetryDelayMs: number): boolean {
+  return elapsedRetryDelayMs >= MAX_AUTO_RETRY_WAIT_MS
 }
 
 export function isSessionNotFoundError(errorMessage: string, stderr?: string): boolean {

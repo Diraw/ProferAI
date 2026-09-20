@@ -30,11 +30,16 @@ import type {
   GenerateTitleInput,
 } from '@profer/shared'
 
-/** 待生成标题的队列（按 conversationId 跟踪） */
+/**
+ * 待参与自动命名的对话（按 conversationId 跟踪本轮使用的渠道/模型）
+ *
+ * 每轮发送都登记一次；命中的资源消耗与定稿判定全在主进程（chat:auto-title），
+ * 这里只负责把「本轮用的哪个模型」带过去。
+ */
 const pendingTitles = new Map<string, GenerateTitleInput>()
 
 /**
- * 注册待生成标题信息（由 ChatView.handleSend 在首条消息时调用）
+ * 登记本轮发送的渠道/模型，供流结束后的自动命名窗口使用（由 ChatView.handleSend 调用）
  */
 export function registerPendingTitle(
   conversationId: string,
@@ -128,35 +133,31 @@ export function useGlobalChatListeners(): void {
           .then((convs) => store.set(conversationsAtom, convs))
           .catch(console.error)
 
-        // 第一条消息回复完成后，生成对话标题
+        // 自动命名窗口：本轮回复完成后，由主进程按前几轮有效用户消息生成/精修标题。
+        // 命不命名、用几条消息、是否已定稿全部由主进程判定；这里只负责把本轮
+        // 的渠道/模型带过去，并在真的改名后同步会话列表与标签页标题。
         const titleInput = pendingTitles.get(event.conversationId)
         if (titleInput) {
           pendingTitles.delete(event.conversationId)
-          console.log('[GlobalChatListeners] 开始生成标题:', titleInput)
           window.electronAPI
-            .generateTitle(titleInput)
-            .then((title) => {
-              console.log('[GlobalChatListeners] 标题生成结果:', title)
-              if (!title) return
-              window.electronAPI
-                .updateConversationTitle(event.conversationId, title)
-                .then((updated) => {
-                  console.log(
-                    '[GlobalChatListeners] 标题更新成功:',
-                    updated.title,
-                  )
-                  store.set(conversationsAtom, (prev) =>
-                    prev.map((c) => (c.id === updated.id ? updated : c)),
-                  )
-                  // 同步更新标签页标题
-                  store.set(tabsAtom, (prev) =>
-                    updateTabTitle(prev, event.conversationId, title),
-                  )
-                })
-                .catch(console.error)
+            .autoTitleConversation({
+              conversationId: event.conversationId,
+              channelId: titleInput.channelId,
+              modelId: titleInput.modelId,
+            })
+            .then((updated) => {
+              if (!updated) return
+              console.log('[GlobalChatListeners] 自动命名窗口更新标题:', updated.title)
+              store.set(conversationsAtom, (prev) =>
+                prev.map((c) => (c.id === updated.id ? updated : c)),
+              )
+              // 同步更新标签页标题
+              store.set(tabsAtom, (prev) =>
+                updateTabTitle(prev, event.conversationId, updated.title),
+              )
             })
             .catch((error) => {
-              console.error('[GlobalChatListeners] 标题生成失败:', error)
+              console.error('[GlobalChatListeners] 自动命名失败:', error)
             })
         }
       },

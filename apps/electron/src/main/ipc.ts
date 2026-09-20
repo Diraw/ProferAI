@@ -144,6 +144,8 @@ import { KNOWLEDGE_IPC_CHANNELS } from '@profer/shared'
 import type { UserProfile, AppSettings } from '../types'
 import { getRuntimeStatus, getGitRepoStatus, reinitializeRuntime } from './lib/runtime-init'
 import { browserController } from './lib/browser-controller'
+import { normalizeOfvThemePayload, type OfvThemeTokens } from '@profer/shared'
+import type { ViewerPreviewTheme } from './lib/browser-preview-service'
 import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import { listBookmarks, addBookmark, removeBookmark, listHistory, clearHistory } from './lib/browser-start-page-store'
 import { getUnstagedChanges, getFileDiff, getUntrackedContent, revertFile, getDiffContents, listWorktrees, getWorktreeChanges, getMainRepoRoot, invalidateGitDiffCache } from './lib/git-diff-service'
@@ -188,7 +190,7 @@ import {
   searchConversationMessages,
   countArchivedConversations,
 } from './lib/conversation-manager'
-import { sendMessage, stopGeneration, generateTitle } from './lib/chat-service'
+import { sendMessage, stopGeneration, generateTitle, autoTitleConversation, regenerateConversationTitle, type AutoTitleConversationInput } from './lib/chat-service'
 import {
   saveAttachment,
   readAttachmentAsBase64,
@@ -268,7 +270,7 @@ import {
   countArchivedAgentSessions,
 } from './lib/agent-session-manager'
 import { listAgentPresets, listGlobalAgentPresets, getDefaultPresetId, setDefaultPresetId, setDefaultPresetReference, enableGlobalPresetInWorkspace, disableGlobalPresetInWorkspace, rebindAndDisableGlobalPresetScope, setWorkspacePresetEnabled, rebindAgentSessionPreset, rebindAutomationPreset, createAgentPreset, createGlobalAgentPreset, promoteWorkspacePresetToGlobal, copyAgentPreset, copyPresetToWorkspace, updateAgentPreset, updateGlobalAgentPreset, deleteAgentPreset, deleteGlobalAgentPreset, getAgentPreset, getPresetReferenceReport, serializeAgentPresetsForExport, importAgentPresets } from './lib/agent-preset-manager'
-import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, emitSessionStreamEvent, agentCatalogInvalidationPublisher } from './lib/agent-service'
+import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, regenerateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, emitSessionStreamEvent, agentCatalogInvalidationPublisher } from './lib/agent-service'
 import { mapSdkShellTasks, isSameProcess, terminateProcessTreeGracefully, type MonitoredProcess } from './lib/process-monitor'
 import { listOwnedRuntimeProcesses, markOwnedRuntimeProcessExited, onRuntimeProcessRegistryChanged } from './lib/runtime-process-registry'
 import { coordinateAgentSend } from './lib/agent-send-coordinator'
@@ -1761,11 +1763,28 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 更新对话标题
+  // 更新对话标题（用户手动命名：同时定稿锁定，自动命名窗口永久退让）
   ipcMain.handle(
     CHAT_IPC_CHANNELS.UPDATE_TITLE,
     async (_, id: string, title: string): Promise<ConversationMeta> => {
-      return updateConversationMeta(id, { title })
+      return updateConversationMeta(id, { title, titleLockedAt: Date.now() })
+    }
+  )
+
+  // 自动命名窗口（Chat）：流结束后由主进程按前几轮有效用户消息生成/精修标题
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.AUTO_TITLE,
+    async (_, input: AutoTitleConversationInput): Promise<ConversationMeta | null> => {
+      if (!input || typeof input.conversationId !== 'string' || !input.conversationId.trim()) return null
+      return autoTitleConversation(input)
+    }
+  )
+
+  // 手动重新生成对话标题：绕过定稿锁定，用前几轮有效消息重命名并重新锁定
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.REGENERATE_TITLE,
+    async (_, id: string, channelId?: string, modelId?: string): Promise<ConversationMeta | null> => {
+      return regenerateConversationTitle(id, channelId, modelId)
     }
   )
 
@@ -2920,6 +2939,47 @@ export function registerIpcHandlers(): void {
     if (!input.tabId || typeof input.zoomFactor !== 'number') throw new Error('tabId 和 zoomFactor 必填。')
     return browserController.setZoom(input.sessionId, input.tabId, input.zoomFactor)
   })
+  // 用户侧：把已授权文件在受管浏览器里打开（HTML 直接加载；其它扩展名走内置 viewer 页 → Open File Viewer）。
+  // 主题由渲染进程算好一起送来（viewer 页无 preload，主题只能烘进 URL）：
+  // theme = 明暗，tokens = app 文档上真实生效的 token 值（皮肤配色由此到达预览页）。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.OPEN_FILE_IN_BROWSER,
+    async (
+      event,
+      input: {
+        sessionId: string
+        filePath: string
+        theme?: 'light' | 'dark'
+        tokens?: OfvThemeTokens
+        access?: FileAccessOptions
+      },
+    ): Promise<import('@profer/shared').BrowserViewState> => {
+      if (
+        !input
+        || typeof input.sessionId !== 'string'
+        || input.sessionId.length === 0
+        || typeof input.filePath !== 'string'
+        || input.filePath.trim().length === 0
+      ) {
+        throw new Error('文件预览参数无效。')
+      }
+      await assertBrowserSessionAccess(event.sender.id, input.sessionId)
+      const options = normalizeFileAccessOptions(input.access)
+      // getAllowedCandidateBasePaths 在没有候选根时返回 undefined；浏览器侧要求 string[]。
+      const allowedRoots = getAllowedCandidateBasePaths(options) ?? []
+      return browserController.previewOpen(
+        input.sessionId,
+        input.filePath,
+        undefined,
+        allowedRoots,
+        undefined,
+        undefined,
+        // IPC 边界收口（未知 token / 可疑值在这里被丢掉，见 shared 的 ofv-theme-bridge）
+        normalizeOfvThemePayload(input) ?? undefined,
+      )
+    },
+  )
+
   ipcMain.handle(AGENT_IPC_CHANNELS.HIDE_BROWSER, async (event, sessionId: string): Promise<void> => {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     browserController.hide(sessionId)
@@ -2928,6 +2988,18 @@ export function registerIpcHandlers(): void {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     await browserController.close(sessionId)
   })
+  // 皮肤切换：viewer 页的主题烘在 URL 里（那页无 preload），只能按新主题重载本地预览。
+  // 全局生效且只影响本地预览标签 —— 普通网页永远不跟随 app 皮肤。
+  // 除了重载已打开的预览，主进程还会记住这次的主题，供之后由 Agent 打开、没有主题来源的预览使用。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.REFRESH_BROWSER_PREVIEW_THEME,
+    async (event, input: { theme?: unknown; tokens?: unknown }): Promise<number> => {
+      assertMainRenderer(event.sender.id)
+      const previewTheme = normalizeOfvThemePayload(input)
+      if (!previewTheme) return 0
+      return browserController.refreshLocalPreviewThemes(previewTheme)
+    },
+  )
   ipcMain.handle(AGENT_IPC_CHANNELS.LIST_BROWSER_TABS, async (event, sessionId: string): Promise<BrowserTabListResult> => {
     await assertBrowserSessionAccess(event.sender.id, sessionId)
     return browserController.listTabs(sessionId)
@@ -3005,11 +3077,11 @@ export function registerIpcHandlers(): void {
     return agentFilePreviewSessionManager.reportInspection(result)
   })
 
-  // 更新 Agent 会话标题
+  // 更新 Agent 会话标题（用户手动命名：同时定稿锁定，自动命名窗口永久退让）
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_TITLE,
     async (_, id: string, title: string): Promise<AgentSessionMeta> => {
-      return updateAgentSessionMeta(id, { title })
+      return updateAgentSessionMeta(id, { title, titleLockedAt: Date.now() })
     }
   )
 
@@ -3048,6 +3120,15 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.GENERATE_TITLE,
     async (_, input: AgentGenerateTitleInput): Promise<string | null> => {
       return generateAgentTitle(input)
+    }
+  )
+
+  // 手动重新生成 Agent 会话标题：绕过定稿锁定，用前几轮有效消息重命名并重新锁定
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.REGENERATE_TITLE,
+    async (_, id: string, channelId?: string, modelId?: string): Promise<AgentSessionMeta | null> => {
+      const result = await regenerateAgentTitle(id, channelId, modelId)
+      return result?.session ?? null
     }
   )
 

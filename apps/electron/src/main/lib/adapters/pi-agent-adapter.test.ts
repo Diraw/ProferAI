@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 // 只验证 Pi 侧 AskUserQuestion 工具注册契约与权限包装闭环，不启动真实 Pi SDK。
-const { buildPromaProductToolDefinitions, shouldBlockToolForAskUserQuestion } = await import('./pi-agent-adapter')
+const { buildPromaProductToolDefinitions, shouldBlockToolForAskUserQuestion, mapSDKErrorToTypedError } = await import('./pi-agent-adapter')
 
 interface CapturedTool {
   name: string
@@ -96,5 +96,24 @@ describe('Pi AskUserQuestion 提问闭环（工具注册契约）', () => {
     await expect(
       askUser?.execute?.('call-2', { questions: [{ question: '继续吗？' }] }),
     ).rejects.toThrow('用户取消回答')
+  })
+})
+
+describe('mapSDKErrorToTypedError 覆盖中转 5xx / 瞬时文案（回归：曾经误判为 unknown_error 且不重试）', () => {
+  const cases: Array<[string, 'service_error' | 'service_unavailable' | 'provider_error']> = [
+    ['520 status code (no body)', 'service_error'],
+    ['503: {"message":"Service temporarily unavailable","type":"api_error"}', 'service_unavailable'],
+    ['Request could not be completed', 'service_error'],
+    ['服务繁忙，请稍后重试', 'provider_error'],
+  ]
+  test.each(cases)('Given “%s” Then 归类为 %s 且允许自动重试', (text, expectedCode) => {
+    const typed = mapSDKErrorToTypedError('provider_error', text, text)
+    expect(typed.code).toBe(expectedCode)
+    expect(typed.canRetry).toBe(true)
+  })
+
+  test('Given 认证失败 Then 仍不误判为 5xx 可重试', () => {
+    const typed = mapSDKErrorToTypedError('invalid_api_key', 'invalid api key', 'invalid api key')
+    expect(typed.code).toBe('invalid_api_key')
   })
 })

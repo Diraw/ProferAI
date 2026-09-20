@@ -29,36 +29,32 @@ import { MarkdownToc } from './MarkdownToc'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { PIERRE_FILE_CSS } from '@/components/agent/tool-result-renderers/pierre-styles'
 import { OfficePreview } from '@/components/file-browser/office-preview/OfficePreview'
+import { OfvPreview } from '@/components/file-browser/ofv-preview/OfvPreview'
+import { EDITABLE_TEXT_EXTS, IMAGE_PREVIEW_EXTS, UNSUPPORTED_EXTS } from '@/lib/preview-extension-sets'
+import { isOfvBackedPath } from '@/lib/ofv-extensions'
 import { SelectionActionPopover } from '@/components/selection/SelectionActionPopover'
 import type { PreviewSelectionSnapshot } from '@/hooks/usePreviewQuotedSelection'
 import { resolveLatestExplorationSourceMessageId } from '@/lib/exploration-session'
 
 const MD_EXTS = new Set(['.md', '.markdown'])
 const HTML_EXTS = new Set(['.html', '.htm'])
-const PLAIN_TEXT_EDIT_EXTS = new Set(['.txt', '.text', '.log'])
-const PDF_EXTS = new Set(['.pdf'])
+/** .docx 仍走 silurus WASM：原因见 OFFICE_PREVIEW_EXTS 上方的说明 */
 const DOCX_EXTS = new Set(['.docx'])
-const OFFICE_PREVIEW_EXTS = new Set(['.xlsx', '.pptx'])
+const PDF_EXTS = new Set(['.pdf'])
+/**
+ * 仍走 silurus WASM 的 Office 格式：**DOCX 与 PPTX**（xlsx 已交给 Open File Viewer）。
+ *
+ * - **PPTX**：Agent 的「正式预览」回执挂在**可见的** silurus viewer 上 —— `official-preview-session.ts`
+ *   需要 `slideCount` / `scrollToSlide` / 每页 canvas 抓图（`getRenderedPptxSlideCanvas`）+ 空白页检测；
+ *   而 OFV 的公开 API 只有 `goToPage` / `command` / `preparePrint`，既没有页数也没有每页 canvas。
+ *   换 PPTX 需先补等价的「页数 + 跳页 + 抓图」能力（或改走主进程 capturePage 截图）。
+ * - **DOCX**：OFV 的 docx 主路径（docx-preview）**不过 DOMPurify**（其 issue #140，源码 `office.ts:641`），
+ *   且它渲染进宿主同源 DOM；在渲染进程里跑就等于把一条注入面带回 app（preload/IPC 可达，需用户点击恶意链接触发）。
+ *   等预览面搬到浏览器视图（sandbox + 无 preload）后这条风险归零，那时再换 docx。
+ */
+const OFFICE_PREVIEW_EXTS = new Set(['.pptx'])
 const LEGACY_OFFICE_EXTS = new Set(['.doc', '.xls', '.ppt'])
-const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico'])
-const UNSUPPORTED_EXTS = new Set([
-  // 可执行 / 库
-  '.exe', '.dll', '.so', '.dylib', '.bin',
-  // 归档
-  '.zip', '.7z', '.rar', '.tar', '.gz', '.bz2', '.xz', '.zst', '.tgz', '.tbz2', '.txz', '.tlz', '.lz', '.lzma', '.lzo',
-  // 字体
-  '.ttf', '.otf', '.woff', '.woff2',
-  // 编译产物
-  '.wasm', '.class', '.pyc', '.pyo', '.o', '.a', '.lib', '.obj',
-  // 数据库 / 磁盘映像 / 安装包
-  '.db', '.sqlite', '.sqlite3', '.mdb', '.accdb', '.iso', '.dmg', '.pkg', '.msi', '.deb', '.rpm', '.apk', '.ipa',
-  // 二进制数据
-  '.dat', '.data', '.bin', '.raw', '.pak',
-  // 多媒体（不可预览的格式）
-  '.mp3', '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.ogg', '.wav', '.aac', '.flac',
-  // 其他
-  '.psd', '.ai', '.sketch', '.fig', '.blend', '.max', '.3ds', '.fbx', '.glb', '.gltf',
-])
+
 const FILE_FIND_SHORTCUT_OPTIONS = { exclusive: true }
 
 /**
@@ -294,13 +290,14 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   const ext = getExtension(filePath)
   const isMarkdown = previewOnly && MD_EXTS.has(ext)
   const isHtml = previewOnly && HTML_EXTS.has(ext)
-  const isPlainTextEditable = previewOnly && PLAIN_TEXT_EDIT_EXTS.has(ext)
+  const isPlainTextEditable = previewOnly && EDITABLE_TEXT_EXTS.has(ext)
   const isEditableText = isMarkdown || isPlainTextEditable
   const isPdf = previewOnly && PDF_EXTS.has(ext)
   const isDocx = previewOnly && DOCX_EXTS.has(ext)
   const isOfficePreview = previewOnly && OFFICE_PREVIEW_EXTS.has(ext)
   const isLegacyOffice = previewOnly && LEGACY_OFFICE_EXTS.has(ext)
-  const isImage = previewOnly && IMAGE_EXTS.has(ext)
+  const isOfvBacked = previewOnly && isOfvBackedPath(filePath)
+  const isImage = previewOnly && IMAGE_PREVIEW_EXTS.has(ext)
   const isUnsupported = previewOnly && UNSUPPORTED_EXTS.has(ext)
 
   React.useEffect(() => {
@@ -321,10 +318,10 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     loading,
     newLength: newContent.length,
     oldLength: oldContent.length,
-    docxLength: docxHtml.length,
     officeLength: officeHtml.length,
     markdownEditing,
     markdownSourceMode,
+    docxLength: docxHtml.length,
   }), [docxHtml.length, filePath, loading, markdownEditing, markdownSourceMode, newContent.length, officeHtml.length, oldContent.length, previewOnly, viewMode])
 
   // 目录提取只需在「文件本身或其内容」变化时重建，避免 loading/编辑态切换造成的抖动
@@ -753,7 +750,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     } else if (isDocx && !docxHtml) {
       message = '无法加载 DOCX 预览'
     } else if (isOfficePreview && !officeHtml) {
-      message = `无法加载 ${ext === '.pptx' ? 'PPTX' : 'Excel'} 预览`
+      message = '无法加载 PPTX 预览'
     } else if (isImage && !imageDataUrl) {
       message = '图片文件过大，无法在此预览'
     }
@@ -1128,7 +1125,7 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
           )
         )}
 
-        {!(previewOnly && (isDocx || isOfficePreview)) && (
+        {!(previewOnly && (isDocx || isOfficePreview || isOfvBacked)) && (
           <button type="button" onClick={handleCopy}
             className={cn("p-1 rounded hover:bg-foreground/[0.06] text-foreground/40 hover:text-foreground/60 shrink-0", previewOnly && !isEditableText && "ml-auto")}
             title="复制文件内容">
@@ -1334,6 +1331,8 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
                   <div className="office-preview-host" dangerouslySetInnerHTML={{ __html: officeFallbackHtml }} />
                 ) : undefined}
               />
+            ) : isOfvBacked ? (
+              <OfvPreview filePath={filePath} access={fileAccess} className="h-full" />
             ) : isLegacyOffice ? null : isHtml && !htmlSourceMode ? (
               htmlPreviewUrl ? (
                 <iframe

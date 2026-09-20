@@ -23,6 +23,7 @@ import { AlertTriangle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useAtom } from 'jotai'
 import { sdkBackgroundTasksAtomFamily } from '@/atoms/agent-atoms'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 import type { AgentWorkspace, AgentSessionMeta } from '@profer/shared'
 
 interface MoveSessionDialogProps {
@@ -53,7 +54,7 @@ export function MoveSessionDialog({
 
   // 过滤掉当前工作区
   const availableWorkspaces = React.useMemo(
-    () => workspaces.filter((ws) => ws.id !== currentWorkspaceId),
+    () => getVisibleAgentWorkspaces(workspaces).filter((ws) => ws.id !== currentWorkspaceId),
     [workspaces, currentWorkspaceId]
   )
 

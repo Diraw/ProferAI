@@ -149,6 +149,24 @@ export function isMalformedResponseError(message?: string, stderr?: string): boo
 }
 
 /**
+ * 中转/上游的中文瞬时文案。
+ *
+ * 与 pi-ai 侧 Profer patch 已识别的可重试文案保持一致（服务繁忙 / 请求量较大 /
+ * 暂时无法及时响应），否则同一类错误在 Pi 原生重试层算可重试、在 Profer 外层却算
+ * 不可重试，重试预算白白浪费。
+ */
+export const TRANSIENT_UPSTREAM_TEXT_PATTERN = /服务繁忙|请求量较大|暂时无法及时响应|请稍后重试|请稍后再试/i
+
+/** 判断错误消息/stderr 是否为中转的中文瞬时文案 */
+export function isTransientUpstreamText(message?: string, stderr?: string): boolean {
+  if (!message && !stderr) return false
+  return (
+    (!!message && TRANSIENT_UPSTREAM_TEXT_PATTERN.test(message)) ||
+    (!!stderr && TRANSIENT_UPSTREAM_TEXT_PATTERN.test(stderr))
+  )
+}
+
+/**
  * 判断 Agent 错误是否只是传输层瞬时故障。
  *
  * 这类错误可以在当前轮提示用户并触发重试，但不应成为会话内容的一部分；
@@ -157,4 +175,21 @@ export function isMalformedResponseError(message?: string, stderr?: string): boo
 export function isEphemeralTransportError(errorCode?: string, ...messages: Array<string | undefined>): boolean {
   if (errorCode === 'network_error') return true
   return messages.some((message) => isTransientNetworkError(message) || isMalformedResponseError(message))
+}
+
+/**
+ * 判断瞬时断流错误卡是否可以从历史里丢弃。
+ *
+ * 设计意图：一次**已经恢复**的断流不应长期挂在消息末尾；但会话尾部仍处于失败
+ * 状态的错误卡必须保留——否则失败在界面上没有任何可见痕迹（表现为「Agent Running
+ * 一闪就什么都没有了」）。因此只有在该错误之后确实还有正常产出时才允许丢弃。
+ *
+ * @param recoveredLater 该错误卡之后是否还有正常产出（后续的干净 assistant 消息或 result）
+ */
+export function isRecoveredEphemeralTransportError(
+  recoveredLater: boolean,
+  errorCode?: string,
+  ...messages: Array<string | undefined>
+): boolean {
+  return recoveredLater && isEphemeralTransportError(errorCode, ...messages)
 }

@@ -1,8 +1,18 @@
-import { app, BrowserWindow, View, WebContentsView, session as electronSession, clipboard as electronClipboard, type Session } from 'electron'
+import { app, BrowserWindow, View, WebContentsView, session as electronSession, clipboard as electronClipboard, shell, type Session } from 'electron'
 import type { BrowserDownloadBlockedEvent, BrowserExecutionSource, BrowserOperationStatus, BrowserTraceAction, BrowserTraceItem, BrowserTranslateResult, BrowserViewLayout, BrowserViewState, BrowserTabListResult, BrowserTabState } from '@profer/shared'
-import { AGENT_IPC_CHANNELS, promoteMru, removeMruId, selectMruFallbackId } from '@profer/shared'
+import {
+  AGENT_IPC_CHANNELS,
+  BROWSER_LOCAL_FILE_OPEN_DEFAULT_URL,
+  BROWSER_LOCAL_FILE_SELECTION_URL_PREFIX,
+  parseBrowserLocalFileSelection,
+  promoteMru,
+  removeMruId,
+  selectMruFallbackId,
+} from '@profer/shared'
 import { assertSafeBrowserDestination, assertSafeBrowserUrl, isSafeBrowserSubresourceUrl } from './browser-policy'
-import { createAuthorizedPreviewUrl, isAuthorizedPreviewProtocol } from './browser-preview-service'
+import { basename, extname } from 'node:path'
+import { createAuthorizedPreviewUrl, createViewerPreviewUrl, isAuthorizedPreviewProtocol, viewerPreviewThemeSignature, type ViewerPreviewTheme } from './browser-preview-service'
+import { resolveAppThemeIsDark } from './app-theme-service'
 import { handleProferFileRequest } from './local-file-protocol'
 import { BrowserCdpTimeoutError, BrowserOperationAbortedError, BROWSER_OBSERVE_TIMEOUT_MS, resolveBrowserObserveAxDepth, throwIfBrowserOperationAborted, withBrowserCdpTimeout } from './browser-cdp'
 import { parseBrowserPressAction } from './browser-key-policy'
@@ -52,6 +62,20 @@ type BrowserTabRecord = {
   /** 防止 UI 与 Agent 在同一 Tab 上交错下发命令。 */
   commandTail: Promise<void>
   isLocalPreview: boolean
+  /** 本地预览文件的绝对路径。**主进程私有**：只服务于「用默认应用打开」，不下发给渲染进程。 */
+  localFilePath: string | null
+  /**
+   * 本地预览打开时**烘进 URL** 的主题参数签名（`viewerPreviewThemeSignature`）。
+   * viewer 页无 preload，主题只能活在 URL 里；换成新主题只能重新生成 URL 并重载，
+   * 所以重载前用这个签名判断"当前 URL 里的是不是已经是新主题"，避免无谓重载。
+   *
+   * `null` = **主题不参与这个标签的 URL**：HTML 本地预览直接加载文件本身，页面配色由文件
+   * 自己决定（与受管浏览器里的普通网页同理），因此主题变化不该重载它 —— 白重载会平白丢掉
+   * 页面状态（表单/滚动），而换不到任何东西。viewer 预览的签名恒为非空串。
+   */
+  localPreviewThemeSignature: string | null
+  /** 本地预览的相对路径基准目录（重载时要复用同一套授权解析口径）。 */
+  localPreviewBaseDir: string | null
   /** 仅表示来源：由 Agent 创建的标签始终保留标识，不随当前工作标签切换而丢失。 */
   openedByAgent: boolean
   /** 用于在超限时优先回收最久未使用的 Agent 标签。 */
@@ -128,8 +152,26 @@ export interface BrowserObservation {
   elements: Array<{ ref: string; role: string; name: string; editable: boolean }>
 }
 
+/**
+ * 本地预览的主题来源优先级。
+ *
+ * 1. 调用方显式给的（用户从 app 里打开文件时，渲染进程能算出真实生效的 token）；
+ * 2. 渲染进程最近一次同步过来的（主进程会记住，覆盖 Agent 打开等没有渲染进程上下文的入口）；
+ * 3. 都没有时按 settings 现算明暗 —— 只保证明暗正确，皮肤配色仍需渲染进程给。
+ *
+ * `resolveFallbackTheme` 做成惰性：命中前两档时不该去读设置/扫皮肤目录。
+ */
+export function resolvePreviewTheme(
+  explicit: ViewerPreviewTheme | undefined,
+  remembered: ViewerPreviewTheme | null,
+  resolveFallbackTheme: () => 'light' | 'dark',
+): ViewerPreviewTheme {
+  return explicit ?? remembered ?? { theme: resolveFallbackTheme() }
+}
+
 function emptyTabState(tabId: string): BrowserTabState {
-  return { tabId, url: '', title: '新建标签页', loading: false, visible: false, canGoBack: false, canGoForward: false, zoomFactor: 1, translated: false, loadError: null, trace: [] }
+  return { tabId, url: '',
+    localFile: null, title: '新建标签页', loading: false, visible: false, canGoBack: false, canGoForward: false, zoomFactor: 1, translated: false, loadError: null, trace: [] }
 }
 
 function rememberInvalidatedLayoutRenderer(browserSession: BrowserSessionRecord, rendererInstanceId: string): void {
@@ -212,6 +254,13 @@ export class BrowserController {
   private readonly guardedSessions = new WeakSet<Session>()
   /** 自定义 partition 不继承 default session 的协议处理器，必须单独注册本地预览协议。 */
   private readonly previewProtocolSessions = new WeakSet<Session>()
+  /**
+   * 渲染进程最近同步过来的主题参数。
+   *
+   * 用途：Agent 的 `BrowserPreviewOpen` 工具没有渲染进程上下文、拿不到主题；
+   * 用最近一次同步值补上，可以让这些预览也跟随当前皮肤（而不是永远浅色/默认色）。
+   */
+  private lastKnownPreviewTheme: ViewerPreviewTheme | null = null
 
   configureSession(sessionId: string, input: ConfigureBrowserSessionInput): void {
     const previous = this.configurations.get(sessionId)
@@ -301,12 +350,14 @@ export class BrowserController {
         tabId: tab.tabId,
         url: tab.state.url,
         title: tab.state.title,
+        localFile: tab.state.localFile,
         loading: tab.state.loading,
         zoomFactor: tab.zoomFactor,
         openedByAgent: tab.openedByAgent,
       })),
       url: active.state.url,
       title: active.state.title,
+      localFile: active.state.localFile,
       loading: active.state.loading,
       visible: active.state.visible,
       canGoBack: active.state.canGoBack,
@@ -424,6 +475,93 @@ export class BrowserController {
     tab.state.trace = [...tab.state.trace, item].slice(-MAX_TRACE_ITEMS)
     browserSession.ledger = [...browserSession.ledger, item].slice(-100)
     this.emit(browserSession)
+  }
+
+  /**
+   * 应用主题变化：把各会话里**仍然打开着**的本地预览按新主题重载，并记住这次的主题。
+   *
+   * 为什么是重载而不是改样式：viewer 页跑在无 preload 的沙箱里，主进程只能靠导航与它通信；
+   * OFV 的 theme 又是 createViewer 时定死的，画布类格式（psd/图片等）不会跟着 CSS 变量变。
+   * 重载是唯一对所有格式都成立的做法，代价是丢缩放/滚动位置 —— 换主题不是高频动作，可接受。
+   *
+   * 主题 = 明暗 + token 值，判重按「烘进 URL 的参数签名」：皮肤之间色调相同也能判出差异。
+   * 记住它是为了之后由 Agent 打开、没有渲染进程上下文的预览（`BrowserPreviewOpen`）。
+   */
+  async refreshLocalPreviewThemes(previewTheme: ViewerPreviewTheme): Promise<number> {
+    // 渲染进程是"当前主题"的唯一权威：它每次换主题都会同步过来，顺便给**之后**新建的
+    // 本地预览（例如 Agent 的 BrowserPreviewOpen）留下可用的主题，那些入口自己没有主题来源。
+    this.lastKnownPreviewTheme = previewTheme
+    const signature = viewerPreviewThemeSignature(previewTheme)
+    let refreshed = 0
+    for (const browserSession of this.sessions.values()) {
+      for (const tab of browserSession.tabs.values()) {
+        if (!tab.isLocalPreview || !tab.localFilePath) continue
+        // null = HTML 本地预览（主题不在它的 URL 里）；签名相同 = 已经烘的就是这套主题
+        if (!tab.localPreviewThemeSignature || tab.localPreviewThemeSignature === signature) continue
+        try {
+          const preview = createViewerPreviewUrl(
+            tab.localFilePath,
+            browserSession.allowedRoots,
+            tab.localPreviewBaseDir ?? undefined,
+            previewTheme,
+          )
+          await this.loadUrl(tab, preview.url)
+          tab.localPreviewThemeSignature = signature
+          refreshed += 1
+        } catch (error) {
+          this.trace(browserSession, tab, 'navigate', `按新主题重载预览失败：${error instanceof Error ? error.message : '未知错误'}`, 'failed')
+        }
+      }
+    }
+    return refreshed
+  }
+
+  /** 用系统默认应用打开当前标签的本地文件；非本地预览 / 无路径时忽略并留痕。 */
+  private openLocalFileWithDefaultApp(browserSession: BrowserSessionRecord, tab: BrowserTabRecord): void {
+    if (!tab.isLocalPreview || !tab.localFilePath) {
+      this.trace(browserSession, tab, 'navigate', '已忽略非本地预览的打开请求', 'failed')
+      return
+    }
+    const filePath = tab.localFilePath
+    void shell.openPath(filePath).then((errorMessage) => {
+      if (errorMessage) {
+        this.trace(browserSession, tab, 'navigate', `用默认应用打开失败：${errorMessage}`, 'failed')
+        return
+      }
+      this.trace(browserSession, tab, 'navigate', `已用默认应用打开 ${basename(filePath)}`, 'verified')
+    })
+  }
+
+  /**
+   * 把 viewer 页回投的划词转给渲染进程，由渲染进程写成对话引用。
+   *
+   * 三道闸：只认本地预览标签、只取该标签**自己**的文件路径、文本按上限截断；
+   * 其余一律忽略并留痕（页面被注入时也只能往这里塞文本，拿不到别的能力）。
+   */
+  private forwardLocalFileSelection(browserSession: BrowserSessionRecord, tab: BrowserTabRecord, url: string): void {
+    if (!tab.isLocalPreview || !tab.localFilePath) {
+      this.trace(browserSession, tab, 'navigate', '已忽略非本地预览的划词回投', 'failed')
+      return
+    }
+    const text = parseBrowserLocalFileSelection(url)
+    if (text === null) {
+      this.trace(browserSession, tab, 'navigate', '已忽略畸形的划词回投', 'failed')
+      return
+    }
+    if (!this.owner || this.owner.isDestroyed()) return
+    this.owner.webContents.send(AGENT_IPC_CHANNELS.BROWSER_LOCAL_FILE_SELECTION, {
+      sessionId: browserSession.sessionId,
+      text,
+      filePath: tab.localFilePath,
+      fileName: basename(tab.localFilePath),
+    })
+    this.trace(
+      browserSession,
+      tab,
+      'navigate',
+      text ? `已引用 ${basename(tab.localFilePath)} 中选中的 ${text.length} 字` : `已清空 ${basename(tab.localFilePath)} 的划词引用`,
+      'verified',
+    )
   }
 
   private invalidateTabDocument(tab: BrowserTabRecord): void {
@@ -602,6 +740,9 @@ export class BrowserController {
       generation: 0,
       commandTail: Promise.resolve(),
       isLocalPreview,
+      localFilePath: null,
+      localPreviewThemeSignature: null,
+      localPreviewBaseDir: null,
       openedByAgent: claimAsAgent,
       lastActivityAt: Date.now(),
       lastRequestedUrl: null,
@@ -613,6 +754,14 @@ export class BrowserController {
     // WebContentsView 不应放任 target=_blank 创建脱离主窗口的 BrowserWindow；此前直接 deny
     // 也导致用户和 Agent 点击站外链接没有任何反应。将安全的 HTTP(S) 目标转为当前受管浏览器的新标签。
     view.webContents.setWindowOpenHandler(({ url }) => {
+      if (url === BROWSER_LOCAL_FILE_OPEN_DEFAULT_URL) {
+        this.openLocalFileWithDefaultApp(browserSession, tab)
+        return { action: 'deny' }
+      }
+      if (url.startsWith(BROWSER_LOCAL_FILE_SELECTION_URL_PREFIX)) {
+        this.forwardLocalFileSelection(browserSession, tab, url)
+        return { action: 'deny' }
+      }
       void this.openExternalLinkInDisplayTab(browserSession, tab, url)
       return { action: 'deny' }
     })
@@ -620,6 +769,16 @@ export class BrowserController {
       // 在校验及真正导航前失效，避免 Observe 后在新页面按旧坐标操作。
       this.invalidateTabDocument(tab)
       try {
+        if (url === BROWSER_LOCAL_FILE_OPEN_DEFAULT_URL) {
+          this.openLocalFileWithDefaultApp(browserSession, tab)
+          event.preventDefault()
+          return
+        }
+        if (url.startsWith(BROWSER_LOCAL_FILE_SELECTION_URL_PREFIX)) {
+          this.forwardLocalFileSelection(browserSession, tab, url)
+          event.preventDefault()
+          return
+        }
         if (isAuthorizedPreviewProtocol(url) && tab.isLocalPreview) return
         tab.lastRequestedUrl = assertSafeBrowserUrl(url)
       } catch {
@@ -680,12 +839,24 @@ export class BrowserController {
     return tab
   }
 
-  private getOrCreateSession(sessionId: string, allowedRoots: string[] = [], createAgentTab = true): BrowserSessionRecord {
+  private getOrCreateSession(
+    sessionId: string,
+    allowedRoots: string[] = [],
+    createAgentTab = true,
+    /**
+     * 新会话是否预建一个空标签。默认 true —— `navigate` / `observe` / `click` 这类操作都假定
+     * 「已有一个标签」。但**自己会紧接着 createTab** 的调用方（createNewTab / createDisplayTab /
+     * previewOpen）必须传 false：否则一次请求会落下两个标签（用户点一次「新建标签页」
+     * 看到两个空白标签），回归测试见 browser-controller-fresh-session-tab.test.ts。
+     */
+    ensureInitialTab = true,
+  ): BrowserSessionRecord {
     const browserSession = this.sessions.get(sessionId) ?? this.createSession(sessionId, allowedRoots)
     if (allowedRoots.length > 0) this.setAllowedRoots(sessionId, allowedRoots)
-    if (browserSession.tabs.size === 0) this.createTab(browserSession, false, createAgentTab)
-    // 每个 Browser* 调用都先发布可渲染状态：即使后续操作失败，当前激活会话也能立即展示浏览器。
-    this.emit(browserSession)
+    if (ensureInitialTab && browserSession.tabs.size === 0) this.createTab(browserSession, false, createAgentTab)
+    // 自己会紧接着 createTab 的冷会话不能提前广播：此时 activeTabId 为空，buildState 会抛错。
+    // 已有标签或默认预建标签时才发布当前状态；冷会话的调用方在建完首 tab 后自行返回/发布状态。
+    if (browserSession.tabs.size > 0) this.emit(browserSession)
     return browserSession
   }
 
@@ -806,6 +977,7 @@ export class BrowserController {
         tabId: tab.tabId,
         url: tab.state.url,
         title: tab.state.title,
+        localFile: tab.state.localFile,
         loading: tab.state.loading,
         zoomFactor: tab.zoomFactor,
         openedByAgent: tab.openedByAgent,
@@ -988,7 +1160,8 @@ export class BrowserController {
 
   /** Agent 新建工作 tab，并立即切到该标签让用户能看到接下来的操作。 */
   async createNewTab(sessionId: string, url?: string): Promise<BrowserViewState> {
-    const browserSession = this.getOrCreateSession(sessionId)
+    // 自己下面就会 createTab，不能让 getOrCreateSession 再补一个空标签
+    const browserSession = this.getOrCreateSession(sessionId, [], true, false)
     this.assertRiskDisclaimerAcknowledged()
     const tab = this.createTab(browserSession, false, true)
     browserSession.agentTabId = tab.tabId
@@ -1003,13 +1176,16 @@ export class BrowserController {
 
   /** 用户在浏览器面板中新建 tab；不会抢占 Agent 的工作 tab。 */
   async createDisplayTab(sessionId: string, url?: string): Promise<BrowserViewState> {
-    const browserSession = this.getOrCreateSession(sessionId, [], false)
+    // 同上：新建标签的调用方自己建标签，不然新会话会一次落两个空白标签
+    const browserSession = this.getOrCreateSession(sessionId, [], false, false)
     this.assertRiskDisclaimerAcknowledged()
     this.markUserBrowserContext(browserSession)
     const tab = this.createTab(browserSession)
     this.activateDisplayTab(browserSession, tab)
     const reclaimed = this.reclaimExcessAgentTabs(browserSession)
     if (reclaimed > 0) this.trace(browserSession, tab, 'tab', `标签超过 ${MAX_BROWSER_TABS} 个上限，已回收 ${reclaimed} 个最久未使用的 Agent 标签`)
+    // 创建/激活完成后广播最新状态；冷会话原先只有调用方拿到返回值，BrowserPanel 不会同步到新 tab。
+    this.emit(browserSession)
     if (url?.trim()) return this.navigateDisplay(sessionId, url)
     return structuredClone(this.buildState(browserSession))
   }
@@ -1051,11 +1227,29 @@ export class BrowserController {
     return structuredClone(this.buildState(browserSession))
   }
 
-  async previewOpen(sessionId: string, inputPath: string, tabId: string | undefined, allowedRoots: string[], baseDir?: string, signal?: AbortSignal): Promise<BrowserViewState> {
-    const browserSession = this.getOrCreateSession(sessionId, allowedRoots)
+  async previewOpen(
+    sessionId: string,
+    inputPath: string,
+    tabId: string | undefined,
+    allowedRoots: string[],
+    baseDir?: string,
+    signal?: AbortSignal,
+    previewTheme?: ViewerPreviewTheme,
+  ): Promise<BrowserViewState> {
+    // 同上：下面会按需 createTab（本地预览标签），不再让新会话先补一个空白标签
+    const browserSession = this.getOrCreateSession(sessionId, allowedRoots, true, false)
     this.assertRiskDisclaimerAcknowledged()
+    const resolvedPreviewTheme = resolvePreviewTheme(previewTheme, this.lastKnownPreviewTheme, () =>
+      resolveAppThemeIsDark() ? 'dark' : 'light',
+    )
     // 先校验路径，避免无效路径遗留一个空白的 Agent 预览标签。
-    const preview = createAuthorizedPreviewUrl(inputPath, browserSession.allowedRoots, baseDir)
+    // HTML 直接加载文件本身（可加载同目录相对资源）；其它扩展名交给内置 viewer 页
+    // （Open File Viewer 渲染，文件以 token URL 作为 ?src= 传入，主题以 ?theme=/?tokens= 传入）。
+    const extension = extname(inputPath).toLowerCase()
+    const usesViewerPage = extension !== '.html' && extension !== '.htm'
+    const preview = usesViewerPage
+      ? createViewerPreviewUrl(inputPath, browserSession.allowedRoots, baseDir, resolvedPreviewTheme)
+      : createAuthorizedPreviewUrl(inputPath, browserSession.allowedRoots, baseDir)
     const tab = tabId ? this.getAgentTab(browserSession, tabId) : this.createTab(browserSession, true, true)
     browserSession.agentTabId = tab.tabId
     this.activateDisplayTab(browserSession, tab)
@@ -1063,6 +1257,12 @@ export class BrowserController {
     if (reclaimed > 0) this.trace(browserSession, tab, 'tab', `已回收 ${reclaimed} 个最久未使用的 Agent 标签以保持最多 ${MAX_BROWSER_TABS} 个标签`)
     return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
       tab.isLocalPreview = true
+      tab.localFilePath = preview.filePath
+      // HTML 直接加载文件本身，主题不在它的 URL 里 —— 写 null 表示"这个标签不跟随主题"
+      tab.localPreviewThemeSignature = usesViewerPage ? viewerPreviewThemeSignature(resolvedPreviewTheme) : null
+      tab.localPreviewBaseDir = baseDir ?? null
+      // 渲染侧据此把地址栏换成「本地文件 · 只读 + 文件名」（不显示 token URL）
+      tab.state.localFile = { name: basename(preview.filePath), readOnly: true }
       try {
         await this.loadUrl(tab, preview.url, operationSignal)
         this.trace(browserSession, tab, 'navigate', `预览本地文件 ${preview.filePath.split(/[\\/]/).pop() ?? preview.filePath}`, 'verified')
@@ -1114,6 +1314,10 @@ export class BrowserController {
     const host = new URL(safeUrl).host
     return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
       tab.isLocalPreview = false
+      tab.localFilePath = null
+      tab.localPreviewThemeSignature = null
+      tab.localPreviewBaseDir = null
+      tab.state.localFile = null
       this.trace(browserSession, tab, 'navigate', `正在打开 ${host}`, 'dispatched')
       try {
         await this.loadUrl(tab, safeUrl, operationSignal)
@@ -1149,6 +1353,10 @@ export class BrowserController {
     try {
       await this.runTabOperation(browserSession, tab, undefined, async () => {
         tab.isLocalPreview = false
+        tab.localFilePath = null
+        tab.localPreviewThemeSignature = null
+        tab.localPreviewBaseDir = null
+        tab.state.localFile = null
         await this.loadUrl(tab, safeUrl)
         this.updateNavigationState(browserSession, tab)
       })
@@ -1169,6 +1377,10 @@ export class BrowserController {
     const host = new URL(safeUrl).host
     return this.runTabOperation(browserSession, tab, undefined, async () => {
       tab.isLocalPreview = false
+      tab.localFilePath = null
+      tab.localPreviewThemeSignature = null
+      tab.localPreviewBaseDir = null
+      tab.state.localFile = null
       this.trace(browserSession, tab, 'navigate', `正在打开 ${host}`, 'dispatched')
       try {
         await this.loadUrl(tab, safeUrl)

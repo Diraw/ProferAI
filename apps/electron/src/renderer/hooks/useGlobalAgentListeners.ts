@@ -80,6 +80,7 @@ import { compactCompletedBackgroundStreamState, isCurrentAgentStreamCompletion, 
 import { AgentStreamRestoreGate } from '@/lib/agent-stream-restore-gate'
 import { isAbsoluteFilePath } from '@/lib/file-utils'
 import { inspectOfficialPptxPreview } from '@/components/file-browser/office-preview/official-preview-session'
+import { isAgentWorkspaceIdVisible } from '@/lib/product-feature-flags'
 
 /** 触发右侧文件浏览器自动定位的写入类工具集合 */
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Update'])
@@ -410,14 +411,16 @@ export function useGlobalAgentListeners(): void {
 
     /** 构建导航到指定会话的回调 */
     const makeNavigateToSession = (sessionId: string, sessionTitle: string) => () => {
+      const sessions = store.get(agentSessionsAtom)
+      const session = sessions.find((s) => s.id === sessionId)
+      if (!isAgentWorkspaceIdVisible(session?.workspaceId, store.get(agentWorkspacesAtom))) return
+
       const tabs = store.get(tabsAtom)
       const result = openTab(tabs, { type: 'agent', sessionId, title: sessionTitle })
       store.set(tabsAtom, result.tabs)
       store.set(activeTabIdAtom, result.activeTabId)
       store.set(appModeAtom, 'agent')
       store.set(currentAgentSessionIdAtom, sessionId)
-      const sessions = store.get(agentSessionsAtom)
-      const session = sessions.find((s) => s.id === sessionId)
       if (session?.workspaceId) {
         store.set(currentAgentWorkspaceIdAtom, session.workspaceId)
       }
@@ -1247,12 +1250,21 @@ export function useGlobalAgentListeners(): void {
         const customSounds = store.get(customNotificationSoundsAtom)
         const sessionTitle = getSessionTitle(data.sessionId)
         if (!backgroundTasksPending) {
+          // 只有真正正常完成才报「任务完成」并播放完成音；失败/中断/用户停止的情况下
+          // 仍报「任务已完成」+ 提示音会误导用户（历史现象：Agent Running 一闪而过、
+          // 界面什么都没有，却响了一声「任务完成」）。非正常结束改为静音通知。
+          const runEndedNormally =
+            (data.endReason === undefined || data.endReason === 'completed') &&
+            (data.resultSubtype === undefined || data.resultSubtype === 'success') &&
+            data.stoppedByUser !== true
           sendDesktopNotification(
-            'Agent 任务完成',
-            `[${sessionTitle}] 任务已完成`,
+            runEndedNormally ? 'Agent 任务完成' : 'Agent 本轮结束',
+            runEndedNormally
+              ? `[${sessionTitle}] 任务已完成`
+              : `[${sessionTitle}] ${data.endReasonLabel ?? '任务未完成'}`,
             enabled,
             {
-              playSound: enabled && soundEnabled,
+              playSound: enabled && soundEnabled && runEndedNormally,
               soundType: 'taskComplete',
               sounds,
               customSounds,
@@ -1508,6 +1520,7 @@ export function useGlobalAgentListeners(): void {
     // 与 PlanningView.startTodoInWorkspace（主窗口中启动）保持同等效果，补齐跨窗口断链。
     const cleanupTodoSessionReady = window.electronAPI.onTodoAgentSessionReady(
       ({ todo, session }) => {
+        if (!isAgentWorkspaceIdVisible(session.workspaceId, store.get(agentWorkspacesAtom))) return
         store.set(agentSessionsAtom, (previous) => upsertAgentSession(previous, session))
         if (session.workspaceId) {
           store.set(currentAgentWorkspaceIdAtom, session.workspaceId)

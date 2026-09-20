@@ -213,7 +213,9 @@ export function TabBarItem({
           ref={buttonRef}
           type="button"
           className={cn(
-            'group relative flex h-[37px] w-[37px] items-center justify-center overflow-hidden rounded-[8px] px-0',
+            // 草稿入口是纯图标固定按钮，用略大于普通标签的圆角 + 更淡的默认描边（见 globals.css
+            // 的 .topbar-tab-scratch；顶栏规则权重高于 rounded-* 工具类，这里只做语义对齐）。
+            'topbar-tab-scratch group relative flex h-[37px] w-[37px] items-center justify-center overflow-hidden rounded-[10px] px-0',
             'text-xs transition-colors select-none cursor-grab active:cursor-grabbing focus-visible:ring-0 focus-visible:ring-offset-0',
             'border border-transparent',
             isActive

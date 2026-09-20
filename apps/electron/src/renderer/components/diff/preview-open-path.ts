@@ -76,3 +76,13 @@ export function getPreviewFileAccess(
     ),
   }
 }
+
+/**
+ * 预览需要的目录基准：`DiffTabContent` 要求 dirPath 必填（用于相对路径解析与默认应用探测）。
+ * 文件自带 dirPath 时用它，否则取文件所在目录，最后回落到会话工作目录。
+ * （从 PreviewTabContent 的局部实现提到这里，浏览器列的列内宿主也复用同一口径。）
+ */
+export function resolvePreviewDirPath(filePath: string, sessionPath: string): string {
+  const lastSep = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
+  return lastSep > 0 ? filePath.slice(0, lastSep) : sessionPath
+}

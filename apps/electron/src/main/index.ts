@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, nativeTheme, powerMonitor, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, powerMonitor, protocol, screen, shell } from 'electron'
 import { join } from 'path'
 import { createConnection } from 'net'
 import { existsSync, cpSync, mkdirSync, readdirSync } from 'fs'
@@ -148,6 +148,7 @@ function registerProtocolsAndHandlers(): void {
 
 
 import { getSettings, updateSettings } from './lib/settings-service'
+import { resolveAppThemeIsDark } from './lib/app-theme-service'
 import { constrainStartupSplashBounds, createStartupSplashHtml } from './lib/startup-splash'
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
@@ -343,13 +344,8 @@ let startupSplashWindow: BrowserWindow | null = null
 // CSS 圆环会在约 2.4 秒内陆续扩散；保留足够展示时间以便用户观察启动反馈。
 const STARTUP_SPLASH_MIN_MS = 2400
 
-function resolveStartupSplashDark(): boolean {
-  const settings = getSettings()
-  if (settings.themeMode === 'light') return false
-  if (settings.themeMode === 'system') return nativeTheme.shouldUseDarkColors
-  if (settings.themeMode === 'special') return !settings.themeStyle?.endsWith('-light')
-  return true
-}
+/** 启动闪屏的背景明暗：与「Agent 打开的本地预览」共用同一套解析（皮肤 tone 优先于 id 后缀启发式） */
+const resolveStartupSplashDark = resolveAppThemeIsDark
 
 /** 获取主窗口实例（供其他模块使用）。 */
 export { getMainWindow }

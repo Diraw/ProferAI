@@ -138,6 +138,18 @@ export const systemIsDarkAtom = atom<boolean>(
 export const skinsAtom = atom<SkinInfo[]>([])
 
 /**
+ * 当前生效的皮肤 id；没启用皮肤（含 special + default）时为 null。
+ *
+ * 供需要在「皮肤 CSS 真落到 DOM 之后」再动作的调用方使用（见 whenSkinCssApplied）：
+ * special 模式下光看 `resolvedThemeAtom` 只能知道明暗，两个深色皮肤之间切换是看不出来的。
+ */
+export const activeSkinIdAtom = atom<string | null>((get) => {
+  if (get(themeModeAtom) !== 'special') return null
+  const style = get(themeStyleAtom)
+  return style === 'default' ? null : style
+})
+
+/**
  * 皮肤 id 后缀推断 tone 的统一兜底（-light 后缀视为浅色，其余深色）。
  * applyThemeToDOM、resolvedThemeAtom 与 index.html 首帧脚本必须共用同一方向，
  * 否则注册表未就绪窗口期内 UI 与 DOM 的明暗判断相反。
@@ -184,19 +196,57 @@ const SKIN_STYLE_ID = 'skin-css'
 /** CSS 注入代数序号：仅接受最新一次请求的结果，防快速切换皮肤时旧请求覆盖新 CSS */
 let skinCssGeneration = 0
 /**
+ * 在途的皮肤 CSS 注入。
+ *
+ * `applySkinCss` 是异步 IPC（渲染进程不缓存皮肤 CSS），因此换肤后的同一帧里
+ * `getComputedStyle` 读到的仍是上一个皮肤的 token。需要"按当前皮肤取值"的调用方
+ * （浏览器列预览的主题同步）必须先 await 注完再读，这个引用就是那把闸。
+ */
+let skinCssInFlight: { skinId: string; promise: Promise<void> } | null = null
+
+/**
+ * 皮肤 CSS 落地代数：每次注入尝试（成功、失败、或"已归属则短路"）都自增。
+ *
+ * 为什么要它：启动时皮肤 CSS 是异步注入的，而 `themeMode/themeStyle` 这些 atom 在注入开始前
+ * 就已就绪。需要在"皮肤真生效"之后重取值的调用方（浏览器列预览主题同步）只依赖 atom 会拿到
+ * 基础主题的 token；订阅这个代数就能在注入落地后自动重跑一次（同一套 token 重发是幂等的：
+ * 主进程按签名判重，不会重载已打开的预览）。
+ */
+export const skinCssAppliedRevisionAtom = atom(0)
+
+/** 等「这套皮肤的 CSS 已经落到 DOM」。目标皮肤已应用 / 未启用皮肤 / 根本没有在途注入（皮肤不存在或读取失败）都立即 resolve。 */
+export function whenSkinCssApplied(skinId: string | null): Promise<void> {
+  if (!skinId || typeof document === 'undefined') return Promise.resolve()
+  const applied = document.getElementById(SKIN_STYLE_ID) as HTMLStyleElement | null
+  if (applied?.dataset.skinId === skinId && applied.textContent) return Promise.resolve()
+  return skinCssInFlight?.skinId === skinId ? skinCssInFlight.promise : Promise.resolve()
+}
+
+/**
  * 注入皮肤 CSS 到 <style id="skin-css">。
  * 幂等（默认）：style 元素已归属当前皮肤（data-skin-id）且有内容时直接短路，
  * 避免重复 IPC + style.textContent 赋值触发的全文档样式重算（P0）。
  * 归属判断不依赖“调用先于 class 切换”的隐式顺序，切换皮肤时必然重新拉取。
  * force=true 用于手动刷新皮肤库后强制重注入。
  */
-async function applySkinCss(id: string, force = false): Promise<void> {
+function applySkinCss(id: string, force = false): Promise<void> {
+  const promise = injectSkinCss(id, force).finally(() => {
+    if (skinCssInFlight?.promise === promise) skinCssInFlight = null
+    getDefaultStore().set(skinCssAppliedRevisionAtom, (revision) => revision + 1)
+  })
+  skinCssInFlight = { skinId: id, promise }
+  return promise
+}
+
+async function injectSkinCss(id: string, force: boolean): Promise<void> {
   const html = document.documentElement
+  // 代数自增必须早于"已归属则短路"：快速 A→B→A 时，A 的短路若不自增代数，
+  // 更早发起、后返回的 B 注入就会被当成最新结果写进 DOM，app 留在 A 而 CSS 变成 B。
+  const generation = ++skinCssGeneration
   if (!force) {
     const existing = document.getElementById(SKIN_STYLE_ID) as HTMLStyleElement | null
     if (existing && existing.dataset.skinId === id && existing.textContent) return
   }
-  const generation = ++skinCssGeneration
   const css = await window.electronAPI.getSkinCss(id).catch(() => null)
   // 注入期间又发起了新的切换，丢弃本次结果（class 已切换为更新的皮肤）
   if (generation !== skinCssGeneration) return
