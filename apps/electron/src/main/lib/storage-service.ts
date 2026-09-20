@@ -20,6 +20,7 @@ import {
 } from './config-paths'
 import { listAgentSessions } from './agent-session-manager'
 import { listAgentWorkspaces } from './agent-workspace-manager'
+import { blobRootDir } from './blob-store'
 
 // ─── 类型定义 ───
 
@@ -29,6 +30,7 @@ export type StorageCategoryKey =
   | 'workspaces'
   | 'conversations'
   | 'attachments'
+  | 'session-blobs'
   | 'temp-files'
 
 export interface StorageCategory {
@@ -142,6 +144,90 @@ function getActiveSdkSessionIds(): Set<string> {
 
 function getActiveWorkspaceSlugs(): Set<string> {
   return new Set(listAgentWorkspaces().map((w) => w.slug))
+}
+
+/**
+ * 收集全部会话文件引用到的 blob 哈希。
+ *
+ * 用正则而不是逐行 JSON.parse：会话文件可达几百 MB，解析全部行代价过高。
+ * 误匹配的代价是**单向安全**的——只会把某个哈希误加入「被引用」集合，
+ * 导致对应的孤儿 blob 这次不被删（下次再说），**绝不会反过来误删在用数据**。
+ *
+ * ⚠️ 不要给这个结果加缓存：会话文件是追加写的，目录 mtime 不会因追加而变，
+ * 任何基于 mtime 的缓存都可能漏掉新写的引用，从而删掉活数据。
+ */
+async function collectReferencedBlobHashes(): Promise<Set<string>> {
+  const hashes = new Set<string>()
+  const dir = getAgentSessionsDir()
+  if (!existsSync(dir)) return hashes
+
+  const pattern = /"hash"\s*:\s*"sha256:([0-9a-f]{64})"/g
+  try {
+    const files = await fsPromises.readdir(dir)
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue
+      try {
+        const content = await fsPromises.readFile(join(dir, file), 'utf-8')
+        pattern.lastIndex = 0
+        let match: RegExpExecArray | null
+        while ((match = pattern.exec(content)) !== null) hashes.add(match[1]!)
+      } catch { /* 单个文件读失败不影响其余 */ }
+    }
+  } catch { /* 目录不可读时返回已收集的部分 */ }
+
+  return hashes
+}
+
+/** 遍历 blob 目录，逐文件回调（跳过临时文件） */
+async function walkBlobFiles(
+  onFile: (filePath: string, fileName: string, size: number) => void,
+): Promise<void> {
+  const root = blobRootDir()
+  if (!existsSync(root)) return
+
+  const walk = async (dir: string): Promise<void> => {
+    let entries: string[]
+    try {
+      entries = await fsPromises.readdir(dir)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry)
+      try {
+        const stat = await fsPromises.stat(full)
+        if (stat.isDirectory()) await walk(full)
+        else if (!entry.includes('.tmp-')) onFile(full, entry, stat.size)
+      } catch { /* skip */ }
+    }
+  }
+
+  await walk(root)
+}
+
+async function calcSessionBlobsCategory(): Promise<StorageCategory> {
+  let bytes = 0, count = 0, orphanBytes = 0, orphanCount = 0
+  const orphans: { path: string; size: number }[] = []
+
+  // 先收集引用集，再判定孤儿——顺序不能反
+  const referenced = await collectReferencedBlobHashes()
+  await walkBlobFiles((filePath, fileName, size) => {
+    bytes += size
+    count++
+    if (!referenced.has(fileName)) {
+      orphanBytes += size
+      orphanCount++
+      orphans.push({ path: filePath, size })
+    }
+  })
+
+  return {
+    label: '会话外置内容',
+    key: 'session-blobs',
+    bytes, count,
+    hasOrphans: orphanCount > 0,
+    orphanBytes, orphanCount,
+  }
 }
 
 async function calcAgentSessionsCategory(): Promise<StorageCategory> {
@@ -359,6 +445,7 @@ export async function calculateStorageStats(): Promise<StorageStats> {
     calcWorkspacesCategory(),
     calcConversationsCategory(),
     calcAttachmentsCategory(),
+    calcSessionBlobsCategory(),
     calcTempFilesCategory(),
   ])
   return {
@@ -485,6 +572,26 @@ async function cleanupOrphanSdkConfig(): Promise<CleanupResult> {
   return { freedBytes, deletedCount, errors }
 }
 
+/**
+ * 清理没被任何会话引用的外置载荷（孤立 blob）。
+ *
+ * 会话被删除后，它的载荷不会自动消失——需要靠引用集反查出来。
+ * **顺序必须是「先建引用集、再删」**，反过来会删掉在用数据。
+ */
+async function cleanupOrphanSessionBlobs(): Promise<CleanupResult> {
+  let freedBytes = 0, deletedCount = 0
+  const errors: string[] = []
+
+  const referenced = await collectReferencedBlobHashes()
+  await walkBlobFiles((filePath, fileName) => {
+    if (referenced.has(fileName)) return
+    const freed = safeUnlink(filePath)
+    if (freed > 0) { freedBytes += freed; deletedCount++ }
+  })
+
+  return { freedBytes, deletedCount, errors }
+}
+
 async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
   const wsDir = getAgentWorkspacesDir()
   const activeIds = getActiveSessionIds()
@@ -576,6 +683,7 @@ export async function cleanupStorage(options: CleanupOptions): Promise<CleanupRe
         case 'agent-sessions': merge(await cleanupOrphanAgentSessions()); break
         case 'sdk-config': merge(await cleanupOrphanSdkConfig()); break
         case 'workspaces': merge(await cleanupOrphanWorkspaces()); break
+        case 'session-blobs': merge(await cleanupOrphanSessionBlobs()); break
       }
     } else if (options.archivedBeforeDays > 0) {
       if (cat === 'agent-sessions' || cat === 'sdk-config') {

@@ -26,10 +26,11 @@ import {
 import { getAgentWorkspace } from './agent-workspace-manager'
 import { assertEnabledModelForChannel } from './agent-model-selection'
 import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
+import { copyForkFile, buildForkProjectKey, renameForkFile, removeForkPath } from './fork-file-ops'
 import { listAgentPresets, normalizeSessionPresetId, presetReferenceForId } from './agent-preset-manager'
 import { copySettledPiHarnessEventsForFork } from './pi-harness/pi-harness-store'
 import { forkPiSessionArtifact } from './pi-session-fork'
-import { isEphemeralTransportError } from './error-patterns'
+import { isRecoveredEphemeralTransportError } from './error-patterns'
 import { adoptPiFileCheckpoints, loadPiFileCheckpoint, restorePiFileCheckpoint, prunePiFileCheckpoints, removePiFileCheckpoints } from './pi-file-checkpoint'
 
 // 在模块加载时一次性设置 SDK 配置目录，避免在 forkSession 等异步调用中临时修改/恢复
@@ -65,9 +66,24 @@ import {
   type SessionHealth,
   type AgentRuntime,
   type RewindSessionResult,
+  SESSION_BLOB_REFS_FIELD,
+  SESSION_BLOB_MISSING_FIELD,
+  readSessionBlobRefs,
 } from '@profer/shared'
 import { getConversationMessages } from './conversation-manager'
 import { isUserInputMessage } from '@profer/session-core'
+
+const activeForkSessionIds = new Set<string>()
+let agentSessionActiveChecker: ((sessionId: string) => boolean) | undefined
+
+/** 由 agent-service 注入运行时活跃状态，避免 manager 反向依赖 orchestrator。 */
+export function setAgentSessionActiveChecker(checker: ((sessionId: string) => boolean) | undefined): void {
+  agentSessionActiveChecker = checker
+}
+
+export function isAgentSessionForking(sessionId: string): boolean {
+  return activeForkSessionIds.has(sessionId)
+}
 
 interface PersistedAssistantMessage {
   type?: string
@@ -521,19 +537,29 @@ export function getAgentSessionMessages(id: string): AgentMessage[] {
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const lines = raw.split('\n').filter((line) => line.trim())
-    const messages: AgentMessage[] = []
+    const parsedMessages: AgentMessage[] = []
     for (const line of lines) {
       try {
-        const parsed = JSON.parse(line) as AgentMessage
-        const assistantError = getPersistedAssistantError(parsed)
-        if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) continue
-        messages.push(parsed)
+        parsedMessages.push(JSON.parse(line) as AgentMessage)
       } catch {
         // 单行损坏不丢整文件：跳过坏行继续解析后续
         console.warn(`[Agent 会话] 跳过损坏的消息行 (${id})`)
       }
     }
-    return messages
+    // 瞬时断流错误卡只在「之后已恢复」时才丢弃；会话尾部的失败必须保留可见。
+    return parsedMessages.filter((message, index) => {
+      const assistantError = getPersistedAssistantError(message)
+      if (!assistantError) return true
+      const recoveredLater = parsedMessages.slice(index + 1).some((later) => {
+        if (later.role !== 'assistant') return false
+        return getPersistedAssistantError(later) === null
+      })
+      return !isRecoveredEphemeralTransportError(
+        recoveredLater,
+        assistantError.errorCode,
+        assistantError.errorText,
+      )
+    })
   } catch (error) {
     console.error(`[Agent 会话] 读取消息文件失败 (${id}):`, error)
     return []
@@ -566,36 +592,325 @@ export function appendAgentMessage(id: string, message: AgentMessage): void {
 }
 
 /** 单条 SDKMessage 序列化后最大长度（UTF-16 code units，超出则截断内容） */
-const MAX_SDK_MESSAGE_LENGTH = 256 * 1024 // ~256K chars
+/** 落盘规则：单条消息序列化后的字符上限。写入路径与存量迁移共用此常量。 */
+export const MAX_SDK_MESSAGE_LENGTH = 256 * 1024 // ~256K chars
 /** 截断后保留的预览文本长度 */
 const TRUNCATED_PREVIEW_LENGTH = 2000
 
 /**
- * 追加 SDKMessage 到会话的 JSONL 文件（Phase 4 新持久化格式）
+ * 按落盘规则收敛一条**已序列化**的会话行；未超限则原样返回。
+ *
+ * 写入路径（`appendSDKMessages` / `serializeSDKMessageForStorage`）与存量迁移
+ * （`oversized-session-migration`）共用这一个入口。此前同一套规则散在两处内联，
+ * 正是「各自漏一处」的温床——补 4 个覆盖缺口时已吃过一次这个亏。
+ */
+export function sanitizeSerializedSessionLine(line: string, sessionId?: string): string {
+  if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
+
+  let message: SDKMessage
+  try {
+    message = JSON.parse(line) as SDKMessage
+  } catch {
+    // 损坏行不在这里处理（迁移侧会记为 skipped）；原样返回，避免二次破坏
+    return line
+  }
+
+  const sanitized = JSON.stringify(sanitizeOversizedMessage(message, line.length))
+  if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
+    console.warn(
+      `[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars)${sessionId ? `, session=${sessionId}` : ''}`,
+    )
+  }
+  return sanitized
+}
+
+// ===== 大载荷外部化（把载荷搬出 JSONL 行，而不是删掉） =====
+
+/**
+ * 消息级引用表字段名。放在消息顶层，不影响任何已有字段。
+ * 为什么不把字段本身换成对象：那会把类型从 string 变成联合类型，
+ * 老版本读到新数据会渲染成 `[object Object]` 甚至崩；
+ * 保持 string（值为片段）则老代码只是显示得短一点——降级而非崩坏。
+ */
+const BLOB_REFS_FIELD = SESSION_BLOB_REFS_FIELD
+/** 还原失败时记录缺失引用，供上层提示「原文不可用」 */
+const BLOB_REFS_MISSING_FIELD = SESSION_BLOB_MISSING_FIELD
+
+/** 第一级：行内保留的片段长度（与截断预览同长） */
+const INLINE_PREVIEW_CHARS = TRUNCATED_PREVIEW_LENGTH
+/**
+ * 第一级可抽取下限。短于片段长度的字符串抽了等于没抽（片段就是全文），因此第一级不碰。
+ * 同时也是第一级「抽不动了」的终止条件：候选已按长度降序，遇到不达下限的就必然全部不达标。
+ */
+const FIRST_TIER_MIN_CHARS = INLINE_PREVIEW_CHARS
+/**
+ * 第二级片段长度：第一级抽完仍超限时，把中等字符串也抽走，只留更短的片段。
+ *
+ * 存在一个真实形态会让第一级无解：**一个工具返回大量（约 150~200 条以上）结构化记录，
+ * 每条带一个约 1500 字符的字段**，而整条消息里没有任何字符串超过 2000。
+ * 真机的委派列表工具已出现过 25 条记录的实例（每条 resultSummary 3K~12K），
+ * 规模再大一个数量级即命中——见工作包 design.md 第 11 节。
+ *
+ * 抽走之后原文仍在 blob，不丢数据；代价只是片段更短，折叠态可读性下降。
+ */
+const SHORT_PREVIEW_CHARS = 200
+const SECOND_TIER_MIN_CHARS = 512
+/** 遍历深度上限，防止异常结构导致栈过深 */
+const MAX_BLOB_WALK_DEPTH = 12
+
+interface StoredBlobRef {
+  /** 相对消息根的对象路径，如 `tool_use_result.content.0.text` */
+  path: string
+  hash: string
+  chars: number
+  bytes: number
+}
+
+interface ExtractableString {
+  path: string
+  length: number
+}
+
+/** 路径 tokenizer：`a.b[0].c` → ['a','b',0,'c'] */
+function tokenizeBlobPath(path: string): (string | number)[] {
+  const tokens: (string | number)[] = []
+  const pattern = /([^.[\]]+)|\[(\d+)\]/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(path)) !== null) {
+    tokens.push(match[2] !== undefined ? Number(match[2]) : match[1]!)
+  }
+  return tokens
+}
+
+function getStringAtPath(root: unknown, path: string): string | undefined {
+  let node: unknown = root
+  for (const token of tokenizeBlobPath(path)) {
+    if (typeof token === 'number') {
+      if (!Array.isArray(node)) return undefined
+      node = node[token]
+    } else {
+      if (!isPlainRecord(node)) return undefined
+      node = node[token]
+    }
+  }
+  return typeof node === 'string' ? node : undefined
+}
+
+function setStringAtPath(root: unknown, path: string, value: string): boolean {
+  const tokens = tokenizeBlobPath(path)
+  if (tokens.length === 0) return false
+  let node: unknown = root
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const token = tokens[i]!
+    if (typeof token === 'number') {
+      if (!Array.isArray(node)) return false
+      node = node[token]
+    } else {
+      if (!isPlainRecord(node)) return false
+      node = node[token]
+    }
+  }
+  const last = tokens[tokens.length - 1]!
+  if (typeof last === 'number') {
+    if (!Array.isArray(node)) return false
+    node[last] = value
+    return true
+  }
+  if (!isPlainRecord(node)) return false
+  node[last] = value
+  return true
+}
+
+/**
+ * 递归收集超过 `minChars` 的字符串及其路径（不进入引用表自身，跳过已抽过的路径）。
+ * 已抽过的路径必须跳过：第一级留下的片段（2000 字）仍 ≥ 第二级下限，
+ * 不跳就会被第二级再抽一遍，把片段也搬走。
+ */
+function collectExtractableStrings(
+  value: unknown,
+  path: string,
+  out: ExtractableString[],
+  minChars: number,
+  skipPaths: Set<string>,
+  depth = 0,
+): void {
+  if (depth > MAX_BLOB_WALK_DEPTH) return
+
+  if (typeof value === 'string') {
+    if (value.length > minChars && !skipPaths.has(path)) out.push({ path, length: value.length })
+    return
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      collectExtractableStrings(value[i], `${path}[${i}]`, out, minChars, skipPaths, depth + 1)
+    }
+    return
+  }
+  if (!isPlainRecord(value)) return
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === BLOB_REFS_FIELD || key === BLOB_REFS_MISSING_FIELD) continue
+    collectExtractableStrings(child, path ? `${path}.${key}` : key, out, minChars, skipPaths, depth + 1)
+  }
+}
+
+/**
+ * 把消息连同引用表一起序列化。
+ *
+ * 判定预算时【必须】带上引用表：否则循环会在「消息刚好落回上限」时停下，
+ * 而附加上引用表后又挠出去几十条引用的大小，最终校验失败导致整个外部化被丢弃。
+ */
+function serializeMessageWithRefs(message: Record<string, unknown>, refs: StoredBlobRef[]): string {
+  return refs.length === 0 ? JSON.stringify(message) : JSON.stringify({ ...message, [BLOB_REFS_FIELD]: refs })
+}
+
+/**
+ * 按给定片段长度与下限，从最大的字符串开始抽，直到（含引用表）落回行预算内。
+ * 返回是否达标，以及达标时可直接落盘的序列化结果。
+ */
+function extractUntilUnderBudget(
+  message: Record<string, unknown>,
+  refs: StoredBlobRef[],
+  extractedPaths: Set<string>,
+  fragmentChars: number,
+  minChars: number,
+): { converged: boolean; serialized: string } {
+  let serialized = serializeMessageWithRefs(message, refs)
+  if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return { converged: true, serialized }
+
+  const candidates: ExtractableString[] = []
+  collectExtractableStrings(message, '', candidates, minChars, extractedPaths)
+  if (candidates.length === 0) return { converged: false, serialized }
+  candidates.sort((a, b) => b.length - a.length)
+
+  for (const candidate of candidates) {
+    if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return { converged: true, serialized }
+
+    const value = getStringAtPath(message, candidate.path)
+    if (typeof value !== 'string' || value.length <= minChars) break
+
+    const { hash, bytes } = writeBlobSync(value)
+    if (!setStringAtPath(message, candidate.path, value.slice(0, fragmentChars))) break
+    extractedPaths.add(candidate.path)
+    refs.push({ path: candidate.path, hash, chars: value.length, bytes })
+    serialized = serializeMessageWithRefs(message, refs)
+  }
+
+  return { converged: serialized.length <= MAX_SDK_MESSAGE_LENGTH, serialized }
+}
+
+/**
+ * 把超限行里的超大字符串搬到 blob，行内只留片段 + 引用。
+ *
+ * 规则（用户 2026-09-17 确认）：
+ * 1. 行未超限 → 原样返回，**一个字节都不动**
+ * 2. 超了 → 从最大字符串开始抽，原位留前 2000 字片段，再量一次，还超就继续抽
+ * 3. 抽不动了（候选已不足片段长度）或 blob 写失败 → 退回截断兜底
+ *
+ * 为什么「从最大开始抽」：抽一个 12 MB 的字符串就解决问题，不需要动其他字段，干预面最小。
+ */
+export function externalizeSerializedSessionLine(line: string, sessionId?: string): string {
+  if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
+
+  let message: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(line)
+    if (!isPlainRecord(parsed)) return sanitizeSerializedSessionLine(line, sessionId)
+    message = parsed
+  } catch {
+    return sanitizeSerializedSessionLine(line, sessionId)
+  }
+
+  const refs: StoredBlobRef[] = []
+  const extractedPaths = new Set<string>()
+  try {
+    // 第一级：只抽明显的大字符串（≥ 2000），片段长度也是 2000
+    let { converged, serialized } = extractUntilUnderBudget(
+      message, refs, extractedPaths, INLINE_PREVIEW_CHARS, FIRST_TIER_MIN_CHARS,
+    )
+
+    // 第二级：第一级无解时（典型形态：一条消息里全是中等字符串，无一超过 2000）
+    // 把中等字符串也抽走，只留更短的片段——原文仍在 blob，不丢数据
+    if (!converged) {
+      ;({ converged, serialized } = extractUntilUnderBudget(
+        message, refs, extractedPaths, SHORT_PREVIEW_CHARS, SECOND_TIER_MIN_CHARS,
+      ))
+    }
+
+    // 达标且确实搬走了东西 → 直接用（serialized 已含引用表，无需再拼一次）
+    if (converged && refs.length > 0) return serialized
+
+    // 两级都抽不动（没有超过 512 的字符串）或抽完仍超限 → 交给截断兜底
+    return sanitizeSerializedSessionLine(line, sessionId)
+  } catch (error) {
+    // blob 写失败不能让写入失败：退回截断，保住行上限
+    console.warn(`[Agent 会话] 载荷外部化失败，退回截断${sessionId ? ` session=${sessionId}` : ''}:`, error)
+    return sanitizeSerializedSessionLine(line, sessionId)
+  }
+}
+
+/**
+ * 从一条**已序列化**的会话行里读出引用表。
+ * 供存量迁移统计「本次搬了多少载荷」使用；解析失败返回空数组（不抛异常）。
+ * 复用 shared 的 readSessionBlobRefs，避免同一形状在两处各自实现。
+ */
+export function readSerializedBlobRefs(line: string): StoredBlobRef[] {
+  try {
+    return readSessionBlobRefs(JSON.parse(line)) as StoredBlobRef[]
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 把一条消息里的引用一次性还原为原文，返回原始形状。
+ *
+ * 这是对外**唯一**的还原入口：消费方不需要知道路径与哈希的存在。
+ * blob 缺失或哈希不匹配时保留片段并记入 `_proferBlobsMissing`，绝不抛异常
+ * ——任何「读历史数据可能崩」的设计都不该上线。
+ */
+export async function resolveMessageBlobs(message: SDKMessage): Promise<SDKMessage> {
+  const rawRefs = (message as unknown as Record<string, unknown>)[BLOB_REFS_FIELD]
+  if (!Array.isArray(rawRefs) || rawRefs.length === 0) return message
+
+  const clone = JSON.parse(JSON.stringify(message)) as Record<string, unknown>
+  const refs = clone[BLOB_REFS_FIELD] as StoredBlobRef[]
+  delete clone[BLOB_REFS_FIELD]
+
+  const missing: string[] = []
+  for (const ref of refs) {
+    const content = await readBlob(ref.hash)
+    if (content === null) {
+      missing.push(ref.path)
+      continue
+    }
+    if (!setStringAtPath(clone, ref.path, content)) missing.push(ref.path)
+  }
+
+  if (missing.length > 0) clone[BLOB_REFS_MISSING_FIELD] = missing
+  return clone as unknown as SDKMessage
+}
+
+import { readBlob, writeBlobSync } from './blob-store'
+
+/**
  *
  * 每条 SDKMessage 单独一行 JSON。读取时通过 `type` 字段区分新旧格式。
  * 超过 256K chars 的消息会被自动截断以防止存储膨胀。
  */
 export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
-  const persistentMessages = messages.filter((message) => {
-    if (message.type !== 'assistant') return true
-    const assistantError = getPersistedAssistantError(message)
-    return !assistantError || !isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)
-  })
+  // 注意：这里不再丢弃「瞬时断流」错误卡。丢弃必须在读取时结合「之后是否已恢复」判断
+  // （见 dropRecoveredEphemeralTransportErrors）——写入时就丢掉，会让一次最终失败的
+  // 网络错误在历史里彻底消失，用户看到的是「Agent Running 一闪就什么都没有了」。
+  const persistentMessages = messages
   if (persistentMessages.length === 0) return
 
   const filePath = getAgentSessionMessagesPath(id)
 
   try {
-    const lines = persistentMessages.map((m) => {
-      const serialized = JSON.stringify(m)
-      if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
-      const sanitized = JSON.stringify(sanitizeOversizedMessage(m, serialized.length))
-      if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
-        console.warn(`[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars), session=${id}`)
-      }
-      return sanitized
-    }).join('\n') + '\n'
+    const lines = persistentMessages
+      .map((m) => externalizeSerializedSessionLine(JSON.stringify(m), id))
+      .join('\n') + '\n'
     appendFileSync(filePath, lines, 'utf-8')
   } catch (error) {
     console.error(`[Agent 会话] 追加 SDKMessage 失败 (${id}):`, error)
@@ -603,16 +918,78 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
   }
 }
 
-/**
- * 截断超大 SDKMessage 的内容，保留元数据结构。
- * 处理三类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片。
- */
-function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
-  const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
-  const truncationThreshold = MAX_SDK_MESSAGE_LENGTH / 2
+/** 递归收敛 tool_use_result 时的最大深度，防止异常结构导致栈过深 */
+const MAX_TOOL_RESULT_SANITIZE_DEPTH = 8
 
+/**
+ * 逐级收紧时的字符串阈值下限。
+ * 低于它就不再继续收紧，避免把正常长度的内容也切碎。
+ */
+const MIN_SANITIZE_STRING_THRESHOLD = 4000
+
+/** 逐级收紧的最大轮数（128K → 32K → 8K → 4K） */
+const MAX_SANITIZE_ATTEMPTS = 4
+
+/** 仅普通对象（排除数组与 null），供结构化载荷遍历使用 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 递归收敛结构化的工具结果载荷。
+ *
+ * Pi runtime 会把 tool_result 的完整 details 作为顶层 `tool_use_result` 落盘
+ * （见 pi-message-adapter.ts），它与 message.content 等量，实测单条最大约 12 MB
+ * （整页 HTML、PDF 的 base64、内嵌图片）。这里用与 message.content 同一套规则处理：
+ * 超过阈值的字符串截断为预览 + 说明。
+ *
+ * 渲染侧只有 parseAgentImageAttachmentDetails 会读它，而该函数提取的是
+ * localPath / filename / mediaType 这类路径型标记，不依赖超长字符串，因此截断安全。
+ */
+function sanitizeToolResultPayload(
+  payload: unknown,
+  truncationThreshold: number,
+  truncationNote: string,
+  depth = 0,
+): unknown {
+  if (depth > MAX_TOOL_RESULT_SANITIZE_DEPTH) return payload
+  if (typeof payload === 'string') {
+    return payload.length > truncationThreshold
+      ? payload.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
+      : payload
+  }
+  if (Array.isArray(payload)) {
+    return payload.map((item) => sanitizeToolResultPayload(item, truncationThreshold, truncationNote, depth + 1))
+  }
+  if (!isPlainRecord(payload)) return payload
+
+  const sanitized: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(payload)) {
+    sanitized[key] = sanitizeToolResultPayload(value, truncationThreshold, truncationNote, depth + 1)
+  }
+  return sanitized
+}
+
+/**
+ * 按给定字符串阈值就地收敛一份消息副本（调用方保证 clone 是可安全修改的深拷贝）。
+ * 处理四类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片、
+ * 以及顶层 tool_use_result 副本（message.content 的等量拷贝）。
+ */
+function applyOversizedSanitization(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const clone: any = JSON.parse(JSON.stringify(msg))
+  clone: any,
+  truncationNote: string,
+  truncationThreshold: number,
+): SDKMessage {
+  // 顶层 tool_use_result 是 tool_result 正文的完整副本，必须与 message.content 同规则处理，
+  // 否则即使正文被截断，整行依然超限（实测 161/250 条巨型行涉此，72 条仅副本就超限）。
+  if (clone.tool_use_result !== undefined) {
+    clone.tool_use_result = sanitizeToolResultPayload(clone.tool_use_result, truncationThreshold, truncationNote)
+  }
+  if (clone.toolUseResult !== undefined) {
+    clone.toolUseResult = sanitizeToolResultPayload(clone.toolUseResult, truncationThreshold, truncationNote)
+  }
+
   const content = clone.message?.content
   if (Array.isArray(content)) {
     for (let i = 0; i < content.length; i++) {
@@ -629,12 +1006,24 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
         if (typeof block.content === 'string' && block.content.length > truncationThreshold) {
           block.content = block.content.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
         }
-        // 剥离 base64 图片数据
         if (Array.isArray(block.content)) {
           block.content = block.content.map((item: Record<string, unknown>) => {
-            if (item?.type === 'image' && (item.source as Record<string, unknown>)?.data) {
-              const dataLen = String((item.source as Record<string, unknown>).data).length
-              return { type: 'image', _truncated: true, _originalLength: dataLen }
+            // 剥离 base64 图片数据。两种结构并存：Anthropic 风格 { source: { data } }
+            // 与 Pi 风格 { data } —— 后者此前漏处理，实测约 95 MB 未收敛。
+            if (item?.type === 'image') {
+              const source = item.source as Record<string, unknown> | undefined
+              const data = typeof item.data === 'string'
+                ? item.data
+                : typeof source?.data === 'string'
+                  ? String(source.data)
+                  : undefined
+              if (data) {
+                return { type: 'image', _truncated: true, _originalLength: data.length }
+              }
+            }
+            // 嵌套在数组里的 text block 此前不受限，同样按阈值截断
+            if (item?.type === 'text' && typeof item.text === 'string' && item.text.length > truncationThreshold) {
+              return { ...item, text: item.text.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote }
             }
             return item
           })
@@ -651,6 +1040,31 @@ function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKM
   return clone as SDKMessage
 }
 
+/**
+ * 截断超大 SDKMessage 的内容，保留元数据结构。
+ *
+ * 字符串的“原文长度”与“序列化长度”可能严重不等：含大量控制字符的内容会被 JSON
+ * 转义为 \\uXXXX（最多膨胀 6 倍，实测 49K 原文 → 279K JSON）。所以这里不以原文长度
+ * 一次定稿，而是按**实际序列化结果**逐级收紧阈值，直到落入上限或到达下限。
+ */
+function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
+  const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const original: any = JSON.parse(JSON.stringify(msg))
+  let threshold = MAX_SDK_MESSAGE_LENGTH / 2
+  let result = applyOversizedSanitization(JSON.parse(JSON.stringify(original)), truncationNote, threshold)
+
+  for (let attempt = 1; attempt < MAX_SANITIZE_ATTEMPTS; attempt++) {
+    if (JSON.stringify(result).length <= MAX_SDK_MESSAGE_LENGTH) return result
+    if (threshold <= MIN_SANITIZE_STRING_THRESHOLD) return result
+    threshold = Math.max(MIN_SANITIZE_STRING_THRESHOLD, Math.floor(threshold / 4))
+    result = applyOversizedSanitization(JSON.parse(JSON.stringify(original)), truncationNote, threshold)
+  }
+
+  return result
+}
+
 /** 桌面端 Agent 会话懒加载单页消息数（首次只取尾部，触顶/按钮加载更早） */
 export const DESKTOP_AGENT_PAGE_SIZE = 60
 
@@ -660,22 +1074,50 @@ function parseSDKMessageLine(line: string, id: string): SDKMessage | null {
     const parsed = JSON.parse(line)
     // 旧格式检测：AgentMessage 有 `role` 字段，SDKMessage 有 `type` 字段
     if ('role' in parsed && !('type' in parsed)) {
-      const message = convertLegacyMessage(parsed as AgentMessage)
-      const assistantError = getPersistedAssistantError(message)
-      if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) return null
-      return message
+      return convertLegacyMessage(parsed as AgentMessage)
     }
-    const message = parsed as SDKMessage
-    if (message.type === 'assistant') {
-      const assistantError = getPersistedAssistantError(message)
-      if (assistantError && isEphemeralTransportError(assistantError.errorCode, assistantError.errorText)) return null
-    }
-    return message
+    return parsed as SDKMessage
   } catch {
     // 单行损坏不丢整文件：跳过坏行继续解析后续
     console.warn(`[Agent 会话] 跳过损坏的 SDKMessage 行 (${id})`)
     return null
   }
+}
+
+/** 该消息是否代表「本轮已恢复/继续产出」——用于判定瞬时断流是否真的已被恢复 */
+function isRecoverySignal(message: SDKMessage): boolean {
+  if (message.type === 'assistant') return getPersistedAssistantError(message) === null
+  return message.type === 'result'
+}
+
+/**
+ * 丢弃「已恢复」的瞬时断流错误卡。
+ *
+ * 会话尾部仍处于失败状态的错误卡必须保留：否则失败在界面上没有任何可见痕迹
+ * （表现为「Agent Running 一闪就什么都没有了」）。只有该错误之后确实还有正常产出
+ * （干净 assistant 消息 / result）时，才按原设计把它从历史里去掉。
+ */
+function dropRecoveredEphemeralTransportErrors(messages: SDKMessage[]): SDKMessage[] {
+  if (messages.length === 0) return messages
+  let dropped = false
+  const kept: SDKMessage[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!
+    const assistantError = message.type === 'assistant' ? getPersistedAssistantError(message) : null
+    if (
+      assistantError &&
+      isRecoveredEphemeralTransportError(
+        messages.slice(i + 1).some((later) => isRecoverySignal(later)),
+        assistantError.errorCode,
+        assistantError.errorText,
+      )
+    ) {
+      dropped = true
+      continue
+    }
+    kept.push(message)
+  }
+  return dropped ? kept : messages
 }
 
 /**
@@ -717,7 +1159,7 @@ export function getAgentSessionSDKMessages(
         if (parsed) messages.push(parsed)
       }
       return {
-        messages,
+        messages: dropRecoveredEphemeralTransportErrors(messages),
         total,
         startIndex: startLine,
         endIndex: before - 1,
@@ -731,7 +1173,7 @@ export function getAgentSessionSDKMessages(
       const parsed = parseSDKMessageLine(line, id)
       if (parsed) messages.push(parsed)
     }
-    return messages
+    return dropRecoveredEphemeralTransportErrors(messages)
   } catch (error) {
     console.error(`[Agent 会话] 读取 SDKMessage 文件失败 (${id}):`, error)
     return opts ? emptyPage : []
@@ -803,7 +1245,7 @@ function convertLegacyMessage(legacy: AgentMessage): SDKMessage {
  */
 export function updateAgentSessionMeta(
   id: string,
-  updates: Partial<Pick<AgentSessionMeta, 'title' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
+  updates: Partial<Pick<AgentSessionMeta, 'title' | 'titleAutoGeneratedAt' | 'titleRefineAttempts' | 'titleLockedAt' | 'channelId' | 'modelId' | 'sdkSessionId' | 'piSessionFile' | 'piEntryBindings' | 'piFileCheckpoints' | 'agentRuntime' | 'codexFastMode' | 'openAIThinkingLevel' | 'agentEffort' | 'workspaceId' | 'pinned' | 'archived' | 'draft' | 'attachedDirectories' | 'attachedFiles' | 'forkSourceDir' | 'explorationParentSessionId' | 'explorationSourceMessageId' | 'explorationSourceLabel' | 'explorationTitleInitializedAt' | 'forkSourceSdkSessionId' | 'resumeAtMessageUuid' | 'stoppedByUser' | 'autoQueueSendEnabled' | 'permissionMode' | 'completedButUnconfirmed' | 'sourceAutomationId' | 'automationGraduated' | 'parentSessionId' | 'rootSessionId' | 'sourceDelegationId' | 'delegationRole' | 'delegationStatus' | 'delegationDepth' | 'delegationGoal' | 'lastAnalyzedTurn' | 'presetId' | 'pptCapabilityActive' | 'lastInterruptReason' | 'lastInterruptLabel' | 'lastInterruptAt' | 'presetReference'>>,
 ): AgentSessionMeta {
   const index = readIndex()
   const idx = index.sessions.findIndex((s) => s.id === id)
@@ -960,7 +1402,7 @@ export function deleteAgentSession(id: string): void {
       try {
         const sessionDir = getAgentSessionWorkspacePath(ws.slug, id)
         if (existsSync(sessionDir)) {
-          rmSync(sessionDir, { recursive: true, force: true })
+          removeForkPath(sessionDir)
           console.log(`[Agent 会话] 已清理 session 工作目录: ${sessionDir}`)
         }
       } catch (error) {
@@ -1275,7 +1717,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
   // 未显式换模型时继承源会话模型；即使源渠道后来被删除/停用，也允许复制
   // 已存在的 Pi artifact。只有用户主动选择新模型时才需要重新校验渠道能力。
   const forkModelId = input.modelId !== undefined
-    ? assertEnabledModelForChannel({ channelId: sourceMeta.channelId, modelId: input.modelId, purpose: '分叉 Pi Agent 会话' })
+    ? assertEnabledModelForChannel({
+        channelId: sourceMeta.channelId,
+        modelId: input.modelId,
+        runtime: 'pi',
+        purpose: '分叉 Pi Agent 会话',
+      })
     : sourceMeta.modelId
   const workspace = sourceMeta.workspaceId ? getAgentWorkspace(sourceMeta.workspaceId) : undefined
   const sourceDir = workspace ? getAgentSessionWorkspacePath(workspace.slug, sourceMeta.id) : undefined
@@ -1342,7 +1789,12 @@ async function forkPiAgentSession(sourceMeta: AgentSessionMeta, input: ForkSessi
     if (Object.keys(branchCheckpoints).length > 0) newMeta.piFileCheckpoints = branchCheckpoints
     Object.assign(newMeta, explorationMeta)
 
-    if (sourceDir && destDir) copyForkWorkspaceFiles(sourceDir, destDir)
+    if (sourceDir && destDir) {
+      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
+      if (copyResult.failedCount > 0) {
+        console.warn(`[Agent 会话] Pi fork 工作区有 ${copyResult.failedCount} 个条目未复制:`, copyResult.failedPaths)
+      }
+    }
     await copyForkStoredSDKMessages({
       sourceSessionId: sourceMeta.id,
       destSessionId: newMeta.id,
@@ -1654,14 +2106,11 @@ function serializeSDKMessageForStorage(
   }
   if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return serialized
 
-  let sanitized = JSON.stringify(sanitizeOversizedMessage(msg, serialized.length))
+  let externalized = externalizeSerializedSessionLine(serialized)
   if (sourceDir && destDir) {
-    sanitized = rewriteSourceToDest(sanitized, sourceDir, destDir)
+    externalized = rewriteSourceToDest(externalized, sourceDir, destDir)
   }
-  if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
-    console.warn(`[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars)`)
-  }
-  return sanitized
+  return externalized
 }
 
 async function writeJsonlLine(stream: WriteStream, line: string): Promise<void> {
@@ -1695,13 +2144,29 @@ async function endWriteStream(stream: WriteStream): Promise<void> {
  * @returns 新创建的会话元数据
  */
 export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSessionMeta> {
-  const { sessionId, upToMessageUuid } = input
-
-  // 1. 获取源会话元数据
+  const { sessionId } = input
   const sourceMeta = getAgentSessionMeta(sessionId)
   if (!sourceMeta) {
     throw new Error(`源 Agent 会话不存在: ${sessionId}`)
   }
+  if (agentSessionActiveChecker?.(sessionId)) {
+    throw new Error('Agent 正在运行，完成后再分叉')
+  }
+  if (activeForkSessionIds.has(sessionId)) {
+    throw new Error('该会话正在创建分叉，请稍候再试')
+  }
+
+  activeForkSessionIds.add(sessionId)
+  try {
+    return await forkAgentSessionUnlocked(sourceMeta, input)
+  } finally {
+    activeForkSessionIds.delete(sessionId)
+  }
+}
+
+async function forkAgentSessionUnlocked(sourceMeta: AgentSessionMeta, input: ForkSessionInput): Promise<AgentSessionMeta> {
+  const { sessionId, upToMessageUuid } = input
+
   // Pi 会话走 Pi 原生分叉（SessionManager branch + forkFrom）；Claude 会话走下方 Claude SDK fork。
   if (normalizeAgentRuntime(sourceMeta.agentRuntime) === 'pi') {
     return forkPiAgentSession(sourceMeta, input)
@@ -1860,11 +2325,11 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     // 继续在源目录下读写文件。
     if (sourceDir && destDir) {
       // 复用 step 3.5 已确认的 JSONL 路径，避免重复扫描
-      const destProjectHash = destDir.replace(/[^a-zA-Z0-9]/g, '-')
+      const destProjectHash = buildForkProjectKey(destDir)
       const sdkProjectsDir = join(getSdkConfigDir(), 'projects', destProjectHash)
       if (!existsSync(sdkProjectsDir)) mkdirSync(sdkProjectsDir, { recursive: true })
       const destJsonl = join(sdkProjectsDir, `${forkResult.sessionId}.jsonl`)
-      copyFileSync(forkJsonlPath, destJsonl)
+      copyForkFile(forkJsonlPath, destJsonl)
       rewritePathsInJsonlFile(destJsonl, sourceDir, destDir)
       console.log(`[Agent 会话] 已将 SDK session JSONL 复制到 fork 目标目录并改写路径: ${destJsonl}`)
     }
@@ -1874,22 +2339,9 @@ export async function forkAgentSession(input: ForkSessionInput): Promise<AgentSe
     // .context/ 必须保留 — Profer 约定 .context/note.md、todo.md、plan/ 等是会话上下文，
     // 如果不复制，fork 后这些参考资料会丢失或被 Claude 误回源目录读取。
     if (sourceDir && destDir) {
-      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-      try {
-        const entries = readdirSync(sourceDir)
-        const skip = (entry: string) => entry === '.claude' || entry === '.DS_Store' || entry === '.git'
-        let copiedCount = 0
-        for (const entry of entries) {
-          if (skip(entry)) continue
-          const srcPath = join(sourceDir, entry)
-          const destPath = join(destDir, entry)
-          cpSync(srcPath, destPath, { recursive: true })
-          copiedCount += 1
-        }
-        console.log(`[Agent 会话] 已复制工作区文件: ${sourceDir} → ${destDir} (${copiedCount} 个条目)`)
-      } catch (err) {
-        // 工作区文件复制失败不触发回滚——fork 会话功能完整，仅缺上下文文件
-        console.warn(`[Agent 会话] 复制工作区文件失败，fork 会话缺少源会话的上下文文件:`, err)
+      const copyResult = copyForkWorkspaceFiles(sourceDir, destDir)
+      if (copyResult.failedCount > 0) {
+        console.warn(`[Agent 会话] Claude fork 工作区有 ${copyResult.failedCount} 个条目未复制:`, copyResult.failedPaths)
       }
     }
 
@@ -1976,7 +2428,7 @@ function rewritePathsInJsonlFile(filePath: string, sourceDir: string, destDir: s
   if (rewritten !== content) {
     const tmpPath = filePath + '.tmp.' + Date.now()
     writeFileSync(tmpPath, rewritten, 'utf-8')
-    renameSync(tmpPath, filePath)
+    renameForkFile(tmpPath, filePath)
   }
 }
 

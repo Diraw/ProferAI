@@ -1,4 +1,6 @@
-# Profer 插件开发：第一、二批能力
+# Profer 通用插件平台：第一、二批能力
+
+插件宿主 API 是 provider-neutral 的平台契约，可供工作区工具、外部服务、任务看板等多类插件复用。具体业务适配器不属于公共契约；未配置 provider 的新能力返回稳定的 `PLUGIN_OPERATION_NOT_SUPPORTED`。
 
 插件使用静态 HTML/CSS/JS 和 `profer-plugin.json` 分发，通过独立沙箱中的 `window.profer` 调用宿主。
 公开 TypeScript 契约位于 `packages/plugin-api/src/index.ts`。示例位于 `examples/plugins/capability-demo/`，可直接安装该目录。
@@ -22,6 +24,12 @@
 
 ## 宿主 API 与权限
 
+除下表既有 API 外，Slice 3 在 Slice 1/2 基础上冻结了通用工作区、session/preset metadata、runtime capability reference、opaque secret reference 和统一 RPC 生命周期契约。它们均要求细粒度 permission、workspace/resource scope、owner/page 绑定、requestId、取消/超时、整数 revision/CAS 与稳定错误码；当前只建立安全边界，provider 尚未接入时不会伪造成功。
+
+**当前不可用（等宿主接入 provider）**：`workspace.files.write`、`sessions.create/configure/cancel`、`runtime.capabilities.inject`、`secrets.requestConfigure` 在生产代码里尚无 provider 接入点（`setPluginWorkspaceProvider` / `setPluginCapabilityProviders` 无调用者，`pluginConfirmations.issue()` 只出现在测试中），调用会稳定返回 `PLUGIN_CONFIRMATION_REQUIRED` 或 `PLUGIN_OPERATION_NOT_SUPPORTED`，不会伪造成功。它们已进入公开契约，属预留能力。
+
+**授权与撤权**：`revokePluginPermissions` 保留 grant 内容但写入 `revoked: true`；此后 `getGrantedPermissions` 返回空数组、`listInstalledPlugins()` 返回 `revoked: true`，所有 RPC 与已加载的 Agent 工具调用均返回 `PLUGIN_REVOKED`。插件设置页对本状态显示「已撤销」，与「待授权」区分。
+
 | API | 权限 | 行为 |
 | --- | --- | --- |
 | `getContext()`、`onContextChanged(callback)` | 无 | 插件信息、语言、主题；主题变化时自动更新 `data-profer-theme` 并通知监听器 |
@@ -34,10 +42,16 @@
 | `network.fetch(input)` | `network.fetch` | 通过宿主请求已声明、已授权的精确 HTTPS origin |
 | `tools.register(id, handler)` | `agent.tools` | 注册已声明的 Agent 工具；Claude 和 Pi 使用一致的参数与宿主执行逻辑 |
 | `requests.cancel(requestId)` | 无额外权限 | 取消本插件的模型或网络请求 |
+| `workspace.list()` | `workspace.read` | 仅列出宿主注入且已授权的 workspace 摘要；不返回绝对根路径 |
+| `workspace.files.list/read/write(input)` | `workspace.files.read` / `workspace.files.write` | 仅限授权 workspace + prefix 的相对 POSIX 路径；list/read 有深度、条目、字节上限，write 只允许单文件 create/replace、每次宿主确认、整数 CAS 与临时文件 rename |
+| `sessions.list/get/create/configure/cancel()` | `sessions.read` / `sessions.create` / `sessions.configure` / `sessions.control` | 只返回 opaque 会话元数据；mutation 绑定 workspace/session ownership、宿主 confirmation、非负整数 `expectedRevision`、取消/撤权和 unknown 终态，不暴露消息、JSONL、SDK/Pi session 对象或内部文件 |
+| `sessions.listPresets/getPreset/requestPreset()` | `presets.read` / `presets.switch` | 只返回 opaque preset metadata；切换必须 CAS/confirmation，明确 `effectiveFrom: "next_turn"`，当前 turn 不热替换 |
+| `runtime.resolve()/inject()` | `runtime.capabilities.read` / `runtime.capabilities.inject` | 只接受 capability references/declarations，返回安全 snapshot/fingerprint；禁止任意 prompt、JS、command、path、env/header 或 SDK/Pi 对象。注入失败保留旧 view，按 `next_turn`/`new_session` 生效 |
+| `secrets.listMetadata()/requestConfigure()` | `secrets.readMetadata` / `secrets.configure`（兼容 `mcp.secrets.readMetadata` / `mcp.secrets.write`） | 只返回 opaque metadata/reference；插件永远不能读取明文。宿主原生/受控输入和 runtime prepare 才能短暂解析；safe storage 不可用、未配置、撤权和卸载均返回稳定错误 |
 
 生成输入：`{requestId,channelId,modelId,prompt,system?,maxTokens?}`。默认输出上限 2048 token，最多 8192；最长 120 秒。
 网络输入：`{requestId,url,method?:"GET"|"POST",headers?,body?,credentialId?}`，返回 `{status,headers,body}`；最长 60 秒，响应最多 2 MB，不跟随重定向，不支持内网地址。
-每个插件最多 4 项并发调用，每分钟最多 30 项。关闭单个页面只取消该页面的调用。
+每个插件最多 4 项并发调用，每分钟最多 30 项。**该配额对全部 RPC operation 生效**（含 `workspace.list`、`sessions.get`、`context.read` 等轻量 metadata 调用），越限返回 `PLUGIN_RATE_LIMITED`（`retryable: true`，`details.limit` 为 `rate` 或 `concurrency`），插件可据此退避重试；参数非法仍是不可重试的 `PLUGIN_INVALID_ARGUMENT`。关闭单个页面只取消该页面的调用。
 
 上下文最多返回最近 100 条文本消息、合计 10 万字符。消息操作只交付指定消息；有选中文本时只交付选中内容。附件每次最多 5 个、每个不超过 8 MB，总提取文本最多 50 万字符。当前上下文是显式交付的任务引用，不随用户切换其他任务自动扩大范围。
 
@@ -99,4 +113,5 @@ await window.profer.tools.register('summarize', async ({ text }, call) => {
 
 - `bun test --isolate apps/electron/src/main/lib/plugins/`：清单、安装回滚、授权、路由、网络边界、凭据、并发和取消。
 - 在 `apps/electron` 运行 `bun run test:plugins:electron`：真实 Electron 页面、preload、工具、宿主模型调用、主题通知、页面隔离和撤权；只使用临时配置与本地模拟模型。
+- 在 `apps/electron` 运行 `bun run test:plugins:rpc-smoke`：真实 preload/IPC envelope、sender owner、跨页拒绝、同 owner cancel、timeout、revoke、page-close abort 与 late-result 抑制。
 - 使用现有 `build:plugin-preload` 构建插件专属 preload。修改主进程或 preload 后需要重启开发版 Profer。

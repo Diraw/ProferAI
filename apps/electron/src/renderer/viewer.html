@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>文件预览</title>
+    <style>
+      /* 独立 viewer 页：只负责"把一个已授权文件渲染出来"，不引入任何 app 样式体系。
+         底色取自主题桥接的 token（--background），token 缺失时才回落到这里的默认值。
+         color-scheme 必须显式跟着 .dark 走：它若跟着 OS，深色主题下的滚动条/表单控件仍是浅色。 */
+      html { color-scheme: light; }
+      html.dark { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; }
+      body { background: hsl(var(--background, 0 0% 100%)); }
+      html.dark body { background: hsl(var(--background, 0 0% 7%)); }
+      #host { position: absolute; inset: 0; }
+      #fallback {
+        position: absolute; inset: 0; display: none; place-items: center;
+        padding: 24px; text-align: center;
+      }
+    </style>
+    <script>
+      // 首帧主题：在 module 入口执行前就把主题写进 DOM —— 防"打开深色主题预览时先白闪一下"，
+      // 也让 OFV 挂载前的滚动条颜色正确。参数只有主进程会烘（`?theme=` / `?tokens=`）。
+      // 这里只取底色一条用于首帧：其余 token 由 viewer/main.ts 经 @profer/shared 的校验器统一应用，
+      // 契约（名单 + 值白名单 + 长度上限）只维护那一份。
+      ;(function () {
+        var params = new URLSearchParams(location.search)
+        var root = document.documentElement
+        root.classList.add('viewer-page')
+        if (params.get('theme') === 'dark') root.classList.add('dark')
+        var raw = params.get('tokens')
+        if (!raw || raw.length > 2048) return
+        var tokens
+        try { tokens = JSON.parse(raw) } catch (e) { return }
+        var background = tokens && tokens.background
+        // 只做类型/长度收口：值最终只进 CSS 自定义属性（setProperty 是安全 API，
+        // 且只会被 hsl(var(--background)) 消费），没有拼接进样式表的路径。
+        if (typeof background !== 'string' || background.length === 0 || background.length > 64) return
+        root.style.setProperty('--background', background)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="host"></div>
+    <div id="fallback"></div>
+    <script type="module" src="./viewer/main.ts"></script>
+  </body>
+</html>

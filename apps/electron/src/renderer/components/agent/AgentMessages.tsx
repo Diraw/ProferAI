@@ -31,7 +31,7 @@ import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/l
 import { userProfileAtom } from '@/atoms/user-profile'
 import { tabMinimapCacheAtom } from '@/atoms/tab-atoms'
 import { channelsAtom } from '@/atoms/chat-atoms'
-import { allPendingAskUserRequestsAtom } from '@/atoms/agent-atoms'
+import { allPendingAskUserRequestsAtom, resolvedBlobMessagesAtom } from '@/atoms/agent-atoms'
 import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@/components/ui/spinner'
@@ -40,6 +40,7 @@ import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, pars
 import { extractUserText } from '@profer/session-core'
 import { buildLiveGroupSet } from './live-group-set'
 import { mergeMessagesByUuid } from '@/lib/agent-message-merge'
+import { applyResolvedBlobMessages } from '@/lib/resolved-blob-messages'
 import { shouldShowAgentRunningIndicator } from '@/lib/agent-running-indicator'
 import { ContentBlock } from './ContentBlock'
 import { parseThinkTagsFromText } from './thinking-tag-parser'
@@ -631,7 +632,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   const transitioning = needsInstant || transitioningCooldown
 
   // 合并持久化 + 实时 SDKMessage（供 ContentBlock 内查找工具结果）
-  const allSDKMessages = React.useMemo(() => {
+  const allSDKMessagesMerged = React.useMemo(() => {
     const persisted = persistedSDKMessages ?? []
     const live = liveMessages ?? []
     const stampStableKey = (message: SDKMessage): SDKMessage => {
@@ -674,6 +675,15 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
       liveWithKeys,
     )
   }, [persistedSDKMessages, liveMessages, streaming])
+
+  // 被外部化的消息在用户点击「加载全文」后会被换成完整版（见 resolvedBlobMessagesAtom）。
+  // 覆盖只放在这一层：下游的 turn 分组、工具结果查找、任务映射都会自动看到完整内容，
+  // 不需要任何组件知道「外部化」这件事存在。
+  const resolvedBlobMessages = useAtomValue(resolvedBlobMessagesAtom)
+  const allSDKMessages = React.useMemo(
+    () => applyResolvedBlobMessages(allSDKMessagesMerged, resolvedBlobMessages),
+    [allSDKMessagesMerged, resolvedBlobMessages],
+  )
   const hasContent = allSDKMessages.length > 0 || (imageGenerations?.length ?? 0) > 0
 
   // 压缩流程进行中（含收尾窗口：compact_boundary 已到但 result 未到）

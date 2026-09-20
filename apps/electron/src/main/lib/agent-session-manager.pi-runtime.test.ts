@@ -261,3 +261,55 @@ describe('Pi runtime 会话持久化隔离', () => {
     expect(updated.forkSourceSdkSessionId).toBeUndefined()
   })
 })
+
+// 回归：一次最终失败的传输错误曾经在写入/读取时被静默丢弃，
+// 用户看到的是「Agent Running 一闪就什么都没有了」。
+describe('瞬时断流错误卡的可见性', () => {
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const userMessage = (): any => ({
+    type: 'user',
+    message: { content: [{ type: 'text', text: '你好' }] },
+    parent_tool_use_id: null,
+    _createdAt: Date.now(),
+  })
+
+  const errorCard = (text: string, errorType = 'network_error'): any => ({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text }] },
+    parent_tool_use_id: null,
+    error: { message: text, errorType },
+    _errorCode: errorType,
+    _createdAt: Date.now(),
+  })
+
+  const okAssistant = (): any => ({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: '已恢复' }] },
+    parent_tool_use_id: null,
+    _createdAt: Date.now(),
+  })
+
+  test('Given 会话尾部是一次网络失败 When 读取消息 Then 失败卡仍可见（含分页）', () => {
+    const meta = sessions.createAgentSession('Network fail', undefined, undefined, undefined, 'pi')
+    sessions.appendSDKMessages(meta.id, [userMessage(), errorCard('网络异常: Connection error.')])
+
+    const full = sessions.getAgentSessionSDKMessages(meta.id)
+    expect(full.some((message) => Boolean((message as any).error))).toBe(true)
+
+    const page = sessions.getAgentSessionSDKMessages(meta.id, { tail: 60 })
+    expect(page.messages.some((message) => Boolean((message as any).error))).toBe(true)
+  })
+
+  test('Given 断流之后又有正常产出 When 读取消息 Then 旧断流卡不进入历史', () => {
+    const meta = sessions.createAgentSession('Recovered', undefined, undefined, undefined, 'pi')
+    sessions.appendSDKMessages(meta.id, [
+      userMessage(),
+      errorCard('网络异常: Connection error.'),
+      okAssistant(),
+    ])
+
+    const full = sessions.getAgentSessionSDKMessages(meta.id)
+    expect(full.some((message) => Boolean((message as any).error))).toBe(false)
+  })
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+})

@@ -74,6 +74,8 @@ import {
 import { initializePreviewModePreference, previewModePreferenceAtom } from './atoms/preview-atoms'
 import { pluginSystemEnabledAtom, installedPluginsAtom } from './atoms/plugin-system'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
+import { useBrowserLocalFileSelectionQuote } from './hooks/useBrowserLocalFileSelectionQuote'
+import { useBrowserPreviewThemeSync } from './hooks/useBrowserPreviewThemeSync'
 import { useGlobalChatListeners } from './hooks/useGlobalChatListeners'
 import {
   todosAtom,
@@ -85,6 +87,7 @@ import {
 import { PlanningReminderRail } from './components/planning/PlanningReminderRail'
 import { initShortcutRegistry, updateShortcutOverrides } from './lib/shortcut-registry'
 import { tabsAtom, activeTabIdAtom, ensureScratchPadTab, getPersistableTabState, scratchPadContentAtom, scratchPadLoadedAtom, SCRATCH_PAD_ID } from './atoms/tab-atoms'
+import { fromPersistedTabGroup, reconcileGroup, tabGroupAtom, toPersistedTabGroup } from './atoms/tab-group-atoms'
 import type { TabItem } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { feishuBotStatesAtom } from './atoms/feishu-atoms'
@@ -97,6 +100,7 @@ import { toast } from 'sonner'
 import { diffCapabilities, isVisibleAgentSession } from '@profer/shared'
 import type { WorkspaceCapabilities } from '@profer/shared'
 import { showCapabilityChangeToasts } from './lib/capabilities-toast'
+import { getVisibleAgentWorkspaces, isAgentWorkspaceVisible } from './lib/product-feature-flags'
 import { UpdateDialog } from './components/settings/UpdateDialog'
 import { GlobalShortcuts } from './components/shortcuts/GlobalShortcuts'
 import { TabSwitcher } from './components/tabs/TabSwitcher'
@@ -296,12 +300,18 @@ function AgentSettingsInitializer(): null {
       // 加载工作区列表并恢复上次选中的工作区
       window.electronAPI.listAgentWorkspaces().then((workspaces) => {
         setAgentWorkspaces(workspaces)
-        if (settings.agentWorkspaceId) {
-          // 验证工作区仍然存在
-          const exists = workspaces.some((w) => w.id === settings.agentWorkspaceId)
-          setCurrentWorkspaceId(exists ? settings.agentWorkspaceId! : workspaces[0]?.id ?? null)
-        } else if (workspaces.length > 0) {
-          setCurrentWorkspaceId(workspaces[0]!.id)
+        const visibleWorkspaces = getVisibleAgentWorkspaces(workspaces)
+        const savedWorkspace = settings.agentWorkspaceId
+          ? workspaces.find((workspace) => workspace.id === settings.agentWorkspaceId)
+          : undefined
+        const nextWorkspaceId = savedWorkspace && isAgentWorkspaceVisible(savedWorkspace)
+          ? savedWorkspace.id
+          : visibleWorkspaces[0]?.id ?? null
+        setCurrentWorkspaceId(nextWorkspaceId)
+
+        // 旧版本可能把团队工作区记在了默认 Agent 工作区设置里；隐藏入口时回落到个人项目。
+        if (settings.agentWorkspaceId && settings.agentWorkspaceId !== nextWorkspaceId) {
+          window.electronAPI.updateSettings({ agentWorkspaceId: nextWorkspaceId ?? undefined }).catch(console.error)
         }
         setAgentSettingsReady(true)
       }).catch((err) => {
@@ -675,6 +685,10 @@ function ChatListenersInitializer(): null {
  */
 function AgentListenersInitializer(): null {
   useGlobalAgentListeners()
+  // 浏览器列里文件预览的划词由主进程转投过来，落进与预览面板同一个引用 atom
+  useBrowserLocalFileSelectionQuote()
+  // 换皮肤时让已打开的文件预览跟上（受管浏览器里的普通网页不跟）
+  useBrowserPreviewThemeSync()
   return null
 }
 
@@ -868,7 +882,8 @@ function TabStatePersistenceInitializer(): null {
       // 启动恢复需要校验所有 tab 的会话有效性（含已归档，否则归档会话 tab 会被误过滤）
       window.electronAPI.listConversations(true),
       window.electronAPI.listAgentSessions(true),
-    ]).then(([settings, conversations, agentSessions]) => {
+      window.electronAPI.listAgentWorkspaces(),
+    ]).then(([settings, conversations, agentSessions, agentWorkspaces]) => {
       const tabState = settings.tabState
       if (!tabState?.tabs?.length) {
         restoredRef.current = true
@@ -890,6 +905,14 @@ function TabStatePersistenceInitializer(): null {
           ))
           .map((tab) => tab.sessionId),
       )
+      const visibleWorkspaceIds = new Set(
+        getVisibleAgentWorkspaces(agentWorkspaces).map((workspace) => workspace.id),
+      )
+      const visibleAgentSessionIds = new Set(
+        agentSessions
+          .filter((session) => !session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
+          .map((session) => session.id),
+      )
       const validSessionIds = new Set([
         ...conversations.map((c) => c.id),
         ...agentSessions
@@ -907,7 +930,8 @@ function TabStatePersistenceInitializer(): null {
           'type' in t &&
           'title' in t &&
           (t.type === 'chat' || t.type === 'agent') &&
-          validSessionIds.has(t.sessionId),
+          validSessionIds.has(t.sessionId) &&
+          (t.type !== 'agent' || visibleAgentSessionIds.has(t.sessionId)),
       )
       if (validTabs.length === 0) {
         restoredRef.current = true
@@ -933,6 +957,8 @@ function TabStatePersistenceInitializer(): null {
       const activeTab = validTabs.find((t) => t.id === restoredActiveTabId) ?? validTabs[0] ?? null
       store.set(tabsAtom, ensureScratchPadTab(validTabs))
       store.set(activeTabIdAtom, activeTab?.id ?? SCRATCH_PAD_ID)
+      const restoredGroup = reconcileGroup(fromPersistedTabGroup(tabState.group), validTabIds)
+      store.set(tabGroupAtom, restoredGroup)
 
       // 同步 appMode、currentSessionId 和 Agent 所属工作区。
       // 团队 Tab 恢复时必须以会话元数据为准，否则页面会按旧的个人工作区渲染。
@@ -964,8 +990,12 @@ function TabStatePersistenceInitializer(): null {
       const tabs = store.get(tabsAtom)
       const activeTabId = store.get(activeTabIdAtom)
       const persistableTabState = getPersistableTabState(tabs, activeTabId)
+      const group = toPersistedTabGroup(
+        store.get(tabGroupAtom),
+        new Set(persistableTabState.tabs.map((tab) => tab.id)),
+      )
       window.electronAPI.updateSettings({
-        tabState: persistableTabState,
+        tabState: { ...persistableTabState, ...(group ? { group } : {}) },
       }).catch(console.error)
     }
 
@@ -977,6 +1007,7 @@ function TabStatePersistenceInitializer(): null {
 
     const unsub1 = store.sub(tabsAtom, debouncedSave)
     const unsub2 = store.sub(activeTabIdAtom, debouncedSave)
+    const unsub3 = store.sub(tabGroupAtom, debouncedSave)
 
     // 窗口关闭前立即刷新，避免最后 500ms 内的变更丢失
     const handleBeforeUnload = (): void => {
@@ -985,8 +1016,13 @@ function TabStatePersistenceInitializer(): null {
       const tabs = store.get(tabsAtom)
       const activeTabId = store.get(activeTabIdAtom)
       const persistableTabState = getPersistableTabState(tabs, activeTabId)
+      const group = toPersistedTabGroup(
+        store.get(tabGroupAtom),
+        new Set(persistableTabState.tabs.map((tab) => tab.id)),
+      )
+      const tabState = { ...persistableTabState, ...(group ? { group } : {}) }
       if (tabs.length > 0 && window.electronAPI.updateSettingsSync) {
-        const ok = window.electronAPI.updateSettingsSync({ tabState: persistableTabState })
+        const ok = window.electronAPI.updateSettingsSync({ tabState })
         if (!ok) {
           console.warn('[TabPersist] sync IPC failed, falling back to async save')
           save()
@@ -1000,6 +1036,7 @@ function TabStatePersistenceInitializer(): null {
     return () => {
       unsub1()
       unsub2()
+      unsub3()
       if (timer) clearTimeout(timer)
       window.removeEventListener('beforeunload', handleBeforeUnload)
     }

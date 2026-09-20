@@ -22,7 +22,7 @@ import { previewFileMapAtom } from '@/atoms/preview-atoms'
 import { tearOffPreviewToSplit } from './preview-opener'
 import { DefaultAppOpenButton } from './DefaultAppOpenButton'
 import { DiffTabContent } from './DiffTabContent'
-import { getDefaultAppTargetPath, getPreviewFileAccess } from './preview-open-path'
+import { getDefaultAppTargetPath, getPreviewFileAccess, resolvePreviewDirPath } from './preview-open-path'
 
 /** 切换为侧边分屏的小按钮 — 与拖拽 Tab 出 TabBar 触发的 tear-off 等价 */
 function TearOffButton({ sessionId }: { sessionId: string }): React.ReactElement {
@@ -53,10 +53,6 @@ interface PreviewTabContentProps {
   sessionId: string
 }
 
-function getFallbackDirPath(filePath: string, sessionPath: string): string {
-  const lastSep = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
-  return lastSep > 0 ? filePath.slice(0, lastSep) : sessionPath
-}
 
 export function PreviewTabContent({ sessionId }: PreviewTabContentProps): React.ReactElement {
   const fileMap = useAtomValue(previewFileMapAtom)
@@ -96,7 +92,7 @@ export function PreviewTabContent({ sessionId }: PreviewTabContentProps): React.
     )
   }
 
-  const dirPath = currentFile.dirPath || sessionPath || getFallbackDirPath(currentFile.filePath, sessionPath)
+  const dirPath = currentFile.dirPath || sessionPath || resolvePreviewDirPath(currentFile.filePath, sessionPath)
   const defaultAppTargetPath = getDefaultAppTargetPath(currentFile, sessionPath)
   const defaultAppAccess = getPreviewFileAccess(sessionId, currentFile, sessionPath)
   return (

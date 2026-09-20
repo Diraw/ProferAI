@@ -65,12 +65,13 @@ import { agentDiffUnseenChangesAtom, agentDiffUnseenFilesAtom, agentDiffPanelTab
 import { autoPreviewEnabledAtom, previewPanelOpenMapAtom, previewFileMapAtom, previewModePreferenceAtom, agentInterruptionMapAtom } from '@/atoms/preview-atoms'
 import type { NotificationSoundType } from '@/types/settings'
 import { toast } from 'sonner'
-import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKAssistantMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock, SDKResultMessage, SDKBackgroundTaskSummary, ProferEvent, AgentSessionMeta, TodoAgentSessionActivation } from '@profer/shared'
+import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStreamPayload, SDKMessage, SDKAssistantMessage, SDKUserMessage, SDKSystemMessage, SDKContentBlock, SDKUserContentBlock, SDKResultMessage, SDKBackgroundTaskSummary, ProferEvent, AgentSessionMeta, TodoAgentSessionActivation } from '@profer/shared'
 import { inferContextWindow, resolveContextWindowFromModelUsage } from '@profer/shared'
 import { buildExternalAgentRunActivation } from '@/lib/external-agent-run'
 import { buildTodoAgentPrompt } from '@/lib/todo-agent-prompt'
 import { upsertAgentSession, mergeFetchedAgentSessions } from '@/lib/agent-session-list'
 import { upsertLiveMessageByUuid } from '@/lib/agent-live-message-upsert'
+import { createSessionUpdateBatcher } from '@/lib/session-update-batcher'
 
 import { getAgentCompletionMarkers } from '@/lib/agent-completion-presence'
 import { getPlanModeChangeFromToolName, updatePlanModeSessionSet } from '@/lib/agent-plan-mode'
@@ -79,6 +80,7 @@ import { compactCompletedBackgroundStreamState, isCurrentAgentStreamCompletion, 
 import { AgentStreamRestoreGate } from '@/lib/agent-stream-restore-gate'
 import { isAbsoluteFilePath } from '@/lib/file-utils'
 import { inspectOfficialPptxPreview } from '@/components/file-browser/office-preview/official-preview-session'
+import { isAgentWorkspaceIdVisible } from '@/lib/product-feature-flags'
 
 /** 触发右侧文件浏览器自动定位的写入类工具集合 */
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Update'])
@@ -373,17 +375,52 @@ export function useGlobalAgentListeners(): void {
     const pendingGitMutateTools = new Map<string, string>()
     /** 每轮只自动打开一次文件改动面板，避免连续写入打断用户 */
     const autoActivatedChangeTurns = new Map<string, string>()
+    /**
+     * SDK 消息可能在一个渲染帧内连续到达；按 session 合并写入，避免每条消息
+     * 都唤醒完整 AgentMessages。终态入口会主动 flush，保证最后一帧不丢。
+     */
+    const liveMessageBatcher = createSessionUpdateBatcher<SDKMessage>((sessionId, messages) => {
+      store.set(liveMessagesMapAtom, (previous) => {
+        let current = previous.get(sessionId) ?? []
+        for (const message of messages) {
+          const next = upsertLiveMessageByUuid(current, message)
+          if (next !== current) current = next
+        }
+        if (current === (previous.get(sessionId) ?? [])) return previous
+        const next = new Map(previous)
+        next.set(sessionId, current)
+        return next
+      })
+    })
+    const streamStateBatcher = createSessionUpdateBatcher<AgentEvent>((sessionId, events) => {
+      store.set(agentStreamingStatesAtom, (previous) => {
+        const current = previous.get(sessionId) ?? {
+          running: true,
+          content: '',
+          toolActivities: [],
+          model: undefined,
+          startedAt: undefined,
+        }
+        const nextState = events.reduce((state, event) => applyAgentEvent(state, event), current)
+        if (nextState === current) return previous
+        const next = new Map(previous)
+        next.set(sessionId, nextState)
+        return next
+      })
+    })
 
     /** 构建导航到指定会话的回调 */
     const makeNavigateToSession = (sessionId: string, sessionTitle: string) => () => {
+      const sessions = store.get(agentSessionsAtom)
+      const session = sessions.find((s) => s.id === sessionId)
+      if (!isAgentWorkspaceIdVisible(session?.workspaceId, store.get(agentWorkspacesAtom))) return
+
       const tabs = store.get(tabsAtom)
       const result = openTab(tabs, { type: 'agent', sessionId, title: sessionTitle })
       store.set(tabsAtom, result.tabs)
       store.set(activeTabIdAtom, result.activeTabId)
       store.set(appModeAtom, 'agent')
       store.set(currentAgentSessionIdAtom, sessionId)
-      const sessions = store.get(agentSessionsAtom)
-      const session = sessions.find((s) => s.id === sessionId)
       if (session?.workspaceId) {
         store.set(currentAgentWorkspaceIdAtom, session.workspaceId)
       }
@@ -760,18 +797,7 @@ export function useGlobalAgentListeners(): void {
               msgRecord._channelModelId = sessionModelMap.get(sessionId) ?? defaultModelId ?? undefined
             }
 
-            store.set(liveMessagesMapAtom, (prev) => {
-              const map = new Map(prev)
-              const current = map.get(sessionId) ?? []
-
-              // 队列用户消息保持 UUID 去重；Pi 则对同 UUID 连续发送 _partial
-              // 预览和 final，任一侧为 partial 时必须覆盖，才能实时渲染。
-              const next = upsertLiveMessageByUuid(current, payload.message)
-              if (next === current) return prev
-
-              map.set(sessionId, next)
-              return map
-            })
+            liveMessageBatcher.enqueue(sessionId, payload.message)
 
             // result 消息携带 SDK 后台任务摘要（含 command/status/type）→存入 atom 供面板显示
             if (msgRecord.type === 'result') {
@@ -800,23 +826,32 @@ export function useGlobalAgentListeners(): void {
             }
           }
 
-          // 更新流式状态（prompt_suggestion 不影响流式状态，跳过以避免在 session 结束后用默认值 running:true 重新激活）
+          // 文本/thinking 增量在一帧内合并；工具、权限和其他控制事件先刷新待处理文本，
+          // 保持原有事件顺序和交互语义。prompt_suggestion 不影响流式状态。
           if (event.type !== 'prompt_suggestion') {
-            store.set(agentStreamingStatesAtom, (prev) => {
-              const current: AgentStreamState = prev.get(sessionId) ?? {
-                running: true,
-                content: '',
-                toolActivities: [],
-                model: undefined,
-                // startedAt 留空：让 STREAM_COMPLETE 竞态保护跳过时间戳比较，
-                // 正常流程中 handleSend 已设置了正确的 startedAt，此 fallback 仅在极端情况下触发
-                startedAt: undefined,
-              }
-              const next = applyAgentEvent(current, event)
-              const map = new Map(prev)
-              map.set(sessionId, next)
-              return map
-            })
+            const highFrequency = event.type === 'text_delta'
+              || event.type === 'text_complete'
+              || event.type === 'thinking_tokens'
+            if (highFrequency) {
+              streamStateBatcher.enqueue(sessionId, event)
+            } else {
+              streamStateBatcher.flush(sessionId)
+              store.set(agentStreamingStatesAtom, (prev) => {
+                const current: AgentStreamState = prev.get(sessionId) ?? {
+                  running: true,
+                  content: '',
+                  toolActivities: [],
+                  model: undefined,
+                  // startedAt 留空：让 STREAM_COMPLETE 竞态保护跳过时间戳比较，
+                  // 正常流程中 handleSend 已设置了正确的 startedAt，此 fallback 仅在极端情况下触发
+                  startedAt: undefined,
+                }
+                const next = applyAgentEvent(current, event)
+                const map = new Map(prev)
+                map.set(sessionId, next)
+                return map
+              })
+            }
           }
 
           // RightSidePanel 由用户完全控制，Agent 行为不影响其开关状态
@@ -1194,6 +1229,10 @@ export function useGlobalAgentListeners(): void {
 
     // ===== 2. 流式完成 =====
     const handleStreamComplete = (data: AgentStreamCompletePayload): void => {
+        // STREAM_COMPLETE 是该 session 的提交屏障：先收敛尚未执行的 rAF 批次，
+        // 再刷新持久化消息和清理状态，避免终态抢在最后一条流式消息之前。
+        liveMessageBatcher.flush(data.sessionId)
+        streamStateBatcher.flush(data.sessionId)
         unstable_batchedUpdates(() => {
         // 后台任务等待态：turn 主体结束但仍有后台任务在飞行，UI 进入"空闲可输入"。
         // 不发"任务已完成"通知（任务并未真正完成）、不清后台任务列表、不重载消息——
@@ -1211,12 +1250,21 @@ export function useGlobalAgentListeners(): void {
         const customSounds = store.get(customNotificationSoundsAtom)
         const sessionTitle = getSessionTitle(data.sessionId)
         if (!backgroundTasksPending) {
+          // 只有真正正常完成才报「任务完成」并播放完成音；失败/中断/用户停止的情况下
+          // 仍报「任务已完成」+ 提示音会误导用户（历史现象：Agent Running 一闪而过、
+          // 界面什么都没有，却响了一声「任务完成」）。非正常结束改为静音通知。
+          const runEndedNormally =
+            (data.endReason === undefined || data.endReason === 'completed') &&
+            (data.resultSubtype === undefined || data.resultSubtype === 'success') &&
+            data.stoppedByUser !== true
           sendDesktopNotification(
-            'Agent 任务完成',
-            `[${sessionTitle}] 任务已完成`,
+            runEndedNormally ? 'Agent 任务完成' : 'Agent 本轮结束',
+            runEndedNormally
+              ? `[${sessionTitle}] 任务已完成`
+              : `[${sessionTitle}] ${data.endReasonLabel ?? '任务未完成'}`,
             enabled,
             {
-              playSound: enabled && soundEnabled,
+              playSound: enabled && soundEnabled && runEndedNormally,
               soundType: 'taskComplete',
               sounds,
               customSounds,
@@ -1406,6 +1454,8 @@ export function useGlobalAgentListeners(): void {
 
     // ===== 3. 流式错误 =====
     const handleStreamError = (data: { sessionId: string; error: string }): void => {
+        liveMessageBatcher.flush(data.sessionId)
+        streamStateBatcher.flush(data.sessionId)
         unstable_batchedUpdates(() => {
         console.error('[GlobalAgentListeners] 流式错误:', data.error)
 
@@ -1470,6 +1520,7 @@ export function useGlobalAgentListeners(): void {
     // 与 PlanningView.startTodoInWorkspace（主窗口中启动）保持同等效果，补齐跨窗口断链。
     const cleanupTodoSessionReady = window.electronAPI.onTodoAgentSessionReady(
       ({ todo, session }) => {
+        if (!isAgentWorkspaceIdVisible(session.workspaceId, store.get(agentWorkspacesAtom))) return
         store.set(agentSessionsAtom, (previous) => upsertAgentSession(previous, session))
         if (session.workspaceId) {
           store.set(currentAgentWorkspaceIdAtom, session.workspaceId)
@@ -1575,6 +1626,8 @@ export function useGlobalAgentListeners(): void {
 
     return () => {
       effectActive = false
+      liveMessageBatcher.flushAll()
+      streamStateBatcher.flushAll()
       cleanupGoal()
       cleanupEvent()
       cleanupComplete()

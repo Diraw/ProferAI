@@ -61,6 +61,7 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { ProjectGraphPanel } from './ProjectGraphPanel'
 import { cn } from '@/lib/utils'
 import { evaluateAutoSendTurn } from '@/lib/agent-autosend-turn'
+import { rollbackRejectedAgentRunState } from '@/lib/agent-stream-state-cleanup'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { registerShortcut } from '@/lib/shortcut-registry'
 import { previewPanelOpenMapAtom, autoPreviewEnabledAtom, quotedSelectionMapAtom, agentInterruptionMapAtom, getAgentInterruptionTone } from '@/atoms/preview-atoms'
@@ -94,6 +95,7 @@ import {
   workspaceAttachedDirectoriesMapAtom,
   workspaceAttachedFilesMapAtom,
   liveMessagesMapAtom,
+  liveMessagesAtomFamily,
   agentThinkingAtom,
   agentEffortAtom,
   stoppedByUserSessionsAtom,
@@ -606,10 +608,8 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
   const sendWithCmdEnter = useAtomValue(sendWithCmdEnterAtom)
   const longTextPasteAsAttachmentEnabled = useAtomValue(longTextPasteAsAttachmentEnabledAtom)
   const stoppedByUser = stoppedByUserSessions.has(sessionId)
-  const liveMessagesMap = useAtomValue(liveMessagesMapAtom)
+  const liveMessages = useAtomValue(liveMessagesAtomFamily(sessionId))
   const setLiveMessagesMap = useSetAtom(liveMessagesMapAtom)
-  // 稳定化空数组引用，避免 ?? [] 每次创建新引用导致下游 useMemo 链不必要重算
-  const liveMessages = liveMessagesMap.get(sessionId) ?? EMPTY_SDK_MESSAGES
   // 运行中追加消息队列（前端托管，turn 结束后 auto-drain 逐条发送）
   const [queuedMessages, setQueuedMessages] = useAtom(agentMessageQueueAtomFamily(sessionId))
   const setAutoSendMap = useSetAtom(agentQueueAutoSendMapAtom)
@@ -2679,7 +2679,11 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
       permissionModeOverride: permissionMode,
     }).catch((error) => {
       console.error('[AgentView] /compact 发送失败:', error)
-      // 回滚：移除合成用户消息 + 清除 isCompacting flag
+      // 回滚：移除合成用户消息 + 撤销这次尚未真正启动的乐观运行态。
+      // 必须同时把 running 复位（与 handleSend 的 catch 一致）：
+      // 若只清 isCompacting，会话会永久停在「运行中」——后续输入全部被
+      // handleSend 的 streaming 分支拦进队列，而队列永远等不到轮结束信号，
+      // 表现为「压缩后输入的队列消息再也不会自动发送」。
       store.set(liveMessagesMapAtom, (prev) => {
         const map = new Map(prev)
         const current = (map.get(sessionId) ?? []).filter(
@@ -2692,8 +2696,11 @@ export function AgentView({ sessionId, embedded = false }: AgentViewProps): Reac
         const map = new Map(prev)
         const current = prev.get(sessionId)
         if (!current) return prev
-        map.set(sessionId, { ...current, isCompacting: false, compactInFlight: false })
+        map.set(sessionId, rollbackRejectedAgentRunState(current))
         return map
+      })
+      toast.error('上下文压缩未启动', {
+        description: error instanceof Error && error.message ? error.message : '请稍后重试，或先停止当前运行再压缩。',
       })
     }).finally(() => {
       // 压缩 run 结束后才释放防重入锁（sendAgentMessage 的 promise 在整轮 run 完成后 resolve）

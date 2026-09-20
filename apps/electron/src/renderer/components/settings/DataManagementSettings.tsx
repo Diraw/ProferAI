@@ -19,6 +19,7 @@ import {
   HardDrive,
   Trash2,
   RefreshCw,
+  PackageOpen,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { SettingsSection, SettingsCard, SettingsRow, SettingsToggle } from './primitives'
@@ -94,6 +95,22 @@ interface StorageStats {
 interface CleanupResult {
   freedBytes: number
   deletedCount: number
+  errors: string[]
+}
+
+/** 与 main/lib/agent-session-compaction.ts 的 SessionCompactionResult 对应 */
+interface SessionCompactionResult {
+  scannedFiles: number
+  rewrittenFiles: number
+  rewrittenLines: number
+  skippedFiles: number
+  failedFiles: number
+  charsBefore: number
+  charsAfter: number
+  blobRefs: number
+  blobCount: number
+  blobBytes: number
+  backupDir?: string
   errors: string[]
 }
 
@@ -552,6 +569,9 @@ function StorageSection(): React.ReactElement {
   const [lastResult, setLastResult] = React.useState<CleanupResult | null>(null)
   const [autoCleanupTemp, setAutoCleanupTemp] = React.useState(true)
   const [autoCleanupDays, setAutoCleanupDays] = React.useState(0)
+  const [compactionPreview, setCompactionPreview] = React.useState<SessionCompactionResult | null>(null)
+  const [compactionResult, setCompactionResult] = React.useState<SessionCompactionResult | null>(null)
+  const [compacting, setCompacting] = React.useState(false)
 
   const loadStats = React.useCallback(async () => {
     setLoading(true)
@@ -610,7 +630,7 @@ function StorageSection(): React.ReactElement {
     setLastResult(null)
     try {
       const result = await window.electronAPI.cleanupStorage({
-        categories: ['agent-sessions', 'sdk-config', 'workspaces'],
+        categories: ['agent-sessions', 'sdk-config', 'workspaces', 'session-blobs'],
         orphansOnly: true,
         archivedBeforeDays: 0,
       }) as CleanupResult
@@ -639,6 +659,38 @@ function StorageSection(): React.ReactElement {
       await window.electronAPI.updateSettings({ autoCleanupArchivedDays: days })
     } catch (e) {
       console.error('[存储管理] 更新自动清理天数失败:', e)
+    }
+  }
+
+  // 先检测再整理：整理不可逆（会替换历史消息里的超大字段），必须先让用户看到规模。
+  const handlePreviewCompaction = async (): Promise<void> => {
+    setCompacting(true)
+    setCompactionResult(null)
+    try {
+      const result = await window.electronAPI.previewSessionCompaction() as SessionCompactionResult
+      setCompactionPreview(result)
+      if (result.rewrittenFiles === 0) toast.info('没有需要整理的历史数据')
+    } catch (e) {
+      console.error('[存储管理] 检测会话整理规模失败:', e)
+      toast.error('检测失败')
+    } finally {
+      setCompacting(false)
+    }
+  }
+
+  const handleApplyCompaction = async (): Promise<void> => {
+    setCompacting(true)
+    try {
+      const result = await window.electronAPI.applySessionCompaction() as SessionCompactionResult
+      setCompactionResult(result)
+      setCompactionPreview(null)
+      toast.success(result.rewrittenFiles > 0 ? `已整理 ${result.rewrittenFiles} 个会话文件` : '没有需要整理的数据')
+      await loadStats()
+    } catch (e) {
+      console.error('[存储管理] 执行会话整理失败:', e)
+      toast.error('整理失败')
+    } finally {
+      setCompacting(false)
     }
   }
 
@@ -774,6 +826,86 @@ function StorageSection(): React.ReactElement {
             </div>
           </SettingsRow>
         </SettingsCard>
+      </SettingsSection>
+
+      {/* 整理历史数据（与「清理」不同：把载荷搬出会话文件，不删任何东西） */}
+      <SettingsSection
+        title="整理历史数据"
+        description="把历史会话里过大的工具输出与内嵌图片搬到独立存储，会话文件里只留片段；原文完整保留可随时取回，不删任何内容"
+      >
+        <SettingsCard>
+          <SettingsRow
+            label="可整理的会话数据"
+            description="检测历史会话中超过存储上限的单条消息（通常是体积很大的工具输出或内嵌图片）。整理后打开这些会话不再需要把巨型内容读进内存"
+          >
+            <div className="flex items-center gap-3">
+              {compactionPreview && (
+                <span
+                  className={cn(
+                    'text-sm tabular-nums',
+                    compactionPreview.rewrittenFiles > 0 ? 'text-amber-500' : 'text-muted-foreground',
+                  )}
+                >
+                  {compactionPreview.rewrittenFiles > 0
+                    ? `${compactionPreview.rewrittenFiles} 个文件 · 会话体积 ${formatBytes(compactionPreview.charsBefore)} → ${formatBytes(compactionPreview.charsAfter)}`
+                    : '无需整理'}
+                </span>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handlePreviewCompaction}
+                disabled={compacting}
+                className="h-7 gap-1 text-xs"
+              >
+                <RefreshCw size={12} className={cn(compacting && 'animate-spin')} />
+                检测
+              </Button>
+              <Button
+                variant={compactionPreview && compactionPreview.rewrittenFiles > 0 ? 'default' : 'ghost'}
+                size="sm"
+                onClick={handleApplyCompaction}
+                disabled={compacting || !compactionPreview || compactionPreview.rewrittenFiles === 0}
+                className="h-7 gap-1 text-xs"
+              >
+                <PackageOpen size={12} />
+                立即整理
+              </Button>
+            </div>
+          </SettingsRow>
+        </SettingsCard>
+
+        {compactionResult && (
+          <div className="mt-3 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm">
+            {compactionResult.rewrittenFiles > 0 ? (
+              <>
+                <span className="text-emerald-600 dark:text-emerald-400">
+                  已整理 {compactionResult.rewrittenFiles} 个会话文件、{compactionResult.rewrittenLines} 条消息；
+                  会话体积 {formatBytes(compactionResult.charsBefore)} → {formatBytes(compactionResult.charsAfter)}
+                </span>
+                <div className="mt-1 text-xs text-muted-foreground">
+                  原文 {formatBytes(compactionResult.blobBytes)} 已搬到独立存储
+                  {compactionResult.blobRefs > compactionResult.blobCount
+                    ? `（${compactionResult.blobCount} 份，重复内容已自动合并）`
+                    : ''}
+                  ；在会话里点「加载全文」即可取回
+                </div>
+                {compactionResult.backupDir && (
+                  <div className="mt-1 break-all text-xs text-muted-foreground">
+                    原文件已备份至 {compactionResult.backupDir}
+                  </div>
+                )}
+              </>
+            ) : (
+              <span className="text-muted-foreground">没有需要整理的数据</span>
+            )}
+            {compactionResult.errors.length > 0 && (
+              <div className="mt-1 text-xs text-destructive">
+                {compactionResult.errors.map((err, i) => <div key={i}>{err}</div>)}
+              </div>
+            )}
+          </div>
+        )}
       </SettingsSection>
 
       {/* 操作结果提示 */}

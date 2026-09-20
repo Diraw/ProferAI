@@ -32,11 +32,12 @@ import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './ada
 import { PiAgentAdapter } from './adapters/pi-agent-adapter'
 import { RuntimeRoutingAgentAdapter } from './adapters/runtime-routing-agent-adapter'
 import { AgentEventBus } from './agent-event-bus'
+import { fanoutSessionEvent } from './agent-event-fanout'
 import { AgentCatalogInvalidationPublisher } from './agent-catalog-invalidation'
 import { AgentOrchestrator, serializeErrorDetail } from './agent-orchestrator'
 import { forwardHeadlessAgentCompletion, setHeadlessAgentRunner, type HeadlessAgentRunCallbacks } from './agent-headless-runner-registry'
 import { getAgentSessionWorkspacePath, getWorkspaceFilesDir } from './config-paths'
-import { getAgentSessionMeta, updateAgentSessionMeta } from './agent-session-manager'
+import { getAgentSessionMeta, setAgentSessionActiveChecker, updateAgentSessionMeta } from './agent-session-manager'
 import { AgentRuntimeContextStore } from './agent-runtime-context'
 
 // ===== 实例创建 =====
@@ -50,6 +51,7 @@ const piAdapter = new PiAgentAdapter()
 // Both runtimes remain behind the same orchestrator, credential gate, P0 lifecycle and Plan-mode boundary.
 const adapter = new RuntimeRoutingAgentAdapter({ claude: claudeAdapter, pi: piAdapter })
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
+setAgentSessionActiveChecker((sessionId) => orchestrator.isActive(sessionId))
 const runtimeContextStore = new AgentRuntimeContextStore()
 
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
@@ -201,6 +203,51 @@ eventBus.use((sessionId, payload, next) => {
   }
   next()
 })
+
+// ===== 统一事件出口 =====
+
+/**
+ * 把一个会话实时事件扇出到「事件总线 + 必要的兜底直发」。
+ *
+ * 事件总线侧负责：remote-service 广播给所有 Pocket 客户端、写入 WS 事件重放日志，
+ * 以及 EventBus IPC 中间件对该 session 已绑定 webContents 的转发。
+ *
+ * 因此当发起方就是已绑定的 webContents 时，中间件已经送达，这里不再直发 —— 否则
+ * 同一窗口的渲染层会收到两份同事件。只有在未绑定（如窗口关闭后重开，该 session 不在
+ * restoreActiveAgentStreams 的快照里，因而不会被重新绑定）、绑定已销毁或绑定不是
+ * 发起方时，才补一次直发，避免横幅不消失。
+ *
+ * sessionId 为空表示 request 已过期，整件事都不做。
+ */
+export function emitSessionStreamEvent(
+  sessionId: string | undefined | null,
+  payload: AgentStreamPayload,
+  fallbackSender?: WebContents | null,
+): void {
+  fanoutSessionEvent(
+    {
+      // 模块内使用本地实例名 eventBus，对外通过 `export { eventBus as agentEventBus }` 暴露。
+      emitToBus: (sid, p) => eventBus.emit(sid, p as AgentStreamPayload),
+      getBoundSender: (sid) => sessionWebContents.get(sid),
+      sendToSender: (sender, sid, p) => {
+        try {
+          (sender as WebContents).send(AGENT_IPC_CHANNELS.STREAM_EVENT, {
+            sessionId: sid,
+            payload: p,
+          } as AgentStreamEvent)
+        } catch (err) {
+          console.error(
+            `[EventBus] 兜底 send 失败: sessionId=${sid}, payload.kind=${(p as Record<string, unknown>)?.kind}`,
+            err,
+          )
+        }
+      },
+    },
+    sessionId,
+    payload,
+    fallbackSender,
+  )
+}
 
 // ===== IPC 薄包装函数 =====
 
@@ -444,6 +491,30 @@ setHeadlessAgentRunner((input, callbacks) => runAgentHeadless(input, callbacks))
  */
 export async function generateAgentTitle(input: AgentGenerateTitleInput): Promise<string | null> {
   return orchestrator.generateTitle(input)
+}
+
+/**
+ * 手动重新生成 Agent 会话标题（不受定稿锁定限制）。
+ *
+ * channelId/modelId 缺省时回退到会话元数据上的上次选择；两者都没有就无法生成，返回 null。
+ */
+export async function regenerateAgentTitle(
+  sessionId: string,
+  channelId?: string,
+  modelId?: string,
+): Promise<{ title: string; session: import('@profer/shared').AgentSessionMeta } | null> {
+  const meta = getAgentSessionMeta(sessionId)
+  if (!meta) return null
+  const resolvedChannelId = channelId || meta.channelId
+  const resolvedModelId = modelId || meta.modelId
+  if (!resolvedChannelId || !resolvedModelId) {
+    console.warn('[Agent 服务] 重新生成标题缺少可用渠道/模型:', { sessionId })
+    return null
+  }
+  const title = await orchestrator.regenerateTitle(sessionId, resolvedChannelId, resolvedModelId)
+  if (!title) return null
+  const session = getAgentSessionMeta(sessionId)
+  return session ? { title, session } : null
 }
 
 /**

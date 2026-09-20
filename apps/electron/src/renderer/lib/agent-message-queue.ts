@@ -84,9 +84,24 @@ export interface QueuedMessageSendPayload {
   mentions: ParsedQueuedMessageMentions
 }
 
+/**
+ * 剥离 Electron `ipcRenderer.invoke` 给主进程错误加上的包装前缀：
+ * `Error invoking remote method '<channel>': Error: <主进程文案>`。
+ *
+ * 主进程抛出的文案本身不带前缀，所以对 `error.message` 做锚定匹配会在真实 IPC 上永远失配
+ * （同一前缀的剥离写法已存在于 FileBrowser.stripIpcErrorPrefix）。
+ */
+function stripIpcErrorPrefix(message: string): string {
+  return message
+    .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim()
+}
+
 /** Main 已结束旧 run、renderer 尚未收到 complete 时，queue 可安全降级为新 run。 */
 export function isQueueTargetNoLongerActiveError(error: unknown): boolean {
-  return error instanceof Error && /^\[Agent 编排\] 会话未运行，无法追加消息: /.test(error.message)
+  if (!(error instanceof Error)) return false
+  return /^\[Agent 编排\] 会话未运行，无法追加消息: /.test(stripIpcErrorPrefix(error.message))
 }
 
 function escapeHtml(text: string): string {

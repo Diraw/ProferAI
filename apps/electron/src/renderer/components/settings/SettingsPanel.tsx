@@ -64,6 +64,7 @@ import { SubscriptionSettings } from "./SubscriptionSettings";
 import { OpenApiSettings } from "./OpenApiSettings";
 import { ProxySettings } from "./ProxySettings";
 import { PluginSettings } from "./PluginSettings";
+import { TEAM_WORKSPACE_UI_ENABLED } from "@/lib/product-feature-flags";
 
 /** 设置 Tab 定义 */
 export interface SettingsTabItem {
@@ -84,7 +85,9 @@ const ACCOUNT_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "account", label: "账户与资料", icon: <UserRound size={16} /> },
   { id: "credits", label: "额度与用量", icon: <Coins size={16} /> },
   { id: "subscription", label: "订阅方案", icon: <CreditCard size={16} /> },
-  { id: "team", label: "团队管理", icon: <Users size={16} /> },
+  ...(TEAM_WORKSPACE_UI_ENABLED
+    ? [{ id: "team" as const, label: "团队管理", icon: <Users size={16} /> }]
+    : []),
 ];
 
 /** 模型与能力：渠道 / Agent / 提示词 / Chat 工具 */

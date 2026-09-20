@@ -6,18 +6,21 @@ import {
   SIDEBAR_WIDTH,
   GAP_BUFFER,
   HYSTERESIS,
+  PANE_SPLIT_GAP,
   computeVisibility,
   layoutNeed,
+  mainAreaNeed,
   type PanelLayoutState,
   type PanelVisibility,
 } from './panel-layout'
+import { GROUP_SPLIT_GAP } from '@/atoms/tab-group-atoms'
 
-const full: PanelLayoutState = { sidebar: true, filePanel: true, browser: true }
-const noBrowser: PanelLayoutState = { sidebar: true, filePanel: true, browser: false }
-const fpAndBrowser: PanelLayoutState = { sidebar: false, filePanel: true, browser: true }
-const browserOnly: PanelLayoutState = { sidebar: false, filePanel: false, browser: true }
-const fpOnly: PanelLayoutState = { sidebar: false, filePanel: true, browser: false }
-const none: PanelLayoutState = { sidebar: false, filePanel: false, browser: false }
+const full: PanelLayoutState = { sidebar: true, filePanel: true, browser: true, mainPaneCount: 1 }
+const noBrowser: PanelLayoutState = { sidebar: true, filePanel: true, browser: false, mainPaneCount: 1 }
+const fpAndBrowser: PanelLayoutState = { sidebar: false, filePanel: true, browser: true, mainPaneCount: 1 }
+const browserOnly: PanelLayoutState = { sidebar: false, filePanel: false, browser: true, mainPaneCount: 1 }
+const fpOnly: PanelLayoutState = { sidebar: false, filePanel: true, browser: false, mainPaneCount: 1 }
+const none: PanelLayoutState = { sidebar: false, filePanel: false, browser: false, mainPaneCount: 1 }
 
 const hidden: PanelVisibility = { browser: false, filePanel: false }
 const shown: PanelVisibility = { browser: true, filePanel: true }
@@ -88,16 +91,71 @@ describe('computeVisibility 收起优先级', () => {
 
   test('given sidebar expanded then thresholds are raised accordingly', () => {
     // 左侧栏展开（300）时，文件面板从不可见恢复需 436+300+300+50 = 1086
-    const layout: PanelLayoutState = { sidebar: true, filePanel: true, browser: false }
+    const layout: PanelLayoutState = { sidebar: true, filePanel: true, browser: false, mainPaneCount: 1 }
     const vis = computeVisibility(1086, layout, hidden)
     expect(vis.filePanel).toBe(true)
     expect(computeVisibility(1085, layout, hidden).filePanel).toBe(false)
   })
 })
 
+// ===== 主区栏数（组合 tab） =====
+
+describe('mainAreaNeed 按主区栏数计算', () => {
+  test('given单栏 then returns CONVERSATION_MIN_WIDTH', () => {
+    expect(mainAreaNeed(1)).toBe(CONVERSATION_MIN_WIDTH)
+    expect(mainAreaNeed(1)).toBe(420)
+  })
+
+  test('given两栏（组合）then adds pane split gap', () => {
+    expect(mainAreaNeed(2)).toBe(CONVERSATION_MIN_WIDTH * 2 + PANE_SPLIT_GAP)
+    expect(mainAreaNeed(2)).toBe(848)
+  })
+
+  test('given 非法栏数 then falls back to at least one pane', () => {
+    expect(mainAreaNeed(0)).toBe(CONVERSATION_MIN_WIDTH)
+    expect(mainAreaNeed(-3)).toBe(CONVERSATION_MIN_WIDTH)
+    expect(mainAreaNeed(1.7)).toBe(CONVERSATION_MIN_WIDTH)
+  })
+
+  test('given pane split gap then matches group atoms (防止只改一边)', () => {
+    expect(PANE_SPLIT_GAP).toBe(GROUP_SPLIT_GAP)
+  })
+})
+
+describe('组合状态下的宽度预算', () => {
+  const groupNoSidebar: PanelLayoutState = { sidebar: false, filePanel: true, browser: false, mainPaneCount: 2 }
+  const groupWithSidebar: PanelLayoutState = { sidebar: true, filePanel: true, browser: false, mainPaneCount: 2 }
+
+  test('given 组合 + 文件面板 when 1400px then file panel 不再被判「宽度够」', () => {
+    // 组合（2 栏）+ 文件面板：848 + 16 + 300 = 1164（已可见时沿用它保持）
+    expect(layoutNeed(groupNoSidebar)).toBe(1164)
+    expect(computeVisibility(1400, groupNoSidebar, shown).filePanel).toBe(true)
+    // 单栏时同一窗口只需 736，两者差异正是被修掉的那个缺陷
+    expect(layoutNeed(fpOnly)).toBe(736)
+  })
+
+  test('given 组合 + 左栏 + 文件面板 when 1400px then file panel 让位', () => {
+    // 848 + 300 + 16 + 300 = 1464 > 1400 → 收起
+    expect(layoutNeed(groupWithSidebar)).toBe(1464)
+    expect(computeVisibility(1400, groupWithSidebar, shown).filePanel).toBe(false)
+    expect(computeVisibility(1464, groupWithSidebar, shown).filePanel).toBe(true)
+  })
+
+  test('given 组合 + 左栏 + 文件面板 when 从不可见恢复 then 需叠加滞后带', () => {
+    expect(computeVisibility(1463, groupWithSidebar, hidden).filePanel).toBe(false)
+    expect(computeVisibility(1514, groupWithSidebar, hidden).filePanel).toBe(true)
+  })
+
+  test('given 同一窗口在组合解散后 then 文件面板恢复可见（阈值回落）', () => {
+    // 组合时 1400 不够；解散回单栏后 1400 ≥ 1036 → 可见（隐藏态需 +50）
+    expect(computeVisibility(1400, groupWithSidebar, hidden).filePanel).toBe(false)
+    expect(computeVisibility(1400, noBrowser, hidden).filePanel).toBe(true)
+  })
+})
+
 describe('computeVisibility 滞后带（防抖动）', () => {
   test('given window oscillating around threshold then each switches only once', () => {
-    const layout: PanelLayoutState = { sidebar: false, filePanel: true, browser: false }
+    const layout: PanelLayoutState = { sidebar: false, filePanel: true, browser: false, mainPaneCount: 1 }
     // 从不可见打开，需要 736+50=786
     expect(computeVisibility(785, layout, hidden).filePanel).toBe(false)
     expect(computeVisibility(786, layout, hidden).filePanel).toBe(true)

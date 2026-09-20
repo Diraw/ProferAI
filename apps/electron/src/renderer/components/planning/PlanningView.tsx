@@ -27,6 +27,7 @@ import { ShortcutKeycaps } from '@/components/shortcuts/ShortcutKeycaps'
 import { WindowControlsHost } from '@/components/WindowControlsTemplate'
 import { detectIsWindows } from '@/lib/platform'
 import { resolveWindowControlsRightInset } from '@/lib/window-controls-layout'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 
 const TABS: Array<{ id: PlanningTab; label: string }> = [
   { id: 'todos', label: 'Todo' },
@@ -53,7 +54,8 @@ export function PlanningView({ standalone = false }: { standalone?: boolean } = 
   const [tab, setTab] = useAtom(planningTabAtom)
   const isWindows = React.useMemo(() => detectIsWindows(), [])
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
-  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const allWorkspaces = useAtomValue(agentWorkspacesAtom)
+  const workspaces = React.useMemo(() => getVisibleAgentWorkspaces(allWorkspaces), [allWorkspaces])
   const teamWorkspaceId = workspaces.find((workspace) => workspace.id === currentWorkspaceId)?.type === 'team' ? currentWorkspaceId : undefined
   const tabButtonRefs = React.useRef<Array<HTMLButtonElement | null>>([])
   const [calendarToolbarTarget, setCalendarToolbarTarget] = React.useState<HTMLDivElement | null>(null)
@@ -206,7 +208,8 @@ function TodoWorkspace({ standalone = false, teamWorkspaceId, embedded = false }
   const tags = useAtomValue(planningTagsAtom)
   const todoCreateRequest = useAtomValue(planningTodoCreateRequestAtom)
   const agentSessions = useAtomValue(agentSessionsAtom)
-  const agentWorkspaces = useAtomValue(agentWorkspacesAtom)
+  const allAgentWorkspaces = useAtomValue(agentWorkspacesAtom)
+  const agentWorkspaces = React.useMemo(() => getVisibleAgentWorkspaces(allAgentWorkspaces), [allAgentWorkspaces])
   const agentChannelId = useAtomValue(agentChannelIdAtom)
   const agentModelId = useAtomValue(agentModelIdAtom)
   const openSession = useOpenSession()

@@ -272,6 +272,13 @@ export const agentSessionStreamingStateAtomFamily = atomFamily((sessionId: strin
  */
 export const liveMessagesMapAtom = atom<Map<string, SDKMessage[]>>(new Map())
 
+const EMPTY_LIVE_MESSAGES: SDKMessage[] = []
+
+/** 单个 session 的实时消息切片，避免后台会话更新唤醒当前 AgentView。 */
+export const liveMessagesAtomFamily = atomFamily((sessionId: string) =>
+  atom((get) => get(liveMessagesMapAtom).get(sessionId) ?? EMPTY_LIVE_MESSAGES),
+)
+
 export const agentPendingPromptAtom = atom<AgentPendingPrompt | null>(null)
 
 /**
@@ -1024,6 +1031,20 @@ export const agentMessageRefreshAtom = atom<Map<string, number>>(new Map())
  */
 export const AGENT_MSG_CACHE_MAX = 20
 export const agentSDKMessagesCacheAtom = atom<Map<string, SDKMessage[]>>(new Map())
+
+/**
+ * 被外部化的消息按 uuid 缓存的「完整版」。
+ *
+ * 落盘时，超限消息里的大载荷会被搬到 blob，行内只留前 2000 字片段
+ * （见 `main/lib/agent-session-manager.ts` 的 `externalizeSerializedSessionLine`）。
+ * 所以渲染层拿到的是片段版本。用户点击「加载全文」后才通过 IPC 取回原文并存进这里，
+ * 由 `allSDKMessages` 覆盖回去——这样下游（turn 分组、工具结果查找、工具卡片的
+ * 「显示全部」按钮）**无需任何改动**就能看到完整内容。
+ *
+ * 为什么用全局 atom 而不是组件 state：uuid 全局唯一，且需要它的组件分散在多处，
+ * 用 atom 可以避免层层透传回调。这也保证了「大内容只在用户主动要求时才进渲染进程」。
+ */
+export const resolvedBlobMessagesAtom = atom<Map<string, SDKMessage>>(new Map())
 
 /**
  * 写入会话消息缓存并执行 LRU 淘汰。

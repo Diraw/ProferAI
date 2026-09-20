@@ -5,8 +5,8 @@
  */
 
 import { getChannelById } from './channel-manager'
-import { isAgentEnabledForChannel } from '@profer/shared'
-import type { ProviderType } from '@profer/shared'
+import { isChannelEnabledForRuntime } from '@profer/shared'
+import type { AgentRuntime, ProviderType } from '@profer/shared'
 
 export interface AvailableAgentModel {
   id: string
@@ -24,9 +24,11 @@ export interface AvailableAgentModelsForChannel {
 export function assertEnabledModelForChannel(input: {
   channelId?: string
   modelId?: string
+  runtime?: AgentRuntime
   purpose: string
 }): string | undefined {
   if (input.modelId == null) return undefined
+  const runtime = input.runtime ?? 'claude'
 
   const modelId = input.modelId.trim()
   if (!modelId) {
@@ -37,7 +39,7 @@ export function assertEnabledModelForChannel(input: {
   }
 
   const channel = getChannelById(input.channelId)
-  if (!channel || !isAgentEnabledForChannel(channel)) {
+  if (!channel || !isChannelEnabledForRuntime(channel, runtime)) {
     throw new Error(`${input.purpose}引用的渠道不存在、未启用或未开放 Agent: ${input.channelId}`)
   }
 
@@ -52,13 +54,14 @@ export function assertEnabledModelForChannel(input: {
 export function listEnabledAgentModelsForChannel(
   channelId: string | undefined,
   purpose: string,
+  runtime: AgentRuntime = 'claude',
 ): AvailableAgentModelsForChannel {
   if (!channelId) {
     throw new Error(`${purpose}需要可用的 channelId`)
   }
 
   const channel = getChannelById(channelId)
-  if (!channel || !isAgentEnabledForChannel(channel)) {
+  if (!channel || !isChannelEnabledForRuntime(channel, runtime)) {
     throw new Error(`${purpose}引用的渠道不存在、未启用或未开放 Agent: ${channelId}`)
   }
 

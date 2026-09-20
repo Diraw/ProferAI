@@ -8,13 +8,15 @@ import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import { toast } from 'sonner'
 import { agentWorkspacesAtom } from '@/atoms/agent-atoms'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 import { SettingsSection } from './primitives/SettingsSection'
 import { SettingsCard } from './primitives/SettingsCard'
 import { SettingsSelect } from './primitives/SettingsSelect'
 import { Button } from '@/components/ui/button'
 
 export function BotDefaultSettings(): React.ReactElement {
-  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const allWorkspaces = useAtomValue(agentWorkspacesAtom)
+  const workspaces = React.useMemo(() => getVisibleAgentWorkspaces(allWorkspaces), [allWorkspaces])
 
   const [defaultWorkspaceId, setDefaultWorkspaceId] = React.useState('')
   const [loading, setLoading] = React.useState(true)
@@ -22,10 +24,11 @@ export function BotDefaultSettings(): React.ReactElement {
   // 加载当前设置
   React.useEffect(() => {
     window.electronAPI.getSettings().then((settings) => {
-      setDefaultWorkspaceId(settings.agentWorkspaceId ?? '')
+      const savedWorkspaceId = settings.agentWorkspaceId
+      setDefaultWorkspaceId(workspaces.some((workspace) => workspace.id === savedWorkspaceId) ? savedWorkspaceId ?? '' : '')
       setLoading(false)
     }).catch(() => setLoading(false))
-  }, [])
+  }, [workspaces])
 
   const workspaceOptions = React.useMemo(
     () => workspaces.map((w) => ({ value: w.id, label: w.name })),

@@ -5,7 +5,7 @@ import { shouldAutoOpenBrowserFromPush } from './browser-auto-open'
 type BrowserPushSnapshot = Pick<BrowserViewState, 'agentTabId' | 'tabs' | 'activity'>
 
 function tab(tabId: string): BrowserTabSummary {
-  return { tabId, url: `https://example.com/${tabId}`, title: tabId, loading: false, zoomFactor: 1, openedByAgent: true }
+  return { tabId, url: `https://example.com/${tabId}`, title: tabId, localFile: null, loading: false, zoomFactor: 1, openedByAgent: true }
 }
 
 function trace(action: BrowserTraceItem['action']): BrowserTraceItem {

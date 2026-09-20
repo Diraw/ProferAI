@@ -13,10 +13,14 @@ import {
   currentAgentWorkspaceIdAtom,
 } from '@/atoms/agent-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
+import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
 import type { AgentWorkspace } from '@profer/shared'
 
 interface UseProjectActionsResult {
+  /** 当前产品 UI 可切换的工作区；团队工作区在隐藏开关关闭时不返回。 */
   workspaces: AgentWorkspace[]
+  /** 完整工作区列表，仅供需要保持底层索引完整的写操作使用。 */
+  allWorkspaces: AgentWorkspace[]
   currentWorkspaceId: string | null
   /** 切换到指定项目；已是当前项目时无副作用。默认切回对话视图，resetView:false 可保持当前视图（如停留在 Agent 技能） */
   selectProject: (workspaceId: string, opts?: { resetView?: boolean }) => void
@@ -25,19 +29,25 @@ interface UseProjectActionsResult {
 }
 
 export function useProjectActions(): UseProjectActionsResult {
-  const [workspaces, setWorkspaces] = useAtom(agentWorkspacesAtom)
+  const [allWorkspaces, setWorkspaces] = useAtom(agentWorkspacesAtom)
+  const workspaces = React.useMemo(
+    () => getVisibleAgentWorkspaces(allWorkspaces),
+    [allWorkspaces],
+  )
   const [currentWorkspaceId, setCurrentWorkspaceId] = useAtom(currentAgentWorkspaceIdAtom)
   const setActiveView = useSetAtom(activeViewAtom)
   const createInFlightRef = React.useRef(false)
 
   const selectProject = React.useCallback(
     (workspaceId: string, opts?: { resetView?: boolean }): void => {
+      const workspace = allWorkspaces.find((item) => item.id === workspaceId)
+      if (!workspace || !getVisibleAgentWorkspaces([workspace]).length) return
       if (workspaceId === currentWorkspaceId) return
       setCurrentWorkspaceId(workspaceId)
       if (opts?.resetView !== false) setActiveView('conversations')
       window.electronAPI.updateSettings({ agentWorkspaceId: workspaceId }).catch(console.error)
     },
-    [currentWorkspaceId, setCurrentWorkspaceId, setActiveView],
+    [allWorkspaces, currentWorkspaceId, setCurrentWorkspaceId, setActiveView],
   )
 
   const createProject = React.useCallback(
@@ -65,5 +75,5 @@ export function useProjectActions(): UseProjectActionsResult {
     [setWorkspaces, setCurrentWorkspaceId, setActiveView],
   )
 
-  return { workspaces, currentWorkspaceId, selectProject, createProject }
+  return { workspaces, allWorkspaces, currentWorkspaceId, selectProject, createProject }
 }

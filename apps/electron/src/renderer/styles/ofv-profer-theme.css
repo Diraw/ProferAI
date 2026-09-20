@@ -1,0 +1,242 @@
+/**
+ * OFV → Profer 主题桥接（viewer 独立页与渲染进程内回退路径共用）
+ *
+ * 两条路径，同一份映射：
+ * - **app 内回退路径**（`components/file-browser/ofv-preview/OfvPreview.tsx`）：本文件在 app 文档里加载，
+ *   Profer token 来自 `globals.css` 与皮肤 CSS —— `var()` 随 `:root` 变，所以换皮肤即时生效。
+ * - **viewer 独立页**（浏览器列主路径）：那一页跑在无 preload 的沙箱 webContents 里，读不到 app 的主题；
+ *   主进程把「明暗 + 实际生效的 token 值」烘进 URL（`?theme=` / `?tokens=`），页面再写成
+ *   `<html>` 内联变量。内联优先级高于下面的兜底镜像，因此同一套映射原样成立。
+ *
+ * 分工：
+ * - **配色跟随主题**：底色、纸面、文字、次要文字、边框、悬停、强调色全部映射到 Profer 的
+ *   token（浅/深由 token 自己翻转），所以皮肤一换，预览页的配色就与 app 一致，
+ *   不会露出 OFV 自带的那套偏蓝调色板（浅 `#eef1f6` / 深 `#0b101f`）。
+ * - **排版与 app 外壳特效不跟随**：字体、字号、字重、行高、文档自身的版式一律保持 OFV 原样 ——
+ *   预览的价值是保真，“文件长什么样”不该被 app 的排版习惯改写。皮肤里只作用于 app 外壳的效果
+ *   （扫描线、辉光、全局直角化这类）同样不搬运：跨进程过去的是**颜色/几何值**（见 shared 的
+ *   `ofv-theme-bridge`），不是皮肤 CSS 文本。
+ *
+ * 变量清单依据 OFV 的 `dist/style.css`：`.ofv-root` 声明整套浅色默认值，
+ * 深色在 `.ofv-theme-dark`。这里用同时命中两者的选择器提高特异度，避免与它的默认值打架。
+ *
+ * 契约：本文件消费的 Profer token 必须都在 `@profer/shared` 的 `OFV_THEME_TOKEN_NAMES` 名单里
+ * —— viewer 页只搬运那份名单。名单是否仍覆盖本文件，由 `lib/ofv-theme-tokens.test.ts` 的漂移守卫守住。
+ */
+
+/* ─────────────────────────────────────────────────────────────
+   1) viewer 独立页的 **兜底** 镜像（只在 viewer 页生效）
+   只在「主进程没能给出 token」时用得上：例如某次预览由 Agent 打开，而主进程还没收到过
+   渲染进程的主题同步。正常路径下 token 由页面写成 <html> 内联变量，内联优先级更高，这段被抬过。
+   选择器必须带 `.viewer-page`：本文件也会进入 app 文档（回退路径），
+   没有这个类就不能在 app 里改写 `:root`，否则会和 globals.css / 皮肤 CSS 抢所有权。
+   ───────────────────────────────────────────────────────────── */
+html.viewer-page {
+  --radius: 0.625rem;
+  --primary: 0 0% 9%;
+  --background: 0 0% 100%;
+  --foreground: 0 0% 3.9%;
+  --muted: 0 0% 96.1%;
+  --muted-foreground: 0 0% 45.1%;
+  --raised-surface: 0 0% 100%;
+  --surface-border: 0 0% 89.8%;
+  --panel-surface: var(--raised-surface);
+  --panel-border: var(--surface-border);
+}
+
+html.viewer-page.dark {
+  --radius: 0.625rem;
+  --primary: 0 0% 98%;
+  --background: 0 0% 7%;
+  --foreground: 0 0% 98%;
+  --muted: 0 0% 14.9%;
+  --muted-foreground: 0 0% 63.9%;
+  --raised-surface: 0 0% 10.5%;
+  --surface-border: 0 0% 18%;
+  --panel-surface: var(--raised-surface);
+  --panel-border: var(--surface-border);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   2) 配色：--ofv-* ← Profer token
+   只映射**颜色**。font-family / font-size / font-weight / 行高 一概不动。
+   强调色用前景色（中性优先），避免 OFV 默认蓝紫跳出来。
+   ───────────────────────────────────────────────────────────── */
+.ofv-root,
+.ofv-root.ofv-theme-dark {
+  --ofv-bg: hsl(var(--background));
+  --ofv-surface: hsl(var(--raised-surface));
+  --ofv-surface-muted: hsl(var(--muted));
+  --ofv-text: hsl(var(--foreground));
+  --ofv-text-muted: hsl(var(--muted-foreground));
+  --ofv-border: hsl(var(--surface-border));
+  --ofv-button-hover: hsl(var(--muted));
+  --ofv-accent: hsl(var(--foreground));
+  --ofv-accent-soft: hsl(var(--foreground) / 0.1);
+  --ofv-toolbar-bg: hsl(var(--panel-surface));
+}
+
+/* ─────────────────────────────────────────────────────────────
+   3) 工具栏 = Profer 工具栏语法（只改控件，不动内容）
+   参照 BrowserPanel 的按钮：40px 行内 24px 方按钮、6px 圆角、12px 字、ghost 悬停。
+   ───────────────────────────────────────────────────────────── */
+.ofv-toolbar {
+  min-height: 40px;
+  padding: 0 8px;
+  gap: 2px;
+  border-bottom: 1px solid hsl(var(--panel-border));
+}
+
+.ofv-toolbar button,
+.ofv-toolbar input {
+  min-height: 24px;
+  /* max() 兜住小半径皮肤：terminal-dark 把 --radius 设成 2px，
+     直接 calc(2px - 4px) 会得到负值 → 整条声明在计算期失效，圆角反而回落成 OFV 默认值。 */
+  border-radius: max(0px, calc(var(--radius) - 4px));
+  padding: 0 8px;
+  font-size: 12px;
+  font-family:
+    'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
+    'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+.ofv-toolbar button {
+  color: hsl(var(--muted-foreground));
+}
+
+.ofv-toolbar button:hover:not(:disabled) {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+
+.ofv-toolbar button:active:not(:disabled) {
+  background: hsl(var(--muted));
+}
+
+.ofv-toolbar button:disabled {
+  opacity: 0.4;
+}
+
+.ofv-toolbar button:focus-visible,
+.ofv-toolbar input:focus-visible {
+  outline: 2px solid hsl(var(--foreground) / 0.35);
+  outline-offset: 1px;
+}
+
+.ofv-toolbar-icon-button {
+  width: 24px;
+  padding: 0;
+}
+
+.ofv-toolbar-zoom-reset {
+  min-width: 44px;
+  padding: 0 6px;
+  font-size: 11.5px;
+}
+
+.ofv-toolbar-sep {
+  height: 14px;
+  margin: 0 4px;
+  background: hsl(var(--panel-border));
+}
+
+.ofv-toolbar select {
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid hsl(var(--panel-border));
+  border-radius: max(0px, calc(var(--radius) - 4px));
+  background: hsl(var(--panel-surface));
+  color: hsl(var(--foreground));
+  font-size: 12px;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   4) 空态（viewer 页 #fallback 的骨架，见 viewer/main.ts）：Profer 空状态，而不是一段裸文字
+   ───────────────────────────────────────────────────────────── */
+#fallback {
+  /* 回退值必须写在 var() 里：`hsl(var(--x) , 回退)` 会被当成 hsl() 的第二个参数，
+     整条声明在计算期失效，颜色反而退到继承值（原实现就是这个写法）。 */
+  color: hsl(var(--muted-foreground, 0 0% 45.1%));
+}
+
+.ofv-profer-empty {
+  max-width: 420px;
+  font: 400 13px/1.7 -apple-system, BlinkMacSystemFont, 'PingFang SC', system-ui, sans-serif;
+}
+
+.ofv-profer-empty-title {
+  margin-bottom: 6px;
+  color: hsl(var(--foreground, 0 0% 3.9%));
+  font-weight: 500;
+}
+
+.ofv-profer-empty-detail {
+  word-break: break-word;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   5) 文字选区 = app 的选区（预览页的划词会变成对话引用，配色不该是浏览器默认蓝）
+   与 `globals.css` 的 `::selection` 同口径：默认主题用 --primary/25%，
+   皮肤若定义了 --selection-bg/--selection-color（与 skin-base.css 消费的同一组 token）就用它。
+   只作用在 OFV 内容里：这条规则同时被 app 文档与 viewer 页加载，
+   不加 .ofv-root 前缀会在 app 里盖掉全局选区配色。
+   ───────────────────────────────────────────────────────────── */
+.ofv-root ::selection {
+  background-color: var(--selection-bg, hsl(var(--primary) / 0.25));
+  color: var(--selection-color, hsl(var(--foreground)));
+}
+
+/* ─────────────────────────────────────────────────────────────
+   6) 收敛 OFV 内部**未 token 化**的蓝调（Tailwind blue-600 一系的硬编码值）
+   这些是 OFV 自己的漏网之鱼：聚焦环、页签选中态、可拖拽分隔条、代码块按钮按下态、
+   LRC 模式按钮、以及链接色。不收敛的话，换上任何非蓝调皮肤都会露出几处 #2563eb。
+   取舍：**只收敛"外壳/交互态"**（聚焦环、页签、分隔条、按下态、链接）。以下三类刻意不碰：
+   - 代码高亮 Prism 配色（`.token.*`）、文档自身的"白纸黑字"（`.ofv-msdoc-*` / `.ofv-word*` /
+     PDF 页面底色）—— 属于"文件长什么样"，与"排版不跟随"同一条边界；
+   - 语义色（`.ofv-status-error` 的红、转换提示的琥珀）—— OFV 的取值与本仓库 `--destructive`
+     系差别很小，不值得为它扩大跨进程 token 名单。
+   ───────────────────────────────────────────────────────────── */
+
+/* 聚焦环：OFV 有四处硬编码 #2563eb，这条同时收掉（只改颜色，宽度/偏移沿用 OFV 的） */
+.ofv-root :focus-visible {
+  outline-color: var(--ofv-accent);
+}
+
+/* 页签选中态（轻/深两套） */
+.ofv-tabs button.is-active,
+.ofv-root.ofv-theme-dark .ofv-tabs button.is-active {
+  border-color: var(--ofv-accent);
+  background: var(--ofv-accent-soft);
+  color: hsl(var(--foreground));
+}
+
+/* 表格/归档侧栏的可拖拽分隔条 */
+.ofv-column-resize-handle:hover::after,
+.ofv-column-resize-handle:active::after {
+  background: var(--ofv-accent);
+}
+
+/* 代码块按钮按下态 / LRC 模式按钮选中态（轻/深两套） */
+.ofv-code-action[aria-pressed='true'],
+.ofv-lrc-mode-button[aria-selected='true'] {
+  border-color: var(--ofv-accent);
+  background: var(--ofv-accent-soft);
+  color: hsl(var(--foreground));
+}
+
+.ofv-theme-dark .ofv-code-action[aria-pressed='true'],
+.ofv-theme-dark .ofv-lrc-mode-button[aria-selected='true'] {
+  color: hsl(var(--foreground));
+}
+
+/* 链接色：与 app 自己的 Markdown 预览同口径（--primary）。
+   只改颜色，不动 OFV 定的下划线取舍 —— 那是"文件长什么样"的范畴，与"排版不跟随"同一条边界。
+   深色变体一并写上：OFV 的深色规则特异度更高（.ofv-root.ofv-theme-dark ...），
+   只写浅色选择器会在深色下被它的 #60a5fa 盖回去。 */
+.ofv-fallback a,
+.ofv-epub-content a,
+.ofv-markdown-body a,
+.ofv-root.ofv-theme-dark .ofv-epub-content a,
+.ofv-root.ofv-theme-dark .ofv-markdown-body a {
+  color: hsl(var(--primary));
+}

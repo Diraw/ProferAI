@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto'
 import type { WebContents } from 'electron'
 import { CHAT_IPC_CHANNELS, resolveXaiCredentialMode } from '@profer/shared'
 import { pushChatStream } from './chat-stream-bus'
-import type { ChatSendInput, ChatMessage, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
+import type { ChatSendInput, ChatMessage, ConversationMeta, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
 import {
   getAdapter,
   streamSSE,
@@ -27,7 +27,7 @@ import {
 import type { ImageAttachmentData, ContinuationMessage } from '@profer/core'
 import { listChannels, decryptApiKey, isCommercialMode, canSelfConfig } from './channel-manager'
 import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
-import { appendMessage, appendBranchTail, updateConversationMeta, getConversationBranch } from './conversation-manager'
+import { appendMessage, appendBranchTail, updateConversationMeta, getConversationBranch, getConversationMeta, DEFAULT_CONVERSATION_TITLE } from './conversation-manager'
 import { readAttachmentAsBase64, isImageAttachment } from './attachment-service'
 import { extractTextFromAttachment, isDocumentAttachment } from './document-parser'
 import { getFetchFn } from './proxy-fetch'
@@ -38,7 +38,7 @@ import { isCommercialBuild } from './build-target'
 import { isOfficialManagedChannel } from './official-channel'
 import { searchKnowledgeItemsForChat } from './knowledge-item-service'
 import { prepareChatKnowledgeRequest } from './chat-knowledge-request'
-import { buildTitlePrompt, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
+import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, mergeTitleRefineAttempts, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
 
 /** 单个对话的活跃 Chat run。`settled` 在该 run 完成落盘与事件收尾后 resolve。 */
 interface ActiveChatRun {
@@ -703,16 +703,21 @@ export function stopAllGenerations(): void {
  * @returns 生成的标题，失败时返回 null
  */
 export async function generateTitle(input: GenerateTitleInput): Promise<string | null> {
-  const { userMessage, channelId, modelId } = input
-  console.log('[标题生成] 开始生成标题:', { channelId, modelId, userMessage: userMessage.slice(0, 50) })
+  const { userMessage, channelId, modelId, contextMessages } = input
+  console.log('[标题生成] 开始生成标题:', { channelId, modelId, sourceCount: contextMessages?.length ?? 1, userMessage: userMessage.slice(0, 50) })
 
-  // 短消息直接使用原文作为标题，避免 AI 幻觉
+  // 短消息直接使用原文作为标题，避免 AI 幻觉。
+  // 窗口路径（contextMessages）已经在收集阶段过滤过信息量，不再走这条短路。
   const trimmedMessage = userMessage.trim()
-  if (trimmedMessage.length <= SHORT_MESSAGE_THRESHOLD) {
+  if ((!contextMessages || contextMessages.length === 0) && trimmedMessage.length <= SHORT_MESSAGE_THRESHOLD) {
     const shortTitle = trimmedMessage.slice(0, MAX_TITLE_LENGTH)
     console.log('[标题生成] 消息过短，直接使用原文作为标题:', shortTitle)
     return shortTitle
   }
+
+  const titlePrompt = contextMessages && contextMessages.length > 0
+    ? buildWindowTitlePrompt(contextMessages)
+    : buildTitlePrompt(userMessage)
 
   // 查找渠道
   const channels = listChannels()
@@ -761,7 +766,7 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
       baseUrl: proxyBaseUrl || channel.baseUrl,
       apiKey,
       modelId,
-      prompt: buildTitlePrompt(userMessage),
+      prompt: titlePrompt,
     })
 
     if (proxyBaseUrl) request.url = proxyBaseUrl
@@ -786,4 +791,157 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     console.warn('[标题生成] 请求失败:', error)
     return null
   }
+}
+
+// ===== 自动命名窗口（Chat 链路） =====
+
+/** 自动命名窗口输入：渠道/模型由渲染层传入本轮的当前选择，避免用到过期的会话元数据。 */
+export interface AutoTitleConversationInput {
+  conversationId: string
+  channelId: string
+  modelId: string
+}
+
+/**
+ * 收集对话「激活分支」上可用于命名的用户消息。
+ *
+ * 只取激活分支，避免把已被切走/回退的分支内容算进主题；
+ * 信息量过滤（命令、寒暄、注入块）统一在 title-generation 里做。
+ */
+function collectConversationTitleSources(conversationId: string): string[] {
+  try {
+    const messages = getConversationBranch(conversationId)
+    return collectTitleSources(messages.filter((m) => m.role === 'user').map((m) => m.content))
+  } catch (error) {
+    console.warn('[聊天服务] 读取对话消息用于命名失败:', error)
+    return []
+  }
+}
+
+/**
+ * 自动命名窗口（Chat 链路）：流结束后按前几轮有效用户消息生成/精修标题。
+ *
+ * 规则与 Agent 链路一致（见 title-generation.ts）：
+ * - 已定稿（titleLockedAt）或标题是用户手动起的 → 直接退出；
+ * - 全是寒暄/命令的轮次不命名，也不消耗调用次数，等真正有内容的轮次；
+ * - 累计到 TITLE_LOCK_MIN_SOURCES 条有效来源即定稿锁定，否则下一轮继续精修；
+ * - 模型调用次数上限 TITLE_REFINE_MAX_ATTEMPTS，用尽后停止自动改名。
+ *
+ * @returns 本轮实际写入标题后的对话元数据；未改名时返回 null（含「只是把锁定写回磁盘」的情形）。
+ */
+export async function autoTitleConversation(input: AutoTitleConversationInput): Promise<ConversationMeta | null> {
+  const { conversationId, channelId, modelId } = input
+  const meta = getConversationMeta(conversationId)
+  if (!meta) return null
+
+  const windowInput = {
+    title: meta.title,
+    defaultTitle: DEFAULT_CONVERSATION_TITLE,
+    titleAutoGeneratedAt: meta.titleAutoGeneratedAt,
+    titleRefineAttempts: meta.titleRefineAttempts,
+    titleLockedAt: meta.titleLockedAt,
+  }
+
+  // 先做只看元数据的预判：已定稿 / 人工命名 / 次数用尽都不需要读对话分支。
+  const preflight = preflightTitleWindow(windowInput)
+  if (preflight) {
+    if (preflight.action === 'lock') {
+      console.log(`[聊天服务] 自动命名窗口关闭（${preflight.reason}）`)
+      updateConversationMeta(conversationId, { titleLockedAt: Date.now() })
+    }
+    return null
+  }
+
+  const sources = collectConversationTitleSources(conversationId)
+  const decision = planTitleWindow({ ...windowInput, sourceCount: sources.length })
+  if (decision.action !== 'generate') {
+    // 此处只可能是「无有效来源」：不消耗调用次数，等下一个有内容的轮次。
+    console.log('[聊天服务] 标题来源无信息量，跳过本次自动命名')
+    return null
+  }
+
+  // 在第一次 await 前同步预占次数。JS 同步段不会被另一个调用插入，
+  // 因此并发结束的 Chat 流会依次拿到 1、2、3…，不会重复使用同一预算。
+  updateConversationMeta(conversationId, { titleRefineAttempts: decision.attempts })
+
+  const persistReservedAttempt = () => {
+    const latest = getConversationMeta(conversationId)
+    if (!latest) return
+    updateConversationMeta(conversationId, {
+      titleRefineAttempts: mergeTitleRefineAttempts(latest.titleRefineAttempts, decision.attempts),
+    })
+  }
+
+  try {
+    const title = await generateTitle({
+      userMessage: sources[0] ?? '',
+      channelId,
+      modelId,
+      contextMessages: sources,
+    })
+    if (!title) {
+      // 生成失败也算一次尝试；保留并发请求已经预占的更大次数。
+      persistReservedAttempt()
+      return null
+    }
+
+    // 标题请求是异步的；期间用户可能手动重命名或已定稿，不能覆盖用户决定。
+    const latest = getConversationMeta(conversationId)
+    if (!latest || latest.titleLockedAt || latest.title !== meta.title) return null
+
+    const updated = updateConversationMeta(conversationId, {
+      title,
+      titleAutoGeneratedAt: Date.now(),
+      titleRefineAttempts: mergeTitleRefineAttempts(latest.titleRefineAttempts, decision.attempts),
+      ...(decision.lockAfterApply ? { titleLockedAt: Date.now() } : {}),
+    })
+    console.log(`[聊天服务] 自动命名窗口完成: "${title}"（来源 ${sources.length} 条，${decision.lockAfterApply ? '已定稿' : '待精修'}）`)
+    return updated
+  } catch (error) {
+    console.warn('[聊天服务] 自动命名窗口失败:', error)
+    persistReservedAttempt()
+    return null
+  }
+}
+
+/**
+ * 手动「重新生成标题」：绕过定稿锁定，用当前激活分支上前几轮有效消息重新命名并重新锁定。
+ *
+ * 用户主动要求就允许重试，不受 TITLE_REFINE_MAX_ATTEMPTS 限制。
+ */
+export async function regenerateConversationTitle(
+  conversationId: string,
+  channelId?: string,
+  modelId?: string,
+): Promise<ConversationMeta | null> {
+  const meta = getConversationMeta(conversationId)
+  if (!meta) return null
+  const resolvedChannelId = channelId || meta.channelId
+  const resolvedModelId = modelId || meta.modelId
+  if (!resolvedChannelId || !resolvedModelId) {
+    console.warn('[聊天服务] 重新生成标题缺少可用渠道/模型:', { conversationId })
+    return null
+  }
+
+  const sources = collectConversationTitleSources(conversationId)
+  if (sources.length === 0) {
+    console.log('[聊天服务] 重新生成标题：没有有效来源')
+    return null
+  }
+
+  const title = await generateTitle({
+    userMessage: sources[0] ?? '',
+    channelId: resolvedChannelId,
+    modelId: resolvedModelId,
+    contextMessages: sources,
+  })
+  if (!title) return null
+
+  const latest = getConversationMeta(conversationId)
+  if (!latest) return null
+  return updateConversationMeta(conversationId, {
+    title,
+    titleAutoGeneratedAt: Date.now(),
+    titleLockedAt: Date.now(),
+  })
 }

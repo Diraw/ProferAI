@@ -288,6 +288,10 @@ function extractHttpStatusFromErrorText(...messages: string[]): number | null {
     /API error[^:]*:\s+(\d{3})/i,
     /\b(?:HTTP|status|statusCode)\s*[:=]?\s*(\d{3})\b/i,
     /\b(\d{3})\s+\{[^}]*"error"/is,
+    // 与 Pi adapter 保持一致：兼容 "503: {...}" / "520 status code (no body)" 这类
+    // 没有 HTTP/status 前缀、响应体也不含字面量 "error" 的中转形态。
+    /(?:^|\n)\s*(\d{3})\s*[:\-]/,
+    /\b(\d{3})\s+status code\b/i,
   ]
 
   for (const pattern of patterns) {

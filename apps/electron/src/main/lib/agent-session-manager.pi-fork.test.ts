@@ -15,11 +15,16 @@ const originalHome = process.env.HOME
 const originalPromaDev = process.env.PROMA_DEV
 const originalProferConfigDir = process.env.PROFER_CONFIG_DIR
 const appendedCustomMessages: Array<{ customType: string; content: string; display: boolean; details?: unknown }> = []
+let forkArtifactGate: Promise<void> | undefined
+let forkArtifactStarted: (() => void) | undefined
+let releaseForkArtifact: (() => void) | undefined
 
 // 分叉测试只替换本地 Pi 分叉边界，不能 mock 正式 Pi SDK 包：Bun 的 mock.module()
 // 在非隔离调用中会污染后续 SDK smoke / model registry 测试。
 mock.module('./pi-session-fork', () => ({
   forkPiSessionArtifact: async () => {
+    forkArtifactStarted?.()
+    if (forkArtifactGate) await forkArtifactGate
     const forkFile = join(tempHome, '.pi-fork.jsonl')
     writeFileSync(forkFile, '', 'utf-8')
     return {
@@ -118,9 +123,66 @@ afterAll(() => {
 
 beforeEach(() => {
   appendedCustomMessages.length = 0
+  forkArtifactGate = undefined
+  forkArtifactStarted = undefined
+  releaseForkArtifact = undefined
 })
 
 describe('Pi 会话分叉', () => {
+  test('Given 源会话仍在运行 When 分叉 Then 在读取 artifact 前拒绝', async () => {
+    const sessionId = 'pi-active-source'
+    writeAgentSessionsIndex([{
+      id: sessionId,
+      title: '运行中的 Pi 会话',
+      workspaceId: 'workspace-a',
+      createdAt: 1,
+      updatedAt: 1,
+      agentRuntime: 'pi',
+      sdkSessionId: 'pi-session-id',
+      piSessionFile: join(tempHome, 'pi-active-session.jsonl'),
+      piEntryBindings: { 'assistant-1': 'entry-keep' },
+    }])
+    writeFileSync(join(tempHome, 'pi-active-session.jsonl'), '', 'utf-8')
+    manager.setAgentSessionActiveChecker(() => true)
+
+    try {
+      await expect(manager.forkAgentSession({ sessionId, upToMessageUuid: 'assistant-1' })).rejects.toThrow('Agent 正在运行')
+      expect(manager.listAgentSessions(true).some((session) => session.id !== sessionId)).toBe(false)
+    } finally {
+      manager.setAgentSessionActiveChecker(undefined)
+    }
+  })
+
+  test('Given 同一会话已有 fork When 再次 fork Then 第二次在 artifact 读取前拒绝', async () => {
+    const sessionId = 'pi-concurrent-source'
+    writeAgentWorkspacesIndex([
+      { id: 'workspace-a', name: '工作区 A', slug: 'workspace-a', createdAt: 1, updatedAt: 1 },
+    ])
+    writeAgentSessionsIndex([{
+      id: sessionId,
+      title: '并发 Pi 会话',
+      workspaceId: 'workspace-a',
+      createdAt: 1,
+      updatedAt: 1,
+      agentRuntime: 'pi',
+      sdkSessionId: 'pi-session-id',
+      piSessionFile: join(tempHome, 'pi-concurrent-session.jsonl'),
+      piEntryBindings: { 'assistant-1': 'entry-keep' },
+    }])
+    mkdirSync(join(tempHome, 'config', 'agent-workspaces', 'workspace-a', sessionId), { recursive: true })
+    writeFileSync(join(tempHome, 'pi-concurrent-session.jsonl'), '', 'utf-8')
+    let startFork!: () => void
+    const started = new Promise<void>((resolve) => { startFork = resolve })
+    forkArtifactStarted = startFork
+    forkArtifactGate = new Promise<void>((resolve) => { releaseForkArtifact = resolve })
+
+    const firstFork = manager.forkAgentSession({ sessionId, upToMessageUuid: 'assistant-1' })
+    await started
+    await expect(manager.forkAgentSession({ sessionId, upToMessageUuid: 'assistant-1' })).rejects.toThrow('正在创建分叉')
+    releaseForkArtifact?.()
+    await firstFork
+  })
+
   test('Given Pi 会话有 entry bindings 和 artifact When 分叉 Then 创建新会话并持久化 branch 元数据', async () => {
     writeAgentWorkspacesIndex([
       { id: 'workspace-a', name: '工作区 A', slug: 'workspace-a', createdAt: 1, updatedAt: 1 },

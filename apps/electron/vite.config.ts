@@ -17,11 +17,17 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'src/renderer/index.html'),
+        // 浏览器列里的独立文件预览页（Open File Viewer 宿主）；见 src/renderer/viewer/main.ts
+        viewer: resolve(__dirname, 'src/renderer/viewer.html'),
       },
     },
   },
   resolve: {
     alias: {
+      // Node 专用原生 canvas：Open File Viewer（emf-converter）有一段运行期守卫的可选 import，
+      // 构建期必须给出替身，否则 @napi-rs/canvas 会把浏览器构建打挂。详见 stub 文件注释。
+      '@napi-rs/canvas': resolve(__dirname, 'src/renderer/lib/node-canvas-stub.ts'),
+      canvas: resolve(__dirname, 'src/renderer/lib/node-canvas-stub.ts'),
       '@/types': resolve(__dirname, 'src/types'),
       '@': resolve(__dirname, 'src/renderer'),
     },
