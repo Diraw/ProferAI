@@ -582,12 +582,13 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
 interface ThinkingBlockProps {
   block: SDKThinkingBlock
   dimmed?: boolean
+  streaming?: boolean
 }
 
 /** 思考块折叠行数阈值 */
 const THINKING_COLLAPSE_LINE_THRESHOLD = 4
 
-function ThinkingBlock({ block, dimmed = false }: ThinkingBlockProps): React.ReactElement {
+function ThinkingBlock({ block, dimmed = false, streaming = false }: ThinkingBlockProps): React.ReactElement {
   const thinkingExpanded = useAtomValue(thinkingExpandedAtom)
   const [isExpanded, setIsExpanded] = React.useState(thinkingExpanded)
   const [shouldCollapse, setShouldCollapse] = React.useState(false)
@@ -638,7 +639,7 @@ function ThinkingBlock({ block, dimmed = false }: ThinkingBlockProps): React.Rea
             shouldCollapse && !isExpanded && 'max-h-[5.6em]',
           )}
         >
-          <MessageResponse>{block.thinking}</MessageResponse>
+          <MessageResponse streaming={streaming} enableBlockCopy={(!shouldCollapse || isExpanded) && !streaming}>{block.thinking}</MessageResponse>
         </div>
         {shouldCollapse && (
           <button
@@ -719,7 +720,7 @@ function GeneratedImageThumb({ image }: { image: ParsedAgentImageAttachment }): 
 
 // ===== ContentBlock 主组件 =====
 
-export function ContentBlock({ block, allMessages, basePath, basePaths, animate = false, index = 0, dimmed = false, childBlocks, isStreaming, showThinking = true }: ContentBlockProps): React.ReactElement | null {
+const ContentBlockView = function ContentBlock({ block, allMessages, basePath, basePaths, animate = false, index = 0, dimmed = false, childBlocks, isStreaming, showThinking = true }: ContentBlockProps): React.ReactElement | null {
   // text 块 — 主要内容，不受 dimmed 影响
   if (block.type === 'text') {
     const textBlock = block as SDKTextBlock
@@ -738,7 +739,7 @@ export function ContentBlock({ block, allMessages, basePath, basePaths, animate 
           </div>
         )}
         {cleanText && (
-          <MessageResponse basePath={basePath} basePaths={basePaths}>{cleanText}</MessageResponse>
+          <MessageResponse basePath={basePath} basePaths={basePaths} streaming={isStreaming} enableBlockCopy={!isStreaming}>{cleanText}</MessageResponse>
         )}
       </>
     )
@@ -765,8 +766,21 @@ export function ContentBlock({ block, allMessages, basePath, basePaths, animate 
   if (block.type === 'thinking') {
     const thinkingBlock = block as SDKThinkingBlock
     if (!showThinking || !thinkingBlock.thinking) return null
-    return <ThinkingBlock block={thinkingBlock} dimmed={dimmed} />
+    return <ThinkingBlock block={thinkingBlock} dimmed={dimmed} streaming={isStreaming} />
   }
 
   return null
 }
+
+
+export const ContentBlock = React.memo(ContentBlockView, (prev, next) => (
+  prev.block === next.block
+  && prev.basePath === next.basePath
+  && prev.basePaths === next.basePaths
+  && prev.animate === next.animate
+  && prev.index === next.index
+  && prev.dimmed === next.dimmed
+  && prev.childBlocks === next.childBlocks
+  && prev.isStreaming === next.isStreaming
+  && prev.showThinking === next.showThinking
+))
