@@ -7,13 +7,16 @@ export interface StartupSplashBounds {
   height: number
 }
 
-/** 将 Splash 初始 bounds 裁剪到目标显示器工作区，不影响创建后的原生移动/缩放。 */
-export function constrainStartupSplashBounds(bounds: StartupSplashBounds, workArea: StartupSplashBounds): StartupSplashBounds {
-  const width = Math.min(Math.max(1, bounds.width), workArea.width)
-  const height = Math.min(Math.max(1, bounds.height), workArea.height)
-  const x = Math.min(Math.max(bounds.x, workArea.x), workArea.x + workArea.width - width)
-  const y = Math.min(Math.max(bounds.y, workArea.y), workArea.y + workArea.height - height)
-  return { x, y, width, height }
+/** 以目标显示器工作区的四分之一尺寸居中生成 Splash 初始 bounds。 */
+export function createCenteredStartupSplashBounds(workArea: StartupSplashBounds): StartupSplashBounds {
+  const width = Math.max(1, Math.round(workArea.width * 0.25))
+  const height = Math.max(1, Math.round(workArea.height * 0.25))
+  return {
+    x: workArea.x + Math.round((workArea.width - width) / 2),
+    y: workArea.y + Math.round((workArea.height - height) / 2),
+    width,
+    height,
+  }
 }
 
 /**

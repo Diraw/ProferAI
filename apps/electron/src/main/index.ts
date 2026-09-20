@@ -149,7 +149,7 @@ function registerProtocolsAndHandlers(): void {
 
 import { getSettings, updateSettings } from './lib/settings-service'
 import { resolveAppThemeIsDark } from './lib/app-theme-service'
-import { constrainStartupSplashBounds, createStartupSplashHtml } from './lib/startup-splash'
+import { createCenteredStartupSplashBounds, createStartupSplashHtml } from './lib/startup-splash'
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
 import { disposeAgentPreviewRenderer } from './lib/agent-preview-renderer'
@@ -584,6 +584,8 @@ function createWindow(): void {
   let splashShown = false
   let rendererReady = false
   let showTimer: ReturnType<typeof setTimeout> | null = null
+  // 冷启动目标显示器的完整工作区；主窗口首次显示前同步到此区域，避免旧 bounds 闪现。
+  let startupDisplayWorkArea: { x: number; y: number; width: number; height: number } | null = null
   // Ctrl/Cmd+R 热刷新时置 true：刷新只重载 renderer，不应改变窗口几何状态（修复刷新后被强制最大化）
   let isRefreshReload = false
   // 刷新前是否处于全屏：Windows 上全屏窗口 hide/show 会退出全屏导致位置/尺寸偏移，show 前需恢复
@@ -596,17 +598,21 @@ function createWindow(): void {
     if (showTimer) clearTimeout(showTimer)
     const remaining = Math.max(0, STARTUP_SPLASH_MIN_MS - (Date.now() - splashStartedAt))
     showTimer = setTimeout(() => {
-      // 冷启动时按上次保存的状态恢复最大化；热刷新（Ctrl/Cmd+R）保持窗口原状，不重新 maximize。
-      // ?? false：从未保存过窗口状态时不默认最大化（原 ?? true 导致首次运行即铺满全屏）。
-      if (!isRefreshReload && (savedState?.isMaximized ?? false)) mainWindow?.maximize()
+      // 冷启动先把隐藏主窗口同步到完整工作区，再显示并恢复原生最大化状态。
+      // 主窗口首次可见时已经是目标尺寸，不会先露出保存的普通 bounds。
+      if (!isRefreshReload && mainWindow && startupDisplayWorkArea) {
+        mainWindow.setBounds(startupDisplayWorkArea)
+      }
       if (process.platform === 'darwin' && app.dock) app.dock.show()
       // 全屏刷新：窗口可见前先恢复全屏。若先以普通尺寸 show 再 setFullScreen，窗口从左上角
       // 扩展到全屏，页面内组件（初始化动画等）容器会随之在底边/右侧偏移（顶边/左侧不动）。
       // 隐藏窗口上 setFullScreen 在 Windows 有效，主窗口 show 时直接就是全屏，无扩展过程。
       if (isRefreshReload && refreshWasFullScreen) mainWindow?.setFullScreen(true)
+      // renderer 已经 ready，先显示完整尺寸的主窗口，再同步原生最大化状态，最后关闭 Splash。
+      mainWindow?.showInactive()
+      if (!isRefreshReload && mainWindow && !mainWindow.isMaximized()) mainWindow.maximize()
       if (!startupSplashWindow?.isDestroyed()) startupSplashWindow?.close()
       startupSplashWindow = null
-      mainWindow?.show()
       // 兜底：隐藏窗口阶段 setFullScreen 未生效时（个别平台），show 后立即再恢复一次全屏
       if (isRefreshReload && refreshWasFullScreen && mainWindow && !mainWindow.isFullScreen()) {
         mainWindow.setFullScreen(true)
@@ -621,30 +627,24 @@ function createWindow(): void {
 
   const createSplashWindow = (splashBounds?: { width: number; height: number; x: number; y: number }): void => {
     if (startupSplashWindow && !startupSplashWindow.isDestroyed()) startupSplashWindow.close()
-    // 刷新（Ctrl/Cmd+R）场景会传入主窗口当前真实 bounds；Splash 与普通窗口一致，
-    // 允许跨屏移动和缩放。CSS 圆环不依赖连续 WebGL 更新，不受混合 DPI 合成闪动影响。
-    const requestedBounds: { x: number; y: number; width: number; height: number } = splashBounds
+    // 以保存位置/刷新前窗口选择目标显示器，但冷启动 Splash 始终使用该屏工作区的四分之一尺寸并居中。
+    const displayTarget = splashBounds
       ? { x: splashBounds.x, y: splashBounds.y, width: splashBounds.width, height: splashBounds.height }
       : savedState
         ? { x: savedState.x, y: savedState.y, width: savedState.width, height: savedState.height }
-        : (() => {
-            const workArea = screen.getPrimaryDisplay().workArea
-            return {
-              x: workArea.x + Math.round((workArea.width - initialBounds.width) / 2),
-              y: workArea.y + Math.round((workArea.height - initialBounds.height) / 2),
-              width: initialBounds.width,
-              height: initialBounds.height,
-            }
-          })()
-    const display = screen.getDisplayMatching(requestedBounds)
-    const bounds = constrainStartupSplashBounds(requestedBounds, display.workArea)
+        : screen.getPrimaryDisplay().workArea
+    const display = screen.getDisplayMatching(displayTarget)
+    startupDisplayWorkArea = { ...display.workArea }
+    const bounds = createCenteredStartupSplashBounds(display.workArea)
+    const minWidth = Math.min(800, bounds.width)
+    const minHeight = Math.min(600, bounds.height)
     startupSplashWindow = new BrowserWindow({
       x: bounds.x,
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
-      minWidth: 800,
-      minHeight: 600,
+      minWidth,
+      minHeight,
       frame: false,
       resizable: true,
       movable: true,
@@ -654,7 +654,8 @@ function createWindow(): void {
     })
     const splashWindow = startupSplashWindow
     splashWindow.setMenuBarVisibility(false)
-
+    // 主窗口完成首次最大化前保持 Splash 置顶，避免 showInactive / maximize 的异步重绘露出空白主窗口。
+    splashWindow.setAlwaysOnTop(true, 'floating')
 
     splashWindow.webContents.once('did-finish-load', () => {
       splashShown = true
