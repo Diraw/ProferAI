@@ -679,9 +679,12 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   // 被外部化的消息在用户点击「加载全文」后会被换成完整版（见 resolvedBlobMessagesAtom）。
   // 覆盖只放在这一层：下游的 turn 分组、工具结果查找、任务映射都会自动看到完整内容，
   // 不需要任何组件知道「外部化」这件事存在。
-  const resolvedBlobMessages = useAtomValue(resolvedBlobMessagesAtom)
+  const resolvedBlobMessagesBySession = useAtomValue(resolvedBlobMessagesAtom)
+  const resolvedBlobMessages = resolvedBlobMessagesBySession.get(sessionId)
   const allSDKMessages = React.useMemo(
-    () => applyResolvedBlobMessages(allSDKMessagesMerged, resolvedBlobMessages),
+    () => resolvedBlobMessages
+      ? applyResolvedBlobMessages(allSDKMessagesMerged, resolvedBlobMessages)
+      : allSDKMessagesMerged,
     [allSDKMessagesMerged, resolvedBlobMessages],
   )
   const hasContent = allSDKMessages.length > 0 || (imageGenerations?.length ?? 0) > 0

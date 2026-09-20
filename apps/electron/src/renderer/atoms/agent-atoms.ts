@@ -1033,7 +1033,7 @@ export const AGENT_MSG_CACHE_MAX = 20
 export const agentSDKMessagesCacheAtom = atom<Map<string, SDKMessage[]>>(new Map())
 
 /**
- * 被外部化的消息按 uuid 缓存的「完整版」。
+ * 被外部化的消息按 sessionId → uuid 缓存的「完整版」。
  *
  * 落盘时，超限消息里的大载荷会被搬到 blob，行内只留前 2000 字片段
  * （见 `main/lib/agent-session-manager.ts` 的 `externalizeSerializedSessionLine`）。
@@ -1041,10 +1041,24 @@ export const agentSDKMessagesCacheAtom = atom<Map<string, SDKMessage[]>>(new Map
  * 由 `allSDKMessages` 覆盖回去——这样下游（turn 分组、工具结果查找、工具卡片的
  * 「显示全部」按钮）**无需任何改动**就能看到完整内容。
  *
- * 为什么用全局 atom 而不是组件 state：uuid 全局唯一，且需要它的组件分散在多处，
- * 用 atom 可以避免层层透传回调。这也保证了「大内容只在用户主动要求时才进渲染进程」。
+ * 为什么用全局 atom 而不是组件 state：需要它的组件分散在多处，用 atom 可以避免
+ * 层层透传回调。按 sessionId 再分一层，是为了关闭标签/删除会话时可以精确释放；
+ * 这也保证了「大内容只在用户主动要求时才进渲染进程，并能随会话关闭释放」。
  */
-export const resolvedBlobMessagesAtom = atom<Map<string, SDKMessage>>(new Map())
+export const resolvedBlobMessagesAtom = atom<Map<string, Map<string, SDKMessage>>>(new Map())
+
+/**
+ * 从 session-keyed Map 删除一条会话。
+ *
+ * 没命中时保持原引用，避免无效更新触发订阅组件重渲染；命中时返回新 Map。
+ * 消息窗口缓存与完整版 blob 缓存共用它，保证关闭/归档/删除会话时的释放语义一致。
+ */
+export function deleteSessionMapEntry<T>(prev: Map<string, T>, sessionId: string): Map<string, T> {
+  if (!prev.has(sessionId)) return prev
+  const next = new Map(prev)
+  next.delete(sessionId)
+  return next
+}
 
 /**
  * 写入会话消息缓存并执行 LRU 淘汰。

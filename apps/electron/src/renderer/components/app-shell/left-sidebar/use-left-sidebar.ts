@@ -28,6 +28,7 @@ import {
 import {
   agentSessionsAtom,
   agentSDKMessagesCacheAtom,
+  resolvedBlobMessagesAtom,
   currentAgentSessionIdAtom,
   agentSessionIndicatorMapAtom,
   unviewedCompletedSessionIdsAtom,
@@ -169,6 +170,7 @@ export function useLeftSidebar() {
     return ids
   }, [agentDraftMap, agentDraftHtmlMap, allPendingAskUserRequests, askUserAnswers])
   const setAgentMessagesCache = useSetAtom(agentSDKMessagesCacheAtom)
+  const setResolvedBlobMessages = useSetAtom(resolvedBlobMessagesAtom)
 
   // 键盘与手柄共用左栏的 DOM 顺序；项目标题和会话行采用 roving focus。
   React.useEffect(() => {
@@ -437,6 +439,9 @@ export function useLeftSidebar() {
     // 重型流式数据：streamingStates（累积 content + toolActivities）与 liveMessages（SDK 消息数组）
     setStreamingStates(deleteKey)
     setLiveMessagesMap(deleteKey)
+    // 持久化消息窗口与用户主动加载的全文 blob 同样是重型、可重建数据。
+    setAgentMessagesCache(deleteKey)
+    setResolvedBlobMessages(deleteKey)
 
     // per-session 请求/错误/提示词状态：删除/归档后清理 Map 条目，避免跨会话累积
     setAgentStreamErrors(deleteKey)
@@ -480,7 +485,7 @@ export function useLeftSidebar() {
     sessionExistsAtom.remove(id)
 
     clearPreviewCacheForSession(id)
-  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setBrowserInlinePreview, setBrowserPanelOpen, setBrowserState, setBrowserDismissed, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
+  }, [setConvModels, setConvContextLength, setConvThinking, setConvParallel, setConvPromptId, setPreviewPanelOpen, setPreviewFile, setBrowserInlinePreview, setBrowserPanelOpen, setBrowserState, setBrowserDismissed, setDiffPanelTab, setExplorationMap, setDiffRefreshVersion, setDiffUnseen, setDiffUnseenFiles, setDiffData, setSessionChannelMap, setSessionModelMap, setSessionPathMap, setSessionViewStateMap, setStreamingStates, setLiveMessagesMap, setAgentMessagesCache, setResolvedBlobMessages, setAgentStreamErrors, setAgentPromptSuggestions, setAllPendingPermissionRequests, setAllPendingAskUserRequests, setAskUserAnswers, setAllPendingExitPlanRequests, setSessionPendingFiles, store])
 
 
   const currentWorkspaceSlug = React.useMemo(() => {

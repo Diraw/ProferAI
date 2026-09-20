@@ -595,7 +595,7 @@ function formatBlobBytes(bytes: number): string {
  * 取回后写进 `resolvedBlobMessagesAtom`，由 `allSDKMessages` 覆盖回消息流，
  * 于是所有下游（工具结果查找、工具卡片的「显示全部」）自动看到完整内容。
  */
-function ExternalizedContentNotice({ messages }: { messages: SDKMessage[] }): React.ReactElement | null {
+function ExternalizedContentNotice({ sessionId, messages }: { sessionId?: string; messages: SDKMessage[] }): React.ReactElement | null {
   const setResolvedMessages = useSetAtom(resolvedBlobMessagesAtom)
   const [loading, setLoading] = React.useState(false)
   const [failed, setFailed] = React.useState(0)
@@ -608,30 +608,34 @@ function ExternalizedContentNotice({ messages }: { messages: SDKMessage[] }): Re
   )
 
   const handleLoadAll = React.useCallback(async (): Promise<void> => {
+    if (!sessionId) return
     setLoading(true)
     setFailed(0)
     let failures = 0
+    const resolvedEntries: Array<[string, SDKMessage]> = []
     for (const { message } of targets) {
       const uuid = (message as { uuid?: string }).uuid
       try {
         const resolved = await window.electronAPI.resolveSessionMessageBlobs?.(message)
-        if (resolved && uuid) {
-          setResolvedMessages((prev) => {
-            const next = new Map(prev)
-            next.set(uuid, resolved as SDKMessage)
-            return next
-          })
-        } else {
-          failures++
-        }
+        if (resolved && uuid) resolvedEntries.push([uuid, resolved as SDKMessage])
+        else failures++
       } catch (e) {
         console.error('[会话存储] 取回外置内容失败:', e)
         failures++
       }
     }
+    if (resolvedEntries.length > 0) {
+      setResolvedMessages((prev) => {
+        const next = new Map(prev)
+        const sessionMessages = new Map(next.get(sessionId) ?? [])
+        for (const [uuid, resolved] of resolvedEntries) sessionMessages.set(uuid, resolved)
+        next.set(sessionId, sessionMessages)
+        return next
+      })
+    }
     setFailed(failures)
     setLoading(false)
-  }, [targets, setResolvedMessages])
+  }, [sessionId, targets, setResolvedMessages])
 
   if (targets.length === 0) return null
 
@@ -867,7 +871,7 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       <MessageContent>
         <TurnFileMapProvider map={turnFileMap}>
           <div className={cn('space-y-2')}>
-            <ExternalizedContentNotice messages={turn.turnMessages} />
+            <ExternalizedContentNotice sessionId={sessionId ?? undefined} messages={turn.turnMessages} />
             {renderItems.map((item, itemIndex) => {
               if (item.type === 'block') {
                 return renderTopLevelBlock(item.item.block, item.item.index)
