@@ -634,12 +634,12 @@ function ThinkingBlock({ block, dimmed = false, streaming = false }: ThinkingBlo
         <div
           ref={contentRef}
           className={cn(
-            'prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-[14px] leading-relaxed [&_.prose]:text-[14px] [&_.prose_strong]:font-medium overflow-hidden',
+            'prose prose-sm dark:prose-invert max-w-none prose-p:my-1 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-[14px] leading-relaxed [&_.prose]:text-[14px] [&_.prose_strong]:font-medium',
             dimmed ? 'text-muted-foreground' : 'text-foreground/90',
-            shouldCollapse && !isExpanded && 'max-h-[5.6em]',
+            shouldCollapse && !isExpanded ? 'max-h-[5.6em] overflow-hidden' : 'overflow-visible',
           )}
         >
-          <MessageResponse streaming={streaming}>{block.thinking}</MessageResponse>
+          <MessageResponse streaming={streaming} enableBlockCopy={(!shouldCollapse || isExpanded) && !streaming}>{block.thinking}</MessageResponse>
         </div>
         {shouldCollapse && (
           <button
@@ -739,7 +739,7 @@ function ContentBlockView({ block, allMessages, basePath, basePaths, animate = f
           </div>
         )}
         {cleanText && (
-          <MessageResponse basePath={basePath} basePaths={basePaths} streaming={isStreaming}>{cleanText}</MessageResponse>
+          <MessageResponse basePath={basePath} basePaths={basePaths} streaming={isStreaming} enableBlockCopy={!isStreaming}>{cleanText}</MessageResponse>
         )}
       </>
     )
