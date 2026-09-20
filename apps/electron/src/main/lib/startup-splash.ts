@@ -1,10 +1,26 @@
 import { INTRO_FLUID_FRAGMENT_SHADER, INTRO_FLUID_VERTEX_SHADER } from '../../shared/intro-fluid-shader'
 
+export interface StartupSplashBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** 将 Splash 初始 bounds 裁剪到目标显示器工作区，不影响创建后的原生移动/缩放。 */
+export function constrainStartupSplashBounds(bounds: StartupSplashBounds, workArea: StartupSplashBounds): StartupSplashBounds {
+  const width = Math.min(Math.max(1, bounds.width), workArea.width)
+  const height = Math.min(Math.max(1, bounds.height), workArea.height)
+  const x = Math.min(Math.max(bounds.x, workArea.x), workArea.x + workArea.width - width)
+  const y = Math.min(Math.max(bounds.y, workArea.y), workArea.y + workArea.height - height)
+  return { x, y, width, height }
+}
+
 /**
  * 生成冷启动独立窗口的原始 WebGL Splash HTML。
  *
- * Windows 下可通过显式 PROFER_ANGLE_BACKEND=d3d11on12 选择兼容性后端；该开关
- * 作用于整个 Electron 进程，默认不启用。Splash 的原始 WebGL 视觉结构保持不变。
+ * Windows 主进程在创建窗口前默认选择 ANGLE D3D11on12，规避部分 NVIDIA + D3D11
+ * 环境中原始动态 ring 的呈现闪动；shader 的原始视觉结构保持不变。
  */
 export function createStartupSplashHtml(isDark: boolean): string {
   const background = isDark ? '#0b0b0c' : '#f7f7f5'

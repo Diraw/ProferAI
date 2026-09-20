@@ -120,10 +120,10 @@ function registerProtocolsAndHandlers(): void {
   // ClearType 是为浅色背景+深色文字设计的，在深色代码块背景下会产生彩色边缘，导致文字模糊。
   if (process.platform === 'win32') {
     app.commandLine.appendSwitch('disable-lcd-text')
-    // ANGLE 后端是整个 Electron 进程级开关，不能为单个 Splash 安全隔离。
-    // 因此不默认修改所有 Windows GPU 的渲染路径，仅保留显式环境变量用于兼容性 A/B。
-    const angleBackend = process.env.PROFER_ANGLE_BACKEND
-    if (angleBackend && ['d3d11', 'd3d9', 'd3d11on12', 'gl', 'swiftshader'].includes(angleBackend)) {
+    // 原始动态 Splash 在部分 NVIDIA + D3D11 环境闪动；D3D11on12 后端已在受影响
+    // RTX 3060 Windows 环境完整显示且不闪，同时启动后的主页面正常。保留环境变量覆盖，便于其他机器 A/B。
+    const angleBackend = process.env.PROFER_ANGLE_BACKEND ?? 'd3d11on12'
+    if (['d3d11', 'd3d9', 'd3d11on12', 'gl', 'swiftshader'].includes(angleBackend)) {
       app.commandLine.appendSwitch('use-angle', angleBackend)
       console.info(`[图形] ANGLE backend: ${angleBackend}`)
     }
@@ -148,7 +148,7 @@ function registerProtocolsAndHandlers(): void {
 
 
 import { getSettings, updateSettings } from './lib/settings-service'
-import { createStartupSplashHtml } from './lib/startup-splash'
+import { constrainStartupSplashBounds, createStartupSplashHtml } from './lib/startup-splash'
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
 import { disposeAgentPreviewRenderer } from './lib/agent-preview-renderer'
@@ -340,8 +340,8 @@ function parseDiagnosticPayload(raw: string): unknown {
 }
 let startupSplashWindow: BrowserWindow | null = null
 
-// 启动 Splash 不应在 renderer 已就绪后额外阻塞主窗口。
-const STARTUP_SPLASH_MIN_MS = 1200
+// CSS 圆环会在约 2.4 秒内陆续扩散；保留足够展示时间以便用户观察启动反馈。
+const STARTUP_SPLASH_MIN_MS = 2400
 
 function resolveStartupSplashDark(): boolean {
   const settings = getSettings()
@@ -626,7 +626,7 @@ function createWindow(): void {
   const createSplashWindow = (splashBounds?: { width: number; height: number; x: number; y: number }): void => {
     if (startupSplashWindow && !startupSplashWindow.isDestroyed()) startupSplashWindow.close()
     // 刷新（Ctrl/Cmd+R）场景会传入主窗口当前真实 bounds；Splash 与普通窗口一致，
-    // 允许跨屏移动和缩放。Splash 的 WebGL 内容与主窗口 renderer 隔离。
+    // 允许跨屏移动和缩放。CSS 圆环不依赖连续 WebGL 更新，不受混合 DPI 合成闪动影响。
     const requestedBounds: { x: number; y: number; width: number; height: number } = splashBounds
       ? { x: splashBounds.x, y: splashBounds.y, width: splashBounds.width, height: splashBounds.height }
       : savedState
@@ -640,7 +640,8 @@ function createWindow(): void {
               height: initialBounds.height,
             }
           })()
-    const bounds = requestedBounds
+    const display = screen.getDisplayMatching(requestedBounds)
+    const bounds = constrainStartupSplashBounds(requestedBounds, display.workArea)
     startupSplashWindow = new BrowserWindow({
       x: bounds.x,
       y: bounds.y,
