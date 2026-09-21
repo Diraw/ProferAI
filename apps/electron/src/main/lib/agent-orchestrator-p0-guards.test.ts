@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { SAFE_TOOLS } from '@profer/shared'
 import {
+  AgentRunAlreadyActiveError,
   applySdkCredentials,
   buildPiSkillMentionOptions,
   isBrowserToolName,
@@ -16,6 +17,15 @@ import {
 } from './agent-orchestrator-p0-guards'
 
 describe('AgentOrchestrator P0 guards', () => {
+  test('Given 同一 session 已有 owner run When 新请求未启动 Then 返回可识别的普通拒绝', () => {
+    const activeError = new AgentRunAlreadyActiveError(false)
+    const stoppingError = new AgentRunAlreadyActiveError(true)
+
+    expect(activeError.code).toBe('AGENT_RUN_ALREADY_ACTIVE')
+    expect(activeError.message).toContain('上一条消息仍在处理中')
+    expect(stoppingError.message).toContain('Agent 正在停止')
+  })
+
   test('Given 同一 session 已在运行 When 再次占用 Then 拒绝并保留原运行令牌', () => {
     const sessions = new Map<string, string>()
 

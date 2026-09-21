@@ -3,6 +3,16 @@ import type { AgentRuntime, ProviderType, SDKMessage } from '@profer/shared'
 import { normalizeAnthropicBaseUrlForSdk } from '@profer/core'
 import { applyAgentSdkAuthEnv } from './agent-sdk-auth-env'
 
+/** 本次发送未获得运行所有权；它不是 owner run 的流式错误或终态。 */
+export class AgentRunAlreadyActiveError extends Error {
+  readonly code = 'AGENT_RUN_ALREADY_ACTIVE'
+
+  constructor(readonly stopping: boolean) {
+    super(`AGENT_RUN_ALREADY_ACTIVE: ${stopping ? 'Agent 正在停止，请稍候再试' : '上一条消息仍在处理中，请稍候再试'}`)
+    this.name = 'AgentRunAlreadyActiveError'
+  }
+}
+
 /** 在任意 await 前原子占用会话；false 表示已有同 session 运行。 */
 export function tryAcquireActiveSession(activeSessions: Map<string, string>, sessionId: string, runToken: string): boolean {
   if (activeSessions.has(sessionId)) return false
