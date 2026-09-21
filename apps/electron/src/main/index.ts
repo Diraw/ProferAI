@@ -120,10 +120,10 @@ function registerProtocolsAndHandlers(): void {
   // ClearType 是为浅色背景+深色文字设计的，在深色代码块背景下会产生彩色边缘，导致文字模糊。
   if (process.platform === 'win32') {
     app.commandLine.appendSwitch('disable-lcd-text')
-    // ANGLE 后端是整个 Electron 进程级开关，不能为单个 Splash 安全隔离。
-    // 因此不默认修改所有 Windows GPU 的渲染路径，仅保留显式环境变量用于兼容性 A/B。
-    const angleBackend = process.env.PROFER_ANGLE_BACKEND
-    if (angleBackend && ['d3d11', 'd3d9', 'd3d11on12', 'gl', 'swiftshader'].includes(angleBackend)) {
+    // 原始动态 Splash 在部分 NVIDIA + D3D11 环境闪动；D3D11on12 后端已在受影响
+    // RTX 3060 Windows 环境完整显示且不闪，同时启动后的主页面正常。保留环境变量覆盖，便于其他机器 A/B。
+    const angleBackend = process.env.PROFER_ANGLE_BACKEND ?? 'd3d11on12'
+    if (['d3d11', 'd3d9', 'd3d11on12', 'gl', 'swiftshader'].includes(angleBackend)) {
       app.commandLine.appendSwitch('use-angle', angleBackend)
       console.info(`[图形] ANGLE backend: ${angleBackend}`)
     }
@@ -149,7 +149,7 @@ function registerProtocolsAndHandlers(): void {
 
 import { getSettings, updateSettings } from './lib/settings-service'
 import { resolveAppThemeIsDark } from './lib/app-theme-service'
-import { createStartupSplashHtml } from './lib/startup-splash'
+import { createCenteredStartupSplashBounds, createStartupSplashHtml } from './lib/startup-splash'
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
 import { disposeAgentPreviewRenderer } from './lib/agent-preview-renderer'
@@ -341,8 +341,8 @@ function parseDiagnosticPayload(raw: string): unknown {
 }
 let startupSplashWindow: BrowserWindow | null = null
 
-// 启动 Splash 不应在 renderer 已就绪后额外阻塞主窗口。
-const STARTUP_SPLASH_MIN_MS = 1200
+// CSS 圆环会在约 2.4 秒内陆续扩散；保留足够展示时间以便用户观察启动反馈。
+const STARTUP_SPLASH_MIN_MS = 2400
 
 /** 启动闪屏的背景明暗：与「Agent 打开的本地预览」共用同一套解析（皮肤 tone 优先于 id 后缀启发式） */
 const resolveStartupSplashDark = resolveAppThemeIsDark
@@ -584,6 +584,8 @@ function createWindow(): void {
   let splashShown = false
   let rendererReady = false
   let showTimer: ReturnType<typeof setTimeout> | null = null
+  // 冷启动目标显示器的完整工作区；主窗口首次显示前同步到此区域，避免旧 bounds 闪现。
+  let startupDisplayWorkArea: { x: number; y: number; width: number; height: number } | null = null
   // Ctrl/Cmd+R 热刷新时置 true：刷新只重载 renderer，不应改变窗口几何状态（修复刷新后被强制最大化）
   let isRefreshReload = false
   // 刷新前是否处于全屏：Windows 上全屏窗口 hide/show 会退出全屏导致位置/尺寸偏移，show 前需恢复
@@ -596,17 +598,21 @@ function createWindow(): void {
     if (showTimer) clearTimeout(showTimer)
     const remaining = Math.max(0, STARTUP_SPLASH_MIN_MS - (Date.now() - splashStartedAt))
     showTimer = setTimeout(() => {
-      // 冷启动时按上次保存的状态恢复最大化；热刷新（Ctrl/Cmd+R）保持窗口原状，不重新 maximize。
-      // ?? false：从未保存过窗口状态时不默认最大化（原 ?? true 导致首次运行即铺满全屏）。
-      if (!isRefreshReload && (savedState?.isMaximized ?? false)) mainWindow?.maximize()
+      // 冷启动先把隐藏主窗口同步到完整工作区，再显示并恢复原生最大化状态。
+      // 主窗口首次可见时已经是目标尺寸，不会先露出保存的普通 bounds。
+      if (!isRefreshReload && mainWindow && startupDisplayWorkArea) {
+        mainWindow.setBounds(startupDisplayWorkArea)
+      }
       if (process.platform === 'darwin' && app.dock) app.dock.show()
       // 全屏刷新：窗口可见前先恢复全屏。若先以普通尺寸 show 再 setFullScreen，窗口从左上角
       // 扩展到全屏，页面内组件（初始化动画等）容器会随之在底边/右侧偏移（顶边/左侧不动）。
       // 隐藏窗口上 setFullScreen 在 Windows 有效，主窗口 show 时直接就是全屏，无扩展过程。
       if (isRefreshReload && refreshWasFullScreen) mainWindow?.setFullScreen(true)
+      // renderer 已经 ready，先显示完整尺寸的主窗口，再同步原生最大化状态，最后关闭 Splash。
+      mainWindow?.showInactive()
+      if (!isRefreshReload && mainWindow && !mainWindow.isMaximized()) mainWindow.maximize()
       if (!startupSplashWindow?.isDestroyed()) startupSplashWindow?.close()
       startupSplashWindow = null
-      mainWindow?.show()
       // 兜底：隐藏窗口阶段 setFullScreen 未生效时（个别平台），show 后立即再恢复一次全屏
       if (isRefreshReload && refreshWasFullScreen && mainWindow && !mainWindow.isFullScreen()) {
         mainWindow.setFullScreen(true)
@@ -621,29 +627,24 @@ function createWindow(): void {
 
   const createSplashWindow = (splashBounds?: { width: number; height: number; x: number; y: number }): void => {
     if (startupSplashWindow && !startupSplashWindow.isDestroyed()) startupSplashWindow.close()
-    // 刷新（Ctrl/Cmd+R）场景会传入主窗口当前真实 bounds；Splash 与普通窗口一致，
-    // 允许跨屏移动和缩放。Splash 的 WebGL 内容与主窗口 renderer 隔离。
-    const requestedBounds: { x: number; y: number; width: number; height: number } = splashBounds
+    // 以保存位置/刷新前窗口选择目标显示器，但冷启动 Splash 始终使用该屏工作区的四分之一尺寸并居中。
+    const displayTarget = splashBounds
       ? { x: splashBounds.x, y: splashBounds.y, width: splashBounds.width, height: splashBounds.height }
       : savedState
         ? { x: savedState.x, y: savedState.y, width: savedState.width, height: savedState.height }
-        : (() => {
-            const workArea = screen.getPrimaryDisplay().workArea
-            return {
-              x: workArea.x + Math.round((workArea.width - initialBounds.width) / 2),
-              y: workArea.y + Math.round((workArea.height - initialBounds.height) / 2),
-              width: initialBounds.width,
-              height: initialBounds.height,
-            }
-          })()
-    const bounds = requestedBounds
+        : screen.getPrimaryDisplay().workArea
+    const display = screen.getDisplayMatching(displayTarget)
+    startupDisplayWorkArea = { ...display.workArea }
+    const bounds = createCenteredStartupSplashBounds(display.workArea)
+    const minWidth = Math.min(800, bounds.width)
+    const minHeight = Math.min(600, bounds.height)
     startupSplashWindow = new BrowserWindow({
       x: bounds.x,
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
-      minWidth: 800,
-      minHeight: 600,
+      minWidth,
+      minHeight,
       frame: false,
       resizable: true,
       movable: true,
@@ -653,7 +654,8 @@ function createWindow(): void {
     })
     const splashWindow = startupSplashWindow
     splashWindow.setMenuBarVisibility(false)
-
+    // 主窗口完成首次最大化前保持 Splash 置顶，避免 showInactive / maximize 的异步重绘露出空白主窗口。
+    splashWindow.setAlwaysOnTop(true, 'floating')
 
     splashWindow.webContents.once('did-finish-load', () => {
       splashShown = true

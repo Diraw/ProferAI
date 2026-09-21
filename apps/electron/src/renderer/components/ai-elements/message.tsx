@@ -22,7 +22,7 @@ import Markdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { ChevronDown, ChevronUp, Paperclip, FileText, Sparkles, Server, Download, MessageSquareText, Link2, Copy, Check } from 'lucide-react'
+import { ChevronDown, ChevronUp, Paperclip, FileText, Sparkles, Server, Download, MessageSquareText, Link2, Copy, Check, ListChecks, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { shouldInspectMermaidCodeBlock, shouldRenderMermaidCodeBlock } from '@/lib/mermaid-detection'
 import { normalizeLatexDelimiters } from '@/lib/normalize-latex'
@@ -44,6 +44,16 @@ import { useFileAccessSessionId } from './file-access-context'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import type { HTMLAttributes, ComponentProps, ReactNode } from 'react'
 import type { FileAttachment } from '@profer/shared'
+import {
+  findAgentSelectionToolbarAnchor,
+  parseAgentMarkdownBlocks,
+  selectAgentBlockRange,
+  serializeAgentBlock,
+  serializeAgentSelection,
+  toggleAgentBlockSelection,
+  type AgentBlockSelectionUpdate,
+  type AgentMarkdownBlock,
+} from './agent-block-copy'
 
 // ===== Message 根容器 =====
 
@@ -128,7 +138,7 @@ export function MessageContent({
   return (
     <div
       className={cn(
-        'message-content flex max-w-full min-w-0 flex-col gap-2 overflow-hidden pl-[46px]',
+        'message-content flex max-w-full min-w-0 flex-col gap-2 overflow-visible pl-[46px]',
         'group-[.is-user]:text-foreground group-[.is-user]:items-start',
         'group-[.is-assistant]:w-full group-[.is-assistant]:text-foreground',
         className
@@ -469,6 +479,8 @@ export function TurnFileMapProvider({ map, children }: { map?: Map<string, strin
 interface MessageResponseProps {
   /** Markdown 内容 */
   children: string
+  /** 流式阶段使用稳定的纯文本布局，避免未闭合 Markdown 语法反复改变 DOM 结构。 */
+  streaming?: boolean
   className?: string
   /** 基础目录路径，用于解析相对文件路径（如 Agent 会话工作目录） */
   basePath?: string
@@ -476,6 +488,8 @@ interface MessageResponseProps {
   basePaths?: string[]
   /** 额外的 remark 插件（追加到内置 remarkGfm + remarkMath 之后） */
   remarkPlugins?: RemarkPluginFn[]
+  /** Agent 回答/已展开思考内容启用块级复制与多选。 */
+  enableBlockCopy?: boolean
 }
 
 /** 稳定引用的插件数组，避免 react-markdown 每帧重建插件管线 */
@@ -664,8 +678,6 @@ const MarkdownPre = React.memo(function MarkdownPre({
 
 // ===== MarkdownTable 表格渲染 + 复制 =====
 
-type TableFormat = 'markdown' | 'tsv'
-
 /** 从 react-markdown 渲染后的表格 children 提取二维纯文本（thead/tbody → tr → th/td） */
 export function parseTableChildren(children: React.ReactNode): string[][] {
   const rows: string[][] = []
@@ -710,11 +722,7 @@ export function rowsToMarkdown(rows: string[][]): string {
   return lines.join('\n')
 }
 
-/**
- * GFM 表格渲染器：在表格右上角提供复制操作条，支持 Markdown 源码 / TSV 两种格式切换。
- * - Markdown：优先用 remarkTableSource 注入的精确源码（保留单元格内联格式），缺失时纯文本重建。
- * - TSV：始终从渲染后的单元格纯文本提取，粘贴到 Excel/WPS 最干净。
- */
+/** Markdown 图片渲染器。 */
 const MarkdownImage = React.memo(function MarkdownImage({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>): React.ReactElement {
   const sessionId = useFileAccessSessionId()
   const basePaths = React.useContext(BasePathsContext)
@@ -740,77 +748,14 @@ const MarkdownImage = React.memo(function MarkdownImage({ src, alt }: React.ImgH
   return resolvedSrc ? <img src={resolvedSrc} alt={alt} /> : <span role="img" aria-label={alt} />
 })
 
+/** GFM 表格本身只负责布局；复制与格式选择由外层块右上角统一操作条提供。 */
 const MarkdownTable = React.memo(function MarkdownTable(
   props: { children?: React.ReactNode }
 ): React.ReactElement {
-  const children = props.children
-  const rawProps = props as unknown as Record<string, unknown>
-  const markdownSource =
-    (rawProps['data-table-source'] as string | undefined) ??
-    (rawProps.dataTableSource as string | undefined)
-
-  const [copied, setCopied] = React.useState(false)
-  const [format, setFormat] = React.useState<TableFormat>('markdown')
-
-  const rows = React.useMemo(() => parseTableChildren(children), [children])
-  const tsvText = React.useMemo(() => rowsToTsv(rows), [rows])
-  const markdownText = React.useMemo(
-    () => markdownSource || rowsToMarkdown(rows),
-    [markdownSource, rows]
-  )
-
-  const copiedResetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  // 卸载时清理复制复位定时器，避免延迟 setState 作用于已卸载组件
-  React.useEffect(
-    () => () => {
-      if (copiedResetTimerRef.current !== null) {
-        clearTimeout(copiedResetTimerRef.current)
-      }
-    },
-    []
-  )
-
-  const handleCopy = React.useCallback(async () => {
-    const text = format === 'markdown' ? markdownText : tsvText
-    try {
-      await navigator.clipboard.writeText(text)
-      if (copiedResetTimerRef.current !== null) {
-        clearTimeout(copiedResetTimerRef.current)
-      }
-      setCopied(true)
-      copiedResetTimerRef.current = setTimeout(() => {
-        copiedResetTimerRef.current = null
-        setCopied(false)
-      }, 2000)
-    } catch (error) {
-      console.error('[MarkdownTable] 复制失败:', error)
-    }
-  }, [format, markdownText, tsvText])
-
   return (
-    <div className="group/table relative my-3 before:absolute before:block before:-top-8 before:inset-x-0 before:h-8 before:content-['']">
-      {/* 操作条：浮在表格顶部上方、右对齐，hover 时出现 */}
-      <div className="absolute -top-8 right-0 hidden items-center gap-0.5 rounded-md border border-border/60 bg-background/95 px-0.5 py-0.5 shadow-sm group-hover/table:flex">
-        <button
-          type="button"
-          onClick={() => setFormat((f) => (f === 'markdown' ? 'tsv' : 'markdown'))}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
-          title={format === 'markdown' ? '复制为 Markdown 表格源码，点击切换为 TSV' : '复制为 TSV（制表符分隔），点击切换为 Markdown'}
-        >
-          {format === 'markdown' ? 'Markdown' : 'TSV'}
-        </button>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
-        >
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          <span>{copied ? '已复制' : '复制'}</span>
-        </button>
-      </div>
+    <div className="my-3">
       <div className="overflow-x-auto">
-        <table className="my-0">{children}</table>
+        <table className="my-0">{props.children}</table>
       </div>
     </div>
   )
@@ -876,64 +821,316 @@ const MarkdownInlineCode = React.memo(function MarkdownInlineCode({
   )
 })
 
+interface AgentBlockMargin {
+  className: string
+  topRank: number
+  bottomRank: number
+  topBridgeClassName: string
+  bottomBridgeClassName: string
+}
+
+function listBlockSignature(block: AgentMarkdownBlock | undefined): string | null {
+  if (!block) return null
+  const match = /^(?:([-+*])|(\d+)([.)]))(?:\s|$)/.exec(block.source.trimStart())
+  if (!match) return null
+  return match[1] ? `unordered:${match[1]}` : `ordered:${match[3]}`
+}
+
+function isFenceBlock(block: AgentMarkdownBlock | undefined): boolean {
+  return Boolean(block && /^(?:`{3,}|~{3,})/.test(block.source.trimStart()))
+}
+
+/** 保留块在原始 prose 容器中的纵向节奏，包括列表邻接与连续代码块间距。 */
+function agentBlockMargin(block: AgentMarkdownBlock, previous?: AgentMarkdownBlock, next?: AgentMarkdownBlock): AgentBlockMargin {
+  const source = block.source.trimStart()
+  const listSignature = listBlockSignature(block)
+  if (listSignature) {
+    const joinsPrevious = listBlockSignature(previous) === listSignature
+    const joinsNext = listBlockSignature(next) === listSignature
+    return {
+      className: cn(joinsPrevious ? 'mt-0' : 'mt-[1.25em]', joinsNext ? 'mb-0' : 'mb-[1.25em]'),
+      topRank: joinsPrevious ? 0 : 18.75,
+      bottomRank: joinsNext ? 0 : 18.75,
+      topBridgeClassName: joinsPrevious ? 'bottom-0' : '-bottom-[1.25em]',
+      bottomBridgeClassName: joinsNext ? 'bottom-0' : '-bottom-[1.25em]',
+    }
+  }
+  if (/^>/.test(source)) return { className: 'my-[1.6em]', topRank: 24, bottomRank: 24, topBridgeClassName: '-bottom-[1.6em]', bottomBridgeClassName: '-bottom-[1.6em]' }
+  if (isFenceBlock(block)) {
+    const followsFence = isFenceBlock(previous)
+    return { className: followsFence ? 'mt-4 mb-0' : 'my-0', topRank: followsFence ? 16 : 0, bottomRank: 0, topBridgeClassName: followsFence ? '-bottom-4' : 'bottom-0', bottomBridgeClassName: 'bottom-0' }
+  }
+  if (block.kind === 'table' || /^(?:[-*_]\s*){3,}$/.test(source.split('\n', 1)[0] ?? '')) return { className: 'my-3', topRank: 12, bottomRank: 12, topBridgeClassName: '-bottom-3', bottomBridgeClassName: '-bottom-3' }
+  if (/^(?:#{1,6}\s|[^\n]+\n(?:=+|-+)\s*$)/.test(source)) return { className: 'my-2', topRank: 8, bottomRank: 8, topBridgeClassName: '-bottom-2', bottomBridgeClassName: '-bottom-2' }
+  return { className: 'my-1.5', topRank: 6, bottomRank: 6, topBridgeClassName: '-bottom-1.5', bottomBridgeClassName: '-bottom-1.5' }
+}
+
 /** 使用 react-markdown 渲染 assistant 消息内容，代码块使用 Shiki 语法高亮 */
+interface CopyableMarkdownBlockProps {
+  block: AgentMarkdownBlock
+  components: React.ComponentProps<typeof Markdown>['components']
+  remarkPlugins: NonNullable<React.ComponentProps<typeof Markdown>['remarkPlugins']>
+  selected: boolean
+  selectedBefore: boolean
+  selectedAfter: boolean
+  selecting: boolean
+  toolbarVisible: boolean
+  toolbarBlock: AgentMarkdownBlock | null
+  toolbarBlockSelected: boolean
+  marginClassName: string
+  selectionBridgeAfterClassName: string
+  markdownFormat: 'markdown' | 'plainText'
+  onSelect: (event: React.MouseEvent<HTMLDivElement>) => void
+  onHover: () => void
+  onToolbarEnter: () => void
+  onToolbarLeave: () => void
+  toolbarExpanded: boolean
+  onCopy: () => void
+  onEnterSelection: (event: React.MouseEvent<HTMLButtonElement>) => void
+  onExitSelection: (event: React.MouseEvent<HTMLButtonElement>) => void
+  onMarkdownFormatChange: (format: 'markdown' | 'plainText') => void
+  tableFormat: 'markdown' | 'tsv'
+  onTableFormatChange: (format: 'markdown' | 'tsv') => void
+  selectionFormatMode: 'markdown' | 'plainText' | 'tsv' | 'mixed'
+  copied: boolean
+}
+
+function CopyableMarkdownBlock({ block, components, remarkPlugins, selected, selectedBefore, selectedAfter, selecting, toolbarVisible, toolbarBlock, toolbarBlockSelected, marginClassName, selectionBridgeAfterClassName, markdownFormat, onSelect, onHover, onToolbarEnter, onToolbarLeave, toolbarExpanded, onCopy, onEnterSelection, onExitSelection, onMarkdownFormatChange, tableFormat, onTableFormatChange, selectionFormatMode, copied }: CopyableMarkdownBlockProps): React.ReactElement {
+  const selectionGroupStart = selected && !selectedBefore
+  const selectionGroupEnd = selected && !selectedAfter
+  const selectionPaddingClassName = selected
+    ? cn(selectionGroupStart && 'pt-2', selectionGroupEnd && 'pb-2')
+    : undefined
+  const selectionFrameClassName = selected
+    ? cn(
+        'pointer-events-none absolute -inset-x-1 top-0 z-0 border-x-[3px] border-primary/60 bg-primary/[0.06]',
+        selectionGroupStart && 'rounded-t-md border-t-[3px]',
+        selectionGroupEnd ? 'bottom-0 rounded-b-md border-b-[3px]' : selectionBridgeAfterClassName,
+      )
+    : undefined
+  return (
+    <div
+      className={cn('group/agent-block relative transition-[padding,colors] duration-100', marginClassName, selectionPaddingClassName, selected && 'is-selected')}
+      data-agent-block-id={block.id}
+      onClick={onSelect}
+      onMouseEnter={onHover}
+    >
+      {selectionFrameClassName && <div aria-hidden="true" className={selectionFrameClassName} />}
+      {toolbarVisible && toolbarBlock && (
+        <div
+          data-agent-toolbar-block-id={toolbarBlock.id}
+          className="pointer-events-auto absolute -right-1 -top-9 z-20 flex h-9 items-end pb-0.5"
+          onMouseEnter={onToolbarEnter}
+          onMouseLeave={onToolbarLeave}
+        >
+          <div className="flex items-center gap-0.5 rounded-md border border-border/60 bg-background/95 px-0.5 py-0.5 shadow-sm" onClick={(event) => event.stopPropagation()}>
+            {toolbarBlock.kind === 'markdown' && (selecting || toolbarExpanded) && (selectionFormatMode === 'markdown' || selectionFormatMode === 'plainText') && (
+              <div className="flex items-center rounded bg-muted/70 p-0.5 text-xs">
+                <button type="button" className={cn('rounded px-1.5 py-0.5', markdownFormat === 'markdown' && 'bg-background shadow-sm')} onClick={() => onMarkdownFormatChange('markdown')}>Markdown</button>
+                <button type="button" className={cn('rounded px-1.5 py-0.5', markdownFormat === 'plainText' && 'bg-background shadow-sm')} onClick={() => onMarkdownFormatChange('plainText')}>纯文本</button>
+              </div>
+            )}
+            {toolbarBlock.kind === 'table' && (selecting || toolbarExpanded) && (selectionFormatMode === 'tsv' || selectionFormatMode === 'markdown') && (
+              <div className="flex items-center rounded bg-muted/70 p-0.5 text-xs">
+                <button type="button" className={cn('rounded px-1.5 py-0.5', tableFormat === 'markdown' && 'bg-background shadow-sm')} onClick={() => onTableFormatChange('markdown')}>表格 Markdown</button>
+                <button type="button" className={cn('rounded px-1.5 py-0.5', tableFormat === 'tsv' && 'bg-background shadow-sm')} onClick={() => onTableFormatChange('tsv')}>TSV</button>
+              </div>
+            )}
+            {selectionFormatMode === 'mixed' && <span className="px-1 text-xs text-muted-foreground">Markdown</span>}
+            <button type="button" aria-label="复制此块" title={selecting ? '复制全部已选块' : '复制此块'} className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onCopy}>{copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}</button>
+            {!selecting && <button type="button" aria-label="选择此块" title="进入多选" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onEnterSelection}><ListChecks className="size-3.5" /></button>}
+            {selecting && <button type="button" aria-label="退出多选" title="退出多选 (Esc)" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={onExitSelection}><X className="size-3.5" /></button>}
+          </div>
+        </div>
+      )}
+      <div className="relative z-10 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+        <Markdown remarkPlugins={remarkPlugins} rehypePlugins={REHYPE_PLUGINS} urlTransform={mentionUrlTransform} components={components}>{block.source}</Markdown>
+      </div>
+    </div>
+  )
+}
+
 export const MessageResponse = React.memo(
-  function MessageResponse({ children, className, basePath, basePaths, remarkPlugins }: MessageResponseProps): React.ReactElement {
-    // 预处理后的 Markdown 文本（供 remarkTableSource 用 position 精确定位表格源码）
-    const processed = React.useMemo(
-      () => normalizeMarkdownEmphasisWhitespace(
-        normalizeLatexDelimiters(children.replace(/<!--PROMA_AUTOMATION:[\s\S]*?-->/g, '').trim())
-      ),
-      [children]
-    )
+  function MessageResponse({ children, className, basePath, basePaths, remarkPlugins, streaming = false, enableBlockCopy = false }: MessageResponseProps): React.ReactElement {
+    const processed = React.useMemo(() => normalizeMarkdownEmphasisWhitespace(normalizeLatexDelimiters(children.replace(/<!--PROMA_AUTOMATION:[\s\S]*?-->/g, '').trim())), [children])
+    const blocks = React.useMemo(() => parseAgentMarkdownBlocks(processed), [processed])
+    const [selection, setSelection] = React.useState<AgentBlockSelectionUpdate>({ selectedIds: new Set(), selecting: false })
+    const { selectedIds, selecting } = selection
+    const [selectionAnchorId, setSelectionAnchorId] = React.useState<string | null>(null)
+    const [rangeEstablished, setRangeEstablished] = React.useState(false)
+    const [hoveredBlockId, setHoveredBlockId] = React.useState<string | null>(null)
+    const [toolbarExpanded, setToolbarExpanded] = React.useState(false)
+    const hoverSwitchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+    const [markdownFormat, setMarkdownFormat] = React.useState<'markdown' | 'plainText'>('markdown')
+    const [tableFormats, setTableFormats] = React.useState<Map<string, 'markdown' | 'tsv'>>(new Map())
 
-    // 合并内置 + 外部 remark 插件（保持引用稳定），末尾追加表格源码标注插件
-    const mergedRemarkPlugins = React.useMemo(
-      () => {
-        const plugins = remarkPlugins ? [...REMARK_PLUGINS, ...remarkPlugins] : [...REMARK_PLUGINS]
-        plugins.push(remarkTableSource(processed))
-        return plugins
-      },
-      [remarkPlugins, processed]
-    )
+    const exitSelection = React.useCallback(() => {
+      setSelection({ selectedIds: new Set(), selecting: false })
+      setSelectionAnchorId(null)
+      setRangeEstablished(false)
+    }, [])
 
-    // 稳定引用的 components 对象，避免 react-markdown 每帧重建组件映射
+    const clearHoverSwitchTimer = React.useCallback(() => {
+      if (hoverSwitchTimerRef.current === null) return
+      clearTimeout(hoverSwitchTimerRef.current)
+      hoverSwitchTimerRef.current = null
+    }, [])
+
+    React.useEffect(() => {
+      exitSelection()
+      clearHoverSwitchTimer()
+      setHoveredBlockId(null)
+      setToolbarExpanded(false)
+    }, [processed, enableBlockCopy, exitSelection, clearHoverSwitchTimer])
+
+    React.useEffect(() => () => clearHoverSwitchTimer(), [clearHoverSwitchTimer])
+
+    React.useEffect(() => {
+      if (!selecting) return
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key !== 'Escape') return
+        event.preventDefault()
+        exitSelection()
+      }
+      window.addEventListener('keydown', handleKeyDown, true)
+      return () => window.removeEventListener('keydown', handleKeyDown, true)
+    }, [exitSelection, selecting])
+
     const components = React.useMemo(() => ({
       a: MarkdownLink,
       img: MarkdownImage,
       pre: MarkdownPre,
-      code: (props: React.HTMLAttributes<HTMLElement>) => (
-        <MarkdownInlineCode {...props} basePath={basePath} basePaths={basePaths} />
-      ),
+      code: (props: React.HTMLAttributes<HTMLElement>) => <MarkdownInlineCode {...props} basePath={basePath} basePaths={basePaths} />,
       table: MarkdownTable,
     }), [basePath, basePaths])
+    const containerClassName = cn('prose dark:prose-invert max-w-none text-[length:var(--md-preview-font-size,15px)]', 'prose-p:my-1.5 prose-p:leading-[1.6] prose-li:leading-[1.6] prose-pre:my-0 prose-headings:my-2 prose-hr:my-3', '[&_.code-block-wrapper+.code-block-wrapper]:mt-4', className)
+
+    const tableFormatFor = React.useCallback((block: AgentMarkdownBlock): 'markdown' | 'tsv' => tableFormats.get(block.id) ?? 'markdown', [tableFormats])
+    const updateTableFormat = React.useCallback((blockId: string, format: 'markdown' | 'tsv') => {
+      setTableFormats((current) => {
+        const next = new Map(current)
+        next.set(blockId, format)
+        return next
+      })
+    }, [])
+    const [copied, setCopied] = React.useState(false)
+    const copiedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+    const markCopied = React.useCallback(() => {
+      setCopied(true)
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current)
+      copiedTimerRef.current = setTimeout(() => {
+        copiedTimerRef.current = null
+        setCopied(false)
+      }, 2000)
+    }, [])
+    React.useEffect(() => () => {
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current)
+    }, [])
+    const copyBlock = React.useCallback(async (block: AgentMarkdownBlock) => {
+      try {
+        await navigator.clipboard.writeText(serializeAgentBlock(block, block.kind === 'table' ? tableFormatFor(block) : markdownFormat))
+        markCopied()
+      } catch (error) {
+        console.error('[MessageResponse] 复制块失败:', error)
+      }
+    }, [markdownFormat, markCopied, tableFormatFor])
+    const copySelected = React.useCallback(async () => {
+      const selectedBlocks = blocks.filter((block) => selectedIds.has(block.id))
+      if (selectedBlocks.length === 0) return
+      const forceMarkdown = selectedBlocks.some((block) => block.kind === 'markdown') && selectedBlocks.some((block) => block.kind === 'table')
+      try {
+        await navigator.clipboard.writeText(forceMarkdown
+          ? selectedBlocks.map((block) => serializeAgentBlock(block, 'markdown')).join('\n\n')
+          : serializeAgentSelection({ blocks: selectedBlocks, markdownFormat, tableFormat: 'markdown', tableFormats }))
+        markCopied()
+      } catch (error) {
+        console.error('[MessageResponse] 复制已选内容失败:', error)
+      }
+    }, [blocks, markdownFormat, markCopied, selectedIds, tableFormats])
+    const toggleBlock = React.useCallback((block: AgentMarkdownBlock, event: React.MouseEvent<HTMLDivElement>) => {
+      if (!selecting || (event.target as HTMLElement).closest('a,button,input,textarea,select,[role="button"]')) return
+      if (!rangeEstablished && selectionAnchorId && selectionAnchorId !== block.id) {
+        setSelection({ selectedIds: selectAgentBlockRange(blocks, selectionAnchorId, block.id), selecting: true })
+        setRangeEstablished(true)
+        return
+      }
+      setSelection((current) => toggleAgentBlockSelection(current.selectedIds, block.id))
+    }, [blocks, rangeEstablished, selecting, selectionAnchorId])
+    const enterSelection = React.useCallback((block: AgentMarkdownBlock, event: React.MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation()
+      setSelection({ selectedIds: new Set([block.id]), selecting: true })
+      setSelectionAnchorId(block.id)
+      setRangeEstablished(false)
+    }, [])
+    const exitSelectionFromButton = React.useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation()
+      exitSelection()
+    }, [exitSelection])
+    const hoverBlock = React.useCallback((block: AgentMarkdownBlock) => {
+      clearHoverSwitchTimer()
+      const currentId = hoveredBlockId
+      if (selecting && selectedIds.has(block.id) && currentId !== null) {
+        const currentAnchor = findAgentSelectionToolbarAnchor(blocks, selectedIds, currentId, true)
+        const nextAnchor = findAgentSelectionToolbarAnchor(blocks, selectedIds, block.id, true)
+        if (currentAnchor === nextAnchor && currentId !== block.id) {
+          hoverSwitchTimerRef.current = setTimeout(() => {
+            hoverSwitchTimerRef.current = null
+            setHoveredBlockId(block.id)
+          }, 180)
+          return
+        }
+      }
+      setHoveredBlockId(block.id)
+    }, [blocks, clearHoverSwitchTimer, hoveredBlockId, selectedIds, selecting])
+    const enterToolbar = React.useCallback(() => {
+      clearHoverSwitchTimer()
+      setToolbarExpanded(true)
+    }, [clearHoverSwitchTimer])
+    const leaveToolbar = React.useCallback(() => {
+      setToolbarExpanded(false)
+    }, [])
+
+    const hoveredIndex = blocks.findIndex((block) => block.id === hoveredBlockId)
+    const hoveredBlock = hoveredIndex >= 0 ? blocks[hoveredIndex]! : null
+    const selectedBlocks = blocks.filter((block) => selectedIds.has(block.id))
+    const hasSelectedMarkdown = selectedBlocks.some((block) => block.kind === 'markdown')
+    const hasSelectedTable = selectedBlocks.some((block) => block.kind === 'table')
+    const selectionFormatMode: 'markdown' | 'plainText' | 'tsv' | 'mixed' = !selecting
+      ? (hoveredBlock?.kind === 'table' ? 'markdown' : 'plainText')
+      : hasSelectedMarkdown && hasSelectedTable
+        ? 'mixed'
+        : hasSelectedTable
+          ? 'tsv'
+          : 'markdown'
+    const toolbarAnchorIndex = findAgentSelectionToolbarAnchor(blocks, selectedIds, hoveredBlockId, selecting)
+
+    if (streaming) return <div className={cn(containerClassName, 'whitespace-pre-wrap break-words')}>{processed}</div>
+    if (!enableBlockCopy) {
+      const plugins = [...(remarkPlugins ? [...REMARK_PLUGINS, ...remarkPlugins] : [...REMARK_PLUGINS]), remarkTableSource(processed)]
+      return <div className={containerClassName}><Markdown remarkPlugins={plugins} rehypePlugins={REHYPE_PLUGINS} urlTransform={mentionUrlTransform} components={components}>{processed}</Markdown></div>
+    }
 
     return (
-      <div
-        className={cn(
-          'prose dark:prose-invert max-w-none text-[length:var(--md-preview-font-size,15px)]',
-          'prose-p:my-1.5 prose-p:leading-[1.6] prose-li:leading-[1.6] prose-pre:my-0 prose-headings:my-2 prose-hr:my-3',
-          '[&_.code-block-wrapper+.code-block-wrapper]:mt-4',
-          '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
-          className
-        )}
-      >
-        <Markdown
-          remarkPlugins={mergedRemarkPlugins}
-          rehypePlugins={REHYPE_PLUGINS}
-          urlTransform={mentionUrlTransform}
-          components={components}
-        >
-          {processed}
-        </Markdown>
-      </div>
+      <>
+        <div className={cn(containerClassName, selecting && 'select-none')} onPointerLeave={() => { clearHoverSwitchTimer(); setHoveredBlockId(null) }}>
+          {blocks.map((block, index) => {
+            const plugins = [...(remarkPlugins ? [...REMARK_PLUGINS, ...remarkPlugins] : [...REMARK_PLUGINS]), remarkTableSource(block.source)]
+            const toolbarBlock = selecting && !selectedIds.has(block.id)
+              ? null
+              : index === toolbarAnchorIndex ? hoveredBlock : null
+            const toolbarTarget = toolbarBlock ?? block
+            const previousBlock = blocks[index - 1]
+            const nextBlock = blocks[index + 1]
+            const margin = agentBlockMargin(block, previousBlock, nextBlock)
+            const nextMargin = nextBlock ? agentBlockMargin(nextBlock, block, blocks[index + 2]) : margin
+            const bridgeClassName = margin.bottomRank >= nextMargin.topRank ? margin.bottomBridgeClassName : nextMargin.topBridgeClassName
+            return <CopyableMarkdownBlock key={block.id} block={block} components={components} remarkPlugins={plugins} selected={selectedIds.has(block.id)} selectedBefore={selectedIds.has(previousBlock?.id ?? '')} selectedAfter={selectedIds.has(nextBlock?.id ?? '')} selecting={selecting} toolbarVisible={toolbarBlock !== null} toolbarBlock={toolbarBlock} toolbarBlockSelected={selectedIds.has(toolbarTarget.id)} copied={copied} toolbarExpanded={toolbarExpanded} marginClassName={margin.className} selectionBridgeAfterClassName={bridgeClassName} markdownFormat={markdownFormat} selectionFormatMode={selectionFormatMode} onSelect={(event) => toggleBlock(block, event)} onHover={() => hoverBlock(block)} onToolbarEnter={enterToolbar} onToolbarLeave={leaveToolbar} onCopy={() => void (selecting ? copySelected() : copyBlock(toolbarTarget))} onEnterSelection={(event) => enterSelection(toolbarTarget, event)} onExitSelection={exitSelectionFromButton} onMarkdownFormatChange={setMarkdownFormat} tableFormat={tableFormatFor(toolbarTarget)} onTableFormatChange={(format) => updateTableFormat(toolbarTarget.id, format)} />
+          })}
+        </div>
+      </>
     )
   },
-  (prevProps, nextProps) =>
-    prevProps.children === nextProps.children &&
-    prevProps.basePath === nextProps.basePath &&
-    prevProps.basePaths === nextProps.basePaths &&
-    prevProps.remarkPlugins === nextProps.remarkPlugins
+  (prevProps, nextProps) => prevProps.children === nextProps.children && prevProps.basePath === nextProps.basePath && prevProps.basePaths === nextProps.basePaths && prevProps.remarkPlugins === nextProps.remarkPlugins && prevProps.streaming === nextProps.streaming && prevProps.enableBlockCopy === nextProps.enableBlockCopy
 )
 
 // ===== UserMessageContent 可折叠用户消息 =====

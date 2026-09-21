@@ -1,6 +1,16 @@
 import { expect, test } from 'bun:test'
 
-import { createStartupSplashHtml } from './startup-splash'
+import { createCenteredStartupSplashBounds, createStartupSplashHtml } from './startup-splash'
+
+test('centers the initial Splash at one quarter of the selected display work area', () => {
+  expect(createCenteredStartupSplashBounds(
+    { x: 0, y: 0, width: 1920, height: 1080 },
+  )).toEqual({ x: 720, y: 405, width: 480, height: 270 })
+
+  expect(createCenteredStartupSplashBounds(
+    { x: 1920, y: 40, width: 2560, height: 1440 },
+  )).toEqual({ x: 2880, y: 580, width: 640, height: 360 })
+})
 
 test('emits a themed original WebGL startup splash', () => {
   const darkHtml = createStartupSplashHtml(true)
