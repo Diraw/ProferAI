@@ -2433,12 +2433,17 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         const previousPrepareNextTurnWithContext = session.agent.prepareNextTurnWithContext
         session.agent.prepareNextTurnWithContext = async (context, signal) => {
           const previousSnapshot = await previousPrepareNextTurnWithContext?.(context, signal)
-          const nextContext = previousSnapshot?.context ?? context.context
-          const systemPrompt = projectInstructionScope.appendPendingInstructions(nextContext.systemPrompt)
-          if (systemPrompt === nextContext.systemPrompt) return previousSnapshot
+          // Pi 0.86 起 AgentContext 不再承载 systemPrompt（变成只读的 AgentState.systemPrompt，
+          // 官方建议通过追加 system 消息更新提示词）。新激活的项目指令因此以一条追加的
+          // SystemMessage 进入下一轮请求：只增不改，不会覆盖已有系统提示词。
+          const pendingInstructions = projectInstructionScope.takePendingInstructions()
+          if (!pendingInstructions) return previousSnapshot
           return {
             ...previousSnapshot,
-            context: { ...nextContext, systemPrompt },
+            messages: [
+              ...(previousSnapshot?.messages ?? []),
+              { role: 'system' as const, content: pendingInstructions, timestamp: Date.now() },
+            ],
           }
         }
       }
