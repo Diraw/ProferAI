@@ -479,8 +479,6 @@ export function TurnFileMapProvider({ map, children }: { map?: Map<string, strin
 interface MessageResponseProps {
   /** Markdown 内容 */
   children: string
-  /** 流式阶段使用稳定的纯文本布局，避免未闭合 Markdown 语法反复改变 DOM 结构。 */
-  streaming?: boolean
   className?: string
   /** 基础目录路径，用于解析相对文件路径（如 Agent 会话工作目录） */
   basePath?: string
@@ -951,7 +949,7 @@ function CopyableMarkdownBlock({ block, components, remarkPlugins, selected, sel
 }
 
 export const MessageResponse = React.memo(
-  function MessageResponse({ children, className, basePath, basePaths, remarkPlugins, streaming = false, enableBlockCopy = false }: MessageResponseProps): React.ReactElement {
+  function MessageResponse({ children, className, basePath, basePaths, remarkPlugins, enableBlockCopy = false }: MessageResponseProps): React.ReactElement {
     const processed = React.useMemo(() => normalizeMarkdownEmphasisWhitespace(normalizeLatexDelimiters(children.replace(/<!--PROMA_AUTOMATION:[\s\S]*?-->/g, '').trim())), [children])
     const blocks = React.useMemo(() => parseAgentMarkdownBlocks(processed), [processed])
     const [selection, setSelection] = React.useState<AgentBlockSelectionUpdate>({ selectedIds: new Set(), selecting: false })
@@ -1104,7 +1102,6 @@ export const MessageResponse = React.memo(
           : 'markdown'
     const toolbarAnchorIndex = findAgentSelectionToolbarAnchor(blocks, selectedIds, hoveredBlockId, selecting)
 
-    if (streaming) return <div className={cn(containerClassName, 'whitespace-pre-wrap break-words')}>{processed}</div>
     if (!enableBlockCopy) {
       const plugins = [...(remarkPlugins ? [...REMARK_PLUGINS, ...remarkPlugins] : [...REMARK_PLUGINS]), remarkTableSource(processed)]
       return <div className={containerClassName}><Markdown remarkPlugins={plugins} rehypePlugins={REHYPE_PLUGINS} urlTransform={mentionUrlTransform} components={components}>{processed}</Markdown></div>
@@ -1130,7 +1127,7 @@ export const MessageResponse = React.memo(
       </>
     )
   },
-  (prevProps, nextProps) => prevProps.children === nextProps.children && prevProps.basePath === nextProps.basePath && prevProps.basePaths === nextProps.basePaths && prevProps.remarkPlugins === nextProps.remarkPlugins && prevProps.streaming === nextProps.streaming && prevProps.enableBlockCopy === nextProps.enableBlockCopy
+  (prevProps, nextProps) => prevProps.children === nextProps.children && prevProps.basePath === nextProps.basePath && prevProps.basePaths === nextProps.basePaths && prevProps.remarkPlugins === nextProps.remarkPlugins && prevProps.enableBlockCopy === nextProps.enableBlockCopy
 )
 
 // ===== UserMessageContent 可折叠用户消息 =====

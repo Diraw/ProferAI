@@ -639,7 +639,7 @@ function ThinkingBlock({ block, dimmed = false, streaming = false }: ThinkingBlo
             shouldCollapse && !isExpanded && 'max-h-[5.6em]',
           )}
         >
-          <MessageResponse streaming={streaming} enableBlockCopy={(!shouldCollapse || isExpanded) && !streaming}>{block.thinking}</MessageResponse>
+          <MessageResponse enableBlockCopy={(!shouldCollapse || isExpanded) && !streaming}>{block.thinking}</MessageResponse>
         </div>
         {shouldCollapse && (
           <button
@@ -739,7 +739,7 @@ const ContentBlockView = function ContentBlock({ block, allMessages, basePath, b
           </div>
         )}
         {cleanText && (
-          <MessageResponse basePath={basePath} basePaths={basePaths} streaming={isStreaming} enableBlockCopy={!isStreaming}>{cleanText}</MessageResponse>
+          <MessageResponse basePath={basePath} basePaths={basePaths} enableBlockCopy={!isStreaming}>{cleanText}</MessageResponse>
         )}
       </>
     )

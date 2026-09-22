@@ -103,10 +103,10 @@ describe('agent block copy serialization', () => {
     expect(source).toContain('onTableFormatChange={(format) => updateTableFormat(toolbarTarget.id, format)}')
   })
 
-  test('streaming 纯文本分支保持不变，展开思考允许外部操作条溢出', async () => {
+  test('streaming 内容保持 Markdown 实时渲染，展开思考允许外部操作条溢出', async () => {
     const source = await Bun.file(`${import.meta.dir}/message.tsx`).text()
     const contentBlockSource = await Bun.file(`${import.meta.dir}/../agent/ContentBlock.tsx`).text()
-    expect(source).toContain("if (streaming) return <div className={cn(containerClassName, 'whitespace-pre-wrap break-words')}>{processed}</div>")
+    expect(source).not.toContain("if (streaming) return <div className={cn(containerClassName, 'whitespace-pre-wrap break-words')}>{processed}</div>")
     expect(contentBlockSource).toContain("shouldCollapse && !isExpanded && 'max-h-[5.6em]'")
   })
 
