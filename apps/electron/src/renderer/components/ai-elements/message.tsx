@@ -790,7 +790,8 @@ const MarkdownInlineCode = React.memo(function MarkdownInlineCode({
     if (isAbsoluteFilePath(text)) {
       return <FilePathChip filePath={text.trim()} basePaths={merged.length > 0 ? merged : undefined} />
     }
-    if (merged.length > 0 && isRelativeFilePath(text)) {
+    if (isRelativeFilePath(text)) {
+      // 相对路径也必须先渲染为统一 chip；没有 basePaths 时由主进程按当前 session 继续解析。
       // 裸文件名命中本轮工具实际访问过的路径时，补成绝对路径；同名冲突会从映射中移除，
       // 因此未命中时继续走既有 basePaths 降级解析，不会误打开别的同名文件。
       const trimmed = text.trim()
