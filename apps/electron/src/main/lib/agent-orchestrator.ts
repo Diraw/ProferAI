@@ -38,7 +38,7 @@ import type {
   AgentThinkingLevel,
   ErrorCode,
 } from '@profer/shared'
-import { isAgentEnabledForChannel, normalizeAgentRuntime } from '@profer/shared'
+import { normalizeAgentRuntime } from '@profer/shared'
 import {
   SAFE_TOOLS,
   THINKING_SIGNATURE_ERROR_CODE,
@@ -195,6 +195,7 @@ import {
   isPartialSDKMessage,
   isPlanModeMarkdownPath,
   isPlanModeMcpTool,
+  isXaiChannelAvailableForRuntime,
   releaseActiveSession,
   resolvePlanModeBrowserPermission,
   shouldPreInterruptQueuedMessage,
@@ -1055,7 +1056,7 @@ export class AgentOrchestrator {
       return
     }
 
-    if (channel.provider === 'xai' && (agentRuntime !== 'pi' || !isAgentEnabledForChannel(channel))) {
+    if (!isXaiChannelAvailableForRuntime(channel, agentRuntime)) {
       reportPreflightError({
         code: 'invalid_request',
         title: agentRuntime !== 'pi' ? 'xAI 仅支持 Pi Agent' : 'xAI Agent 尚未开启',
