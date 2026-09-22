@@ -265,19 +265,19 @@ bun run dev -- --port 5178
 
 ### Harness
 
-默认关闭：
+默认开启。直接启动 Pi turn，确认 Harness 创建 Goal/Turn/sidecar/graph focus，并且只观察当前 Pi turn，不能自动重试、修复或启动下一轮 Agent。
+
+需要回退时，按进程显式关闭：
+
+```powershell
+$env:PROFER_PI_HARNESS = '0'
+```
+
+测试后清除覆盖：
 
 ```powershell
 Remove-Item Env:PROFER_PI_HARNESS -ErrorAction SilentlyContinue
 ```
-
-确认普通 Pi turn 不创建 Goal/Turn/sidecar/graph focus。单独设置：
-
-```powershell
-$env:PROFER_PI_HARNESS = '1'
-```
-
-确认它只能观察当前 Pi turn，不能自动重试、修复或启动下一轮 Agent。测试后关闭环境变量。
 
 ## 7. 可选打包验收
 
@@ -316,7 +316,7 @@ PowerShell timeout/abort/taskkill：
 Pi 普通执行：
 Pi TaskOutput/TaskStop：
 Claude 链：
-Harness 默认关闭/显式开启：
+Harness 默认开启 / `PROFER_PI_HARNESS=0` 显式关闭：
 打包版：
 
 通过：
@@ -335,6 +335,6 @@ Windows-only PowerShell 测试在 Windows 上实际执行而不是 skip；
 Git Bash、WSL、PowerShell descriptor 不互相污染；
 Pi 普通执行、timeout、abort、TaskOutput、TaskStop 正常；
 Claude 原有链路正常；
-Harness 默认关闭且不接管执行；
+Harness 默认开启且不接管执行；可用 `PROFER_PI_HARNESS=0` 按进程关闭；
 旧 startTime 不能停止已变化或已退出的进程。
 ```

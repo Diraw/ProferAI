@@ -1589,7 +1589,7 @@ ${enrichedMessage}`
       const appSettings = getSettings()
       // Agent 预设：会话绑定的预设可覆盖权限模式与推理档位，并在系统提示词后追加预设专属段（sessionPreset 已在步骤 10 解析）。
       const initialPermissionMode: ProferPermissionMode = presetPolicy.permissionMode
-      // Harness 是显式 opt-in 的观察侧车；初始化失败不能阻断普通 Agent turn。
+      // Harness 默认启用；设置 PROFER_PI_HARNESS=0 可按进程关闭。初始化失败不能阻断普通 Agent turn。
       // Stop 可能发生在前面的异步 preflight 期间，此时不能再晚建 scope，
       // 否则 finally 会把用户主动停止的 Turn 误记为 completed。
       if (shouldStartPiHarness(agentRuntime)) {
