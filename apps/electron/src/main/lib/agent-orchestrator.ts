@@ -172,7 +172,8 @@ import {
 } from './agent-prompt-utils'
 import { resolveSDKCliPath } from './agent-sdk-cli-path'
 import { collectAttachedDirectories, collectProductArtifactDirectories } from './agent-directory-utils'
-import { buildAgentRuntimeEnv } from './agent-runtime-env'
+import { buildAgentRuntimeEnv, mergeRuntimeEnv } from './agent-runtime-env'
+import { getOrCreateShellSnapshot } from './shell-snapshot'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 import type { PiRetryUpdate } from './adapters/pi-retry-control'
 import { buildPiBuiltinTools } from './adapters/pi-builtin-tools'
@@ -1947,10 +1948,30 @@ ${enrichedMessage}`
       const projectCandidates = detectAttachedDirectoryProjects(allAdditionalDirectories)
       const attachedDirectoriesPrompt = buildPiAdditionalDirectoriesPrompt(allAdditionalDirectories, projectCandidates)
       const runtimeStatus = getRuntimeStatus()
+      const shellPreference = getSettings().agentShellPreference
+      const piShellSnapshot = agentRuntime === 'pi'
+        ? await getOrCreateShellSnapshot({
+            sessionId,
+            cwd: agentCwd,
+            platform: process.platform,
+            processEnv: process.env,
+            source: runtimeStatus ? 'runtime-status' : undefined,
+            shell: process.platform === 'win32' && shellPreference === 'git-bash' && runtimeStatus?.shell?.gitBash.path
+              ? { kind: 'git-bash', path: runtimeStatus.shell.gitBash.path, login: false, source: 'configured' }
+              : process.platform === 'win32' && shellPreference === 'wsl'
+                ? { kind: 'wsl', path: 'wsl.exe', login: false, source: 'configured' }
+                : runtimeStatus?.shell?.recommended === 'git-bash' && runtimeStatus.shell.gitBash.path
+                  ? { kind: 'git-bash', path: runtimeStatus.shell.gitBash.path, login: false, source: 'detected' }
+                  : runtimeStatus?.shell?.recommended === 'wsl'
+                    ? { kind: 'wsl', path: 'wsl.exe', login: false, source: 'detected' }
+                    : undefined,
+          })
+        : undefined
       const piRuntimeEnv = buildAgentRuntimeEnv({
         proxyUrl: await getEffectiveProxyUrl(),
         runtimeStatus,
-        shellPreference: getSettings().agentShellPreference,
+        processEnv: piShellSnapshot ? mergeRuntimeEnv(process.env, piShellSnapshot.env) : process.env,
+        shellPreference,
       })
       const promptShellPath = agentRuntime === 'pi'
         ? piRuntimeEnv.shellPath

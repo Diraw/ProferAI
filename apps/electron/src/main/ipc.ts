@@ -273,6 +273,7 @@ import { listAgentPresets, listGlobalAgentPresets, getDefaultPresetId, setDefaul
 import { runAgent, stopAgent, stopAgentAndWait, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, regenerateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, emitSessionStreamEvent, agentCatalogInvalidationPublisher } from './lib/agent-service'
 import { mapSdkShellTasks, isSameProcess, terminateProcessTreeGracefully, type MonitoredProcess } from './lib/process-monitor'
 import { listOwnedRuntimeProcesses, markOwnedRuntimeProcessExited, onRuntimeProcessRegistryChanged } from './lib/runtime-process-registry'
+import { isProcessHandleOwnedBySession, processHandleFromRuntimeRecord } from './lib/process-handle'
 import { coordinateAgentSend } from './lib/agent-send-coordinator'
 import { GoalController } from './lib/goal-controller'
 import { parseGoalIterationResult } from './lib/goal-loop'
@@ -3310,17 +3311,19 @@ export function registerIpcHandlers(): void {
       const results = new Map<number, SessionProcessInfo>()
       const owned = await listOwnedRuntimeProcesses(input.sessionId)
       for (const record of owned) {
-        const key = record.pid ?? -Math.abs(record.launchedAt)
+        const handle = processHandleFromRuntimeRecord(record)
+        if (!isProcessHandleOwnedBySession(handle, input.sessionId)) continue
+        const key = handle.pid ?? -Math.abs(handle.startedAt)
         results.set(key, {
-          pid: record.pid,
-          name: record.pid ? 'Pi service' : 'Pi launch observation',
-          cmd: record.command,
-          startTime: record.startTime,
+          pid: handle.pid,
+          name: handle.pid ? 'Pi service' : 'Pi launch observation',
+          cmd: handle.command,
+          startTime: handle.startTime,
           ports: record.ports,
           source: 'pi-owned',
-          status: record.status === 'running' ? 'running' : 'pending',
-          cwd: record.cwd,
-          persistsAfterChat: Boolean(record.pid),
+          status: handle.status === 'running' ? 'running' : 'pending',
+          cwd: handle.cwd,
+          persistsAfterChat: Boolean(handle.pid),
         })
       }
       const bySdk = await mapSdkShellTasks(input.sessionId, input.sdkShellTasks ?? [])
@@ -3347,7 +3350,13 @@ export function registerIpcHandlers(): void {
       }
       // 仅允许结束本会话在启动点登记过的进程，防止 renderer 借 IPC 杀任意 PID。
       const owned = await listOwnedRuntimeProcesses(input.sessionId)
-      const isOwned = owned.some((record) => record.pid === input.pid && record.startTime === input.startTime && record.status === 'running')
+      const isOwned = owned.some((record) => {
+        const handle = processHandleFromRuntimeRecord(record)
+        return isProcessHandleOwnedBySession(handle, input.sessionId)
+          && handle.pid === input.pid
+          && handle.startTime === input.startTime
+          && handle.status === 'running'
+      })
       if (!isOwned) {
         throw new Error('该进程不属于本会话或已失效，拒绝结束')
       }

@@ -16,6 +16,7 @@ import type {
   AgentThinkingLevel,
   AgentProviderAdapter,
   AgentQueryInput,
+  GetTaskOutputResult,
   CodexOAuthCredentials,
   ErrorCode,
   JsonSchemaOutputFormat,
@@ -89,6 +90,7 @@ import {
   runWithPiRequestProxy,
 } from './pi-request-proxy'
 import { registerPendingPiRuntimeProcess, registerPiRuntimeProcessShell } from '../runtime-process-registry'
+import { piBackgroundTaskManager } from '../pi-background-task-manager'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 type BashOperations = import('@earendil-works/pi-coding-agent').BashOperations
@@ -1693,6 +1695,8 @@ function createWslBashOperations(
   runtimeEnv: AgentRuntimeEnv,
   sessionId: string,
   onToolExecutionResult?: PiAgentQueryOptions['onToolExecutionResult'],
+  getTaskId?: () => string | undefined,
+  clearTaskId?: () => void,
 ): BashOperations {
   return {
     async exec(command, cwd, options) {
@@ -1704,13 +1708,31 @@ function createWslBashOperations(
         timeoutMs: options.timeout !== undefined ? options.timeout * 1_000 : undefined,
         signal: options.signal,
       }, {
-        onStdout: options.onData,
-        onStderr: options.onData,
+        onStdout: (data) => {
+          options.onData?.(data)
+          const taskId = getTaskId?.()
+          if (taskId) piBackgroundTaskManager.append(sessionId, taskId, data)
+        },
+        onStderr: (data) => {
+          options.onData?.(data)
+          const taskId = getTaskId?.()
+          if (taskId) piBackgroundTaskManager.append(sessionId, taskId, data)
+        },
         onSpawn: (pid) => {
-          if (pid > 0) registerPiRuntimeProcessShell(sessionId, command, cwd, pid)
+          if (pid > 0) {
+            const record = registerPiRuntimeProcessShell(sessionId, command, cwd, pid)
+            const taskId = getTaskId?.()
+            if (taskId && record) piBackgroundTaskManager.attachProcess(sessionId, taskId, pid, record.startTime)
+          }
         },
       })
       reportCommandExecutionResult(onToolExecutionResult, execution)
+      const taskId = getTaskId?.()
+      if (taskId) {
+        const status = execution.aborted || execution.timedOut ? 'stopped' : execution.errorKind || execution.exitCode !== 0 ? 'failed' : 'completed'
+        piBackgroundTaskManager.complete(sessionId, taskId, status)
+        clearTaskId?.()
+      }
       if (execution.errorKind) throw commandExecutionFailureError(execution)
       if (execution.aborted) throw new Error('aborted')
       if (execution.timedOut) throw new Error(`timeout:${options.timeout}`)
@@ -2096,6 +2118,8 @@ export function createControlledLocalBashOperations(
   sessionId: string,
   shellPath: string | undefined,
   onToolExecutionResult?: PiAgentQueryOptions['onToolExecutionResult'],
+  getTaskId?: () => string | undefined,
+  clearTaskId?: () => void,
 ): BashOperations {
   return {
     async exec(command, cwd, options) {
@@ -2127,12 +2151,21 @@ export function createControlledLocalBashOperations(
         timeoutMs: options.timeout !== undefined ? options.timeout * 1_000 : undefined,
         signal: options.signal,
       }, {
-        onStdout: options.onData,
-        onStderr: options.onData,
-        onSpawn: (pid) => registerPiRuntimeProcessShell(sessionId, command, cwd, pid),
+        onStdout: (data) => { options.onData?.(data); const taskId = getTaskId?.(); if (taskId) piBackgroundTaskManager.append(sessionId, taskId, data) },
+        onStderr: (data) => { options.onData?.(data); const taskId = getTaskId?.(); if (taskId) piBackgroundTaskManager.append(sessionId, taskId, data) },
+        onSpawn: (pid) => {
+          const record = registerPiRuntimeProcessShell(sessionId, command, cwd, pid)
+          const taskId = getTaskId?.()
+          if (taskId && record) piBackgroundTaskManager.attachProcess(sessionId, taskId, pid, record.startTime)
+        },
       })
 
       reportCommandExecutionResult(onToolExecutionResult, execution)
+      const taskId = getTaskId?.()
+      if (taskId) {
+        piBackgroundTaskManager.complete(sessionId, taskId, execution.aborted || execution.timedOut ? 'stopped' : execution.errorKind || execution.exitCode !== 0 ? 'failed' : 'completed')
+        clearTaskId?.()
+      }
       if (execution.errorKind) throw commandExecutionFailureError(execution)
       if (execution.aborted) throw new Error('aborted')
       if (execution.timedOut) throw new Error(`timeout:${options.timeout}`)
@@ -2146,11 +2179,26 @@ function createPromaBashToolOptions(
   runtimeEnv: AgentRuntimeEnv | undefined,
   onToolExecutionResult?: PiAgentQueryOptions['onToolExecutionResult'],
 ): BashToolOptions | undefined {
+  const taskIds = new Map<string, string>()
+  const currentToolCallId = (): string | undefined => piToolExecutionContext.getStore()?.toolCallId
+  const getTaskId = (): string | undefined => {
+    const toolCallId = currentToolCallId()
+    return toolCallId ? taskIds.get(toolCallId) : undefined
+  }
+  const clearTaskId = (): void => {
+    const toolCallId = currentToolCallId()
+    if (toolCallId) taskIds.delete(toolCallId)
+  }
   const spawnHook: NonNullable<BashToolOptions['spawnHook']> = ({ command, cwd, env }) => {
     // Pi exposes this public pre-spawn hook. Record ownership here, while the
     // command/cwd still describe the actual Agent launch rather than a later
     // renderer-side directory guess. PID is confirmed by the registry monitor.
-    registerPendingPiRuntimeProcess(sessionId, command, cwd)
+    const record = registerPendingPiRuntimeProcess(sessionId, command, cwd)
+    const toolCallId = currentToolCallId()
+    if (record && toolCallId) {
+      taskIds.set(toolCallId, record.id)
+      piBackgroundTaskManager.begin(sessionId, record.id, command)
+    }
     return {
       command,
       cwd,
@@ -2160,13 +2208,13 @@ function createPromaBashToolOptions(
 
   if (runtimeEnv?.shellKind === 'wsl') {
     return {
-      operations: createWslBashOperations(runtimeEnv, sessionId, onToolExecutionResult),
+      operations: createWslBashOperations(runtimeEnv, sessionId, onToolExecutionResult, getTaskId, clearTaskId),
       spawnHook,
     }
   }
 
   return {
-    operations: createControlledLocalBashOperations(sessionId, runtimeEnv?.shellPath, onToolExecutionResult),
+    operations: createControlledLocalBashOperations(sessionId, runtimeEnv?.shellPath, onToolExecutionResult, getTaskId, clearTaskId),
     spawnHook,
   }
 }
@@ -2237,11 +2285,11 @@ export function installRuntimeGuardHooks(session: AgentSession, guard: AgentRunt
 }
 
 export class PiAgentAdapter implements AgentProviderAdapter {
-  // Pi 的后台服务进程由 runtime registry 管理，但尚未提供 Claude SDK TaskOutput/TaskStop 等价物。
+  // Pi 的后台服务由 runtime registry 负责归属，TaskOutput/TaskStop 只做安全适配。
   getCapabilities() {
     return {
-      supportsTaskOutput: false,
-      supportsTaskStop: false,
+      supportsTaskOutput: true,
+      supportsTaskStop: true,
       supportsRewind: true,
       supportsInterrupt: true,
       supportsQueuedMessage: true,
@@ -2967,6 +3015,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
 
   async setPermissionMode(_sessionId: string, _mode: string): Promise<void> {
     // Proma 权限由工具包装层实时读取 sessionPermissionModes，自身无需同步给 Pi。
+  }
+
+  async getTaskOutput(sessionId: string, taskId: string, options?: { block?: boolean; timeoutMs?: number }): Promise<GetTaskOutputResult> {
+    return piBackgroundTaskManager.getOutput(sessionId, taskId, options)
+  }
+
+  async stopTask(sessionId: string, taskId: string, expectedType?: 'agent' | 'shell'): Promise<void> {
+    if (expectedType && expectedType !== 'shell') throw new Error('Pi runtime 只支持停止 shell 后台任务')
+    await piBackgroundTaskManager.stop(sessionId, taskId)
   }
 
   dispose(): void {
