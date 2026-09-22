@@ -7,6 +7,8 @@
  * Pi/Claude session behaviour by default.
  */
 
+import type { AgentRuntime } from '@profer/shared'
+
 export const PI_HARNESS_FEATURE_ENV = 'PROFER_PI_HARNESS'
 
 /**
@@ -15,4 +17,15 @@ export const PI_HARNESS_FEATURE_ENV = 'PROFER_PI_HARNESS'
  */
 export function isPiHarnessEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[PI_HARNESS_FEATURE_ENV]?.trim() === '1'
+}
+
+/**
+ * Harness is Pi-only and opt-in. Keeping the runtime check here prevents callers
+ * from accidentally creating sidecar state for Claude or ordinary Pi turns.
+ */
+export function shouldStartPiHarness(
+  agentRuntime: AgentRuntime,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return agentRuntime === 'pi' && isPiHarnessEnabled(env)
 }

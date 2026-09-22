@@ -125,7 +125,7 @@ import { getAgentWorkspacePath, getAgentSessionWorkspacePath, getPiCheckpointsDi
 import { getRuntimeSkillsPath, prepareRuntimeSkills } from './global-skill-manager'
 import { normalizeDefaultSkillSlug } from './default-skill-slugs'
 import { getRuntimeStatus } from './runtime-init'
-import { isPiHarnessEnabled } from './pi-harness/feature-gate'
+import { shouldStartPiHarness } from './pi-harness/feature-gate'
 import { pauseActivePiHarnessRun, settlePiHarnessRun, startPiHarnessRun } from './pi-harness/orchestrator-bridge'
 import type { CommandExecutionResult } from './command-execution'
 import { createCommandExecutionLedger } from './pi-execution-ledger'
@@ -1592,7 +1592,7 @@ ${enrichedMessage}`
       // Harness 是显式 opt-in 的观察侧车；初始化失败不能阻断普通 Agent turn。
       // Stop 可能发生在前面的异步 preflight 期间，此时不能再晚建 scope，
       // 否则 finally 会把用户主动停止的 Turn 误记为 completed。
-      if (agentRuntime === 'pi' && isPiHarnessEnabled()) {
+      if (shouldStartPiHarness(agentRuntime)) {
         if (this.stoppedBySessions.has(sessionId)) {
           harnessStopped = true
           console.log(`[Pi Harness] 检测到 scope 初始化前已停止，跳过本轮 scope (${sessionId})`)
