@@ -17,6 +17,7 @@ import {
   Brain,
   MessageSquareText,
   Download,
+  Check,
 } from 'lucide-react'
 import { useAtomValue } from 'jotai'
 import { thinkingExpandedAtom } from '@/atoms/chat-atoms'
@@ -334,6 +335,9 @@ function TaskListCollapsedSummary({ tasks }: { tasks: ParsedTaskListItem[] }): R
 
 // ===== 工具调用块 =====
 
+/** 右键复制命令后，「已复制」反馈的展示时长 */
+const COMMAND_COPIED_FEEDBACK_MS = 1500
+
 interface ToolUseBlockProps {
   block: SDKToolUseBlock
   allMessages: SDKMessage[]
@@ -400,6 +404,28 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
 
   // 子代理工具调用统计
   const childToolCount = childBlocks?.filter((b) => b.type === 'tool_use').length ?? 0
+
+  // ===== 右键复制命令 =====
+  // 命令类工具在行上右键即可复制完整命令原文；左键仍是正常的展开/收起。
+
+  const [commandCopied, setCommandCopied] = React.useState(false)
+  const commandCopiedTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
+
+  React.useEffect(() => () => clearTimeout(commandCopiedTimerRef.current), [])
+
+  const handleCommandContextMenu = React.useCallback((event: React.MouseEvent<HTMLButtonElement>): void => {
+    if (!commandText) return
+    // 已选中文本时交还原生右键菜单，避免抢占用户复制选区的操作
+    if (window.getSelection()?.toString()) return
+    event.preventDefault()
+    navigator.clipboard.writeText(commandText).then(() => {
+      setCommandCopied(true)
+      clearTimeout(commandCopiedTimerRef.current)
+      commandCopiedTimerRef.current = setTimeout(() => setCommandCopied(false), COMMAND_COPIED_FEEDBACK_MS)
+    }).catch((error: unknown) => {
+      console.error('[ContentBlock] 复制命令失败:', error)
+    })
+  }, [commandText])
 
   // ===== Agent/Task 工具：特殊渲染 =====
   if (isAgentTool) {
@@ -507,6 +533,8 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
           'hover:opacity-70',
         )}
         onClick={() => setExpanded(!expanded)}
+        // 右键：复制完整命令。非命令类工具没有 commandText，保持原生右键行为
+        onContextMenu={handleCommandContextMenu}
       >
         {!isCompleted && isStreaming ? (
           <Loader2 className="size-3.5 animate-spin text-primary/50 shrink-0" />
@@ -543,6 +571,13 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
         {taskListSummary && (
           <span className="flex min-w-0 items-center gap-1.5">
             <TaskListCollapsedSummary tasks={taskListSummary} />
+          </span>
+        )}
+
+        {commandCopied && (
+          <span className="flex shrink-0 items-center gap-1 text-[11px] text-success">
+            <Check className="size-3" />
+            已复制
           </span>
         )}
 
