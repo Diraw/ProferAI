@@ -6,7 +6,7 @@
  */
 
 import * as React from 'react'
-import { useAtomValue, useSetAtom } from 'jotai'
+import { useAtomValue, useSetAtom, useStore } from 'jotai'
 import {
   Download,
   Upload,
@@ -31,7 +31,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { agentWorkspacesAtom } from '@/atoms/agent-atoms'
+import {
+  agentWorkspacesAtom,
+  agentMessageRefreshAtom,
+  agentSDKMessagesCacheAtom,
+  currentAgentSessionIdAtom,
+  resolvedBlobMessagesAtom,
+} from '@/atoms/agent-atoms'
 import { migrationImportDialogOpenAtom } from '@/atoms/migration-atoms'
 import { cn } from '@/lib/utils'
 import { getFileBaseName } from '@/lib/file-utils'
@@ -563,6 +569,7 @@ function MigrationSection(): React.ReactElement {
 // ==================== 磁盘管理 Section ====================
 
 function StorageSection(): React.ReactElement {
+  const store = useStore()
   const [stats, setStats] = React.useState<StorageStats | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [cleaningKey, setCleaningKey] = React.useState<string | null>(null)
@@ -684,6 +691,29 @@ function StorageSection(): React.ReactElement {
       const result = await window.electronAPI.applySessionCompaction() as SessionCompactionResult
       setCompactionResult(result)
       setCompactionPreview(null)
+
+      // 整理会原子替换磁盘文件。renderer 可能仍持有整理前的整条巨型消息；
+      // 必须清掉消息缓存与按需全文缓存，并让当前会话重读磁盘，否则磁盘已变瘦、
+      // 打开/关闭会话时内存仍可能沿用旧对象，看起来像「整理没生效」。
+      if (result.rewrittenFiles > 0) {
+        const cachedSessionIds = [...store.get(agentSDKMessagesCacheAtom).keys()]
+        const currentSessionId = store.get(currentAgentSessionIdAtom)
+        const refreshSessionIds = new Set(cachedSessionIds)
+        if (currentSessionId) refreshSessionIds.add(currentSessionId)
+
+        store.set(agentSDKMessagesCacheAtom, new Map())
+        store.set(resolvedBlobMessagesAtom, new Map())
+        if (refreshSessionIds.size > 0) {
+          store.set(agentMessageRefreshAtom, (prev) => {
+            const next = new Map(prev)
+            for (const sessionId of refreshSessionIds) {
+              next.set(sessionId, (prev.get(sessionId) ?? 0) + 1)
+            }
+            return next
+          })
+        }
+      }
+
       toast.success(result.rewrittenFiles > 0 ? `已整理 ${result.rewrittenFiles} 个会话文件` : '没有需要整理的数据')
       await loadStats()
     } catch (e) {

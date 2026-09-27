@@ -23,6 +23,8 @@ import { ContentBlock } from './ContentBlock'
 import { TaskProgressCard } from './TaskProgressCard'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
 import { ProcessBlockGroup, buildAssistantTurnRenderItems, buildCompletedToolResultIds } from './ProcessBlockGroup'
+import { applyRenderWindow } from './render-window'
+import { FoldedSegmentsRegion } from './FoldedSegmentsRegion'
 import { extractToolResultText, isTaskProgressTool, parseTaskCreateResult } from './task-progress'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tag-parser'
 import { DurationBadge } from './AgentMessages'
@@ -595,7 +597,7 @@ function formatBlobBytes(bytes: number): string {
  * 取回后写进 `resolvedBlobMessagesAtom`，由 `allSDKMessages` 覆盖回消息流，
  * 于是所有下游（工具结果查找、工具卡片的「显示全部」）自动看到完整内容。
  */
-function ExternalizedContentNotice({ messages }: { messages: SDKMessage[] }): React.ReactElement | null {
+function ExternalizedContentNotice({ sessionId, messages }: { sessionId?: string; messages: SDKMessage[] }): React.ReactElement | null {
   const setResolvedMessages = useSetAtom(resolvedBlobMessagesAtom)
   const [loading, setLoading] = React.useState(false)
   const [failed, setFailed] = React.useState(0)
@@ -608,30 +610,34 @@ function ExternalizedContentNotice({ messages }: { messages: SDKMessage[] }): Re
   )
 
   const handleLoadAll = React.useCallback(async (): Promise<void> => {
+    if (!sessionId) return
     setLoading(true)
     setFailed(0)
     let failures = 0
+    const resolvedEntries: Array<[string, SDKMessage]> = []
     for (const { message } of targets) {
       const uuid = (message as { uuid?: string }).uuid
       try {
         const resolved = await window.electronAPI.resolveSessionMessageBlobs?.(message)
-        if (resolved && uuid) {
-          setResolvedMessages((prev) => {
-            const next = new Map(prev)
-            next.set(uuid, resolved as SDKMessage)
-            return next
-          })
-        } else {
-          failures++
-        }
+        if (resolved && uuid) resolvedEntries.push([uuid, resolved as SDKMessage])
+        else failures++
       } catch (e) {
         console.error('[会话存储] 取回外置内容失败:', e)
         failures++
       }
     }
+    if (resolvedEntries.length > 0) {
+      setResolvedMessages((prev) => {
+        const next = new Map(prev)
+        const sessionMessages = new Map(next.get(sessionId) ?? [])
+        for (const [uuid, resolved] of resolvedEntries) sessionMessages.set(uuid, resolved)
+        next.set(sessionId, sessionMessages)
+        return next
+      })
+    }
     setFailed(failures)
     setLoading(false)
-  }, [targets, setResolvedMessages])
+  }, [sessionId, targets, setResolvedMessages])
 
   if (targets.length === 0) return null
 
@@ -795,6 +801,16 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       completedToolResultIds,
     })
   }, [topLevelBlocks, isStreaming, completedToolResultIds])
+  // 渲染窗口：过程与回复各自取尾部窗口，避免过程把回复挤出可视范围。
+  // 展开/收起的状态由 FoldedSegmentsRegion 自己持有，父组件不参与（否则外层折叠时无法重置）。
+  const { items: windowedItems, foldedProcessItems, foldedReplyItems } = React.useMemo(
+    () => applyRenderWindow(renderItems),
+    [renderItems],
+  )
+  const firstReplyIndex = React.useMemo(
+    () => windowedItems.findIndex((item) => item.type === 'block'),
+    [windowedItems],
+  )
   // 与本轮工具调用同源的映射，让正文内联的裸文件名可靠定位真实文件。
   const turnFileMap = React.useMemo(
     () => buildTurnFileNameMap(turn.turnMessages),
@@ -870,10 +886,20 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       <MessageContent>
         <TurnFileMapProvider map={turnFileMap}>
           <div className={cn('space-y-2')}>
-            <ExternalizedContentNotice messages={turn.turnMessages} />
-            {renderItems.map((item, itemIndex) => {
+            <ExternalizedContentNotice sessionId={sessionId ?? undefined} messages={turn.turnMessages} />
+            {windowedItems.map((item, itemIndex) => {
               if (item.type === 'block') {
-                return renderTopLevelBlock(item.item.block, item.item.index)
+                return (
+                  <React.Fragment key={`reply-${item.item.index}`}>
+                    {itemIndex === firstReplyIndex && foldedReplyItems.length > 0 && (
+                      <FoldedSegmentsRegion
+                        count={foldedReplyItems.length}
+                        renderRevealed={() => foldedReplyItems.map((folded) => renderTopLevelBlock(folded.block, folded.index))}
+                      />
+                    )}
+                    {renderTopLevelBlock(item.item.block, item.item.index)}
+                  </React.Fragment>
+                )
               }
 
               const groupBlocks = item.items.map((groupItem) => groupItem.block)
@@ -884,8 +910,16 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
                   blocks={groupBlocks}
                   isStreaming={isStreaming}
                   keepExpandedAfterComplete={processGroupsKeepExpanded}
-                  isMessageTail={itemIndex === renderItems.length - 1}
+                  isMessageTail={itemIndex === windowedItems.length - 1}
                 >
+                  {/* 折叠占位符放在过程组内部：外层折叠时它随之隐藏；
+                     外层重新展开时子元素已卸载并重建，展开状态自然回到折叠态。 */}
+                  {foldedProcessItems.length > 0 && (
+                    <FoldedSegmentsRegion
+                      count={foldedProcessItems.length}
+                      renderRevealed={() => foldedProcessItems.map((folded) => renderProcessGroupBlock(folded.block, folded.index))}
+                    />
+                  )}
                   {item.items.map((groupItem) => renderProcessGroupBlock(groupItem.block, groupItem.index))}
                 </ProcessBlockGroup>
               )
