@@ -403,7 +403,11 @@ function QuestionCard({
             {`${questionIndex + 1}-${question.multiSelect ? '多选' : '单选'}${question.header ? `：${question.header}` : ''}`}
           </span>
         )}
-        <p className="text-sm text-foreground">{question.question}</p>
+        <div className="text-sm text-foreground prose prose-sm dark:prose-invert max-w-none prose-p:my-0 prose-headings:my-0.5 prose-li:my-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+          <Markdown remarkPlugins={PREVIEW_REMARK_PLUGINS} urlTransform={safeUrlTransform}>
+            {question.question}
+          </Markdown>
+        </div>
       </div>
 
       {/* 竖向选项 */}
