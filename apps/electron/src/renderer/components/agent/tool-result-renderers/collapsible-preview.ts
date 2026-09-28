@@ -7,21 +7,41 @@
  *
  * 这里让预览同时受两个维度约束：
  * - 任一维度超限即折叠
- * - 折叠后先取前 previewLines 行，再按 maxChars 封顶
+ * - 初始折叠态先取前 previewLines 行，再按 maxChars 封顶
+ * - 用户主动展开后只按行数推进（渐进展开），不再叠加字符封顶
  */
 
 export interface ResultPreviewOptions {
-  /** 字符数上界：超过即折叠，折叠后预览也不会超过它 */
+  /** 字符数上界：超过即折叠，初始预览也不会超过它 */
   maxChars: number
-  /** 行数上界：超过即折叠，折叠后预览只取前 N 行 */
+  /** 行数上界：超过即折叠，初始预览只取前 N 行 */
   previewLines: number
 }
 
 export interface ResultPreview {
   /** 用于渲染的文本：未折叠时是原文，折叠时是预览片段 */
   text: string
-  /** 是否需要折叠（折叠按钮出现，且 text 只是片段） */
+  /** 是否需要折叠（折叠控件出现，且 text 只是片段） */
   collapsed: boolean
+}
+
+export interface ResultWindowOptions extends ResultPreviewOptions {
+  /**
+   * 展开态要显示的行数；传 Number.POSITIVE_INFINITY 表示全部。
+   *
+   * 小于等于 previewLines 时按「初始折叠态」处理，字符封顶生效；
+   * 大于 previewLines 时是用户主动展开，只受行数约束。
+   */
+  revealedLines: number
+}
+
+export interface ResultWindow extends ResultPreview {
+  /** 当前 text 仍不是全文，即 renderContent 的 collapsed 参数 */
+  truncated: boolean
+  /** 还有未显示的行，决定是否提供「再显示 N 行」 */
+  hasMoreLines: boolean
+  /** 总行数（按 \r?\n 切分） */
+  totalLines: number
 }
 
 /** 是否为 UTF-16 高位代理（0xD800-0xDBFF） */
@@ -29,27 +49,55 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff
 }
 
+/** 按字符截断；落在代理对中间时回退一位，避免孤立代理渲染成 U+FFFD */
+function sliceAtBoundary(text: string, maxChars: number): string {
+  const end = isHighSurrogate(text.charCodeAt(maxChars - 1)) ? maxChars - 1 : maxChars
+  return text.slice(0, end)
+}
+
 /**
- * 计算工具结果的预览片段。
+ * 计算工具结果在「折叠 / 渐进展开 / 全部展开」下的渲染窗口。
  *
- * 切行统一按 `\r?\n`，折叠后的预览再以 `\n` 连接：Windows 输出的 CRLF 不会在
- * 预览里残留 `\r`（`whitespace-pre-wrap` 下 `\r` 也被当作换行，会多出空行）。
+ * 切行统一按 `\r?\n`，预览再以 `\n` 连接：Windows 输出的 CRLF 不会在预览里
+ * 残留 `\r`（`whitespace-pre-wrap` 下 `\r` 也被当作换行，会多出空行）。
+ */
+export function sliceResultWindow(
+  content: string,
+  options: ResultWindowOptions,
+): ResultWindow {
+  const safeContent = content ?? ''
+  const maxChars = Math.max(0, options.maxChars)
+  const lines = safeContent.split(/\r?\n/)
+  const totalLines = lines.length
+
+  const collapsed = safeContent.length > maxChars || totalLines > options.previewLines
+  if (!collapsed) {
+    return { text: safeContent, collapsed: false, truncated: false, hasMoreLines: false, totalLines }
+  }
+
+  const revealed = Math.min(Math.max(options.revealedLines, 0), totalLines)
+  const hasMoreLines = revealed < totalLines
+  const initialPreview = options.revealedLines <= options.previewLines
+
+  const head = (initialPreview ? lines.slice(0, options.previewLines) : lines.slice(0, revealed)).join('\n')
+  const text = initialPreview && head.length > maxChars ? sliceAtBoundary(head, maxChars) : head
+
+  return { text, collapsed, truncated: initialPreview || hasMoreLines, hasMoreLines, totalLines }
+}
+
+/**
+ * 只区分「折叠 / 展开」两态时的简化入口。
+ *
+ * 等价于 sliceResultWindow 在 revealedLines === previewLines 下的结果，
+ * 供不提供渐进展开的调用方使用。
  */
 export function sliceResultPreview(
   content: string,
   options: ResultPreviewOptions,
 ): ResultPreview {
-  const safeContent = content ?? ''
-  const maxChars = Math.max(0, options.maxChars)
-
-  const lines = safeContent.split(/\r?\n/)
-  const collapsed = safeContent.length > maxChars || lines.length > options.previewLines
-  if (!collapsed) return { text: safeContent, collapsed }
-
-  const head = lines.slice(0, options.previewLines).join('\n')
-  if (head.length <= maxChars) return { text: head, collapsed }
-
-  // 按字符封顶时不要切断代理对，否则孤立代理会渲染成 U+FFFD
-  const end = isHighSurrogate(head.charCodeAt(maxChars - 1)) ? maxChars - 1 : maxChars
-  return { text: head.slice(0, end), collapsed }
+  const { text, collapsed } = sliceResultWindow(content, {
+    ...options,
+    revealedLines: options.previewLines,
+  })
+  return { text, collapsed }
 }

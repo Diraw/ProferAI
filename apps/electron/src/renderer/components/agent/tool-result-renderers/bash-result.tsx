@@ -72,6 +72,8 @@ export function BashResultRenderer({ result, isError, input }: BashResultRendere
   return (
     <CollapsibleResult
       content={result}
+      // 每行渲染成一个 <div>，展开即等于创建等量元素；按 50 行递进避免一次铺满
+      revealStep={50}
       renderContent={renderTerminal}
     />
   )
