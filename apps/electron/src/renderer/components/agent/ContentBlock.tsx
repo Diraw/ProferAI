@@ -335,8 +335,11 @@ function TaskListCollapsedSummary({ tasks }: { tasks: ParsedTaskListItem[] }): R
 
 // ===== 工具调用块 =====
 
-/** 右键复制命令后，「已复制」反馈的展示时长 */
-const COMMAND_COPIED_FEEDBACK_MS = 1500
+/** 右键复制命令后，行内反馈（已复制 / 复制失败）的展示时长 */
+const COMMAND_COPY_FEEDBACK_MS = 1500
+
+/** 右键复制命令的行内反馈状态 */
+type CommandCopyState = 'idle' | 'copied' | 'failed'
 
 interface ToolUseBlockProps {
   block: SDKToolUseBlock
@@ -408,22 +411,30 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   // ===== 右键复制命令 =====
   // 命令类工具在行上右键即可复制完整命令原文；左键仍是正常的展开/收起。
 
-  const [commandCopied, setCommandCopied] = React.useState(false)
-  const commandCopiedTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
+  const [commandCopyState, setCommandCopyState] = React.useState<CommandCopyState>('idle')
+  const commandCopyTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
 
-  React.useEffect(() => () => clearTimeout(commandCopiedTimerRef.current), [])
+  React.useEffect(() => () => clearTimeout(commandCopyTimerRef.current), [])
 
   const handleCommandContextMenu = React.useCallback((event: React.MouseEvent<HTMLButtonElement>): void => {
     if (!commandText) return
     // 已选中文本时交还原生右键菜单，避免抢占用户复制选区的操作
     if (window.getSelection()?.toString()) return
     event.preventDefault()
+
+    // 复制失败（剪贴板被其他应用占用等）必须有可见反馈，
+    // 否则用户会默认已经复制成功、粘贴到别处才发现是旧内容。
+    const showFeedback = (state: CommandCopyState): void => {
+      setCommandCopyState(state)
+      clearTimeout(commandCopyTimerRef.current)
+      commandCopyTimerRef.current = setTimeout(() => setCommandCopyState('idle'), COMMAND_COPY_FEEDBACK_MS)
+    }
+
     navigator.clipboard.writeText(commandText).then(() => {
-      setCommandCopied(true)
-      clearTimeout(commandCopiedTimerRef.current)
-      commandCopiedTimerRef.current = setTimeout(() => setCommandCopied(false), COMMAND_COPIED_FEEDBACK_MS)
+      showFeedback('copied')
     }).catch((error: unknown) => {
       console.error('[ContentBlock] 复制命令失败:', error)
+      showFeedback('failed')
     })
   }, [commandText])
 
@@ -574,10 +585,13 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
           </span>
         )}
 
-        {commandCopied && (
-          <span className="flex shrink-0 items-center gap-1 text-[11px] text-success">
-            <Check className="size-3" />
-            已复制
+        {commandCopyState !== 'idle' && (
+          <span className={cn(
+            'flex shrink-0 items-center gap-1 text-[11px]',
+            commandCopyState === 'copied' ? 'text-success' : 'text-destructive',
+          )}>
+            {commandCopyState === 'copied' ? <Check className="size-3" /> : <XCircle className="size-3" />}
+            {commandCopyState === 'copied' ? '已复制' : '复制失败'}
           </span>
         )}
 
