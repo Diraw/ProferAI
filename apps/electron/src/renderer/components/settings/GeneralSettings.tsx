@@ -77,6 +77,8 @@ import { useWindowInnerHeight } from '@/hooks/use-window-inner-height'
 import { cn } from '@/lib/utils'
 import { detectIsWindows } from '@/lib/platform'
 import { shortcutOverridesAtom } from '@/atoms/shortcut-atoms'
+import { settingsOpenAtom } from '@/atoms/settings-tab'
+import { coachTourOpenAtom } from '@/atoms/coach-tour-atoms'
 import { SHORTCUT_MAP } from '@/lib/shortcut-defaults'
 import { getAcceleratorDisplay, isMac } from '@/lib/shortcut-registry'
 import { Button } from '../ui/button'
@@ -84,6 +86,8 @@ import type { RuntimeStatus } from '@profer/shared'
 import type { NotificationSoundId, NotificationSoundType, NotificationSoundSettings } from '@/types/settings'
 
 export function GeneralSettings(): React.ReactElement {
+  const setSettingsOpen = useSetAtom(settingsOpenAtom)
+  const setCoachTourOpen = useSetAtom(coachTourOpenAtom)
   const [notificationsEnabled, setNotificationsEnabled] = useAtom(notificationsEnabledAtom)
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useAtom(notificationSoundEnabledAtom)
   const [notificationSounds, setNotificationSounds] = useAtom(notificationSoundsAtom)
@@ -373,6 +377,23 @@ export function GeneralSettings(): React.ReactElement {
             checked={quickTaskEnabled}
             onCheckedChange={handleQuickTaskToggle}
           />
+          <SettingsRow
+            label="界面引导"
+            description="重新播放首次进入时的界面蒙层引导（Esc 可随时退出）"
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                // 先关设置再开播：引导遮罩在主界面上方取景，避免盖住设置对话框
+                setSettingsOpen(false)
+                window.setTimeout(() => setCoachTourOpen(true), 200)
+              }}
+            >
+              重新播放
+            </Button>
+          </SettingsRow>
         </SettingsCard>
       </SettingsSection>
 

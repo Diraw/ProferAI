@@ -9,6 +9,9 @@ import { environmentCheckDialogOpenAtom } from './atoms/environment'
 import { tabsAtom, activeTabIdAtom, openTab, TUTORIAL_TAB_ID } from './atoms/tab-atoms'
 import { replayIntroEnvironmentTestAtom, replayIntroOpenAtom } from './atoms/intro-atoms'
 import { IntroWaterRipple } from './components/onboarding/IntroWaterRipple'
+import { CoachTourOverlay } from './components/onboarding/coach-tour/CoachTourOverlay'
+import { coachTourOpenAtom } from './atoms/coach-tour-atoms'
+import { CURRENT_COACH_TOUR_VERSION } from './components/onboarding/coach-tour/coach-tour-steps'
 import type { AppShellContextType } from './contexts/AppShellContext'
 
 /** 懒加载非首屏组件——减少首次渲染的 JS 解析量 */
@@ -39,6 +42,10 @@ export default function App(): React.ReactElement {
         const settings = await window.electronAPI.getSettings()
         if (!settings.onboardingCompleted) {
           setShowOnboarding(true)
+        } else if ((settings.coachTourVersion ?? 0) < CURRENT_COACH_TOUR_VERSION) {
+          // 界面引导版本化接力：Onboarding 已完成的用户（含升级后版本偏低的老用户）
+          // 等主界面首帧稳定后自动播放一次；退出时写入版本，不会重复出现。
+          window.setTimeout(() => store.set(coachTourOpenAtom, true), 800)
         }
       } catch (error) {
         console.error('[App] 初始化失败:', error)
@@ -81,6 +88,11 @@ export default function App(): React.ReactElement {
         })
         store.set(tabsAtom, result.tabs)
         store.set(activeTabIdAtom, result.activeTabId)
+
+        // Onboarding 接力：进入主界面后自动播放一次界面蒙层引导；
+        // 等首帧渲染稳定再启动，保证锚点（输入区/模型选择器）已挂载。
+        window.setTimeout(() => store.set(coachTourOpenAtom, true), 600)
+
       }
     } catch (error) {
       console.error('[App] 创建欢迎对话失败:', error)
@@ -145,6 +157,7 @@ export default function App(): React.ReactElement {
         <MigrationImportDialog />
       </React.Suspense>
       <IntroReplayOverlay />
+      <CoachTourOverlay />
     </TooltipProvider>
   )
 }

@@ -69,7 +69,7 @@ export function SidebarRail({ s }: { s: SidebarModel }): React.ReactElement {
         <div className="my-3 h-px w-8 bg-border/70" />
 
         {/* 模式切换 */}
-        <div className="flex flex-col items-center gap-1.5">
+        <div className="flex flex-col items-center gap-1.5" data-tour="mode-switch">
           <CollapsedWorkspacePopover>
             <button
               type="button"

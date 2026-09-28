@@ -946,6 +946,23 @@
   animation: indicator-flicker 2.5s infinite steps(15);
 }
 
+@keyframes coach-tour-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.45); opacity: 1; }
+  70% { box-shadow: 0 0 0 14px rgba(255, 255, 255, 0); opacity: 0.9; }
+  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); opacity: 0; }
+}
+
+/* CoachTour 交互步骤的呼吸脉冲环：提示「点这里」，几何跟随聚光灯 rect */
+.coach-tour-pulse-ring {
+  animation: coach-tour-pulse 1.6s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach-tour-pulse-ring {
+    animation: none;
+  }
+}
+
 @keyframes feature-tour-enter-forward {
   from { opacity: 0; transform: translate3d(42px, 10px, 0) scale(.99); filter: blur(8px); }
   to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); filter: blur(0); }

@@ -249,6 +249,8 @@ export interface AppSettings {
   agentWorkspaceId?: string
   /** 是否已完成 Onboarding 流程 */
   onboardingCompleted?: boolean
+  /** 已看过的界面蒙层引导（CoachTour）内容版本；低于当前版本时自动重播一次。缺省视为 0 */
+  coachTourVersion?: number
   /** 是否跳过了环境检测 */
   environmentCheckSkipped?: boolean
   /** 最后一次环境检测结果（缓存） */

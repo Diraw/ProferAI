@@ -137,7 +137,7 @@ export function PlanningView({ standalone = false }: { standalone?: boolean } = 
       </header>
       <main className={cn('min-h-0 flex-1 overflow-hidden titlebar-no-drag', standalone ? 'px-5 pb-4 pt-3' : 'px-6 pb-6 pt-3 sm:px-8 xl:px-10')}>
         <div className="h-full w-full">
-          <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-surface-border/50 bg-surface-raised shadow-lg">
+          <section data-tour="planning-panel" className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-surface-border/50 bg-surface-raised shadow-lg">
             {tab === 'calendar' ? <div ref={setCalendarToolbarTarget} className="shrink-0 titlebar-drag-region" /> : <div className="flex shrink-0 items-center gap-3 border-b border-surface-border/45 px-4 py-2.5 sm:px-5 titlebar-drag-region">
               <nav className="inline-flex h-9 shrink-0 rounded-xl border border-surface-border/40 bg-surface-sunken/45 p-0.5 shadow-sm" aria-label="任务日程视图" role="tablist" aria-orientation="horizontal">
                 {TABS.map((item, index) => <button key={item.id} ref={(element) => { tabButtonRefs.current[index] = element }} type="button" role="tab" aria-selected={tab === item.id} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)} onKeyDown={(event) => handleTabKeyDown(event, index)} className={cn('h-8 rounded-lg px-3.5 text-sm transition-colors', tab === item.id ? 'bg-surface-raised font-semibold text-foreground shadow-sm ring-1 ring-surface-border/35' : 'text-muted-foreground hover:bg-surface-selected/60 hover:text-foreground')}>{item.label}</button>)}

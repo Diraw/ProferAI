@@ -363,7 +363,7 @@ export function AgentSkillsView(): React.ReactElement {
       />
       {/* 顶部 56px 已交给上面的拖拽层。不能把含 mt-14 的外层设为 no-drag，
           否则它的布局盒会盖住窗口顶端并抵消拖拽区；交互控件从 56px 开始的内层才设 no-drag。 */}
-      <div className="mx-auto mt-14 flex w-full max-w-6xl shrink-0 flex-col gap-3 px-4 pb-4 sm:px-6 lg:px-8">
+      <div data-tour="agent-skills-header" className="mx-auto mt-14 flex w-full max-w-6xl shrink-0 flex-col gap-3 px-4 pb-4 sm:px-6 lg:px-8">
         <div className="titlebar-no-drag flex min-h-5 items-center">
           <Tooltip>
             <TooltipTrigger asChild>
@@ -544,7 +544,7 @@ export function AgentSkillsView(): React.ReactElement {
 
       {/* 内容 */}
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-        <div className="mx-auto w-full max-w-6xl px-4 pb-10 sm:px-6 lg:px-8">
+        <div data-tour="agent-skills-panel" className="mx-auto w-full max-w-6xl px-4 pb-10 sm:px-6 lg:px-8">
           {globalConfigOpen ? (
             <GlobalCapabilitiesView
               initialTab={globalConfigTab}
