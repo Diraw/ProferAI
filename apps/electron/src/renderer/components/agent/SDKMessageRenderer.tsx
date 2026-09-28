@@ -704,6 +704,9 @@ export interface AssistantTurnRendererProps {
 }
 
 export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true }: AssistantTurnRendererProps): React.ReactElement | null {
+  // 折叠区状态属于当前 turn，而不是瞬时的窗口/工具块组件；工具完成导致内容重算时保留用户选择。
+  const [expandedProcessSegments, setExpandedProcessSegments] = React.useState(false)
+  const [expandedReplySegments, setExpandedReplySegments] = React.useState(false)
   const channels = useAtomValue(channelsAtom)
   const processGroupsKeepExpanded = useAtomValue(agentProcessGroupsKeepExpandedAtom)
   const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
@@ -894,6 +897,8 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
                     {itemIndex === firstReplyIndex && foldedReplyItems.length > 0 && (
                       <FoldedSegmentsRegion
                         count={foldedReplyItems.length}
+                        expanded={expandedReplySegments}
+                        onExpandedChange={setExpandedReplySegments}
                         renderRevealed={() => foldedReplyItems.map((folded) => renderTopLevelBlock(folded.block, folded.index))}
                       />
                     )}
@@ -917,6 +922,8 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
                   {foldedProcessItems.length > 0 && (
                     <FoldedSegmentsRegion
                       count={foldedProcessItems.length}
+                      expanded={expandedProcessSegments}
+                      onExpandedChange={setExpandedProcessSegments}
                       renderRevealed={() => foldedProcessItems.map((folded) => renderProcessGroupBlock(folded.block, folded.index))}
                     />
                   )}

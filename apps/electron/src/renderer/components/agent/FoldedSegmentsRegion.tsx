@@ -23,6 +23,10 @@ export interface FoldedSegmentsRegionProps {
   count: number
   /** 展开时渲染被折叠的段；折叠时不调用 */
   renderRevealed: () => React.ReactNode
+  /** 可选的受控展开状态；用于流式窗口重算后保留用户选择。 */
+  expanded?: boolean
+  /** 受控展开状态变更回调。 */
+  onExpandedChange?: (expanded: boolean) => void
 }
 
 /**
@@ -33,12 +37,12 @@ export interface FoldedSegmentsRegionProps {
  *    做法：区域末尾放一个零高度锚点，切换前记录它的视口位置，切换后用
  *    `useLayoutEffect` 在同一帧内补偿滚动量（paint 之前完成，不会闪一下）。
  * 2. 展开后要有**收起**入口——折叠态与展开态各自可点，构成主动折叠闭环。
- * 3. 展开状态存在本组件内部。外层 `ProcessBlockGroup` 折叠时会卸载 children，
- *    本组件随之卸载、状态自然丢失，因此**每次展开外层都要重新手动展开**这里的内容。
- *    不要把状态提升到父组件，否则第 3 条会失效。
+ * 3. 展开状态默认由调用方按 turn 生命周期持有；没有传入受控状态时才使用本组件内部状态。
+ *    这样过程块因流式窗口变化重新挂载时，不会覆盖用户已经展开的选择。
  */
-export function FoldedSegmentsRegion({ count, renderRevealed }: FoldedSegmentsRegionProps): React.ReactElement | null {
-  const [revealed, setRevealed] = React.useState(false)
+export function FoldedSegmentsRegion({ count, renderRevealed, expanded, onExpandedChange }: FoldedSegmentsRegionProps): React.ReactElement | null {
+  const [internalRevealed, setInternalRevealed] = React.useState(false)
+  const revealed = expanded ?? internalRevealed
   const anchorRef = React.useRef<HTMLDivElement>(null)
   const pendingRef = React.useRef<{ top: number; scroller: HTMLElement } | null>(null)
 
@@ -48,8 +52,9 @@ export function FoldedSegmentsRegion({ count, renderRevealed }: FoldedSegmentsRe
     if (anchor && scroller) {
       pendingRef.current = { top: anchor.getBoundingClientRect().top, scroller }
     }
-    setRevealed(next)
-  }, [])
+    if (expanded === undefined) setInternalRevealed(next)
+    onExpandedChange?.(next)
+  }, [expanded, onExpandedChange])
 
   // 无依赖数组：每次渲染后检查是否有待补偿的滚动量。
   // useLayoutEffect 在 DOM 变更后、浏览器 paint 前同步执行，不会看到跳动。
