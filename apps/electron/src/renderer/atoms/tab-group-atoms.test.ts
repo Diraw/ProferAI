@@ -1,13 +1,13 @@
 /**
  * tab-group-atoms 单测
  *
- * 覆盖：组合白名单、构造与成员判定、合并落点语义、对账解散、持久化读写、几何 clamp。
+ * 覆盖：组合白名单、构造与成员判定、合并落点语义、对账解散、持久化读写、几何 clamp、
+ * 拖放与宽度的归属关系（宽度只归分栏缝，拖放不改宽度）。
  * 纯函数层不依赖 React 与 jotai store。
  */
 
 import { expect, test } from 'bun:test'
 import {
-  GROUP_EMPTY_SIDE_RATIO,
   GROUP_MIN_PANE_WIDTH,
   emptyGroupSide,
   fillGroupSide,
@@ -28,7 +28,6 @@ import {
   planAutoGroupWorkTab,
   planFollowWorkTab,
   planGroupDrop,
-  ratioForEmptySide,
   reconcileGroup,
   reconcileTabGroups,
   removeTabGroup,
@@ -438,17 +437,34 @@ test('持久化：允许一侧为空', () => {
   })
 })
 
-// ===== 空栏初始占比 =====
+// ===== 拖放对宽度的影响（宽度只归分栏缝，拖放不改宽度）=====
 
-test('空栏初始占比：空栏只占 1/3，且落在可拖拽边界内', () => {
-  expect(GROUP_EMPTY_SIDE_RATIO).toBeCloseTo(1 / 3, 6)
-  expect(ratioForEmptySide('right')).toBeCloseTo(1 / 3, 6)
-  expect(ratioForEmptySide('left')).toBeCloseTo(2 / 3, 6)
-  // 必须能直接喂给几何函数（不被 clamp 改写）
-  expect(resolveGroupSplitGeometry(1400, ratioForEmptySide('right')).ratio).toBeCloseTo(1 / 3, 6)
-  expect(resolveGroupSplitGeometry(1400, ratioForEmptySide('left')).ratio).toBeCloseTo(2 / 3, 6)
+/**
+ * 回归锁：这一块的宽度规则被用户否掉过两次实现（按投放指针横坐标分配、按空栏模板自动分配），
+ * 两次都表现为"虚线预览和实际分栏不一致 / 上次调好的宽度不记住"。
+ * 现在的约定是：拖放只决定成员与左右顺序，宽度只归分栏缝拖动（tabGroupRatioAtom）。
+ * 因此这里断言"模块不再提供任何从落点/空栏推导宽度的入口"，并断言几何函数本身不再改写合法比例。
+ */
+test('拖放不得再提供"自动分配宽度"的入口（历史上两种做法都被否掉）', async () => {
+  const api = (await import('./tab-group-atoms')) as Record<string, unknown>
+  for (const forbidden of ['ratioForDropPosition', 'ratioForEmptySide', 'GROUP_EMPTY_SIDE_RATIO', 'resolveDropRatio', 'resolveDropPreviewRatio']) {
+    expect(Object.hasOwn(api, forbidden), `禁止重新引入 ${forbidden}`).toBe(false)
+  }
 })
 
+test('几何函数只做最小栏宽约束，不改写用户拖出来的宽度', () => {
+  // 容器足够宽时，几何返回值就是用户拖出来的比例本身（虚线预览与实际两栏共用同一份几何）
+  for (const memoryRatio of [0.25, 0.3, 0.42, 0.5, 0.66, 0.75]) {
+    expect(resolveGroupSplitGeometry(2000, memoryRatio).ratio).toBeCloseTo(memoryRatio, 6)
+  }
+  // 容器偏窄时只受最小栏宽约束（这是尺寸约束，不是"按落点/空栏"的业务分配）
+  const narrow = resolveGroupSplitGeometry(1400, 0.25)
+  expect(narrow.rightWidth).toBeCloseTo(GROUP_MIN_PANE_WIDTH, 6)
+  expect(narrow.leftWidth).toBeGreaterThanOrEqual(GROUP_MIN_PANE_WIDTH - 1e-6)
+  // 同一输入幂等：预览与实际各算一次必然相等
+  const twin = resolveGroupSplitGeometry(2000, 0.661)
+  expect(resolveGroupSplitGeometry(2000, twin.ratio)).toEqual(twin)
+})
 
 // ===== 程序化自动建组（浏览器推送 / 自动预览跟随）=====
 

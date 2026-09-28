@@ -193,6 +193,8 @@ export function MainArea(): React.ReactElement {
   }, [])
 
   const groupGeometry = resolveGroupSplitGeometry(groupContainerWidth, tabGroupRatio)
+  // 虚线投放区与真实两栏都用这一份几何：宽度只由分栏缝拖动决定，拖放落定不改宽度，
+  // 所以"拖下来看到的分配虚线"就是落定后的两栏宽度（含空栏的实际比例）。
   // 当前激活标签属于某个组合时才显示该组合；其他组合保持后台状态。
   const groupViewActive = !!tabGroup && (!!leftGroupTab || !!rightGroupTab)
   const leftPaneTabId = groupViewActive ? leftGroupTab?.id ?? null : contentTabId

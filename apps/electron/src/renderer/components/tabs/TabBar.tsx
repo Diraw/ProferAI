@@ -46,19 +46,16 @@ import { appModeAtom } from "@/atoms/app-mode";
 import { openFilePanel } from "@/hooks/usePanelAutoLayout";
 import { openBrowserTabManually } from "@/lib/browser-tab";
 import {
-  emptyGroupSide,
   findTabGroup,
   groupTabIds,
   isGroupActive,
   isGroupEligibleTab,
   isSessionConsistentGroup,
   planGroupDrop,
-  ratioForEmptySide,
   removeTabGroup,
   replaceTabGroup,
   tabGroupsAtom,
   tabGroupDragAtom,
-  tabGroupRatioAtom,
   type TabGroupSide,
 } from "@/atoms/tab-group-atoms";
 import { panelVisibilityAtom } from "@/atoms/panel-layout-atoms";
@@ -734,7 +731,6 @@ function TabBarInner({
   // ===== 组合 tab =====
   // 唯一创建入口是手势：把标签向下拖出标签栏，在主区左右投放区选位置。
   // 顶栏只在"已处于左右双栏"时提供一个解散按钮（常态不显示任何入口按钮）。
-  const setTabGroupRatio = useSetAtom(tabGroupRatioAtom);
   const setTabGroupDrag = useSetAtom(tabGroupDragAtom);
 
   // 每个组合在顶栏的锚点：成员中在 tabsAtom 里靠前的那个，另一个折叠隐藏。
@@ -1010,9 +1006,10 @@ function TabBarInner({
         }
         store.set(tabGroupsAtom, replaceTabGroup(groups, currentGroup, plan.group));
         store.set(activeTabIdAtom, plan.activeTabId);
-        // 空栏给一个较小的初始占比；之后用户可以自由拖分栏缝
-        const emptySide = emptyGroupSide(plan.group);
-        if (emptySide) setTabGroupRatio(ratioForEmptySide(emptySide));
+        // 宽度不在这里动：分栏宽度只归分栏缝拖动（tabGroupRatioAtom，持久化）。
+        // 用户上次调到多少，新分栏就是多少；MainArea 的虚线投放区与真实两栏用同一个 geometry
+        // 渲染，所以虚线画的就是落定后的宽度。别在这里按指针位置或空栏模板分配宽度（历史上
+        // 两种做法都因此产生过"预览与实际不一致"，见 tab-group-atoms 模块头）。
         setTabMru((previous) => promoteMru(previous, plan.activeTabId));
       };
 
@@ -1020,7 +1017,7 @@ function TabBarInner({
       document.addEventListener("pointerup", handleUp);
       document.addEventListener("pointercancel", handleUp);
     },
-    [onCancelSort, onDragStart, setTabGroupDrag, setTabGroupRatio, setTabMru],
+    [onCancelSort, onDragStart, setTabGroupDrag, setTabMru],
   );
 
   /**

@@ -12,6 +12,17 @@
  *   useSyncActiveTabSideEffects 单点同步自动把"当前会话"跟到焦点栏。
  * - "组合激活" = activeTabId ∈ 非空成员；点第三个标签只切视图，不会劫持组合。
  *
+ * **宽度归属（唯一事实来源）**：分栏宽度只由分栏缝拖动决定，存在 tabGroupRatioAtom
+ * （localStorage 持久化）。**拖放标签只决定成员与左右顺序，任何时候都不改宽度**——
+ * 用户上次调到多少，新分栏就是多少。虚线投放区与真实两栏用同一个 geometry 函数渲染，
+ * 所以“虚线看到的宽度”与“落定后的宽度”不可能不一致。
+ *
+ * 已被用户否掉的两种做法（不要再引入）：
+ * 1) 按投放指针横坐标分配：标签是从顶栏往下拖的垂直手势，指针 X 基本等于标签原本在顶栏
+ *    的位置，与想要的宽度无关；标签在最左边时会把有内容的一栏直接挤到 420px 最小宽度；
+ * 2) 按空栏模板自动分配（空栏 1/3，或把记忆值镜像成“空栏拿较小的一份”）：前者是“只有一种
+ *    固定模式”，后者会让“上次调好的宽度”在新建分栏时被翻到另一侧。
+ *
  * 纯函数（createGroup / resolveGroupMembership / planGroupDrop / reconcileGroup / 几何）
  * 与 React 无关，可直接单测。
  */
@@ -71,14 +82,6 @@ export const GROUP_MIN_PANE_WIDTH = 420
 /** 右栏占比的拖拽边界 */
 export const GROUP_MIN_RATIO = 0.25
 export const GROUP_MAX_RATIO = 0.75
-
-/** 组合里有一栏空着时，空栏初始占比（给选择入口留位置，又不挤占有内容的一栏） */
-export const GROUP_EMPTY_SIDE_RATIO = 1 / 3
-
-/** 空栏指定在哪一侧时，右栏占比的初始值 */
-export function ratioForEmptySide(side: TabGroupSide): number {
-  return side === 'right' ? GROUP_EMPTY_SIDE_RATIO : 1 - GROUP_EMPTY_SIDE_RATIO
-}
 
 // ===== 纯函数 =====
 
