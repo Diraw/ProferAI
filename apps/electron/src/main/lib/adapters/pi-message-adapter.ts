@@ -125,6 +125,37 @@ export function restorePiInput(
   }
 }
 
+export const EMPTY_IMAGE_PLACEHOLDER_TEXT = '[图像内容不可用：工具返回了空图像数据，已从发送给模型的上下文中移除。请改用文本方式获取信息（例如 BrowserObserve）。]'
+
+function isEmptyImageBlock(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false
+  const record = block as Record<string, unknown>
+  if (record.type !== 'image') return false
+  return typeof record.data !== 'string' || record.data.length === 0
+}
+
+/**
+ * 请求前历史消毒：工具若把空图像块（例如视图不可见时 capturePage 返回的空截图）写进会话历史，
+ * 部分模型上游收到带空 data 的 image part 会挂起直到客户端超时（实测 kimi-k3 每次 ~105s 无响应
+ * 后被自动重试，表现为“模型连不上”式死循环）。每轮构建请求前把空图像块替换为文本说明，
+ * 既保护新写入的历史，也让已被污染的既有会话恢复可用。无空图时原样返回（不复制数组）。
+ */
+export function sanitizePiContextMessages(messages: AgentMessage[]): AgentMessage[] {
+  let changed = false
+  const next = messages.map((message) => {
+    if (!message || typeof message !== 'object' || (message as { role?: unknown }).role !== 'toolResult') return message
+    const toolResult = message as ToolResultMessage
+    const content = toolResult.content as unknown
+    if (!Array.isArray(content) || !content.some(isEmptyImageBlock)) return message
+    changed = true
+    return {
+      ...toolResult,
+      content: content.map((block) => (isEmptyImageBlock(block) ? { type: 'text', text: EMPTY_IMAGE_PLACEHOLDER_TEXT } : block)),
+    } as unknown as AgentMessage
+  })
+  return changed ? next : messages
+}
+
 function normalizeToolResultContent(content: unknown): unknown {
   if (!Array.isArray(content)) return content
   return content.map((item) => {

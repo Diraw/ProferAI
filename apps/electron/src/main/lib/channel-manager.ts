@@ -376,6 +376,7 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
       agentBaseUrl?: string
       managedType?: 'model-family' | 'legacy'
       familyId?: string
+      directDataPlane?: boolean
       models: ChannelModel[]
     }>
   }
@@ -440,6 +441,7 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
       serverManaged: true,
       managedType: ch.managedType ?? 'legacy',
       familyId: ch.familyId,
+      directDataPlane: ch.directDataPlane === true,
       createdAt: localExisting?.createdAt ?? now,
       updatedAt: now,
     })

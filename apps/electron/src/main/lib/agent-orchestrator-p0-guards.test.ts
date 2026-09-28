@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { isAgentEnabledForChannel, SAFE_TOOLS } from '@profer/shared'
+import { canonicalAgentToolName, isAgentEnabledForChannel, SAFE_TOOLS } from '@profer/shared'
 import {
   AgentRunAlreadyActiveError,
   applySdkCredentials,
@@ -107,23 +107,21 @@ describe('AgentOrchestrator P0 guards', () => {
     expect(isPlanModeMcpTool('Read')).toBe(false)
   })
 
-  test('Given 工具名 When 判断是否受管浏览器工具 Then 只认 Browser 前缀的 Pi-native 工具', () => {
+  test('Given 工具名 When 判断是否受管浏览器工具 Then Claude namespace 与 Pi 裸名共享逻辑名', () => {
+    expect(canonicalAgentToolName('BrowserListTabs')).toBe('BrowserListTabs')
+    expect(canonicalAgentToolName('mcp__browser__BrowserListTabs')).toBe('BrowserListTabs')
     expect(isBrowserToolName('BrowserListTabs')).toBe(true)
     expect(isBrowserToolName('BrowserNavigate')).toBe(true)
     expect(isBrowserToolName('Read')).toBe(false)
-    expect(isBrowserToolName('mcp__browser__BrowserListTabs')).toBe(false)
+    expect(isBrowserToolName('mcp__browser__BrowserListTabs')).toBe(true)
   })
 
   test('Given Plan 模式 When 调用只读浏览器工具 Then 允许', () => {
     for (const toolName of PLAN_MODE_READ_ONLY_BROWSER_TOOLS) {
       expect(resolvePlanModeBrowserPermission(toolName)).toEqual({ behavior: 'allow' })
     }
-    expect([...PLAN_MODE_READ_ONLY_BROWSER_TOOLS]).toEqual([
-      'BrowserObserve',
-      'BrowserScreenshot',
-      'BrowserListTabs',
-      'BrowserPreviewOpen',
-    ])
+    expect(resolvePlanModeBrowserPermission('mcp__browser__BrowserObserve')).toEqual({ behavior: 'allow' })
+    expect(resolvePlanModeBrowserPermission('mcp__browser__BrowserClick').behavior).toBe('deny')
   })
 
   test('Given Plan 模式 When 调用交互式浏览器工具 Then 拒绝并给出提示', () => {

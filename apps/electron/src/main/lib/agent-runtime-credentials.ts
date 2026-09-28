@@ -27,12 +27,30 @@ export type ResolveRuntimeCredentialsResult =
  * 渠道存在性/启用性仍由 Orchestrator 的既有 preflight 负责，避免改变产品错误优先级。
  */
 export async function resolveRuntimeCredentials(
-  channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode'>,
+  channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode' | 'directDataPlane'>,
 ): Promise<ResolveRuntimeCredentialsResult> {
   const isOfficialChannel = isOfficialManagedChannel(channel)
   const forceBearerAuth = (isCommercialBuild() || isCommercialMode()) && isOfficialChannel
 
+  const useDirectDataPlane = forceBearerAuth && channel.directDataPlane === true
+
   if (forceBearerAuth) {
+    if (useDirectDataPlane) {
+      try {
+        const apiKey = decryptApiKey(channel.id)
+        return {
+          ok: true,
+          credentials: {
+            apiKey,
+            baseUrl: resolveChannelAgentBaseUrl(channel),
+            provider: channel.provider,
+            forceBearerAuth: false,
+          },
+        }
+      } catch {
+        return { ok: false, code: 'api_key_decrypt_failed' }
+      }
+    }
     const auth = await getTeamAuthWithRefresh()
     if (!auth) return { ok: false, code: 'token_expired' }
     return {

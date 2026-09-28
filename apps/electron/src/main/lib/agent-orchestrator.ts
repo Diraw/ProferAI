@@ -2029,7 +2029,7 @@ ${enrichedMessage}`
       const compressedSystemPrompt = agentRuntime === 'pi'
         ? buildPiTaskPrompt({
             basePrompt: baseSystemPrompt,
-            userMessage,
+            userMessage: runtimeUserMessage,
             toolNames: piCustomTools?.map((tool) => tool.name) ?? [],
             forceAutomation: input.triggeredBy === 'automation',
             pptCapabilityActive,
@@ -2055,6 +2055,13 @@ ${enrichedMessage}`
           console.warn(`[Agent 编排] Pi 文件检查点创建失败，本轮继续但不可文件回退 (${sessionId}):`, error)
         }
       }
+      const browserAllowedToolAliases = SAFE_TOOLS
+        .filter((toolName) => toolName.startsWith('Browser'))
+        .map((toolName) => `mcp__browser__${toolName}`)
+      const autoAllowedTools = [...new Set([...SAFE_TOOLS, ...browserAllowedToolAliases])]
+      const sdkAllowedTools = sdkPermissionModeForProferMode(initialPermissionMode) === 'auto'
+        ? { allowedTools: autoAllowedTools }
+        : {}
       const queryOptions: AgentQueryInput & Record<string, unknown> = {
         sessionId,
         agentRuntime,
@@ -2120,7 +2127,7 @@ ${enrichedMessage}`
         // 从实际 tool_use 流里同步，避免 UI 停留在计划阶段。
         allowDangerouslySkipPermissions: !canUseTool,
         canUseTool,
-        ...(sdkPermissionModeForProferMode(initialPermissionMode) === 'auto' && { allowedTools: [...SAFE_TOOLS] }),
+        ...sdkAllowedTools,
         ...(disabledClaudeTools.length > 0 && { disallowedTools: disabledClaudeTools }),
         // 默认继续使用 claude_code preset；开发者开启开放认识论后改用 Profer 完整自管 prompt，
         // 避免上游本地 preset 稀释该姿态。模型服务端更高优先级规则不受此设置影响。
@@ -2196,9 +2203,10 @@ ${enrichedMessage}`
           }
 
           // SDK 初始化完成后立即触发标题生成，使多会话并发时用户能快速区分
+          // goal 等机器注入的 prompt 不作为命名来源，改用调用方提供的干净文本（如 goal 本身）
           if (!titleGenerationStarted) {
             titleGenerationStarted = true
-            this.autoGenerateTitle(sessionId, userMessage, channelId, resolvedModel, callbacks).catch((err) =>
+            this.autoGenerateTitle(sessionId, input.titleSourceText ?? userMessage, channelId, resolvedModel, callbacks).catch((err) =>
               console.error('[Agent 编排] 标题生成未捕获异常:', err),
             )
           }
@@ -2323,13 +2331,25 @@ ${enrichedMessage}`
 
       let relayTokenRecoveryAttempted = false
       const recoverRelayTokenForAgent = async (): Promise<boolean> => {
-        if (relayTokenRecoveryAttempted || !runtimeCredentials.forceBearerAuth) return false
+        if (relayTokenRecoveryAttempted || (!runtimeCredentials.forceBearerAuth && channel.directDataPlane !== true)) return false
         relayTokenRecoveryAttempted = true
 
         const recovered = await recoverCommercialProxyAuth()
         if (!recovered) return false
 
-        const nextCredentials = await resolveRuntimeCredentials(channel)
+        // 直连 canary 失败时同步一次渠道目录，将该用户切回 Relay；旧 Relay 令牌仍由服务端控制。
+        if (channel.directDataPlane === true) {
+          try {
+            const { syncChannelsFromServer } = require('./channel-manager') as typeof import('./channel-manager')
+            await syncChannelsFromServer(recovered.baseUrl, recovered.token)
+          } catch (error) {
+            console.warn('[Agent 编排] 直连失败后的 Relay 渠道同步失败:', error)
+          }
+        }
+        const nextChannel = getChannelById(channelId)
+        const nextCredentials = nextChannel
+          ? await resolveRuntimeCredentials(nextChannel)
+          : { ok: false as const, code: 'token_expired' as const }
         if (!nextCredentials.ok) return false
 
         runtimeCredentials = nextCredentials.credentials
@@ -2339,7 +2359,7 @@ ${enrichedMessage}`
           queryOptions.apiKey = runtimeCredentials.apiKey
           queryOptions.baseUrl = runtimeCredentials.baseUrl
         }
-        console.warn('[Agent 编排] relay 令牌已刷新，正在重试一次请求')
+        console.warn('[Agent 编排] 模型数据面失败，已切换到 Relay 重试')
         return true
       }
 

@@ -180,6 +180,7 @@ for (const key of Object.keys(process.env)) {
 import { createApplicationMenu, installTextContextMenus } from './menu'
 import { registerIpcHandlers, setRendererReadyHandler, stopAllGoalsForProcessExit } from './ipc'
 import { setRemoteServiceEnabled, startRemoteService, stopRemoteService } from './lib/remote-service'
+import { startAgentFabricService, stopAgentFabricService } from './lib/agent-fabric/agent-fabric-service'
 import { createTray, destroyTray, getTray } from './tray'
 import { initializeRuntime } from './lib/runtime-init'
 import { seedDefaultSkills, VITE_DEV_SERVER_URL } from './lib/config-paths'
@@ -920,6 +921,12 @@ async function bootstrap(): Promise<void> {
     }
   })
 
+  // Agent Fabric 本地服务：仅显式启用时启动（PROFER_AGENT_FABRIC=1 或 agent-fabric.json），
+  // 只监听 127.0.0.1，向已配对本地调用方（如 Hermes）暴露统一任务协议。
+  safeRun('startAgentFabricService', () => {
+    void startAgentFabricService()
+  })
+
   // Set dock icon on macOS
   if (process.platform === 'darwin' && app.dock) {
     await app.dock.show()
@@ -1224,6 +1231,8 @@ app.on('before-quit', () => {
   destroyPlanningWindow()
   // 停止移动端版远程服务
   stopRemoteService()
+  // 停止 Agent Fabric 本地服务
+  void stopAgentFabricService()
   // 停止同步引擎
   const { stopSyncEngine } = require('./lib/sync-manager')
   stopSyncEngine()

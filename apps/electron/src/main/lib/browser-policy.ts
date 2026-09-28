@@ -64,12 +64,27 @@ export function assertSafeBrowserUrl(input: string): string {
 export function isSafeBrowserSubresourceUrl(input: string): boolean {
   try {
     const parsed = new URL(input)
-    return ['http:', 'https:'].includes(parsed.protocol)
+    return ['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)
       && !parsed.username
       && !parsed.password
   } catch {
     return false
   }
+}
+
+/**
+ * 按顶层页面信任上下文校验子资源：本地开发页允许加载本地依赖；公网页面拒绝明显的私网目标。
+ * 非私网公网资源不重复做 DNS 查询，完整的 DNS rebinding 防护仍应由受控 egress 层承担。
+ */
+export async function assertSafeBrowserSubresourceDestination(input: string, topLevelUrl: string): Promise<string> {
+  if (!isSafeBrowserSubresourceUrl(input)) throw new Error('受管浏览器不允许此子资源协议或认证信息。')
+  const resource = new URL(input)
+  const topLevel = new URL(topLevelUrl)
+  if (!['http:', 'https:', 'ws:', 'wss:'].includes(resource.protocol)) throw new Error('受管浏览器不允许此子资源协议。')
+  if (!isPrivateAddress(topLevel.hostname) && isPrivateAddress(resource.hostname)) {
+    throw new Error('公网页面不得访问本机或私网子资源。')
+  }
+  return resource.toString()
 }
 
 /**

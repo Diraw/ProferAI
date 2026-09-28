@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { assertSafeBrowserUrl, isSafeBrowserSubresourceUrl, normalizeBrowserUrl } from './browser-policy'
+import { assertSafeBrowserSubresourceDestination, assertSafeBrowserUrl, isSafeBrowserSubresourceUrl, normalizeBrowserUrl } from './browser-policy'
 
 describe('受管浏览器 URL 策略', () => {
   test('规范化常见地址栏输入为可导航的 HTTPS URL', () => {
@@ -28,12 +28,19 @@ describe('受管浏览器 URL 策略', () => {
     expect(normalizeBrowserUrl('example.com:8443/docs')).toBe('https://example.com:8443/docs')
   })
 
-  test('子资源使用同步策略，并允许本地开发服务加载依赖', () => {
+  test('顶层本地开发页允许本地子资源，公网顶层页拒绝私网子资源', async () => {
+    await expect(assertSafeBrowserSubresourceDestination('http://127.0.0.1:3000/@vite/client', 'http://localhost:5173/')).resolves.toBe('http://127.0.0.1:3000/@vite/client')
+    await expect(assertSafeBrowserSubresourceDestination('http://192.168.1.10/api', 'http://dev-machine.local:3000/')).resolves.toBe('http://192.168.1.10/api')
+    await expect(assertSafeBrowserSubresourceDestination('http://127.0.0.1:3000/admin', 'https://example.com/')).rejects.toThrow('公网页面不得访问')
+    await expect(assertSafeBrowserSubresourceDestination('ws://127.0.0.1:5173/socket', 'http://localhost:5173/')).resolves.toBe('ws://127.0.0.1:5173/socket')
+    await expect(assertSafeBrowserSubresourceDestination('wss://127.0.0.1:5173/socket', 'https://example.com/')).rejects.toThrow('公网页面不得访问')
+  })
+
+  test('子资源协议和认证信息使用同步策略', () => {
     expect(isSafeBrowserSubresourceUrl('https://cdn.example.com/app.js')).toBe(true)
     expect(isSafeBrowserSubresourceUrl('http://127.0.0.1:3000/app.js')).toBe(true)
-    expect(isSafeBrowserSubresourceUrl('http://localhost:5173/@vite/client')).toBe(true)
-    expect(isSafeBrowserSubresourceUrl('https://192.168.1.10/app.js')).toBe(true)
     expect(isSafeBrowserSubresourceUrl('data:text/plain,ok')).toBe(false)
+    expect(isSafeBrowserSubresourceUrl('https://user:pass@example.com/app.js')).toBe(false)
     expect(isSafeBrowserSubresourceUrl('not a url')).toBe(false)
   })
 })

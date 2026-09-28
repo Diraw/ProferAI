@@ -273,7 +273,9 @@ export async function sendMessage(
   let proxyBaseUrl = ''
   // 代管模式判定：商业构建 或 服务端标记代管，且用户无自配权限
   // 自配用户(canSelfConfigApi=true)可用自己配的渠道直连，不强制走统一 proxy
-  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode()) && isOfficialManagedChannel(channel)
+  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode())
+    && isOfficialManagedChannel(channel)
+    && channel.directDataPlane !== true
 
   if (shouldUseCommercialProxy) {
     const auth = await getTeamAuthWithRefresh()
@@ -404,10 +406,39 @@ export async function sendMessage(
       try {
         return await streamSSE({ request, adapter, signal: controller.signal, fetchFn, onEvent: handleStreamEvent })
       } catch (error) {
-        if (!shouldUseCommercialProxy || controller.signal.aborted || !isInvalidRelayTokenError(error)) throw error
+        const canRecover = !controller.signal.aborted && (isInvalidRelayTokenError(error) || channel.directDataPlane === true)
+        if (!canRecover) throw error
 
         const recovered = await recoverCommercialProxyAuth()
         if (!recovered) throw error
+
+        if (channel.directDataPlane === true) {
+          try {
+            const { syncChannelsFromServer } = await import('./channel-manager')
+            await syncChannelsFromServer(recovered.baseUrl, recovered.token)
+          } catch (syncError) {
+            console.warn('[聊天服务] 直连失败后的 Relay 渠道同步失败:', syncError)
+          }
+          const fallbackChannel = listChannels().find((candidate) => candidate.id === channelId)
+          if (!fallbackChannel || fallbackChannel.directDataPlane === true) throw error
+          const fallbackApiKey = decryptApiKey(channelId)
+          const fallbackAdapter = getAdapter(fallbackChannel.provider)
+          const fallbackRequest = fallbackAdapter.buildStreamRequest({
+            baseUrl: fallbackChannel.baseUrl,
+            apiKey: fallbackApiKey,
+            modelId,
+            history: enrichedHistory,
+            userMessage: enrichedUserMessage,
+            systemMessage: effectiveSystemMessage,
+            attachments,
+            readImageAttachments: getImageAttachmentData,
+            thinkingEnabled,
+            tools,
+            continuationMessages: continuationMessages.length > 0 ? continuationMessages : undefined,
+          })
+          console.warn('[聊天服务] New API 直连失败，已切换到 Relay 重试')
+          return streamSSE({ request: fallbackRequest, adapter: fallbackAdapter, signal: controller.signal, fetchFn, onEvent: handleStreamEvent })
+        }
 
         proxyBaseUrl = `${recovered.baseUrl}${ANTHROPIC_PROXY_PROVIDERS.has(channel.provider) ? '/v1/proxy/messages' : '/v1/proxy/chat'}`
         apiKey = recovered.proxyToken || recovered.token
@@ -745,7 +776,9 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
 
   let apiKey: string
   let proxyBaseUrl = ''
-  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode()) && isOfficialManagedChannel(channel)
+  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode())
+    && isOfficialManagedChannel(channel)
+    && channel.directDataPlane !== true
 
   if (shouldUseCommercialProxy) {
     const auth = await getTeamAuthWithRefresh()

@@ -76,6 +76,7 @@ import {
   isAssistantPiMessage,
   normalizePermissionInput,
   restorePiInput,
+  sanitizePiContextMessages,
 } from './pi-message-adapter'
 import { DEFAULT_CONTEXT_WINDOW, buildModel, normalizePiApi } from './pi-model-registry'
 import { createPartialMessageCoalescer, type PartialMessageCoalescer } from './pi-streaming-control'
@@ -2494,6 +2495,14 @@ export class PiAgentAdapter implements AgentProviderAdapter {
             ],
           }
         }
+      }
+      // 历史消毒（见 sanitizePiContextMessages）：空图像块会让部分上游挂起直到超时，
+      // 必须在每轮构建请求前拦截；与项目指令 wrapper 叠加，作为最外层统一处理。
+      const previousPrepareBeforeSanitize = session.agent.prepareNextTurnWithContext
+      session.agent.prepareNextTurnWithContext = async (context, signal) => {
+        const snapshot = await previousPrepareBeforeSanitize?.(context, signal)
+        if (!snapshot || !Array.isArray(snapshot.messages)) return snapshot
+        return { ...snapshot, messages: sanitizePiContextMessages(snapshot.messages) }
       }
       if (piAi && input.codexFastMode && input.provider === 'openai-codex' && isCodexFastModeSupportedModel(input.model)) {
         // Pi 的通用 streamSimple 会丢弃 provider 专属 serviceTier；这里直接走

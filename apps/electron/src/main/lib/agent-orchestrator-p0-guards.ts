@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve } from 'node:path'
 import type { AgentRuntime, Channel, ProviderType, SDKMessage } from '@profer/shared'
-import { isChannelEnabledForRuntime } from '@profer/shared'
+import { isChannelEnabledForRuntime, canonicalAgentToolName } from '@profer/shared'
 import { normalizeAnthropicBaseUrlForSdk } from '@profer/core'
 import { applyAgentSdkAuthEnv } from './agent-sdk-auth-env'
 
@@ -100,9 +100,9 @@ export function isPlanModeMcpTool(toolName: string): boolean {
   return toolName.startsWith('mcp__')
 }
 
-/** 受管浏览器是 Pi-native 工具，名称不带 mcp__ 前缀，必须显式识别。 */
+/** MCP 与 Pi 两条 Runtime 共用同一套 Browser 工具逻辑名。 */
 export function isBrowserToolName(toolName: string): boolean {
-  return toolName.startsWith('Browser')
+  return canonicalAgentToolName(toolName).startsWith('Browser')
 }
 
 /**
@@ -113,6 +113,7 @@ export function isBrowserToolName(toolName: string): boolean {
  */
 export const PLAN_MODE_READ_ONLY_BROWSER_TOOLS: ReadonlySet<string> = new Set([
   'BrowserObserve',
+  'BrowserExtract',
   'BrowserScreenshot',
   'BrowserListTabs',
   'BrowserPreviewOpen',
@@ -132,7 +133,7 @@ export interface BrowserToolPermissionDecision {
  * 非 plan 模式由通用分派继续处理，保持 auto / bypassPermissions 既有行为不变。
  */
 export function resolvePlanModeBrowserPermission(toolName: string): BrowserToolPermissionDecision {
-  if (PLAN_MODE_READ_ONLY_BROWSER_TOOLS.has(toolName)) return { behavior: 'allow' }
+  if (PLAN_MODE_READ_ONLY_BROWSER_TOOLS.has(canonicalAgentToolName(toolName))) return { behavior: 'allow' }
   return {
     behavior: 'deny',
     message: '计划模式下只能观察受管浏览器，请在计划获批后再进行网页交互。',

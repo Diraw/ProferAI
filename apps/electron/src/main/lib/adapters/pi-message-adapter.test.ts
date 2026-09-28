@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
-import { convertPiMessage, convertResultMessage, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, stripErrorFromContentMessage } from './pi-message-adapter'
+import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, sanitizePiContextMessages, stripErrorFromContentMessage } from './pi-message-adapter'
+import type { AgentMessage } from '@earendil-works/pi-agent-core'
 
 function textAssistant(content: string, overrides?: Partial<AssistantMessage>): AssistantMessage {
   return {
@@ -219,5 +220,47 @@ describe('convertPiMessage', () => {
 
     expect(hasTerminalErrorWithContent(message!)).toBe(false)
     expect(stripErrorFromContentMessage(message!)).toBeNull()
+  })
+})
+
+describe('sanitizePiContextMessages', () => {
+  test('空图像块被替换为文本占位，防止带空 data 的 image part 让上游挂起', () => {
+    const toolResult = {
+      role: 'toolResult',
+      toolCallId: 'call-1',
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [
+        { type: 'text', text: '已截取当前页面：profer-file://x/index.html' },
+        { type: 'image', data: '', mimeType: 'image/png' },
+      ],
+    } as unknown as AgentMessage
+
+    const result = sanitizePiContextMessages([toolResult])
+    const sanitized = result[0]! as unknown as { content: Array<Record<string, unknown>> }
+
+    expect(sanitized.content).toEqual([
+      { type: 'text', text: '已截取当前页面：profer-file://x/index.html' },
+      { type: 'text', text: EMPTY_IMAGE_PLACEHOLDER_TEXT },
+    ])
+    // 不修改原始消息对象
+    expect((toolResult as unknown as { content: Array<Record<string, unknown>> }).content[1]!.data).toBe('')
+  })
+
+  test('非空图像与其余消息原样透传；无需改动时返回原数组引用', () => {
+    const validImage = {
+      role: 'toolResult',
+      toolCallId: 'call-2',
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [{ type: 'image', data: 'iVBORw0KGgoAAAANSUhEUg', mimeType: 'image/png' }],
+    } as unknown as AgentMessage
+    const user = { role: 'user', content: [{ type: 'text', text: 'hi' }] } as unknown as AgentMessage
+
+    const messages = [validImage, user]
+    const result = sanitizePiContextMessages(messages)
+
+    expect(result).toBe(messages)
+    expect(result[0]).toBe(validImage)
   })
 })

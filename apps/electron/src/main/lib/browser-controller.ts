@@ -1,5 +1,5 @@
 import { app, BrowserWindow, View, WebContentsView, session as electronSession, clipboard as electronClipboard, shell, type Session } from 'electron'
-import type { BrowserDownloadBlockedEvent, BrowserExecutionSource, BrowserOperationStatus, BrowserTraceAction, BrowserTraceItem, BrowserTranslateResult, BrowserViewLayout, BrowserViewState, BrowserTabListResult, BrowserTabState } from '@profer/shared'
+import type { BrowserDownloadBlockedEvent, BrowserExecutionSource, BrowserExtractInput, BrowserExtractResult, BrowserOperationStatus, BrowserScrollInput, BrowserScrollResult, BrowserTraceAction, BrowserTraceItem, BrowserTranslateResult, BrowserViewLayout, BrowserViewState, BrowserTabListResult, BrowserTabState } from '@profer/shared'
 import {
   AGENT_IPC_CHANNELS,
   BROWSER_LOCAL_FILE_OPEN_DEFAULT_URL,
@@ -9,7 +9,7 @@ import {
   removeMruId,
   selectMruFallbackId,
 } from '@profer/shared'
-import { assertSafeBrowserDestination, assertSafeBrowserUrl, isSafeBrowserSubresourceUrl } from './browser-policy'
+import { assertSafeBrowserDestination, assertSafeBrowserSubresourceDestination, assertSafeBrowserUrl } from './browser-policy'
 import { basename, extname } from 'node:path'
 import { createAuthorizedPreviewUrl, createViewerPreviewUrl, isAuthorizedPreviewProtocol, viewerPreviewThemeSignature, type ViewerPreviewTheme } from './browser-preview-service'
 import { resolveAppThemeIsDark } from './app-theme-service'
@@ -636,19 +636,20 @@ export class BrowserController {
     browserSession.webRequest.onBeforeRequest((details, callback) => {
       let protocol = ''
       try { protocol = new URL(details.url).protocol } catch { callback({ cancel: true }); return }
-      // 页面里的图片、脚本、字体和 XHR 可能来自不同 CDN；对每个子资源重复做
-      // DNS 查询会把正常页面变成“资源全被取消”的白屏。主框架仍做完整公网校验，
-      // 子资源只拦截明显的非 HTTP(S) 和同步可判定的私网地址。
-      if (protocol !== 'http:' && protocol !== 'https:') {
+      if (protocol !== 'http:' && protocol !== 'https:' && protocol !== 'ws:' && protocol !== 'wss:') {
         callback({ cancel: false })
         return
       }
+      const browserRecord = [...this.sessions.values()].find((record) => record.browserSession === browserSession)
+      const tab = browserRecord
+        ? [...browserRecord.tabs.values()].find((candidate) => candidate.view.webContents.id === details.webContentsId)
+        : undefined
+      const topLevelUrl = tab?.lastRequestedUrl ?? tab?.state.url ?? ''
       if (details.resourceType !== 'mainFrame') {
-        try {
-          callback({ cancel: !isSafeBrowserSubresourceUrl(details.url) })
-        } catch {
-          callback({ cancel: true })
-        }
+        // 本地开发顶层页面需要完整加载本地脚本、接口和 WebSocket；公网顶层页面则不能借此访问私网。
+        void assertSafeBrowserSubresourceDestination(details.url, topLevelUrl)
+          .then(() => callback({ cancel: false }))
+          .catch(() => callback({ cancel: true }))
         return
       }
       void assertSafeBrowserDestination(details.url)
@@ -726,6 +727,10 @@ export class BrowserController {
         contextIsolation: true,
         sandbox: true,
         webSecurity: true,
+        // Agent 驱动的页面经常在原生视图隐藏时完成导航/加载；节流会让页面进程
+        // 不产任何合成帧，之后显示/分屏改尺寸时只能拿到空纹理（网页区黑屏，偶发、
+        // 高负载下更明显）。受管视图的可见性由主进程显式控制，节流没有收益。
+        backgroundThrottling: false,
       },
     })
     // 页面加载前 / 加载失败 / 空白页显示卡片底色（--browser-host-surface）而非默认白色，避免露白与分层。
@@ -1002,11 +1007,27 @@ export class BrowserController {
       !browserSession
       || browserSession.invalidatedLayoutRendererInstanceIds.has(layout.rendererInstanceId)
       || !Number.isSafeInteger(layout.layoutSourceRevision)
-    ) return
+    ) {
+      console.warn('[BROWSER-DEBUG] setLayout 丢弃: 无会话/失效来源', {
+        sessionId: layout.sessionId, tabId: layout.tabId, visible: layout.visible,
+        hasSession: !!browserSession, src: layout.layoutSourceRevision, rev: layout.revision,
+      })
+      return
+    }
     const isNewRenderer = browserSession.lastLayoutRendererInstanceId !== layout.rendererInstanceId
     const isNewLayoutSource = isNewRenderer || layout.layoutSourceRevision !== browserSession.lastLayoutSourceRevision
-    if (!isNewLayoutSource && !shouldApplyBrowserLayoutRevision(browserSession.lastLayoutRevision, layout.revision)) return
-    if (!isNewRenderer && layout.layoutSourceRevision < browserSession.lastLayoutSourceRevision) return
+    if (!isNewLayoutSource && !shouldApplyBrowserLayoutRevision(browserSession.lastLayoutRevision, layout.revision)) {
+      console.warn('[BROWSER-DEBUG] setLayout 丢弃: 过期 revision', {
+        sessionId: layout.sessionId, visible: layout.visible, last: browserSession.lastLayoutRevision, rev: layout.revision,
+      })
+      return
+    }
+    if (!isNewRenderer && layout.layoutSourceRevision < browserSession.lastLayoutSourceRevision) {
+      console.warn('[BROWSER-DEBUG] setLayout 丢弃: 过期来源', {
+        sessionId: layout.sessionId, visible: layout.visible, lastSrc: browserSession.lastLayoutSourceRevision, src: layout.layoutSourceRevision,
+      })
+      return
+    }
     if (isNewRenderer && browserSession.lastLayoutRendererInstanceId) {
       // 顶栏切换标签会卸载旧 BrowserViewport；即使旧 cleanup 晚于新布局抵达，也不能再隐藏新页面。
       rememberInvalidatedLayoutRenderer(browserSession, browserSession.lastLayoutRendererInstanceId)
@@ -1030,6 +1051,11 @@ export class BrowserController {
     }
     pageBounds.width = Math.min(pageBounds.width, Math.max(0, viewportBounds.width - pageBounds.x))
     pageBounds.height = Math.min(pageBounds.height, Math.max(0, viewportBounds.height - pageBounds.y))
+    console.warn('[BROWSER-DEBUG] setLayout 应用', {
+      sessionId: layout.sessionId, tabId: tab?.tabId, layoutVisible: layout.visible,
+      viewport: layout.viewportBounds, page: layout.pageBounds,
+      lastVisible: browserSession.lastVisible, foreground: this.foregroundSessionId,
+    })
     const visible = layout.visible
       && browserSession.sessionId === this.foregroundSessionId
       && hasUsableBrowserBounds(viewportBounds)
@@ -1211,6 +1237,12 @@ export class BrowserController {
     return structuredClone(this.buildState(browserSession))
   }
 
+  /** Agent 关闭标签的显式入口；UI 关闭使用 closeTab，不应绕过浏览器风险告知。 */
+  async closeAgentTab(sessionId: string, tabId: string): Promise<BrowserViewState | null> {
+    this.assertRiskDisclaimerAcknowledged()
+    return this.closeTab(sessionId, tabId)
+  }
+
   async closeTab(sessionId: string, tabId: string): Promise<BrowserViewState | null> {
     const browserSession = this.getSession(sessionId)
     const tab = this.getDisplayTab(browserSession, tabId)
@@ -1349,6 +1381,7 @@ export class BrowserController {
 
     const tab = this.createTab(browserSession)
     this.activateDisplayTab(browserSession, tab)
+    tab.lastRequestedUrl = safeUrl
     const host = new URL(safeUrl).host
     try {
       await this.runTabOperation(browserSession, tab, undefined, async () => {
@@ -1394,13 +1427,18 @@ export class BrowserController {
     })
   }
 
-  async goBack(sessionId: string, tabId?: string): Promise<BrowserViewState> {
+  async goBack(sessionId: string, tabId?: string, signal?: AbortSignal): Promise<BrowserViewState> {
     const browserSession = this.getOrCreateSession(sessionId)
     this.assertRiskDisclaimerAcknowledged()
     const tab = this.getAgentTab(browserSession, tabId)
-    if (tab.view.webContents.canGoBack()) tab.view.webContents.goBack()
-    this.updateNavigationState(browserSession, tab)
-    return structuredClone(this.buildState(browserSession))
+    return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
+      throwIfBrowserOperationAborted(operationSignal)
+      if (!tab.view.webContents.canGoBack()) throw new Error('当前标签没有可后退的导航记录。')
+      tab.view.webContents.goBack()
+      this.updateNavigationState(browserSession, tab)
+      this.trace(browserSession, tab, 'navigate', 'Agent 后退页面', 'dispatched')
+      return structuredClone(this.buildState(browserSession))
+    })
   }
 
   async goBackDisplay(sessionId: string): Promise<BrowserViewState> {
@@ -1408,13 +1446,18 @@ export class BrowserController {
     return this.goBack(sessionId, this.getDisplayTab(browserSession).tabId)
   }
 
-  async goForward(sessionId: string, tabId?: string): Promise<BrowserViewState> {
+  async goForward(sessionId: string, tabId?: string, signal?: AbortSignal): Promise<BrowserViewState> {
     const browserSession = this.getOrCreateSession(sessionId)
     this.assertRiskDisclaimerAcknowledged()
     const tab = this.getAgentTab(browserSession, tabId)
-    if (tab.view.webContents.canGoForward()) tab.view.webContents.goForward()
-    this.updateNavigationState(browserSession, tab)
-    return structuredClone(this.buildState(browserSession))
+    return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
+      throwIfBrowserOperationAborted(operationSignal)
+      if (!tab.view.webContents.canGoForward()) throw new Error('当前标签没有可前进的导航记录。')
+      tab.view.webContents.goForward()
+      this.updateNavigationState(browserSession, tab)
+      this.trace(browserSession, tab, 'navigate', 'Agent 前进页面', 'dispatched')
+      return structuredClone(this.buildState(browserSession))
+    })
   }
 
   async goForwardDisplay(sessionId: string): Promise<BrowserViewState> {
@@ -1422,13 +1465,17 @@ export class BrowserController {
     return this.goForward(sessionId, this.getDisplayTab(browserSession).tabId)
   }
 
-  async reload(sessionId: string, tabId?: string): Promise<BrowserViewState> {
+  async reload(sessionId: string, tabId?: string, signal?: AbortSignal): Promise<BrowserViewState> {
     const browserSession = this.getOrCreateSession(sessionId)
     this.assertRiskDisclaimerAcknowledged()
     const tab = this.getAgentTab(browserSession, tabId)
-    tab.view.webContents.reload()
-    this.updateNavigationState(browserSession, tab)
-    return structuredClone(this.buildState(browserSession))
+    return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
+      throwIfBrowserOperationAborted(operationSignal)
+      tab.view.webContents.reload()
+      this.updateNavigationState(browserSession, tab)
+      this.trace(browserSession, tab, 'navigate', 'Agent 刷新页面', 'dispatched')
+      return structuredClone(this.buildState(browserSession))
+    })
   }
 
   async reloadDisplay(sessionId: string): Promise<BrowserViewState> {
@@ -1510,6 +1557,67 @@ export class BrowserController {
     const remote = result as Record<string, unknown>
     if ('value' in remote) return remote.value
     return null
+  }
+
+  async scroll(sessionId: string, input: BrowserScrollInput, tabId?: string, signal?: AbortSignal): Promise<BrowserScrollResult> {
+    const browserSession = this.getOrCreateSession(sessionId)
+    this.assertRiskDisclaimerAcknowledged()
+    const tab = this.getAgentTab(browserSession, tabId)
+    const direction = input.direction ?? 'down'
+    const amount = Number.isFinite(input.amount) ? Math.max(1, Math.min(Math.abs(input.amount as number), 20_000)) : undefined
+    const selector = typeof input.selector === 'string' ? input.selector.trim() : ''
+    if (selector.length > 1_000) throw new Error('滚动 selector 不能超过 1000 个字符。')
+    const payload = JSON.stringify({ direction, amount, selector }).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
+    const expression = `(() => {
+      const input = ${payload};
+      const root = input.selector ? document.querySelector(input.selector) : document.scrollingElement;
+      if (!root) return { ok: false, error: '未找到滚动目标。' };
+      const amount = input.amount ?? Math.max(120, Math.floor((root.clientHeight || window.innerHeight || 720) * 0.8));
+      const dx = input.direction === 'left' ? -amount : input.direction === 'right' ? amount : 0;
+      const dy = input.direction === 'up' ? -amount : input.direction === 'down' ? amount : 0;
+      root.scrollBy({ left: dx, top: dy, behavior: 'auto' });
+      const maxTop = Math.max(0, root.scrollHeight - root.clientHeight);
+      const maxLeft = Math.max(0, root.scrollWidth - root.clientWidth);
+      return { ok: true, scrollTop: root.scrollTop, scrollLeft: root.scrollLeft, scrollHeight: root.scrollHeight, scrollWidth: root.scrollWidth, clientHeight: root.clientHeight, clientWidth: root.clientWidth, atTop: root.scrollTop <= 0, atBottom: root.scrollTop >= maxTop, atLeft: root.scrollLeft <= 0, atRight: root.scrollLeft >= maxLeft };
+    })()`
+    return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
+      const result = await this.executePageExpression(tab, expression, operationSignal) as Record<string, unknown> | null
+      if (!result || result.ok !== true) {
+        this.trace(browserSession, tab, 'scroll', typeof result?.error === 'string' ? result.error : '滚动目标不可用', 'failed')
+        throw new Error(typeof result?.error === 'string' ? result.error : '滚动目标不可用。')
+      }
+      const scrollResult = { tabId: tab.tabId, url: tab.state.url, title: tab.state.title, scrollTop: Number(result.scrollTop) || 0, scrollLeft: Number(result.scrollLeft) || 0, scrollHeight: Number(result.scrollHeight) || 0, scrollWidth: Number(result.scrollWidth) || 0, clientHeight: Number(result.clientHeight) || 0, clientWidth: Number(result.clientWidth) || 0, atTop: result.atTop === true, atBottom: result.atBottom === true, atLeft: result.atLeft === true, atRight: result.atRight === true }
+      this.trace(browserSession, tab, 'scroll', `滚动页面 ${direction}${selector ? `（${selector.slice(0, 60)}）` : ''}`)
+      return scrollResult
+    })
+  }
+
+  async extract(sessionId: string, input: BrowserExtractInput, tabId?: string, signal?: AbortSignal): Promise<BrowserExtractResult> {
+    const browserSession = this.getOrCreateSession(sessionId)
+    this.assertRiskDisclaimerAcknowledged()
+    const tab = this.getAgentTab(browserSession, tabId)
+    const mode = input.mode ?? 'text'
+    const selector = typeof input.selector === 'string' && input.selector.trim() ? input.selector.trim() : mode === 'links' ? 'a' : mode === 'table' ? 'table' : 'body'
+    const limit = Number.isFinite(input.limit) ? Math.max(1, Math.min(Math.floor(input.limit as number), 100)) : 50
+    if (selector.length > 1_000) throw new Error('提取 selector 不能超过 1000 个字符。')
+    const payload = JSON.stringify({ mode, selector, limit }).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
+    const expression = `(() => {
+      const input = ${payload};
+      const nodes = Array.from(document.querySelectorAll(input.selector));
+      const items = nodes.slice(0, input.limit).map((element) => {
+        if (input.mode === 'links') return { text: (element.textContent || '').trim().slice(0, 8000), href: element instanceof HTMLAnchorElement ? element.href : element.getAttribute('href') };
+        if (input.mode === 'attributes') { const attributes = {}; for (const attribute of element.attributes) attributes[attribute.name] = attribute.value.slice(0, 1000); return { attributes }; }
+        if (input.mode === 'table') { const rows = Array.from(element.querySelectorAll('tr')); const headers = Array.from(element.querySelectorAll('thead th')).map((cell) => (cell.textContent || '').trim().slice(0, 1000)); return { headers, cells: rows.map((row) => Array.from(row.querySelectorAll('th,td')).map((cell) => (cell.textContent || '').trim().slice(0, 2000))) }; }
+        return { text: (element.textContent || '').trim().slice(0, 8000) };
+      });
+      return { items, truncated: nodes.length > input.limit };
+    })()`
+    return this.runTabOperation(browserSession, tab, signal ?? browserSession.agentAbortController.signal, async (operationSignal) => {
+      const result = await this.executePageExpression(tab, expression, operationSignal) as { items?: unknown[]; truncated?: boolean } | null
+      const items = Array.isArray(result?.items) ? result.items.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object').map((item) => ({ text: typeof item.text === 'string' ? item.text : undefined, href: typeof item.href === 'string' || item.href === null ? item.href : undefined, attributes: item.attributes && typeof item.attributes === 'object' ? item.attributes as Record<string, string> : undefined, headers: Array.isArray(item.headers) ? item.headers.filter((value): value is string => typeof value === 'string') : undefined, cells: Array.isArray(item.cells) ? item.cells.flatMap((row) => Array.isArray(row) ? [row.filter((value): value is string => typeof value === 'string')] : []) : undefined })) : []
+      this.trace(browserSession, tab, 'extract', `提取 ${mode} 内容 ${items.length} 项${result?.truncated ? '（已截断）' : ''}`)
+      return { tabId: tab.tabId, url: tab.state.url, title: tab.state.title, selector, mode, items, truncated: result?.truncated === true }
+    })
   }
 
   async observe(sessionId: string, tabId?: string, requestedMaxElements?: number, signal?: AbortSignal): Promise<BrowserObservation> {
@@ -1841,8 +1949,20 @@ export class BrowserController {
       throwIfBrowserOperationAborted(operationSignal)
       const image = await withBrowserCdpTimeout(() => tab.view.webContents.capturePage(), 'Page.captureScreenshot', BROWSER_OBSERVE_TIMEOUT_MS + 3_000, operationSignal)
       throwIfBrowserOperationAborted(operationSignal)
+      // 视图隐藏/零尺寸/尚未渲染时 capturePage 会「成功」返回空 NativeImage。
+      // 空图一旦作为成功结果进入会话历史，部分模型上游收到带空 data 的 image part 会挂起直到
+      // 客户端超时（实测 kimi-k3 每次 ~105s 无响应后被自动重试，表现为“模型连不上”式死循环），
+      // 所以空截图必须在这里显式失败，绝不能写进工具结果。
+      if (image.isEmpty()) {
+        this.trace(browserSession, tab, 'screenshot', '截取失败：capturePage 返回空图像（页面可能不可见或尚未渲染）', 'failed')
+        throw new Error('截图为空：页面可能尚未渲染完成或浏览器面板当前不可见。请改用 BrowserObserve 获取页面信息，或确认页面在浏览器面板中可见后重试。')
+      }
       const buffer = image.toPNG()
-      if (buffer.byteLength > MAX_SCREENSHOT_BYTES) throw new Error('截图过大，请缩小页面或改用 browser_observe。')
+      if (buffer.byteLength === 0) {
+        this.trace(browserSession, tab, 'screenshot', '截取失败：PNG 编码结果为空', 'failed')
+        throw new Error('截图为空：图像编码失败。请改用 BrowserObserve 获取页面信息。')
+      }
+      if (buffer.byteLength > MAX_SCREENSHOT_BYTES) throw new Error('截图过大，请缩小页面或改用 BrowserObserve。')
       this.trace(browserSession, tab, 'screenshot', '截取当前页面', 'verified')
       return { tabId: tab.tabId, url: tab.state.url, mimeType: 'image/png', base64: buffer.toString('base64') }
     })

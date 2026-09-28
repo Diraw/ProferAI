@@ -1344,11 +1344,61 @@ function buildBrowserTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefiniti
     sdk.defineTool({
       name: 'BrowserNavigate',
       label: '在受管浏览器中打开网页',
-      description: 'Navigate the Agent working in-app browser tab to a public HTTP/HTTPS URL. Localhost, private network addresses, downloads, popups, and browser permissions are blocked.',
+      description: 'Navigate the Agent working in-app browser tab to a public HTTP/HTTPS URL or an explicitly requested local development URL. Downloads, popups, and browser permissions are blocked.',
       parameters: Type.Object({ url: Type.String({ description: 'A complete public HTTP/HTTPS URL.' }), tabId: Type.Optional(Type.String({ description: 'Optional tab id. Defaults to the Agent working tab, independent of the tab visible to the user.' })) }),
       async execute(_id, params, signal?: AbortSignal) {
         const args = params as Record<string, unknown>
         return jsonToolResult(await browserController.navigate(ctx.sessionId, typeof args.url === 'string' ? args.url : '', typeof args.tabId === 'string' ? args.tabId : undefined, signal))
+      },
+    }),
+    sdk.defineTool({
+      name: 'BrowserGoBack',
+      label: '后退浏览器页面',
+      description: 'Go back in the Agent working tab navigation history. Returns current URL and navigation availability.',
+      parameters: Type.Object({ tabId: Type.Optional(Type.String({ description: 'Optional Agent working tab id.' })) }),
+      async execute(_id, params, signal?: AbortSignal) {
+        const tabId = typeof (params as Record<string, unknown>).tabId === 'string' ? (params as Record<string, string>).tabId : undefined
+        return jsonToolResult(await browserController.goBack(ctx.sessionId, tabId, signal))
+      },
+    }),
+    sdk.defineTool({
+      name: 'BrowserGoForward',
+      label: '前进浏览器页面',
+      description: 'Go forward in the Agent working tab navigation history. Returns current URL and navigation availability.',
+      parameters: Type.Object({ tabId: Type.Optional(Type.String({ description: 'Optional Agent working tab id.' })) }),
+      async execute(_id, params, signal?: AbortSignal) {
+        const tabId = typeof (params as Record<string, unknown>).tabId === 'string' ? (params as Record<string, string>).tabId : undefined
+        return jsonToolResult(await browserController.goForward(ctx.sessionId, tabId, signal))
+      },
+    }),
+    sdk.defineTool({
+      name: 'BrowserReload',
+      label: '刷新浏览器页面',
+      description: 'Reload the Agent working browser tab after a transient page or automation failure.',
+      parameters: Type.Object({ tabId: Type.Optional(Type.String({ description: 'Optional Agent working tab id.' })) }),
+      async execute(_id, params, signal?: AbortSignal) {
+        const tabId = typeof (params as Record<string, unknown>).tabId === 'string' ? (params as Record<string, string>).tabId : undefined
+        return jsonToolResult(await browserController.reload(ctx.sessionId, tabId, signal))
+      },
+    }),
+    sdk.defineTool({
+      name: 'BrowserScroll',
+      label: '滚动受管浏览器页面',
+      description: 'Scroll the current page or a fixed CSS selector container and return scroll metrics. Local development pages are supported.',
+      parameters: Type.Object({ direction: Type.Optional(Type.Union([Type.Literal('up'), Type.Literal('down'), Type.Literal('left'), Type.Literal('right')])), amount: Type.Optional(Type.Number({ minimum: 1, maximum: 20000 })), selector: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })), tabId: Type.Optional(Type.String({ description: 'Optional Agent working tab id.' })) }),
+      async execute(_id, params, signal?: AbortSignal) {
+        const args = params as Record<string, unknown>
+        return jsonToolResult(await browserController.scroll(ctx.sessionId, { direction: args.direction as 'up' | 'down' | 'left' | 'right' | undefined, amount: typeof args.amount === 'number' ? args.amount : undefined, selector: typeof args.selector === 'string' ? args.selector : undefined }, typeof args.tabId === 'string' ? args.tabId : undefined, signal))
+      },
+    }),
+    sdk.defineTool({
+      name: 'BrowserExtract',
+      label: '提取网页内容',
+      description: 'Extract page text, links, table rows, or element attributes through a fixed CSS selector. Prefer this structured read before arbitrary JavaScript.',
+      parameters: Type.Object({ mode: Type.Optional(Type.Union([Type.Literal('text'), Type.Literal('links'), Type.Literal('table'), Type.Literal('attributes')])), selector: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })), limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })), tabId: Type.Optional(Type.String({ description: 'Optional Agent working tab id.' })) }),
+      async execute(_id, params, signal?: AbortSignal) {
+        const args = params as Record<string, unknown>
+        return jsonToolResult(await browserController.extract(ctx.sessionId, { mode: args.mode as 'text' | 'links' | 'table' | 'attributes' | undefined, selector: typeof args.selector === 'string' ? args.selector : undefined, limit: typeof args.limit === 'number' ? args.limit : undefined }, typeof args.tabId === 'string' ? args.tabId : undefined, signal))
       },
     }),
     sdk.defineTool({
@@ -1505,12 +1555,12 @@ function buildBrowserTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefiniti
     sdk.defineTool({
       name: 'BrowserCloseTab',
       label: '关闭浏览器标签',
-      description: 'Close a browser tab by tab id. Closing the last tab closes the in-app browser session.',
+      description: 'Close an Agent browser tab by tab id after the browser risk notice has been acknowledged. Closing the last tab closes the in-app browser session.',
       parameters: Type.Object({ tabId: Type.String({ description: 'Tab id from BrowserListTabs.' }) }),
       async execute(_id, params) {
         const value = (params as Record<string, unknown>).tabId
         const tabId = typeof value === 'string' ? value : ''
-        return jsonToolResult(await browserController.closeTab(ctx.sessionId, tabId))
+        return jsonToolResult(await browserController.closeAgentTab(ctx.sessionId, tabId))
       },
     }),
   ] as ToolDefinition[]

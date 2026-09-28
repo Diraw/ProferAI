@@ -125,7 +125,24 @@ function buildBrowserGuideline(
   const has = (toolName: string): boolean => availableBrowserTools.has(toolName)
 
   if (has('BrowserNavigate')) {
-    lines.push('打开公网网站或导航到指定 URL 时使用 `BrowserNavigate`；不要把本地路径交给公网导航工具。')
+    lines.push('打开公网网站或导航到指定 URL 时使用 `BrowserNavigate`；用户明确要求时也支持 localhost、回环地址和局域网开发服务；不要把本地文件路径交给公网导航工具。')
+  }
+
+  const navigationTools = [
+    has('BrowserGoBack') ? '`BrowserGoBack`' : '',
+    has('BrowserGoForward') ? '`BrowserGoForward`' : '',
+    has('BrowserReload') ? '`BrowserReload`' : '',
+  ].filter(Boolean)
+  if (navigationTools.length > 0) {
+    lines.push(`需要恢复导航流程或页面暂时无响应时使用 ${navigationTools.join('、')}；先根据返回的 canGoBack/canGoForward 判断是否有历史记录，不要反复猜测 URL。`)
+  }
+
+  if (has('BrowserScroll')) {
+    lines.push('长页面、懒加载列表或页面底部内容使用 `BrowserScroll`，根据返回的 scrollHeight、scrollTop 和 atBottom 判断是否继续。')
+  }
+
+  if (has('BrowserExtract')) {
+    lines.push('需要读取正文、链接、表格或元素属性时优先使用 `BrowserExtract`；它只做结构化读取，结果可能带有 truncated 标记。')
   }
 
   if (has('BrowserObserve')) {

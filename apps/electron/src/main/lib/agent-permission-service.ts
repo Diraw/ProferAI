@@ -24,6 +24,7 @@ import {
   isDangerousCommand,
   hasDangerousStructure,
   hasDangerousPowerShellStructure,
+  canonicalAgentToolName,
 } from '@profer/shared'
 
 /** SDK PermissionBehavior */
@@ -235,13 +236,14 @@ export class AgentPermissionService {
    * 判断工具是否为只读操作（智能模式下自动允许）
    */
   private isReadOnlyTool(toolName: string, input: Record<string, unknown>): boolean {
-    // 安全工具白名单
-    if (SAFE_TOOLS.includes(toolName)) return true
+    const canonicalToolName = canonicalAgentToolName(toolName)
+    // 安全工具白名单使用 shared registry 的逻辑短名，兼容 Claude MCP namespace。
+    if (SAFE_TOOLS.includes(canonicalToolName)) return true
 
     // 命令工具：分别使用对应语法的保守只读规则
     const command = typeof input.command === 'string' ? input.command : ''
-    if (toolName === 'Bash') return isSafeBashCommand(command)
-    if (toolName === 'PowerShell') return isSafePowerShellCommand(command)
+    if (canonicalToolName === 'Bash') return isSafeBashCommand(command)
+    if (canonicalToolName === 'PowerShell') return isSafePowerShellCommand(command)
 
     return false
   }
@@ -253,19 +255,20 @@ export class AgentPermissionService {
     const whitelist = this.sessionWhitelists.get(sessionId)
     if (!whitelist) return false
 
-    // 非命令工具：检查工具名是否在白名单中
-    if (toolName !== 'Bash' && toolName !== 'PowerShell') {
-      return whitelist.allowedTools.has(toolName)
+    const canonicalToolName = canonicalAgentToolName(toolName)
+    // 非命令工具：检查逻辑工具名是否在白名单中
+    if (canonicalToolName !== 'Bash' && canonicalToolName !== 'PowerShell') {
+      return whitelist.allowedTools.has(canonicalToolName)
     }
 
     // 命令工具：即使基础命令在白名单中，也要重新检查对应 shell 的完整语法。
     const command = typeof input.command === 'string' ? input.command : ''
-    const hasDangerousSyntax = toolName === 'PowerShell'
+    const hasDangerousSyntax = canonicalToolName === 'PowerShell'
       ? hasDangerousPowerShellStructure(command)
       : hasDangerousStructure(command)
     if (hasDangerousSyntax || isDangerousCommand(command)) return false
     const baseCommand = this.extractBaseCommand(command)
-    return whitelist.allowedCommandBases.has(`${toolName}:${baseCommand}`)
+    return whitelist.allowedCommandBases.has(`${canonicalToolName}:${baseCommand}`)
   }
 
   /**
@@ -274,13 +277,14 @@ export class AgentPermissionService {
   private addToWhitelist(sessionId: string, toolName: string, input: Record<string, unknown>): void {
     const whitelist = this.getOrCreateWhitelist(sessionId)
 
-    if (toolName !== 'Bash' && toolName !== 'PowerShell') {
-      whitelist.allowedTools.add(toolName)
+    const canonicalToolName = canonicalAgentToolName(toolName)
+    if (canonicalToolName !== 'Bash' && canonicalToolName !== 'PowerShell') {
+      whitelist.allowedTools.add(canonicalToolName)
     } else {
       const command = typeof input.command === 'string' ? input.command : ''
       const baseCommand = this.extractBaseCommand(command)
       if (baseCommand) {
-        whitelist.allowedCommandBases.add(`${toolName}:${baseCommand}`)
+        whitelist.allowedCommandBases.add(`${canonicalToolName}:${baseCommand}`)
       }
     }
   }
