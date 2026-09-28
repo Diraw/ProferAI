@@ -277,8 +277,9 @@ import { listOwnedRuntimeProcesses, markOwnedRuntimeProcessExited, onRuntimeProc
 import { isProcessHandleOwnedBySession, processHandleFromRuntimeRecord } from './lib/process-handle'
 import { coordinateAgentSend } from './lib/agent-send-coordinator'
 import { GoalController } from './lib/goal-controller'
-import { parseGoalIterationResult } from './lib/goal-loop'
-import type { AgentGoalState } from '@profer/shared'
+import { buildGoalIterationPrompt, parseGoalIterationResult } from './lib/goal-loop'
+import { loadGoalStates, saveGoalStates } from './lib/goal-store'
+import type { AgentGoalContract, AgentGoalIterationResult, AgentGoalState, AgentGoalUsage } from '@profer/shared'
 import { getAgentPresetByReference, presetReferenceForId } from './lib/agent-preset-manager'
 import { AgentSessionDeletionCoordinator } from './lib/agent-session-deletion'
 import { permissionService } from './lib/agent-permission-service'
@@ -429,40 +430,124 @@ function collectGoalText(value: unknown, output: string[] = []): string[] {
   return output
 }
 
+const GOAL_STORE_PATH = () => join(app.getPath('userData'), 'goals.json')
+
+/** Goal 每次状态变化时的完整快照持久化（渲染层事件不受影响）。 */
+function persistGoalStates(): void {
+  try {
+    saveGoalStates(GOAL_STORE_PATH(), goalController.list())
+  } catch (error) {
+    console.error('[goal] 状态持久化失败', error)
+  }
+}
+
+/**
+ * Goal 进入受阻/完成时与规划中心联动（Profer 原生集成）：
+ * - blocked：创建（或更新）一条规划中心 Todo，让用户在规划中心看到待处理项；
+ * - completed：自动完成之前创建的受阻 Todo。
+ * 只在状态跃迁时触发，blocked 状态下重复 emit 不会重复建 Todo。
+ */
+const goalTerminalHandled = new Map<string, string>()
+function syncGoalPlanningTodo(state: AgentGoalState): void {
+  const key = `${state.id}:${state.iteration}`
+  try {
+    if (state.status === 'blocked') {
+      if (goalTerminalHandled.get(state.id) === key) return
+      goalTerminalHandled.set(state.id, key)
+      if (state.blockedTodoId) {
+        // 复阻时重开已有 Todo 并刷新原因，避免重复建项。
+        updateTodo({ id: state.blockedTodoId, status: 'open', notes: `最新阻塞原因：${state.stopReason || state.lastSummary || '未说明'}` })
+        return
+      }
+      const session = getAgentSessionMeta(state.sessionId)
+      const todo = createTodo({
+        title: `[Goal 受阻] ${state.goal.slice(0, 60)}`,
+        notes: [
+          `会话：${session?.title || state.sessionId}`,
+          `阻塞原因：${state.stopReason || state.lastSummary || '未说明'}`,
+          `处理后可回到该会话执行 /goal resume 继续。`,
+        ].join('\n'),
+        priority: 'high',
+        workspaceId: session?.workspaceId,
+      })
+      goalController.patch(state.sessionId, { blockedTodoId: todo.id })
+      return
+    }
+    if (state.status === 'completed' && state.blockedTodoId) {
+      if (goalTerminalHandled.get(state.id) === key) return
+      goalTerminalHandled.set(state.id, key)
+      updateTodo({ id: state.blockedTodoId, status: 'completed' })
+    }
+  } catch (error) {
+    console.error('[goal] 规划中心联动失败', error)
+  }
+}
+
+function collectGoalUsage(messages: unknown[]): AgentGoalUsage | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index] as { type?: string; usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } } | undefined
+    if (message?.type !== 'result' || !message.usage) continue
+    const inputTokens = Number(message.usage.input_tokens ?? 0) + Number(message.usage.cache_read_input_tokens ?? 0) + Number(message.usage.cache_creation_input_tokens ?? 0)
+    const outputTokens = Number(message.usage.output_tokens ?? 0)
+    return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens }
+  }
+  return undefined
+}
+
 const goalController = new GoalController({
-  runTurn: async ({ sessionId, goal, iteration, previousSummary }) => {
+  runTurn: async ({ sessionId, state, previousSummary }) => {
     const session = getAgentSessionMeta(sessionId)
     if (!session?.channelId) throw new Error('Goal 会话缺少渠道配置')
-    const prompt = [
-      `你正在持续执行 Goal。目标：${goal}`,
-      `这是第 ${iteration} 轮。`,
-      previousSummary ? `上一轮摘要：${previousSummary}` : '',
-      '请继续实际执行目标，不要只给建议。每轮结束时必须输出：<goal_result>{"status":"continue|complete|blocked","summary":"...","evidence":["..."]}</goal_result>。只有目标真正完成且提供验证证据时才使用 complete。',
-    ].filter(Boolean).join('\n')
+    const prompt = buildGoalIterationPrompt(state, { previousSummary })
+    let structuredResult: AgentGoalIterationResult | undefined
+    const messagesBeforeTurn = getAgentSessionSDKMessages(sessionId).length
     const mainWindow = getMainWindow()
     if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Profer 主窗口不可用，Goal 已停止')
     await runAgent({
       sessionId,
-      userMessage: prompt,
+      userMessage: state.goal,
+      internalPrompt: prompt,
+      suppressUserMessagePersistence: true,
       channelId: session.channelId,
       modelId: session.modelId,
       workspaceId: session.workspaceId,
       agentRuntime: session.agentRuntime,
       permissionModeOverride: 'bypassPermissions',
       triggeredBy: 'goal',
+      goalIteration: state.iteration,
+      titleSourceText: state.goal,
+      reportGoalResult: (result) => { structuredResult = result },
     }, mainWindow.webContents)
     const messages = getAgentSessionSDKMessages(sessionId)
-    const goalText = collectGoalText(messages).join('\n')
-    return parseGoalIterationResult(goalText)
+    const currentTurnMessages = messages.slice(messagesBeforeTurn)
+    const usage = collectGoalUsage(currentTurnMessages)
+    if (structuredResult) return usage ? { ...structuredResult, usage } : structuredResult
+    const goalText = collectGoalText(currentTurnMessages).join('\n')
+    const fallback = parseGoalIterationResult(goalText)
+    return usage ? { ...fallback, usage } : fallback
   },
   stopTurn: (sessionId) => stopAgentAndWait(sessionId),
   onStateChange: (state) => {
+    syncGoalPlanningTodo(state)
+    persistGoalStates()
     const event = { sessionId: state.sessionId, state }
     getMainWindow()?.webContents.send(AGENT_IPC_CHANNELS.GOAL_EVENT, event)
   },
 })
 
-/** 应用进程退出前停止所有 Goal，不保留后台循环。 */
+// 启动时恢复上次会话遗留的 Goal（active 已在退出时降级为 paused，由用户显式 resume）。
+let goalStatesRestored = false
+function restoreGoalStatesOnce(): void {
+  if (goalStatesRestored) return
+  goalStatesRestored = true
+  try {
+    goalController.restore(loadGoalStates(GOAL_STORE_PATH()))
+  } catch (error) {
+    console.error('[goal] 状态恢复失败', error)
+  }
+}
+
+/** 应用进程退出前暂停所有 Goal 并持久化，下次启动可恢复。 */
 export function stopAllGoalsForProcessExit(): void {
   goalController.stopAll()
 }
@@ -1279,6 +1364,8 @@ export function registerIpcHandlers(): void {
     return
   }
   _ipcHandlersRegistered = true
+
+  restoreGoalStatesOnce()
 
   onRuntimeProcessRegistryChanged((sessionId) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -3815,14 +3902,18 @@ export function registerIpcHandlers(): void {
   // 中止 Agent 执行。必须等待底层 run 的 finally 完成后才向渲染层返回，
   // 否则用户刚点击「停止」就发送下一条消息时，编排器仍持有 active session，
   // 新消息会被并发保护拒绝，造成必须重复发送一次的体验问题。
-  ipcMain.handle(AGENT_IPC_CHANNELS.START_GOAL, async (event, sessionId: string, goal: string): Promise<AgentGoalState> => {
+  ipcMain.handle(AGENT_IPC_CHANNELS.START_GOAL, async (event, sessionId: string, goal: string, contract?: AgentGoalContract): Promise<AgentGoalState> => {
     assertSensitiveAgentIpcSender(event)
     if (typeof sessionId !== 'string' || typeof goal !== 'string' || !goal.trim()) throw new Error('Goal 不能为空')
-    return goalController.start(sessionId, goal)
+    return goalController.start(sessionId, goal, contract)
   })
   ipcMain.handle(AGENT_IPC_CHANNELS.GET_GOAL, async (event, sessionId: string): Promise<AgentGoalState | null> => {
     assertSensitiveAgentIpcSender(event)
     return goalController.get(sessionId) ?? null
+  })
+  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_GOALS, async (event): Promise<AgentGoalState[]> => {
+    assertSensitiveAgentIpcSender(event)
+    return goalController.list()
   })
   ipcMain.handle(AGENT_IPC_CHANNELS.PAUSE_GOAL, async (event, sessionId: string): Promise<AgentGoalState> => {
     assertSensitiveAgentIpcSender(event)

@@ -1271,6 +1271,36 @@ export interface AgentGoalLimits {
   maxDurationMs: number
 }
 
+/**
+ * Goal 契约（参考 Codex 的 goal contract，收敛为 Profer 三要素）。
+ * 均可选：用户未显式声明时，首轮迭代要求 Agent 自行拟定验证面并在摘要中回报。
+ */
+export interface AgentGoalContract {
+  /** 验证面：什么证据/命令/产物证明目标达成 */
+  verification?: string
+  /** 约束：执行过程中不许回归/破坏的内容 */
+  constraints?: string
+  /** 停止条件：何时应当判定 blocked 并停下来等待用户 */
+  stopWhen?: string
+}
+
+/** 单轮迭代记录，用于回查 Goal 执行轨迹 */
+export interface AgentGoalIterationRecord {
+  iteration: number
+  startedAt: number
+  finishedAt: number
+  status: AgentGoalIterationResult['status']
+  summary: string
+  evidence: string[]
+  usage?: AgentGoalUsage
+}
+
+export interface AgentGoalUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
 export interface AgentGoalState {
   id: string
   sessionId: string
@@ -1281,6 +1311,14 @@ export interface AgentGoalState {
   startedAt: number
   updatedAt: number
   limits: AgentGoalLimits
+  /** 目标契约；纯文本目标（无 @verify/@constraint/@stop 标记）时为空 */
+  contract?: AgentGoalContract
+  /** 迭代历史，最多保留最近若干条（见 GOAL_HISTORY_LIMIT） */
+  history?: AgentGoalIterationRecord[]
+  /** Goal 累计 token 用量；没有 runtime usage 时保持为空 */
+  usage?: AgentGoalUsage
+  /** Goal 受阻时自动创建/更新的规划中心 Todo ID */
+  blockedTodoId?: string
   lastSummary?: string
   lastEvidence?: string[]
   stopReason?: string
@@ -1288,7 +1326,7 @@ export interface AgentGoalState {
 
 export type AgentGoalCommand =
   | { type: 'not_goal' }
-  | { type: 'start'; goal: string }
+  | { type: 'start'; goal: string; contract?: AgentGoalContract }
   | { type: 'status' | 'pause' | 'resume' | 'stop' | 'clear' }
   | { type: 'invalid'; reason: string }
 
@@ -1296,6 +1334,8 @@ export interface AgentGoalIterationResult {
   status: 'continue' | 'complete' | 'blocked'
   summary: string
   evidence: string[]
+  /** 本轮模型 usage（由 runtime result/assistant message 归一化） */
+  usage?: AgentGoalUsage
 }
 
 export type AgentGoalContinuation =
@@ -1337,8 +1377,22 @@ export interface AgentSendInput {
   startedAt?: number
   /** 触发来源：用户手动 vs 定时任务自动触发（用于 UI 区分标记） */
   triggeredBy?: 'user' | 'automation' | 'delegation' | 'goal'
+  /**
+   * Goal 迭代轮次（triggeredBy='goal' 时携带）。
+   * 透传到持久化的用户消息上作为 _goalIteration 标记：控制 prompt 不渲染为普通用户气泡，
+   * 而是显示为轻量的 Goal 迭代分隔条。
+   */
+  goalIteration?: number
+  /** 标题来源覆盖文本：goal 等机器注入的 prompt 不应用作自动命名来源。 */
+  titleSourceText?: string
   /** 前端预生成的消息 UUID（透传到持久化消息，用于队列乐观气泡与消息重载按 uuid 合并去重） */
   uuid?: string
+  /** Goal 内部 prompt：传给 runtime，但不作为普通用户消息持久化。 */
+  internalPrompt?: string
+  /** Goal/系统触发的内部 turn 不写入 Profer 对话 transcript。 */
+  suppressUserMessagePersistence?: boolean
+  /** Goal 专用结构化结果回调；由内置 update_goal 工具调用，不写入普通对话。 */
+  reportGoalResult?: (result: import('@profer/shared').AgentGoalIterationResult) => void
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
   automationContext?: string
   /** Main-process one-shot ticket for a user-confirmed Pi Harness candidate. Not renderer-generated. */
@@ -1974,6 +2028,8 @@ export const AGENT_IPC_CHANNELS = {
   START_GOAL: 'agent:goal-start',
   /** 获取当前会话 Goal */
   GET_GOAL: 'agent:goal-get',
+  /** 列出全部会话的 Goal（启动时水合渲染层状态） */
+  LIST_GOALS: 'agent:goal-list',
   /** 暂停当前 Goal */
   PAUSE_GOAL: 'agent:goal-pause',
   /** 恢复当前 Goal */

@@ -7,6 +7,7 @@
  * （最完整）快照来消除「拼接单字 / 重复段落」，这是会话「快照去重」的落地实现。
  */
 import type { SDKAssistantMessage, SDKContentBlock, SDKToolUseBlock } from '@profer/shared'
+import { isGoalIterationMessage } from '@profer/shared'
 import { type MessageGroup, extractUserText, getGroupPreview, stripScheduledRunMarker } from './group'
 import { estimateTokens } from './tokens'
 
@@ -99,6 +100,18 @@ function buildAssistantContent(messages: SDKAssistantMessage[]): { text: string;
 export function toTranscript(groups: MessageGroup[]): TranscriptTurn[] {
   return groups.map((group, index) => {
     if (group.type === 'user') {
+      if (isGoalIterationMessage(group.message)) {
+        const preview = getGroupPreview(group)
+        return {
+          index,
+          role: 'user' as const,
+          createdAt: (group.message as unknown as { _createdAt?: number })._createdAt,
+          text: preview,
+          toolSummaries: [],
+          preview,
+          tokens: estimateTokens(preview),
+        }
+      }
       const text = stripScheduledRunMarker(extractUserText(group.message) ?? '')
         .replace(/<attached_files>[\s\S]*?<\/attached_files>\n*/g, '')
         .replace(/<quoted_file[^>]*>[\s\S]*?<\/quoted_file>\n*/g, '')

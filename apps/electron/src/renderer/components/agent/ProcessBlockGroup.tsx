@@ -9,6 +9,7 @@ import type {
   SDKToolUseBlock,
   SDKUserMessage,
 } from '@profer/shared'
+import { isGoalUpdateToolName } from '@profer/shared'
 
 interface ProcessBlockGroupProps {
   blocks: SDKContentBlock[]
@@ -134,58 +135,48 @@ export function buildAssistantTurnRenderItems(
   blocks: SDKContentBlock[],
   options: BuildAssistantTurnRenderItemsOptions = {},
 ): AssistantTurnRenderItem[] {
-  if (blocks.length === 0) return []
+  const visibleBlocks = blocks
+    .map((block, index) => ({ block, index }))
+    .filter(({ block }) => block.type !== 'tool_use' || !isGoalUpdateToolName((block as SDKToolUseBlock).name))
+  if (visibleBlocks.length === 0) return []
+  const renderBlocks = visibleBlocks.map(({ block }) => block)
 
   // 流式阶段最后的 text 还不稳定，后续工具调用可能会把它变成中间过程。
-  // 只有当前面所有工具都有结果时，才把尾部 text 视作交付输出提前外置，降低完成瞬间的跳动。
-  const hasProcessBlock = blocks.some((block) => block.type === 'tool_use' || block.type === 'thinking')
-  const outputSplit = getTrailingOutputSplit(blocks)
+  // 只有当前面所有工具都有结果时，才把尾部 text 视作最终输出，降低完成瞬间的跳动。
+  const hasProcessBlock = renderBlocks.some((block) => block.type === 'tool_use' || block.type === 'thinking')
+  const outputSplit = getTrailingOutputSplit(renderBlocks)
   const canSplitStreamingFinalOutput = options.isStreaming
     && hasProcessBlock
     && outputSplit !== null
     && outputSplit.textStartIndex > 0
-    && areToolsBeforeIndexCompleted(blocks, outputSplit.textStartIndex, options.completedToolResultIds)
+    && areToolsBeforeIndexCompleted(renderBlocks, outputSplit.textStartIndex, options.completedToolResultIds)
 
   if (options.isStreaming && hasProcessBlock && !canSplitStreamingFinalOutput) {
-    return [{
-      type: 'process-group',
-      items: blocks.map((block, index) => ({ block, index })),
-    }]
+    return [{ type: 'process-group', items: visibleBlocks }]
   }
 
   if (outputSplit === null) {
-    return [{
-      type: 'process-group',
-      items: blocks.map((block, index) => ({ block, index })),
-    }]
+    return [{ type: 'process-group', items: visibleBlocks }]
   }
 
   const { textStartIndex, textEndIndex } = outputSplit
-  // 正文之前的步骤 + 正文之后仅剩的 thinking（收尾思考）统一归入过程组，
-  // 保证最终正文始终作为过程组之外可见的交付内容渲染。
+  // 正文之前的步骤 + 正文之后仅剩的 thinking（收尾思考）统一归入过程组。
   const processItems: IndexedContentBlock[] = []
   for (let index = 0; index < textStartIndex; index++) {
-    const block = blocks[index]
-    if (!block) continue
-    processItems.push({ block, index })
+    const item = visibleBlocks[index]
+    if (item) processItems.push(item)
   }
-  for (let index = textEndIndex + 1; index < blocks.length; index++) {
-    const block = blocks[index]
-    if (!block) continue
-    processItems.push({ block, index })
+  for (let index = textEndIndex + 1; index < visibleBlocks.length; index++) {
+    const item = visibleBlocks[index]
+    if (item) processItems.push(item)
   }
 
   const items: AssistantTurnRenderItem[] = []
-  if (processItems.length > 0) {
-    items.push({ type: 'process-group', items: processItems })
-  }
-
+  if (processItems.length > 0) items.push({ type: 'process-group', items: processItems })
   for (let index = textStartIndex; index <= textEndIndex; index++) {
-    const block = blocks[index]
-    if (!block) continue
-    items.push({ type: 'block', item: { block, index } })
+    const item = visibleBlocks[index]
+    if (item) items.push({ type: 'block', item })
   }
-
   return items
 }
 
@@ -195,6 +186,7 @@ function buildProcessGroupSummary(blocks: SDKContentBlock[]): string {
 
   for (const block of blocks) {
     if (block.type === 'tool_use') {
+      if (isGoalUpdateToolName((block as SDKToolUseBlock).name)) continue
       toolCount += 1
     } else if (block.type === 'thinking' || block.type === 'text') {
       messageCount += 1
@@ -215,6 +207,7 @@ export function buildProcessGroupToolNames(blocks: SDKContentBlock[]): string[] 
   for (const block of blocks) {
     if (block.type !== 'tool_use') continue
     const toolBlock = block as SDKToolUseBlock
+    if (isGoalUpdateToolName(toolBlock.name)) continue
     if (seen.has(toolBlock.name)) continue
     seen.add(toolBlock.name)
     toolNames.push(toolBlock.name)

@@ -1,5 +1,6 @@
 import { routePluginModel } from './plugins/plugin-routing'
 import { buildPluginAgentTools } from './plugins/plugin-agent-tools'
+import { injectGoalMcpServer } from './goal-tools'
 /**
  * AgentOrchestrator — Agent 编排层
  *
@@ -904,6 +905,7 @@ export class AgentOrchestrator {
       mentionedSessionIds,
       automationContext,
     } = input
+    const runtimeUserMessage = input.internalPrompt ?? userMessage
     let { channelId, modelId } = input
     // Pi/Claude 的错误结构和可恢复语义不同；Router 必须按本次请求 runtime 提供 helper。
     const errorHelpers = this.adapter.getErrorHelpers?.(agentRuntime) ?? this.adapter.errorHelpers
@@ -1108,19 +1110,23 @@ export class AgentOrchestrator {
     }
       let runtimeCredentials = credentialResult.credentials
 
-    // 5. 持久化用户消息（SDKMessage 格式）——在所有 preflight 检查之前写入，
-    // 确保即使后续渠道/Key 检查失败，用户输入也不会丢失。
-    const userSDKMsg: SDKMessage = {
-      type: 'user',
-      message: {
-        content: [{ type: 'text', text: userMessage }],
-      },
-      parent_tool_use_id: null,
-      // 1.7.1：透传前端预生成的 uuid，使乐观气泡与持久化消息可按 uuid 匹配去重
-      ...(input.uuid ? { uuid: input.uuid } : {}),
-      _createdAt: Date.now(),
-    } as unknown as SDKMessage
-    appendSDKMessages(sessionId, [userSDKMsg])
+    // 5. 持久化用户消息（SDKMessage 格式）——在所有 preflight 检查之前写入。
+    // Goal 内部 turn 使用 internalPrompt，仅供 runtime 消费，不写入 Profer 普通对话 transcript。
+    if (!input.suppressUserMessagePersistence) {
+      const userSDKMsg: SDKMessage = {
+        type: 'user',
+        message: {
+          content: [{ type: 'text', text: userMessage }],
+        },
+        parent_tool_use_id: null,
+        // 1.7.1：透传前端预生成的 uuid，使乐观气泡与持久化消息可按 uuid 匹配去重
+        ...(input.uuid ? { uuid: input.uuid } : {}),
+        // 旧调用方仍可使用 Goal 标记；新的 internalPrompt 路径不会写入消息。
+        ...(input.triggeredBy === 'goal' ? { _goalIteration: input.goalIteration ?? true } : {}),
+        _createdAt: Date.now(),
+      } as unknown as SDKMessage
+      appendSDKMessages(sessionId, [userSDKMsg])
+    }
     await callbacks.onRunStarted?.({ startedAt: streamStartedAt })
       const completeRun = (messages?: AgentMessage[], opts?: CompleteOptions): void => {
       // 真正的 complete 必须等 owner finally 释放 activeSessions 后才通知 renderer，
@@ -1411,6 +1417,12 @@ export class AgentOrchestrator {
       if (!disabledToolGroups.has('task-graph')) {
         await injectTaskGraphMcpServer(sdk, mcpServers, { sessionId }, disabledTools)
       }
+      if (agentRuntime === 'claude' && input.reportGoalResult) {
+        await injectGoalMcpServer(sdk, mcpServers, {
+          iteration: input.goalIteration ?? 0,
+          report: input.reportGoalResult,
+        })
+      }
       await injectAgentPresetMcpServer(sdk, mcpServers, {
         sessionId,
         workspaceSlug,
@@ -1550,7 +1562,7 @@ export class AgentOrchestrator {
       })
 
       // 11.5 注入 mention 引用指令（Skill/MCP/会话）— 仅引用当前预设实际可用的能力。
-      let enrichedMessage = userMessage
+      let enrichedMessage = runtimeUserMessage
       const referencedSessionsBlock = buildReferencedSessionsPrompt(sessionId, mentionedSessionIds, workspaceId)
       if (referencedSessionsBlock) {
         enrichedMessage = `${referencedSessionsBlock}\n\n${enrichedMessage}`
@@ -1580,7 +1592,7 @@ export class AgentOrchestrator {
 
 ${enrichedMessage}`
 
-      const isCompactCommand = userMessage.trim() === '/compact'
+      const isCompactCommand = runtimeUserMessage.trim() === '/compact'
       let finalPrompt = isCompactCommand
         ? '/compact'
         : existingSdkSessionId
@@ -1609,7 +1621,7 @@ ${enrichedMessage}`
           try {
             piHarnessScope = startPiHarnessRun({
               sessionId,
-              userMessage,
+              userMessage: runtimeUserMessage,
               prompt: finalPrompt,
               permissionMode: initialPermissionMode,
               manualCandidateContinuationTicket: input.piHarnessManualContinuationTicket,
@@ -1659,6 +1671,8 @@ ${enrichedMessage}`
               }),
               permissionMode: initialPermissionMode,
               triggeredBy: input.triggeredBy,
+              goalIteration: input.goalIteration,
+              reportGoalResult: input.reportGoalResult,
               allowedPresetOperations,
               currentPresetReference,
               presetOperationUserMessage: userMessage,

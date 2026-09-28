@@ -137,7 +137,7 @@ const AGENT_REFRESH_HEADROOM = 100
 /** 内存缓存只保留尾部窗口，防止随用户加载更多历史无限膨胀 */
 const AGENT_CACHE_WINDOW = DESKTOP_AGENT_PAGE_SIZE + AGENT_REFRESH_HEADROOM
 
-import { MAX_ATTACHMENT_SIZE, isAgentPresetToolGroupDisabled } from '@profer/shared'
+import { MAX_ATTACHMENT_SIZE, isAgentPresetToolGroupDisabled, parseGoalCommand } from '@profer/shared'
 import { fileToBase64, formatFileNames, getFileBaseName, getFileParentPath } from '@/lib/file-utils'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -164,6 +164,11 @@ import { resolveForkActionAvailability } from '@/lib/exploration-session'
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
 const LONG_TEXT_ATTACHMENT_THRESHOLD = 2000
+
+/** /goal 状态命令展示用标签（与 GoalStatusBar 保持一致语义） */
+const GOAL_STATUS_LABELS: Record<import('@profer/shared').AgentGoalStatus, string> = {
+  active: '执行中', paused: '已暂停', completed: '已完成', blocked: '等待处理', failed: '执行失败', stopped: '已停止',
+}
 
 /** 构造乐观用户 SDKMessage（用于运行中追加消息立即上屏） */
 function createUserSDKMessage(text: string, uuid?: string, createdAt = Date.now()): SDKMessage {
@@ -2114,30 +2119,32 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   /** 发送消息 */
   const handleSend = React.useCallback(async (): Promise<void> => {
     const text = inputContent.trim()
-    const goalMatch = text.match(/^\/goal(?:\s+(.+))?$/i)
-    if (goalMatch) {
-      const command = goalMatch[1]?.trim() ?? ''
+    const goalCommand = parseGoalCommand(text)
+    if (goalCommand.type !== 'not_goal') {
       try {
-        const normalized = command.toLowerCase()
-        if (!command) throw new Error('请输入 Goal 目标，例如：/goal 完成登录页')
-        if (normalized === 'status') {
+        if (goalCommand.type === 'invalid') throw new Error(goalCommand.reason)
+        if (goalCommand.type === 'status') {
           const state = await window.electronAPI.getGoal(sessionId)
-          toast.info(state ? `Goal：${state.status} · 第 ${state.iteration} 轮` : '当前会话没有 Goal', { description: state?.goal })
-        } else if (normalized === 'pause') {
+          toast.info(state ? `Goal：${GOAL_STATUS_LABELS[state.status]} · 第 ${state.iteration} 轮` : '当前会话没有 Goal', { description: state?.lastSummary || state?.goal })
+        } else if (goalCommand.type === 'pause') {
           await window.electronAPI.pauseGoal(sessionId)
           toast.info('Goal 已暂停')
-        } else if (normalized === 'resume') {
+        } else if (goalCommand.type === 'resume') {
           await window.electronAPI.resumeGoal(sessionId)
           toast.info('Goal 已恢复')
-        } else if (normalized === 'stop') {
+        } else if (goalCommand.type === 'stop') {
           await window.electronAPI.stopGoal(sessionId)
           toast.info('Goal 已停止')
-        } else if (normalized === 'clear') {
+        } else if (goalCommand.type === 'clear') {
           await window.electronAPI.clearGoal(sessionId)
           toast.info('Goal 状态已清除')
-        } else {
-          await window.electronAPI.startGoal(sessionId, command)
-          toast.success('Goal 已启动', { description: command })
+        } else if (goalCommand.type === 'start') {
+          await window.electronAPI.startGoal(sessionId, goalCommand.goal, goalCommand.contract)
+          toast.success('Goal 已启动', {
+            description: goalCommand.contract?.verification
+              ? `${goalCommand.goal} · 验收：${goalCommand.contract.verification}`
+              : `${goalCommand.goal}（可用 @verify:/@constraint:/@stop: 行补充契约）`,
+          })
         }
         setInputContent('')
         setInputHtmlContent('')

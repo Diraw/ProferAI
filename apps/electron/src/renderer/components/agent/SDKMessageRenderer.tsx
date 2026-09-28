@@ -14,7 +14,8 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen } from 'lucide-react'
+import { isGoalIterationMessage } from '@profer/shared'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -102,6 +103,23 @@ function CompactBoundaryDivider(): React.ReactElement {
         上下文已压缩
       </span>
       <div className="flex-1 h-px bg-border/40" />
+    </div>
+  )
+}
+
+/**
+ * Goal 迭代分隔条：Goal 每轮注入的控制 prompt（预算/契约/goal_result 协议）是机器协议，
+ * 不渲染为用户气泡，只留一条轻量分隔标记，同时充当 turn 边界防止多轮合并。
+ */
+function GoalIterationDivider({ iteration }: { iteration?: number }): React.ReactElement {
+  return (
+    <div className="flex items-center gap-3 my-4 px-1" data-testid="goal-iteration-divider">
+      <div className="flex-1 h-px bg-primary/20" />
+      <span className="shrink-0 flex items-center gap-1 text-[11px] text-primary/70 px-2 py-0.5 rounded-full border border-primary/20 bg-primary/[0.06]">
+        <Target className="size-3" aria-hidden="true" />
+        {typeof iteration === 'number' ? `Goal 自动迭代 · 第 ${iteration} 轮` : 'Goal 自动迭代'}
+      </span>
+      <div className="flex-1 h-px bg-primary/20" />
     </div>
   )
 }
@@ -346,7 +364,12 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
   for (const msg of messages) {
     if (msg.type === 'user') {
       const userMsg = msg as SDKUserMessage
-      if (isUserInputMessage(userMsg)) {
+      if (isGoalIterationMessage(userMsg)) {
+        // Goal 迭代控制消息 → 独立分隔条，作为 turn 边界但不进入 turn 消息
+        flushTurn()
+        groups.push({ type: 'user', message: userMsg })
+        pendingWakeBoundary = false
+      } else if (isUserInputMessage(userMsg)) {
         // 真正的用户输入 → 结束当前 turn，开始新段落
         flushTurn()
         groups.push({ type: 'user', message: userMsg })
@@ -1046,6 +1069,10 @@ export function SDKMessageRenderer({
   // user 消息
   if (msgType === 'user') {
     const uMsg = message as SDKUserMessage
+    if (isGoalIterationMessage(uMsg)) {
+      const iteration = (uMsg as unknown as Record<string, unknown>)._goalIteration
+      return <GoalIterationDivider iteration={typeof iteration === 'number' ? iteration : undefined} />
+    }
     if (isUserInputMessage(uMsg)) {
       return <UserInputMessage message={uMsg} basePath={basePath} basePaths={basePaths} />
     }
@@ -1599,6 +1626,10 @@ const GROUP_PREVIEW_LIMIT = 200
  */
 export function getGroupPreview(group: MessageGroup): string {
   if (group.type === 'user') {
+    if (isGoalIterationMessage(group.message)) {
+      const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
+      return typeof iteration === 'number' ? `Goal 自动迭代 · 第 ${iteration} 轮` : 'Goal 自动迭代'
+    }
     return parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text.slice(0, GROUP_PREVIEW_LIMIT)
   }
   if (group.type === 'system') {
@@ -1631,6 +1662,14 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
   const groupId = getGroupId(group)
 
   if (group.type === 'user') {
+    if (isGoalIterationMessage(group.message)) {
+      const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
+      return (
+        <div data-message-id={groupId} data-message-role="goal-iteration">
+          <GoalIterationDivider iteration={typeof iteration === 'number' ? iteration : undefined} />
+        </div>
+      )
+    }
     return (
       <div data-message-id={groupId} data-message-role="user">
         <UserInputMessage message={group.message} basePath={basePath} basePaths={basePaths} />

@@ -363,13 +363,30 @@ export function useGlobalAgentListeners(): void {
 
   useEffect(() => {
     let effectActive = true
+    // 启动时水合 Goal 状态（含重启后待恢复的 paused Goal）
+    void window.electronAPI.listGoals().then((goals) => {
+      if (!effectActive) return
+      store.set(agentGoalsAtom, new Map(goals.map((goal) => [goal.sessionId, goal])))
+    }).catch(() => {})
     const cleanupGoal = window.electronAPI.onGoalEvent((event) => {
-      store.set(agentGoalsAtom, (previous) => {
-        const next = new Map(previous)
-        if (event.state) next.set(event.sessionId, event.state)
+      const previous = store.get(agentGoalsAtom).get(event.sessionId)
+      store.set(agentGoalsAtom, (previousMap) => {
+        const next = new Map(previousMap)
+        // clear 后主进程发送 stopReason='cleared' 的快照，渲染层直接移除条目
+        if (event.state && event.state.stopReason !== 'cleared') next.set(event.sessionId, event.state)
         else next.delete(event.sessionId)
         return next
       })
+      // 终态跃迁时通知用户（Goal 常在后台长跑，用户可能不在看该会话）
+      if (event.state && previous && previous.status !== event.state.status) {
+        if (event.state.status === 'completed') {
+          toast.success('Goal 已完成', { description: event.state.lastSummary || event.state.goal })
+        } else if (event.state.status === 'blocked') {
+          toast.warning('Goal 受阻，已在规划中心创建待办', { description: event.state.stopReason || event.state.lastSummary || event.state.goal })
+        } else if (event.state.status === 'failed') {
+          toast.error('Goal 执行失败', { description: event.state.stopReason || event.state.goal })
+        }
+      }
     })
 
     /** 正在执行的写工具：toolUseId → { path, sessionId, toolName, runId } */

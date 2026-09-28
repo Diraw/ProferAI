@@ -46,6 +46,7 @@ import { ContentBlock } from './ContentBlock'
 import { parseThinkTagsFromText } from './thinking-tag-parser'
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
 import type { AgentEventUsage, RetryAttempt, SDKMessage, AgentImageGenerationCard, AgentRuntime } from '@profer/shared'
+import { isGoalIterationMessage } from '@profer/shared'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
 import { AgentImageGenerationCardView } from './AgentImageGenerationCard'
 import { getPendingImageGenerationCards, mergeAgentImageGenerationTimeline } from './agent-image-generation-timeline'
@@ -763,10 +764,10 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     }
   }, [sessionId, minimapItems, setMinimapCache])
 
-  // 所有用户消息的数据 — 供 StickyUserMessage 使用
+  // 所有用户消息的数据 — 供 StickyUserMessage 使用（Goal 迭代分隔条不是用户发言，不参与）
   const allUserMessagesData = React.useMemo(() => {
     return visibleGroups
-      .filter((g): g is MessageGroup & { type: 'user' } => g.type === 'user')
+      .filter((g): g is MessageGroup & { type: 'user' } => g.type === 'user' && !isGoalIterationMessage(g.message))
       .map((g) => {
         const rawText = extractUserText(g.message) ?? ''
         const { files, text } = sdkParseAttachedFiles(rawText)

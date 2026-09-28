@@ -41,6 +41,7 @@ import type {
   SDKToolResultBlock,
   SDKSystemMessage,
 } from '@profer/shared'
+import { isGoalUpdateToolName, stripGoalResultBlocks } from '@profer/shared'
 
 // ===== useToolResult Hook =====
 
@@ -400,6 +401,7 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   if (isAgentTool) {
     return (
       <div
+        data-tool-use-id={block.id}
         className={cn(
           animate && 'animate-in fade-in duration-150 fill-mode-both',
         )}
@@ -490,6 +492,7 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   // ===== 普通工具：语义化短语 + 结构化结果 =====
   return (
     <div
+      data-tool-use-id={block.id}
       className={cn(
         animate && 'animate-in fade-in duration-150 fill-mode-both',
       )}
@@ -730,7 +733,8 @@ const ContentBlockView = function ContentBlock({ block, allMessages, basePath, b
     if (!textBlock.text) return null
 
     // 兼容历史消息中的本地图片标记；新工具结果使用结构化附件。
-    const { images, cleanText } = parseAgentImageAttachmentMarkers(textBlock.text)
+    // Goal 迭代的 <goal_result> 机器协议块只用于主进程解析，不做展示。
+    const { images, cleanText } = parseAgentImageAttachmentMarkers(stripGoalResultBlocks(textBlock.text))
 
     return (
       <>
@@ -751,6 +755,7 @@ const ContentBlockView = function ContentBlock({ block, allMessages, basePath, b
   // tool_use 块
   if (block.type === 'tool_use') {
     const toolBlock = block as SDKToolUseBlock
+    if (isGoalUpdateToolName(toolBlock.name)) return null
     return (
       <ToolUseBlock
         block={toolBlock}

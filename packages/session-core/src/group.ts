@@ -13,6 +13,7 @@ import type {
   SDKUserMessage,
   SDKSystemMessage,
 } from '@profer/shared'
+import { isGoalIterationMessage } from '@profer/shared'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tags'
 
 // ===== 辅助：从 SDKMessage 提取元数据 =====
@@ -50,6 +51,8 @@ export function isUserInputMessage(message: SDKUserMessage): boolean {
   if (message.parent_tool_use_id) return false
   // SDK 合成消息（如 Skill 展开 prompt）不是用户输入
   if (message.isSynthetic) return false
+  // Goal 迭代注入的控制 prompt 不是用户对话内容（以分隔条形式独立展示）
+  if (isGoalIterationMessage(message)) return false
   // 包含 tool_result 块的消息是工具结果，不是用户输入
   const content = message.message?.content
   if (Array.isArray(content) && content.some((b) => b.type === 'tool_result')) return false
@@ -108,7 +111,12 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
   for (const msg of messages) {
     if (msg.type === 'user') {
       const userMsg = msg as SDKUserMessage
-      if (isUserInputMessage(userMsg)) {
+      if (isGoalIterationMessage(userMsg)) {
+        // Goal 迭代控制消息 → 独立段落（分隔条），作为 turn 边界但不进入 turn 消息
+        flushTurn()
+        groups.push({ type: 'user', message: userMsg })
+        pendingWakeBoundary = false
+      } else if (isUserInputMessage(userMsg)) {
         // 真正的用户输入 → 结束当前 turn，开始新段落
         flushTurn()
         groups.push({ type: 'user', message: userMsg })
@@ -256,6 +264,10 @@ export function stripScheduledRunMarker(text: string): string {
  */
 export function getGroupPreview(group: MessageGroup): string {
   if (group.type === 'user') {
+    if (isGoalIterationMessage(group.message)) {
+      const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
+      return typeof iteration === 'number' ? `Goal 自动迭代 · 第 ${iteration} 轮` : 'Goal 自动迭代'
+    }
     return stripScheduledRunMarker(extractUserText(group.message) ?? '')
       .replace(/<attached_files>[\s\S]*?<\/attached_files>\n*/, '')
       .replace(/<quoted_file[^>]*>[\s\S]*?<\/quoted_file>\n*/g, '')

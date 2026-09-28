@@ -114,6 +114,7 @@ import {
 } from '../agent-gpt-image-tools'
 import { GPT_IMAGE_QUALITIES, GPT_IMAGE_SIZES } from '../gpt-image-service'
 import { buildPiAgentSkinTools } from '../agent-skin-tools'
+import { normalizeGoalToolResult } from '../goal-tools'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 
@@ -152,6 +153,9 @@ export interface PiBuiltinToolsContext {
   allowedPresetOperations?: readonly AgentPresetMutationOperation[]
   /** 当前 query 开始时冻结的预设引用，用于安全切换和并发校验。 */
   currentPresetReference?: PresetReference
+  /** 当前 Goal turn 的结构化结果回调，仅由 Goal 内部工具使用。 */
+  reportGoalResult?: (result: import('@profer/shared').AgentGoalIterationResult) => void
+  goalIteration?: number
   /** 仅由 orchestrator 注入的当前用户原文，供目标预设意图绑定。 */
   presetOperationUserMessage?: string
   /** 当前会话待确认的主进程提案。 */
@@ -458,6 +462,29 @@ export function buildPiTaskGraphTools(sdk: PiSdk, ctx: Pick<PiBuiltinToolsContex
       },
     }),
   ] as unknown as ToolDefinition[]
+}
+
+// ===== Goal 内部工具 =====
+
+export function buildPiGoalTools(sdk: PiSdk, ctx: Pick<PiBuiltinToolsContext, 'goalIteration' | 'reportGoalResult'>): ToolDefinition[] {
+  if (!ctx.reportGoalResult) return []
+  return [sdk.defineTool({
+    name: 'update_goal',
+    label: '更新 Goal 状态',
+    description: '向 Profer Goal 控制器报告当前轮次结果。该工具是内部控制通道，不是用户可见消息；complete 必须带真实证据，blocked 仅用于需要用户输入或外部状态变化的阻塞。',
+    promptSnippet: 'update_goal: report structured Goal status to the host runtime',
+    parameters: Type.Object({
+      status: Type.Union([Type.Literal('continue'), Type.Literal('complete'), Type.Literal('blocked')]),
+      summary: Type.String({ minLength: 1, maxLength: 2000 }),
+      evidence: Type.Array(Type.String({ minLength: 1, maxLength: 1000 }), { maxItems: 20 }),
+    }),
+    async execute(_toolCallId, params) {
+      const args = params as { status: unknown; summary: unknown; evidence: unknown }
+      const result = normalizeGoalToolResult(args)
+      ctx.reportGoalResult?.(result)
+      return jsonToolResult({ accepted: true, iteration: ctx.goalIteration, status: result.status })
+    },
+  }) as unknown as ToolDefinition]
 }
 
 // ===== Agent 预设工具 =====
@@ -1555,6 +1582,10 @@ export async function buildPiBuiltinTools(
   })
 
   const tools: ToolDefinition[] = []
+
+  if (ctx.reportGoalResult) {
+    tools.push(...buildPiGoalTools(sdk, ctx))
+  }
 
   if (!isAgentPresetToolGroupDisabled(ctx.disabledToolGroups, 'image')) {
     try {

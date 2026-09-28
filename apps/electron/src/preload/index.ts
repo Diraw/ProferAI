@@ -784,8 +784,9 @@ export interface ElectronAPI {
 
   /** 中止 Agent 执行 */
   stopAgent: (sessionId: string) => Promise<void>
-  startGoal: (sessionId: string, goal: string) => Promise<import('@profer/shared').AgentGoalState>
+  startGoal: (sessionId: string, goal: string, contract?: import('@profer/shared').AgentGoalContract) => Promise<import('@profer/shared').AgentGoalState>
   getGoal: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState | null>
+  listGoals: () => Promise<import('@profer/shared').AgentGoalState[]>
   pauseGoal: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState>
   resumeGoal: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState>
   stopGoal: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState>
@@ -2483,8 +2484,9 @@ const electronAPI: ElectronAPI = {
   stopAgent: (sessionId: string) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP_AGENT, sessionId)
   },
-  startGoal: (sessionId: string, goal: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.START_GOAL, sessionId, goal),
+  startGoal: (sessionId: string, goal: string, contract?: import('@profer/shared').AgentGoalContract) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.START_GOAL, sessionId, goal, contract),
   getGoal: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_GOAL, sessionId),
+  listGoals: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_GOALS),
   pauseGoal: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.PAUSE_GOAL, sessionId),
   resumeGoal: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.RESUME_GOAL, sessionId),
   stopGoal: (sessionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP_GOAL, sessionId),
