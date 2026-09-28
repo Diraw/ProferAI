@@ -5,6 +5,8 @@ node_modules
 out
 dist
 *.tgz
+# 冒烟脚本的编译产物（apps/electron/scripts/agent-session-smoke.ts 的 --outfile 目录）
+apps/electron/scripts/.smoke/
 # GitHub Release 上传中间目录（收集 latest.yml / Setup exe / blockmap）
 apps/electron/release-assets/
 
