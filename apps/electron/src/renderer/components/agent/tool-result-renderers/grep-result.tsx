@@ -9,6 +9,7 @@ import * as React from 'react'
 import { cn } from '@/lib/utils'
 import { FileTypeIcon } from '@/components/file-browser'
 import { CollapsibleResult } from './collapsible-result'
+import { limitGrepGroupsForPreview } from './grep-preview'
 
 interface GrepResultRendererProps {
   result: string
@@ -108,9 +109,9 @@ export function GrepResultRenderer({ result, isError, input }: GrepResultRendere
 
   const totalMatches = groups.reduce((sum, g) => sum + g.matches.length, 0)
 
-  const renderGroups = React.useCallback((text: string): React.ReactNode => {
-    // 根据 text 长度决定显示多少（CollapsibleResult 会截断）
-    const visibleLines = text.split('\n').length
+  const renderGroups = React.useCallback((_text: string, collapsed: boolean): React.ReactNode => {
+    // 分组结构无法按文本切行，折叠预览改为按匹配条数收敛渲染量
+    const { groups: visibleGroups, hiddenMatches } = limitGrepGroupsForPreview(groups, collapsed)
 
     return (
       <div className="space-y-2">
@@ -119,7 +120,7 @@ export function GrepResultRenderer({ result, isError, input }: GrepResultRendere
           {totalMatches} 个匹配，{groups.length} 个文件
         </div>
 
-        {groups.map((group) => (
+        {visibleGroups.map((group) => (
           <div key={group.file} className="overflow-hidden rounded-md border border-surface-border/60 bg-code text-code-foreground">
             {/* 文件头 */}
             <div className="flex items-center gap-1.5 bg-surface-sunken/50 px-3 py-1.5 text-[11px]">
@@ -142,6 +143,12 @@ export function GrepResultRenderer({ result, isError, input }: GrepResultRendere
             </div>
           </div>
         ))}
+
+        {hiddenMatches > 0 && (
+          <div className="text-[11px] text-muted-foreground/60">
+            还有 {hiddenMatches} 条匹配，展开后可见
+          </div>
+        )}
       </div>
     )
   }, [groups, pattern, totalMatches])
