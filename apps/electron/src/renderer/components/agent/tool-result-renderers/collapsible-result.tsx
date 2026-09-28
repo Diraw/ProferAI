@@ -17,7 +17,7 @@
 import * as React from 'react'
 import { ChevronDown, ChevronsDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { canRevealByStep, sliceResultWindow } from './collapsible-preview'
+import { canRevealByStep, describeRevealProgress, sliceResultWindow } from './collapsible-preview'
 
 interface CollapsibleResultProps {
   /** 内容文本 */
@@ -98,10 +98,8 @@ export function CollapsibleResult({
   const canRevealMore = canRevealByStep(resultWindow, revealStep)
   const wasExpanded = fullyExpanded || revealedLines > previewLines
 
-  // 多行内容报行数更有辨识度；单行超长内容（minified JSON、heredoc）只能报字符数
-  const expandLabel = resultWindow.totalLines > previewLines
-    ? `${resultWindow.totalLines.toLocaleString()} 行`
-    : `${safeContent.length.toLocaleString()} 字符`
+  // 括号里报「还剩多少」而非总量：点「全部展开」补上的正是这一部分
+  const progress = describeRevealProgress(resultWindow, safeContent, previewLines)
 
   return (
     <div className={cn('relative', className)}>
@@ -117,7 +115,7 @@ export function CollapsibleResult({
 
           {resultWindow.truncated && (
             <CollapseControl onClick={expandAll} icon={ChevronsDown}>
-              全部展开 ({expandLabel})
+              全部展开 (还剩 {progress.remaining.toLocaleString()} {progress.unit})
             </CollapseControl>
           )}
 
@@ -127,9 +125,9 @@ export function CollapsibleResult({
             </CollapseControl>
           )}
 
-          {!fullyExpanded && revealedLines > previewLines && (
+          {resultWindow.truncated && (
             <span className="text-[11px] text-muted-foreground/40">
-              已显示 {resultWindow.visibleLines.toLocaleString()} / {resultWindow.totalLines.toLocaleString()} 行
+              已显示 {progress.revealed.toLocaleString()} / {progress.total.toLocaleString()} {progress.unit}
             </span>
           )}
         </div>

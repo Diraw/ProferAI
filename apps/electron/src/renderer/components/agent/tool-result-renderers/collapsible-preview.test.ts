@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { canRevealByStep, sliceResultPreview, sliceResultWindow } from './collapsible-preview'
+import { canRevealByStep, describeRevealProgress, sliceResultPreview, sliceResultWindow } from './collapsible-preview'
 
 /** 与 CollapsibleResult 默认值一致 */
 const OPTIONS = { maxChars: 3000, previewLines: 15 }
@@ -200,5 +200,46 @@ describe('递进按钮的可见性', () => {
 
     expect(window.visibleLines).toBe(1)
     expect(canRevealByStep(window, 50)).toBe(false)
+  })
+})
+
+describe('展开进度描述', () => {
+  test('Given 多行内容 When 描述进度 Then 以行为单位且剩余为总量减已显示', () => {
+    const content = makeLines(801)
+    const window = sliceResultWindow(content, WINDOW)
+    const progress = describeRevealProgress(window, content, WINDOW.previewLines)
+
+    expect(progress.unit).toBe('行')
+    expect(progress.revealed).toBe(15)
+    expect(progress.total).toBe(801)
+    expect(progress.remaining).toBe(786)
+  })
+
+  test('Given 递进若干行 When 描述进度 Then 剩余随之减少', () => {
+    const content = makeLines(801)
+    const window = sliceResultWindow(content, { ...WINDOW, revealedLines: 765 })
+    const progress = describeRevealProgress(window, content, WINDOW.previewLines)
+
+    expect(progress.revealed).toBe(765)
+    expect(progress.remaining).toBe(36)
+  })
+
+  test('Given 单行超长内容 When 描述进度 Then 改用字符为单位', () => {
+    const content = 'x'.repeat(637_891)
+    const window = sliceResultWindow(content, WINDOW)
+    const progress = describeRevealProgress(window, content, WINDOW.previewLines)
+
+    expect(progress.unit).toBe('字符')
+    expect(progress.revealed).toBe(WINDOW.maxChars)
+    expect(progress.total).toBe(637_891)
+    expect(progress.remaining).toBe(637_891 - WINDOW.maxChars)
+  })
+
+  test('Given 已全部展开 When 描述进度 Then 剩余为零', () => {
+    const content = makeLines(801)
+    const window = sliceResultWindow(content, { ...WINDOW, revealedLines: Number.POSITIVE_INFINITY })
+    const progress = describeRevealProgress(window, content, WINDOW.previewLines)
+
+    expect(progress.remaining).toBe(0)
   })
 })

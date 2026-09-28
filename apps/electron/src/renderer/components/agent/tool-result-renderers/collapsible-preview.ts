@@ -112,6 +112,44 @@ export function canRevealByStep(resultWindow: ResultWindow, revealStep: number):
   return resultWindow.totalLines - resultWindow.visibleLines > revealStep
 }
 
+/** 展开进度的度量方式与数值 */
+export interface RevealProgress {
+  /** 当前已展示的量 */
+  revealed: number
+  /** 总量 */
+  total: number
+  /** 尚未展示的量，即「全部展开」还能补上多少 */
+  remaining: number
+  /** 度量单位 */
+  unit: '行' | '字符'
+}
+
+/**
+ * 描述展开进度。
+ *
+ * 行数超过预览行数时以「行」度量；单行超长内容（minified JSON、heredoc 单行脚本）
+ * 行数不足以表达进度，只能以「字符」度量。
+ *
+ * remaining 描述的是「全部展开」这一步的动作量，比总量更贴近按钮语义 —— 用户看到
+ * 「还剩 52 行」时知道点下去会多出多少，看到总量还得自己减去已显示的部分。
+ */
+export function describeRevealProgress(
+  resultWindow: ResultWindow,
+  content: string,
+  previewLines: number,
+): RevealProgress {
+  const usesLines = resultWindow.totalLines > previewLines
+  const revealed = usesLines ? resultWindow.visibleLines : resultWindow.text.length
+  const total = usesLines ? resultWindow.totalLines : content.length
+
+  return {
+    revealed,
+    total,
+    remaining: total - revealed,
+    unit: usesLines ? '行' : '字符',
+  }
+}
+
 /**
  * 只区分「折叠 / 展开」两态时的简化入口。
  *
