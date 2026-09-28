@@ -11,8 +11,6 @@ import { cn } from '@/lib/utils'
 import type { BackgroundTask } from '@/atoms/agent-atoms'
 
 export interface ActiveTasksBarProps {
-  /** 当前会话 ID */
-  sessionId: string
   /** 后台任务列表 */
   tasks: BackgroundTask[]
   /** 点击任务回调 */
@@ -31,7 +29,6 @@ export interface ActiveTasksBarProps {
  * 只在有任务时显示，提供运行中任务的概览和快速导航。
  */
 export function ActiveTasksBar({
-  sessionId,
   tasks,
   onTaskClick,
   onTaskStop,
@@ -44,14 +41,14 @@ export function ActiveTasksBar({
   return (
     <div
       className={cn(
-        'flex items-center gap-2 px-4 py-2',
+        'flex flex-wrap items-center gap-2 px-3 py-2',
         'border-t border-border/50',
         'bg-muted/30',
         className
       )}
     >
-      <span className="text-xs text-muted-foreground font-medium">运行中任务:</span>
-      <div className="flex items-center gap-2 flex-wrap">
+      <span className="shrink-0 text-xs text-muted-foreground font-medium">运行中任务</span>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {tasks.map((task) => (
           <TaskBadge
             key={task.toolUseId}

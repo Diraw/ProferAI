@@ -51,6 +51,7 @@ import {
   groupTabIds,
   isGroupActive,
   isGroupEligibleTab,
+  isSessionConsistentGroup,
   planGroupDrop,
   ratioForEmptySide,
   removeTabGroup,
@@ -251,7 +252,14 @@ export function TabBar({
         window.electronAPI as Partial<typeof window.electronAPI>
       ).setAgentBrowserForeground;
       if (typeof setForeground === "function") {
-        setForeground(tab.type === "agent" ? tab.sessionId : null);
+        // agent / 预览 / 浏览器 Tab 都绑定在 agent 会话上，必须同步声明前台所有权。
+        // 只认 agent 会导致点击浏览器 Tab 把前台置成 null，而 MainArea 的同步 effect
+        // 以 browserSessionId 为依赖、同会话内切换不重跑，null 永久滞留 →
+        // 主进程对所有布局算出 visible=false，网页无论如何不渲染。
+        const foregroundSession = tab.type === "agent" || tab.type === "preview" || tab.type === "browser"
+          ? tab.sessionId
+          : null;
+        setForeground(foregroundSession);
       }
       // 浏览器页 Tab：激活 = 切换主进程当前页（原生视口按激活页渲染）
       if (tab.type === "browser" && tab.browserTabId) {
@@ -646,7 +654,11 @@ function TabBarInner({
   // 受管浏览器入口：仅当当前标签是 Agent 会话时展示。主进程按会话隔离浏览器。
   const setBrowserStateMap = useSetAtom(browserStateMapAtom);
   // 界面蒙层引导：顶栏指南针按钮触发，Overlay 在 App 顶层渲染
-  const setCoachTourOpen = useSetAtom(coachTourOpenAtom);
+  const [coachTourOpen, setCoachTourOpen] = useAtom(coachTourOpenAtom);
+  const coachTourLaunchPendingRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!coachTourOpen) coachTourLaunchPendingRef.current = false;
+  }, [coachTourOpen]);
   // 每页一个浏览器 Tab 后「浏览器 Tab」是一组页：首个页 Tab 用于入口聚焦，
   // 「正在展示」指激活的本来就是该会话的浏览器页 Tab。
   const activeBrowserTab = activeAgentSessionId
@@ -789,7 +801,11 @@ function TabBarInner({
       label: "界面引导",
       tooltip: "播放界面引导（Esc 退出）",
       icon: <Compass className="size-3.5" />,
-      onClick: () => setCoachTourOpen(true),
+      onClick: () => {
+        if (coachTourOpen || coachTourLaunchPendingRef.current) return;
+        coachTourLaunchPendingRef.current = true;
+        setCoachTourOpen(true);
+      },
     },
     {
       id: "tab-group",
@@ -987,6 +1003,11 @@ function TabBarInner({
           position: side,
         });
         if (!plan) return;
+        // 产品边界：顶栏 Tab 属于同一会话，组合只允许同会话成员并排，跨会话落定直接拒绝。
+        if (!isSessionConsistentGroup(plan.group, store.get(tabsAtom))) {
+          toast.info("组合只允许同一会话的标签并排");
+          return;
+        }
         store.set(tabGroupsAtom, replaceTabGroup(groups, currentGroup, plan.group));
         store.set(activeTabIdAtom, plan.activeTabId);
         // 空栏给一个较小的初始占比；之后用户可以自由拖分栏缝

@@ -210,8 +210,9 @@ export function TabBarItem({
           ? 'topbar-tab-focused'
           : undefined
   const previewItems = minimapCache.get(id) ?? []
-  // 当前 active Tab 不显示预览面板
-  const showPreview = isHovered && !isActive
+  // 仅会话 Tab 有消息预览价值；浏览器、文件预览等工作区 Tab 不显示空态面板。
+  const canShowPreview = (type === 'chat' || type === 'agent') && previewItems.length > 0
+  const showPreview = isHovered && !isActive && canShowPreview
 
   // Scratch Pad 是固定草稿入口
   if (isScratch) {

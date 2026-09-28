@@ -1153,6 +1153,8 @@ export interface BackgroundTask {
   elapsedSeconds: number
   /** 任务意图/描述 */
   intent?: string
+  /** 最近一次从 Runtime 查询到的输出 */
+  output?: string
 }
 
 /**

@@ -43,6 +43,25 @@ export function OnboardingView({
 
   const handleFinish = async (openTutorial?: boolean) => {
     if (persistCompletion) {
+      const settings = await window.electronAPI.getSettings()
+      if (!settings.onboardingCompleted) {
+        try {
+          const events = await window.electronAPI.listCalendarEvents()
+          const demoTitle = '随便安排的一件事'
+          if (!events.some((event) => event.title === demoTitle)) {
+            const today = new Date()
+            today.setHours(0, 0, 0, 0)
+            await window.electronAPI.createCalendarEvent({
+              title: demoTitle,
+              notes: '首次引导中的示例日程，没有实际安排。',
+              startAt: today.getTime(),
+              allDay: true,
+            })
+          }
+        } catch (error) {
+          console.error('[Onboarding] 创建示例日程失败:', error)
+        }
+      }
       await window.electronAPI.updateSettings({ onboardingCompleted: true })
     }
     onComplete(openTutorial)

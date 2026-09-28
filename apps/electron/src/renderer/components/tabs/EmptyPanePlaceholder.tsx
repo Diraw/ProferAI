@@ -5,6 +5,7 @@
  * 空栏本身就是那个选择入口：可以从下拉里选一个已打开的会话，也可以把任意会话标签拖进来。
  *
  * 只提供组合白名单内的候选（agent / chat / preview），并排除已在栏里的标签；
+ * 顶栏 Tab 属于同一会话，候选进一步收窄到组合已有成员的会话（不允许跨会话拼）；
  * 没有候选时给出"先从左侧栏打开一个会话"的指引，而不是给一个点不动的按钮。
  */
 
@@ -25,6 +26,8 @@ import {
 export interface EmptyPanePlaceholderProps {
   /** 已经在组合里的标签 id（不再作为候选） */
   excludeTabIds: string[]
+  /** 组合已有成员的会话 id；给出时候选收窄到该会话（顶栏 Tab 不跨会话拼） */
+  sessionId?: string | null
   onPick: (tabId: string) => void
   onDissolve: () => void
 }
@@ -40,14 +43,17 @@ function CandidateIcon({ tab }: { tab: TabItem }): React.ReactElement | null {
 
 export function EmptyPanePlaceholder({
   excludeTabIds,
+  sessionId = null,
   onPick,
   onDissolve,
 }: EmptyPanePlaceholderProps): React.ReactElement {
   const tabs = useAtomValue(tabsAtom)
   const excluded = React.useMemo(() => new Set(excludeTabIds), [excludeTabIds])
   const candidates = React.useMemo(
-    () => tabs.filter((tab) => !excluded.has(tab.id) && isGroupEligibleTab(tab)),
-    [excluded, tabs],
+    () => tabs.filter((tab) => !excluded.has(tab.id)
+      && isGroupEligibleTab(tab)
+      && (!sessionId || tab.sessionId === sessionId)),
+    [excluded, sessionId, tabs],
   )
 
   return (

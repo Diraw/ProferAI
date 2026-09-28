@@ -148,7 +148,7 @@ export function VoiceInputSettings(): React.ReactElement {
   return (
     <div className="space-y-6">
       <SettingsSection
-        title="豆包流式语音输入"
+        title="语音输入（豆包流式）"
         description="启用后会显示在 Chat、Agent 与便签输入工具栏中，也可通过全局快捷键唤起浮窗。"
         action={
           <Button

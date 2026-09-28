@@ -5,6 +5,7 @@
  * （左侧栏入口，components/agent-skills/AgentSkillsView），
  * Agent 预设管理也已迁移到该视图的「预设」tab。
  * 此页仅保留推理档位与内置工具的只读概览。
+ * 展示类偏好（自动预览修改中文件、输出完保持展开）已迁至「使用偏好」。
  */
 
 import * as React from 'react'
@@ -14,9 +15,8 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { settingsTabAtom } from '@/atoms/settings-tab'
 import { chatToolsAtom } from '@/atoms/chat-tool-atoms'
-import { agentEffortAtom, agentProcessGroupsKeepExpandedAtom } from '@/atoms/agent-atoms'
-import { autoPreviewEnabledAtom } from '@/atoms/preview-atoms'
-import { SettingsSection, SettingsCard, SettingsSegmentedControl, SettingsToggle } from './primitives'
+import { agentEffortAtom } from '@/atoms/agent-atoms'
+import { SettingsSection, SettingsCard, SettingsSegmentedControl } from './primitives'
 import type { AgentEffort } from '@profer/shared'
 
 const EFFORT_OPTIONS: { value: AgentEffort; label: string }[] = [
@@ -30,8 +30,6 @@ export function AgentSettings(): React.ReactElement {
   const tools = useAtomValue(chatToolsAtom)
   const setSettingsTab = useSetAtom(settingsTabAtom)
   const [effort, setEffort] = useAtom(agentEffortAtom)
-  const [autoPreviewEnabled, setAutoPreviewEnabled] = useAtom(autoPreviewEnabledAtom)
-  const [processGroupsKeepExpanded, setProcessGroupsKeepExpanded] = useAtom(agentProcessGroupsKeepExpandedAtom)
 
   const handleEffortChange = React.useCallback((value: string) => {
     const v = value as AgentEffort
@@ -80,23 +78,6 @@ export function AgentSettings(): React.ReactElement {
             value={effort ?? 'high'}
             onValueChange={handleEffortChange}
             options={EFFORT_OPTIONS}
-          />
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection title="显示" description="控制 Agent 修改文件后的展示行为">
-        <SettingsCard divided>
-          <SettingsToggle
-            label="自动预览修改中文件"
-            description="Agent 编辑文件时自动在右侧打开预览"
-            checked={autoPreviewEnabled}
-            onCheckedChange={setAutoPreviewEnabled}
-          />
-          <SettingsToggle
-            label="输出完保持展开"
-            description="Agent 完成输出后保留过程组展开，方便回看执行细节"
-            checked={processGroupsKeepExpanded}
-            onCheckedChange={setProcessGroupsKeepExpanded}
           />
         </SettingsCard>
       </SettingsSection>

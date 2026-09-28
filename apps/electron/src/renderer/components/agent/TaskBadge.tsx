@@ -7,7 +7,6 @@
 
 import * as React from 'react'
 import { Loader2, Terminal, GitBranch, Square, FileOutput } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import type { BackgroundTask } from '@/atoms/agent-atoms'
 
 export interface TaskBadgeProps {
@@ -77,65 +76,40 @@ export function TaskBadge({ task, onClick, onStop, onOutput }: TaskBadgeProps): 
   const Icon = task.type === 'shell' ? Terminal : GitBranch
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onClick() }}
-      className={cn(
-        'h-[30px] px-3 py-1.5 rounded-[8px]',
-        'flex items-center gap-2 shrink-0',
-        'bg-background/70 backdrop-blur-sm',
-        'border-[0.5px] border-border',
-        'hover:bg-accent hover:border-accent-foreground/20',
-        'transition-all duration-200',
-        'text-xs font-medium',
-        'cursor-pointer select-none'
-      )}
-      title={task.intent || `${task.type} 任务`}
-    >
-      {/* Spinner */}
-      <Loader2 className="size-3 animate-spin text-primary" />
-
-      {/* 类型图标 */}
-      <Icon className="size-3 text-muted-foreground" />
-
-      {/* 类型标签 */}
-      <span className="text-muted-foreground">
-        {task.type === 'shell' ? 'Shell' : 'Task'}
-      </span>
-
-      {/* 任务 ID（缩短） */}
-      <span className="font-mono opacity-80">{shortenId(task.id)}</span>
-
-      {/* 耗时 */}
-      <span className="tabular-nums text-muted-foreground">
-        {formatElapsed(displayElapsed)}
-      </span>
-
+    <div className="inline-flex h-[30px] items-center gap-2 rounded-[8px] border-[0.5px] border-border bg-background/70 px-2.5 text-xs font-medium backdrop-blur-sm">
+      <button
+        type="button"
+        onClick={onClick}
+        className="inline-flex min-w-0 items-center gap-2 hover:text-foreground"
+        title={task.intent || `${task.type} 任务`}
+      >
+        <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+        <Icon className="size-3 shrink-0 text-muted-foreground" />
+        <span className="text-muted-foreground">{task.type === 'shell' ? 'Shell' : 'Task'}</span>
+        <span className="font-mono opacity-80">{shortenId(task.id)}</span>
+        <span className="tabular-nums text-muted-foreground">{formatElapsed(displayElapsed)}</span>
+      </button>
       {onOutput && (
-        <span
-          role="button"
-          tabIndex={0}
+        <button
+          type="button"
           title="查看任务输出"
-          onClick={(event) => { event.stopPropagation(); onOutput() }}
-          onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); onOutput() } }}
+          aria-label={`查看任务 ${shortenId(task.id)} 的输出`}
+          onClick={onOutput}
           className="text-muted-foreground hover:text-foreground"
         >
           <FileOutput className="size-3" />
-        </span>
+        </button>
       )}
       {onStop && (
-        <span
-          role="button"
-          tabIndex={0}
+        <button
+          type="button"
           title="停止任务"
-          onClick={(event) => { event.stopPropagation(); onStop() }}
-          onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); onStop() } }}
+          aria-label={`停止任务 ${shortenId(task.id)}`}
+          onClick={onStop}
           className="text-destructive/80 hover:text-destructive"
         >
           <Square className="size-3" />
-        </span>
+        </button>
       )}
     </div>
   )

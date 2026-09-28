@@ -28,6 +28,7 @@ import {
   UserRound,
   Blocks,
   FlaskConical,
+  SlidersHorizontal,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { settingsTabAtom, channelFormDirtyAtom, settingsCloseRequestedAtom, settingsOpenAtom } from "@/atoms/settings-tab";
@@ -50,6 +51,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ChannelSettings } from "./ChannelSettings";
 import { GeneralSettings } from "./GeneralSettings";
+import { UsageSettings } from "./UsageSettings";
 import { AccountSettings } from "./AccountSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { AboutSettings } from "./AboutSettings";
@@ -100,11 +102,10 @@ const MODEL_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "tools", label: "Chat 工具", icon: <Wrench size={16} /> },
 ];
 
-/** 体验：外观 / 快捷键 / 教程 */
+/** 体验：外观 / 快捷键 */
 const EXPERIENCE_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "appearance", label: "外观设置", icon: <Palette size={16} /> },
   { id: "shortcuts", label: "快捷键管理", icon: <Keyboard size={16} /> },
-  { id: "tutorial", label: "Profer 教程", icon: <GraduationCap size={16} /> },
 ];
 
 /** 连接：远程连接 / 代理 */
@@ -113,9 +114,14 @@ const CONNECTION_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "proxy", label: "代理设置", icon: <Network size={16} /> },
 ];
 
-/** 系统：数据管理 / 隐藏插件入口 / 关于 */
+/** 系统：数据管理 / 隐藏插件入口 */
 const SYSTEM_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "data-management", label: "数据管理", icon: <Database size={16} /> },
+];
+
+/** 帮助：教程 / 关于与更新 */
+const HELP_GROUP_ITEMS: SettingsTabItem[] = [
+  { id: "tutorial", label: "Profer 教程", icon: <GraduationCap size={16} /> },
   { id: "about", label: "关于/更新", icon: <Info size={16} /> },
 ];
 
@@ -143,6 +149,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
   switch (tab) {
     case "general":
       return <GeneralSettings />;
+    case "usage":
+      return <UsageSettings />;
     case "account":
       return <AccountSettings />;
     case "channels":
@@ -255,12 +263,13 @@ export function SettingsPanel({
       : SYSTEM_GROUP_ITEMS
 
     const allGroups: SettingsTabGroup[] = [
-      { items: [{ id: "general", label: "通用偏好", icon: <Settings size={16} /> }] },
+      { items: [{ id: "general", label: "通用", icon: <Settings size={16} /> }, { id: "usage", label: "使用偏好", icon: <SlidersHorizontal size={16} /> }] },
       { title: "账户", items: ACCOUNT_GROUP_ITEMS },
       { title: "模型与能力", items: modelItems },
       { title: "体验", items: EXPERIENCE_GROUP_ITEMS },
       { title: "连接", items: CONNECTION_GROUP_ITEMS },
       { title: "系统", items: systemItems },
+      { title: "帮助", items: HELP_GROUP_ITEMS },
     ]
 
     if (authStatus.isLoggedIn) return allGroups

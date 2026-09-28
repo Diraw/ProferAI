@@ -989,7 +989,7 @@ export function useGlobalAgentListeners(): void {
               if (prev.some((task) => task.id === event.taskId || task.toolUseId === toolUseId)) return prev
               return [...prev, {
                 id: event.taskId,
-                type: 'agent' as const,
+                type: event.taskType === 'shell' || event.taskType === 'bash' || event.taskType === 'local_bash' ? 'shell' : 'agent',
                 toolUseId,
                 startTime: Date.now(),
                 elapsedSeconds: 0,

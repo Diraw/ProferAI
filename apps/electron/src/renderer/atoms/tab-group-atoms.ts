@@ -93,6 +93,33 @@ export function groupTabIds(group: TabGroupState | null): string[] {
   return [group.leftTabId, group.rightTabId].filter((id): id is string => !!id)
 }
 
+/**
+ * 组合的所属会话（产品边界：顶栏 Tab 属于同一会话，组合只允许同会话成员并排）。
+ * 只看非空成员；成员在 tabs 中找不到时返回 null（该组合已失效，交给对账解散）。
+ */
+export function groupSessionId(
+  group: TabGroupState | null,
+  tabs: readonly { id: string, sessionId: string }[],
+): string | null {
+  if (!group) return null
+  let sessionId: string | null = null
+  for (const id of groupTabIds(group)) {
+    const tab = tabs.find((candidate) => candidate.id === id)
+    if (!tab) return null
+    if (sessionId === null) sessionId = tab.sessionId
+    else if (sessionId !== tab.sessionId) return null
+  }
+  return sessionId
+}
+
+/** 组合是否满足「同一会话」边界：成员都存在且 sessionId 一致。 */
+export function isSessionConsistentGroup(
+  group: TabGroupState | null,
+  tabs: readonly { id: string, sessionId: string }[],
+): boolean {
+  return groupSessionId(group, tabs) !== null
+}
+
 /** 两侧是否都已就位（用于"空栏提示"的判定） */
 export function isGroupComplete(group: TabGroupState | null): boolean {
   return !!group && !!group.leftTabId && !!group.rightTabId

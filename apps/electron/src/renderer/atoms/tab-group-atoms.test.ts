@@ -17,12 +17,14 @@ import {
   focusGroupMember,
   fromPersistedTabGroup,
   fromPersistedTabGroups,
+  groupSessionId,
   groupSideOf,
   groupTabIds,
   isGroupComplete,
   isGroupActive,
   isGroupEligibleTab,
   isGroupMember,
+  isSessionConsistentGroup,
   planAutoGroupWorkTab,
   planFollowWorkTab,
   planGroupDrop,
@@ -509,4 +511,30 @@ test('planFollowWorkTab：无组合时退化为新建组合', () => {
     activeTabId: 's1',
   })
   expect(next![0]).toEqual({ leftTabId: 's1', rightTabId: '__preview__:s1:a', focusedTabId: 's1' })
+})
+
+// ===== 同一会话边界 =====
+
+const sessionTabs = [
+  { id: 'a1', sessionId: 's1' },
+  { id: 'p1', sessionId: 's1' },
+  { id: 'b2', sessionId: 's2' },
+]
+
+test('groupSessionId：同会话成员返回会话 id，空栏只看非空侧', () => {
+  expect(groupSessionId(createGroup('a1', 'p1', 'a1'), sessionTabs)).toBe('s1')
+  expect(groupSessionId(createGroup('a1', null, 'a1'), sessionTabs)).toBe('s1')
+  expect(groupSessionId(createGroup(null, 'p1', 'p1'), sessionTabs)).toBe('s1')
+})
+
+test('groupSessionId：跨会话成员或成员缺失返回 null', () => {
+  expect(groupSessionId(createGroup('a1', 'b2', 'a1'), sessionTabs)).toBeNull()
+  expect(groupSessionId(createGroup('a1', 'ghost', 'a1'), sessionTabs)).toBeNull()
+  expect(groupSessionId(null, sessionTabs)).toBeNull()
+})
+
+test('isSessionConsistentGroup：跨会话组合不合法，应被解散', () => {
+  expect(isSessionConsistentGroup(createGroup('a1', 'p1', 'a1'), sessionTabs)).toBe(true)
+  expect(isSessionConsistentGroup(createGroup('a1', null, 'a1'), sessionTabs)).toBe(true)
+  expect(isSessionConsistentGroup(createGroup('a1', 'b2', 'a1'), sessionTabs)).toBe(false)
 })

@@ -346,7 +346,25 @@ const GENERIC_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>([
  * 这样既能识别「用 Anthropic 协议接入第三方品牌」的渠道，又不会把第三方
  * anthropic-compatible 服务误判为 Claude。
  */
-export function getChannelLogo(channel: { provider: ProviderType; baseUrl: string }): string {
+export function getChannelLogo(channel: {
+  provider: ProviderType
+  baseUrl: string
+  name?: string
+  familyId?: string
+  models?: Array<Pick<import('@profer/shared').ChannelModel, 'id'>>
+}): string {
+  // 模型族虚拟渠道的 provider 表示请求协议，不一定代表真实品牌。
+  // 先看具体模型，再看服务端提供的 familyId/name，覆盖后续新增的别名模型。
+  const modelLogo = channel.models
+    ?.map((model) => getModelLogoById(model.id))
+    .find((logo): logo is string => Boolean(logo))
+  if (modelLogo) return modelLogo
+
+  const familyLogo = [channel.familyId, channel.name]
+    .map((value) => getModelLogoById(value ?? ''))
+    .find((logo): logo is string => Boolean(logo))
+  if (familyLogo) return familyLogo
+
   if (GENERIC_PROVIDERS.has(channel.provider) && channel.baseUrl) {
     for (const [regex, logo] of URL_LOGO_MAP) {
       if (regex.test(channel.baseUrl)) {

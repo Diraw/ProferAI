@@ -37,7 +37,9 @@ import {
   fillGroupSide,
   findTabGroup,
   focusGroupMember,
+  groupSessionId,
   groupTabIds,
+  isSessionConsistentGroup,
   reconcileTabGroups,
   removeTabGroup,
   replaceTabGroup,
@@ -112,6 +114,9 @@ export function MainArea(): React.ReactElement {
   React.useLayoutEffect(() => {
     // 先同步主进程的可见性所有权，再处理旧会话隐藏和新布局，
     // 防止后台 Agent 在这次会话切换的 IPC 间隙抢先显示原生 WebContentsView。
+    // 依赖含 activeTabId：同会话内的标签切换（对话 ↔ 预览 ↔ 浏览器）即使不改变
+    // browserSessionId，也要重新断言前台所有权——顶栏激活处理器先行写入的所有权
+    // 可能有瞬时值，这里作为最终口径兜底纠正。
     const setForeground = (window.electronAPI as Partial<typeof window.electronAPI>).setAgentBrowserForeground
     if (typeof setForeground === 'function') setForeground(browserSessionId)
 
@@ -122,7 +127,7 @@ export function MainArea(): React.ReactElement {
       void (window.electronAPI as Partial<typeof window.electronAPI>).hideAgentBrowser?.(previousSessionId)
     }
     previousBrowserSessionIdRef.current = browserSessionId
-  }, [browserSessionId])
+  }, [activeTabId, browserSessionId])
 
   React.useEffect(() => {
     // Vite renderer 可在 preload 热重载前先更新；旧 bridge 时浏览器功能不可用，
@@ -201,7 +206,10 @@ export function MainArea(): React.ReactElement {
 
   // 成员被关闭/删除（或组合指向失效标签）时自动解散对应组合。
   React.useEffect(() => {
+    // 再叠加「同一会话」边界：跨会话组合（旧持久化或异常状态）直接解散，
+    // 顶栏 Tab 属于同一会话，组合只允许同会话成员并排。
     const reconciled = reconcileTabGroups(tabGroups, new Set(tabs.map((tab) => tab.id)))
+      .filter((group) => isSessionConsistentGroup(group, tabs))
     const unchanged = reconciled.length === tabGroups.length
       && reconciled.every((group, index) => group === tabGroups[index])
     if (!unchanged) setTabGroups(reconciled)
@@ -222,13 +230,14 @@ export function MainArea(): React.ReactElement {
     activateGroupTab(targetId)
   }, [activateGroupTab, activeTabId, setTabGroups, tabGroup])
 
-  /** 空栏里选中一个标签（会话或工作 Tab）：放进去并把焦点交给它 */
+  /** 空栏里选中一个标签（会话或工作 Tab）：放进去并把焦点交给它；跨会话标签一律拒绝 */
   const fillGroupPane = React.useCallback((side: TabGroupSide, tabId: string): void => {
     if (!tabGroup) return
     const filledGroup = fillGroupSide(tabGroup, side, tabId)
-    if (filledGroup) setTabGroups((previous) => replaceTabGroup(previous, tabGroup, filledGroup))
+    if (!filledGroup || !isSessionConsistentGroup(filledGroup, tabs)) return
+    setTabGroups((previous) => replaceTabGroup(previous, tabGroup, filledGroup))
     activateGroupTab(tabId)
-  }, [activateGroupTab, setTabGroups, tabGroup])
+  }, [activateGroupTab, setTabGroups, tabGroup, tabs])
 
   const dissolveGroup = React.useCallback((): void => {
     setTabGroups((previous) => removeTabGroup(previous, tabGroup))
@@ -345,6 +354,7 @@ export function MainArea(): React.ReactElement {
                   ) : groupViewActive && tabGroup ? (
                     <EmptyPanePlaceholder
                       excludeTabIds={groupTabIds(tabGroup)}
+                      sessionId={groupSessionId(tabGroup, tabs)}
                       onPick={(tabId) => fillGroupPane('left', tabId)}
                       onDissolve={dissolveGroup}
                     />
@@ -376,6 +386,7 @@ export function MainArea(): React.ReactElement {
                       ) : (
                         <EmptyPanePlaceholder
                           excludeTabIds={groupTabIds(tabGroup)}
+                          sessionId={groupSessionId(tabGroup, tabs)}
                           onPick={(tabId) => fillGroupPane('right', tabId)}
                           onDissolve={dissolveGroup}
                         />

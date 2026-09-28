@@ -29,7 +29,6 @@ import {
 } from '@/components/ui/select'
 import { SettingsSection, SettingsCard } from './primitives'
 import { chatToolsAtom } from '@/atoms/chat-tool-atoms'
-import { VoiceInputSettings } from './VoiceInputSettings'
 
 /** 刷新全局工具列表 atom */
 async function refreshChatTools(
@@ -675,9 +674,6 @@ function CustomToolsSection(): React.ReactElement | null {
 export function ToolSettings(): React.ReactElement {
   return (
     <div className="space-y-8">
-      {/* 语音输入 */}
-      <VoiceInputSettings />
-
       {/* 联网搜索工具 */}
       <WebSearchSettings />
 

@@ -2,7 +2,8 @@
  * Settings Tab Atom — 设置标签页状态
  *
  * 管理设置面板中当前激活的标签页：
- * - general: 通用偏好
+ * - general: 通用
+ * - usage: 使用偏好（通知与声音 / 对话浏览 / 输入体验）
  * - account: 账户与资料
  * - channels: 模型配置
  * - prompts: 提示词管理
@@ -25,7 +26,7 @@
 
 import { atom } from 'jotai'
 
-export type SettingsTab = 'general' | 'account' | 'channels' | 'appearance' | 'about' | 'agent' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'shortcuts' | 'team' | 'credits' | 'subscription' | 'openapi' | 'data-management' | 'developer' | 'plugins' | 'proxy' | 'devices'
+export type SettingsTab = 'general' | 'usage' | 'account' | 'channels' | 'appearance' | 'about' | 'agent' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'shortcuts' | 'team' | 'credits' | 'subscription' | 'openapi' | 'data-management' | 'developer' | 'plugins' | 'proxy' | 'devices'
 
 /** 当前设置标签页（不持久化，每次打开设置默认显示通用偏好） */
 export const settingsTabAtom = atom<SettingsTab>('general')
