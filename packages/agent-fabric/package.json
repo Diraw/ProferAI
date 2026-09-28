@@ -1,0 +1,19 @@
+{
+  "name": "@profer/agent-fabric",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "description": "Profer Agent Fabric 契约层：Agent Node、Task Protocol、Task Graph、Capability、Policy、Event、Artifact、Result 的统一 TypeScript 契约与纯函数行为（状态机、策略收窄、事件重放、审批绑定）。不绑定 Electron、Claude SDK 或 Pi runtime。",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
