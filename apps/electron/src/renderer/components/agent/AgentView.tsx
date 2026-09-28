@@ -1163,7 +1163,6 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     // 只有切换会话时才进入 loading 态；同一会话在流式完成后的刷新要保留当前
     // persisted/live 消息，避免“助手气泡先消失、持久化消息再恢复”的空窗跳动。
     const isSessionSwitch = loadingSessionIdRef.current !== sessionId
-    console.warn('[AGENTVIEW-DEBUG] 消息加载 effect', JSON.stringify({ sessionId, isSessionSwitch, mountedCacheHit: !!store.get(agentSDKMessagesCacheAtom).get(sessionId) }))
     if (isSessionSwitch) {
       loadingSessionIdRef.current = sessionId
       // 1.7.1：乐观消息只属于当前会话，切会话时清空待合并登记，避免拼进新会话消息流
@@ -1216,7 +1215,6 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     loadPromise
       .then((sdkMsgs) => {
         if (cancelled) return
-        console.warn('[AGENTVIEW-DEBUG] 消息加载返回', JSON.stringify({ sessionId, isSessionSwitch, count: Array.isArray(sdkMsgs) ? sdkMsgs.length : -1 }))
         const historyResult = normalizeAgentHistoryResult(
           sdkMsgs,
           { startIndex: historyStartIndexRef.current, hasMore: historyHasMoreRef.current },

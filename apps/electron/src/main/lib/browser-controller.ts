@@ -1007,27 +1007,11 @@ export class BrowserController {
       !browserSession
       || browserSession.invalidatedLayoutRendererInstanceIds.has(layout.rendererInstanceId)
       || !Number.isSafeInteger(layout.layoutSourceRevision)
-    ) {
-      console.warn('[BROWSER-DEBUG] setLayout 丢弃: 无会话/失效来源', {
-        sessionId: layout.sessionId, tabId: layout.tabId, visible: layout.visible,
-        hasSession: !!browserSession, src: layout.layoutSourceRevision, rev: layout.revision,
-      })
-      return
-    }
+    ) return
     const isNewRenderer = browserSession.lastLayoutRendererInstanceId !== layout.rendererInstanceId
     const isNewLayoutSource = isNewRenderer || layout.layoutSourceRevision !== browserSession.lastLayoutSourceRevision
-    if (!isNewLayoutSource && !shouldApplyBrowserLayoutRevision(browserSession.lastLayoutRevision, layout.revision)) {
-      console.warn('[BROWSER-DEBUG] setLayout 丢弃: 过期 revision', {
-        sessionId: layout.sessionId, visible: layout.visible, last: browserSession.lastLayoutRevision, rev: layout.revision,
-      })
-      return
-    }
-    if (!isNewRenderer && layout.layoutSourceRevision < browserSession.lastLayoutSourceRevision) {
-      console.warn('[BROWSER-DEBUG] setLayout 丢弃: 过期来源', {
-        sessionId: layout.sessionId, visible: layout.visible, lastSrc: browserSession.lastLayoutSourceRevision, src: layout.layoutSourceRevision,
-      })
-      return
-    }
+    if (!isNewLayoutSource && !shouldApplyBrowserLayoutRevision(browserSession.lastLayoutRevision, layout.revision)) return
+    if (!isNewRenderer && layout.layoutSourceRevision < browserSession.lastLayoutSourceRevision) return
     if (isNewRenderer && browserSession.lastLayoutRendererInstanceId) {
       // 顶栏切换标签会卸载旧 BrowserViewport；即使旧 cleanup 晚于新布局抵达，也不能再隐藏新页面。
       rememberInvalidatedLayoutRenderer(browserSession, browserSession.lastLayoutRendererInstanceId)
@@ -1051,11 +1035,6 @@ export class BrowserController {
     }
     pageBounds.width = Math.min(pageBounds.width, Math.max(0, viewportBounds.width - pageBounds.x))
     pageBounds.height = Math.min(pageBounds.height, Math.max(0, viewportBounds.height - pageBounds.y))
-    console.warn('[BROWSER-DEBUG] setLayout 应用', {
-      sessionId: layout.sessionId, tabId: tab?.tabId, layoutVisible: layout.visible,
-      viewport: layout.viewportBounds, page: layout.pageBounds,
-      lastVisible: browserSession.lastVisible, foreground: this.foregroundSessionId,
-    })
     const visible = layout.visible
       && browserSession.sessionId === this.foregroundSessionId
       && hasUsableBrowserBounds(viewportBounds)
