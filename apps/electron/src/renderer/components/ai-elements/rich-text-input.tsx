@@ -13,7 +13,7 @@
  * - 自动扩高
  */
 
-import { useState, useEffect, useRef, useMemo, useImperativeHandle, forwardRef } from 'react'
+import { useState, useEffect, useRef, useMemo, useImperativeHandle, forwardRef, useCallback } from 'react'
 import { useAtomValue } from 'jotai'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
@@ -155,8 +155,10 @@ interface RichTextInputProps {
   value: string
   /** 值变更回调 */
   onChange: (markdown: string) => void
-  /** 提交回调（Enter 键） */
-  onSubmit: () => void
+  /** 草稿在空与非空之间切换时通知外层，不随每个字符重复触发。 */
+  onDraftPresenceChange?: (hasDraft: boolean) => void
+  /** 提交回调（Enter 键）；传入编辑器最新 Markdown，避免防抖草稿尚未上浮时丢字。 */
+  onSubmit: (markdown?: string) => void
   /** 粘贴文件回调（拦截粘贴的文件） */
   onPasteFiles?: (files: File[]) => void
   /** 粘贴超长文本回调（由调用方决定是否转换为附件） */
@@ -212,6 +214,7 @@ export interface RichTextInputHandle {
 export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>(function RichTextInput({
   value,
   onChange,
+  onDraftPresenceChange,
   onSubmit,
   onPasteFiles,
   onPasteLongText,
@@ -241,6 +244,17 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
   const isExpandedRef = useRef(false)
   // 行数检查的 rAF 调度句柄（用 rAF 节流，一帧最多检查一次）
   const lineCheckHandleRef = useRef<number | null>(null)
+  // 输入热路径只保留最新 HTML；Markdown 序列化和全局草稿更新在短暂空闲后合并。
+  const draftSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestHtmlRef = useRef('')
+  const lastSyncedValueRef = useRef(value)
+  const hasPendingLocalDraftRef = useRef(false)
+  const draftPresenceRef = useRef(value.trim().length > 0)
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+  const onDraftPresenceChangeRef = useRef(onDraftPresenceChange)
+  onDraftPresenceChangeRef.current = onDraftPresenceChange
+  const flushDraftRef = useRef<() => string>(() => '')
   // 跟踪编辑器自己设置的值，用于区分外部设置和内部更新
   const lastEditorValueRef = useRef<string>('')
   // 跟踪 IME 输入状态（中文输入法等）
@@ -588,7 +602,8 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
 
           if (isSend) {
             event.preventDefault()
-            onSubmitRef.current()
+            flushDraftRef.current()
+            onSubmitRef.current(lastSyncedValueRef.current)
             return true
           }
 
@@ -649,41 +664,73 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
     },
     onUpdate: ({ editor: ed }) => {
       const html = ed.getHTML()
-      if (html === '<p></p>') {
+      latestHtmlRef.current = html
+      const isEmpty = html === '<p></p>'
+      if (draftPresenceRef.current !== !isEmpty) {
+        draftPresenceRef.current = !isEmpty
+        onDraftPresenceChangeRef.current?.(!isEmpty)
+      }
+
+      if (isEmpty) {
+        if (draftSyncTimerRef.current !== null) {
+          clearTimeout(draftSyncTimerRef.current)
+          draftSyncTimerRef.current = null
+        }
+        hasPendingLocalDraftRef.current = false
         lastEditorValueRef.current = ''
-        onChange('')
+        lastSyncedValueRef.current = ''
+        onChangeRef.current('')
         onHtmlChangeRef.current?.('')
         if (isExpandedRef.current) {
           isExpandedRef.current = false
           setIsExpanded(false)
         }
         setIsManuallyCollapsed(false)
-      } else {
-        const markdown = htmlToMarkdown(html, { skipMarkdownEscape: !richTextEnabledRef.current })
-        lastEditorValueRef.current = markdown
-        onChange(markdown)
-        onHtmlChangeRef.current?.(html)
-
-        // 行数检查用 rAF 节流：每键 doc.descendants 全文遍历 + setState 重渲染会让
-        // 输入热路径变重；延后到下一帧合并连续按键，对 UX 无影响。
-        if (lineCheckHandleRef.current !== null) {
-          cancelAnimationFrame(lineCheckHandleRef.current)
-        }
-        lineCheckHandleRef.current = requestAnimationFrame(() => {
-          lineCheckHandleRef.current = null
-          const nextExpanded = countEditorLines(ed) > 5
-          if (nextExpanded !== isExpandedRef.current) {
-            isExpandedRef.current = nextExpanded
-            setIsExpanded(nextExpanded)
-          }
-        })
+        return
       }
+
+      hasPendingLocalDraftRef.current = true
+      // 连续输入时只保留最新一次 HTML，避免每个字符都重新解析整个 TipTap 文档。
+      if (draftSyncTimerRef.current !== null) clearTimeout(draftSyncTimerRef.current)
+      draftSyncTimerRef.current = setTimeout(() => flushDraftRef.current(), 180)
+
+      // 行数检查用 rAF 节流：每键 doc.descendants 全文遍历 + setState 重渲染会让
+      // 输入热路径变重；延后到下一帧合并连续按键，对 UX 无影响。
+      if (lineCheckHandleRef.current !== null) {
+        cancelAnimationFrame(lineCheckHandleRef.current)
+      }
+      lineCheckHandleRef.current = requestAnimationFrame(() => {
+        lineCheckHandleRef.current = null
+        const nextExpanded = countEditorLines(ed) > 5
+        if (nextExpanded !== isExpandedRef.current) {
+          isExpandedRef.current = nextExpanded
+          setIsExpanded(nextExpanded)
+        }
+      })
     },
   }, [])
 
-  // 卸载时取消未触发的 rAF 行数检查，避免泄漏 / 在卸载组件上 setState
+  const flushDraft = useCallback((): string => {
+    if (!hasPendingLocalDraftRef.current) return lastSyncedValueRef.current
+    const html = latestHtmlRef.current
+    const markdown = htmlToMarkdown(html, { skipMarkdownEscape: !richTextEnabledRef.current })
+    hasPendingLocalDraftRef.current = false
+    if (draftSyncTimerRef.current !== null) {
+      clearTimeout(draftSyncTimerRef.current)
+      draftSyncTimerRef.current = null
+    }
+    lastEditorValueRef.current = markdown
+    lastSyncedValueRef.current = markdown
+    onChangeRef.current(markdown)
+    onHtmlChangeRef.current?.(html)
+    return markdown
+  }, [])
+  flushDraftRef.current = flushDraft
+
+  // 卸载时最后一次同步草稿，并清理未触发的 rAF 行数检查。
   useEffect(() => {
     return () => {
+      flushDraftRef.current()
       if (lineCheckHandleRef.current !== null) {
         cancelAnimationFrame(lineCheckHandleRef.current)
         lineCheckHandleRef.current = null
@@ -713,11 +760,19 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
       if (!isEditorRecreated && !isRichTextModeChanged && controllerValue === lastEditorValueRef.current) {
         return
       }
+      // 连续输入尚未同步到外层时，外层仍持有上一次已同步值；不能反向覆盖编辑器。
+      if (!isEditorRecreated && !isRichTextModeChanged && hasPendingLocalDraftRef.current && controllerValue === lastSyncedValueRef.current) {
+        return
+      }
 
       if (controllerValue === '') {
         clearEditorContentSafely(currentEditor)
         lastEditorValueRef.current = ''
-        isExpandedRef.current = false
+        lastSyncedValueRef.current = ''
+        latestHtmlRef.current = ''
+        hasPendingLocalDraftRef.current = false
+        draftPresenceRef.current = false
+        onDraftPresenceChangeRef.current?.(false)
         setIsExpanded(false)
         setIsManuallyCollapsed(false)
       } else if (htmlValue && richTextEnabled && !isRichTextModeChanged) {
@@ -725,6 +780,10 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         // 使用旧 HTML，否则纯文本模式下的 **粗体** 会继续保留为富文本，反之亦然。
         setEditorContentSafely(currentEditor, htmlValue)
         lastEditorValueRef.current = controllerValue
+        lastSyncedValueRef.current = controllerValue
+        latestHtmlRef.current = htmlValue
+        hasPendingLocalDraftRef.current = false
+        draftPresenceRef.current = controllerValue.trim().length > 0
       } else {
         // 受控值是 Markdown，富文本模式下要经过同一套 Markdown → HTML 管线；
         // 纯文本模式则转义后再放进段落，避免原始 HTML 被 TipTap 当成 DOM 解析。
@@ -733,11 +792,13 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
           : plainTextToEditorHtml(controllerValue)
         setEditorContentSafely(currentEditor, html)
         lastEditorValueRef.current = controllerValue
+        lastSyncedValueRef.current = controllerValue
+        latestHtmlRef.current = html
+        hasPendingLocalDraftRef.current = false
+        draftPresenceRef.current = controllerValue.trim().length > 0
       }
     }
   }, [editor, value, richTextEnabled])
-
-  // 同步 disabled 状态
   useEffect(() => {
     if (editor) {
       editor.setEditable(!disabled)

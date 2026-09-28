@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { applyAgentEvent, type AgentStreamState } from './agent-atoms'
+import { applyAgentEvent, deleteSessionMapEntry, type AgentStreamState } from './agent-atoms'
 
 function runningState(overrides: Partial<AgentStreamState> = {}): AgentStreamState {
   return {
@@ -9,6 +9,26 @@ function runningState(overrides: Partial<AgentStreamState> = {}): AgentStreamSta
     ...overrides,
   }
 }
+
+describe('session-keyed heavy cache release', () => {
+  test('Given the session exists When deleted Then returns a new Map without that entry', () => {
+    const a = { messages: 10 }
+    const b = { messages: 20 }
+    const prev = new Map([['a', a], ['b', b]])
+
+    const next = deleteSessionMapEntry(prev, 'a')
+
+    expect(next).not.toBe(prev)
+    expect(next.has('a')).toBe(false)
+    expect(next.get('b')).toBe(b)
+    expect(prev.has('a')).toBe(true) // 不修改入参
+  })
+
+  test('Given the session is absent When deleted Then keeps the same Map reference', () => {
+    const prev = new Map([['a', 1]])
+    expect(deleteSessionMapEntry(prev, 'missing')).toBe(prev)
+  })
+})
 
 describe('Agent renderer lifecycle ownership', () => {
   test('Given an SDK error event When main ownership is not released Then keeps the renderer run active', () => {

@@ -849,11 +849,12 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const wsAttachedFilesMap = useAtomValue(workspaceAttachedFilesMapAtom)
   const wsAttachedFiles = currentWorkspaceId ? (wsAttachedFilesMap.get(currentWorkspaceId) ?? []) : []
 
-  // 按 sessionId 切片订阅 drafts/draftHtml：仅本 session 草稿变化才让 AgentView 重渲染。
-  // 输入框每次按键都会写整 Map atom，若直接订阅整 Map，AgentView 跟着每键重渲染。
+  // 草稿正文延迟同步到全局 Map；输入区只保留一个空/非空标记供按钮即时响应。
   const inputContent = useAtomValue(agentSessionDraftAtomFamily(sessionId))
+  const [hasInputDraft, setHasInputDraft] = React.useState(() => inputContent.trim().length > 0)
   const setDraftsMap = useSetAtom(agentSessionDraftsAtom)
   const setInputContent = React.useCallback((value: string) => {
+    setHasInputDraft(value.trim().length > 0)
     setDraftsMap((prev) => {
       const map = new Map(prev)
       if (value.trim() === '') {
@@ -1940,8 +1941,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
    * 供发送按钮左键（streaming/队列非空分支）、发送按钮右键（无条件入队）复用。
    * 仅支持纯文本；输入为空且无附件时静默返回。
    */
-  const enqueueCurrentInput = React.useCallback((): void => {
-    const text = inputContent.trim()
+  const enqueueCurrentInput = React.useCallback((latestText = richTextInputRef.current?.getMarkdown() ?? inputContent): void => {
+    const text = latestText.trim()
     const effectiveText = text || suggestion || ''
     const pendingFilesSnapshot = pendingFilesRef.current
     if (!effectiveText && pendingFilesSnapshot.length === 0) return
@@ -1965,7 +1966,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       map.delete(sessionId)
       return map
     })
-  }, [consumeQuotedSelection, inputContent, pendingFilesRef, sessionId, setInputContent, setInputHtmlContent, setPromptSuggestions, setQueuedMessages, suggestion])
+  }, [consumeQuotedSelection, pendingFilesRef, sessionId, setInputContent, setInputHtmlContent, setPromptSuggestions, setQueuedMessages, suggestion])
 
   /** 向 liveMessages 追加一条乐观用户消息 */
   const appendLiveUserMessage = React.useCallback((message: SDKMessage) => {
@@ -2120,8 +2121,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   ])
 
   /** 发送消息 */
-  const handleSend = React.useCallback(async (): Promise<void> => {
-    const text = inputContent.trim()
+  const handleSend = React.useCallback(async (latestText = richTextInputRef.current?.getMarkdown() ?? inputContent): Promise<void> => {
+    const text = latestText.trim()
     const goalCommand = parseGoalCommand(text)
     if (goalCommand.type !== 'not_goal') {
       try {
@@ -2171,7 +2172,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
 
     // 1.6.1 队列非空时所有入口强制入队：用户需先清空队列（发完/撤回/删除）才能直接发送。
     if (queuedMessages.length > 0) {
-      enqueueCurrentInput()
+      enqueueCurrentInput(latestText)
       return
     }
 
@@ -2183,7 +2184,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     // streaming：进入前端托管队列，turn 结束后 auto-drain 逐条发送（不打断当前 turn）。
     if (streaming) {
       // 附件限制/消费引用/入队/清空输入统一收敛到 enqueueCurrentInput
-      enqueueCurrentInput()
+      enqueueCurrentInput(latestText)
       return
     }
 
@@ -2497,7 +2498,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
         return map
       })
     })
-  }, [inputContent, attachedDirs, attachedFileDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, sessionAgentRuntime, workspaces, streaming, backgroundWaiting, suggestion, hasAvailableModel, streamState?.stopping, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, revealRendererDraft, permissionMode, messagesLoaded, consumeAgentInterruptionBlock, queuedMessages, enqueueCurrentInput, removeOptimisticPersistedMessage])
+  }, [attachedDirs, attachedFileDirectories, sessionId, agentChannelId, agentModelId, currentWorkspaceId, sessionAgentRuntime, workspaces, streaming, backgroundWaiting, suggestion, hasAvailableModel, streamState?.stopping, store, setStreamingStates, setPendingFiles, setAgentStreamErrors, setPromptSuggestions, setInputContent, setLiveMessagesMap, revealRendererDraft, permissionMode, messagesLoaded, consumeAgentInterruptionBlock, queuedMessages, enqueueCurrentInput, removeOptimisticPersistedMessage])
 
   // ===== 运行中追加消息队列：控制与自动发送 =====
   const allPermissionRequestsForQueue = useAtomValue(allPendingPermissionRequestsAtom)
@@ -3048,7 +3049,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     return registerShortcut('toggle-preview-panel', togglePreviewPanel)
   }, [ownsGlobalShortcuts, togglePreviewPanel])
 
-  const hasTextInput = inputContent.trim().length > 0
+  const hasTextInput = hasInputDraft
   const isCompacting = contextStatus.isCompacting
   const canSend = messagesLoaded && !presetSelectionRequired && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput) && !isCompacting && !streamState?.stopping
   const voiceDictationEnabled = useAtomValue(voiceDictationEnabledAtom)
@@ -3209,7 +3210,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       tooltip={queuedMessages.length > 0 ? '点击添加到队列（Enter）' : <>左键发送（Enter）<br />右键添加到队列</>}
       state={canSend ? 'active' : 'muted'}
       className="disabled:cursor-not-allowed"
-      onClick={handleSend}
+      onClick={() => { void handleSend() }}
       // 1.6.1 右键发送按钮：无条件加入队列（无论队列是否为空），阻止默认浏览器右键菜单
       onContextMenu={(event) => {
         event.preventDefault()
@@ -3354,7 +3355,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
                 <button
                   type="button"
                   className="group flex items-start gap-2 w-full rounded-lg border border-dashed border-primary/30 bg-primary/[0.03] px-3 py-2.5 text-left text-sm transition-colors hover:border-primary/50 hover:bg-primary/[0.06]"
-                  onClick={handleSend}
+                  onClick={() => { void handleSend() }}
                 >
                   <Sparkles className="size-4 shrink-0 mt-0.5 text-primary/60 group-hover:text-primary/80" />
                   <span className="flex-1 min-w-0 text-foreground/80 group-hover:text-foreground line-clamp-3">{suggestion}</span>
@@ -3391,6 +3392,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
               ref={richTextInputRef}
               value={inputContent}
               onChange={setInputContent}
+              onDraftPresenceChange={setHasInputDraft}
               onSubmit={handleSend}
               onPasteFiles={handlePasteFiles}
               onPasteLongText={handlePasteLongText}

@@ -27,6 +27,9 @@ import { previewFilesByTabAtom } from '@/atoms/preview-atoms'
 import {
   agentSessionsAtom,
   agentSessionIndicatorMapAtom,
+  agentSDKMessagesCacheAtom,
+  resolvedBlobMessagesAtom,
+  deleteSessionMapEntry,
   unviewedCompletedSessionIdsAtom,
 } from '@/atoms/agent-atoms'
 import { useSyncActiveTabSideEffects } from '@/hooks/useSyncActiveTabSideEffects'
@@ -48,6 +51,8 @@ export function useCloseTab(): UseCloseTabReturn {
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const setPreviewFilesByTab = useSetAtom(previewFilesByTabAtom)
   const setBrowserDismissed = useSetAtom(browserPanelDismissedSessionIdsAtom)
+  const setAgentMessagesCache = useSetAtom(agentSDKMessagesCacheAtom)
+  const setResolvedBlobMessages = useSetAtom(resolvedBlobMessagesAtom)
 
   const clearIdleAgentCompletionNotice = React.useCallback((sessionId: string) => {
     const indicatorMap = store.get(agentSessionIndicatorMapAtom)
@@ -163,11 +168,15 @@ export function useCloseTab(): UseCloseTabReturn {
       syncActiveTabSideEffects(newActiveTab)
     }
 
-    // 用户主动关闭 idle 的 Agent Tab 时，清除完成提醒状态
+    // 关闭 Agent Tab 不停止后台 Agent，但要释放可从磁盘/实时消息重建的重型缓存。
+    // 否则会话虽从界面关闭，完整消息数组和用户主动加载的全文 blob 仍一直驻留到进程重启。
     if (closingTab && closingTab.type === 'agent') {
-      clearIdleAgentCompletionNotice(closingTab.sessionId)
+      const sessionId = closingTab.sessionId
+      setAgentMessagesCache((prev) => deleteSessionMapEntry(prev, sessionId))
+      setResolvedBlobMessages((prev) => deleteSessionMapEntry(prev, sessionId))
+      clearIdleAgentCompletionNotice(sessionId)
     }
-  }, [tabs, activeTabId, tabMru, setTabs, setActiveTabId, setTabMru, setPreviewFilesByTab, setBrowserDismissed, syncActiveTabSideEffects, clearIdleAgentCompletionNotice])
+  }, [tabs, activeTabId, tabMru, setTabs, setActiveTabId, setTabMru, setPreviewFilesByTab, setBrowserDismissed, setAgentMessagesCache, setResolvedBlobMessages, syncActiveTabSideEffects, clearIdleAgentCompletionNotice])
 
   const requestClose = React.useCallback((tabId: string) => {
     executeClose(tabId)

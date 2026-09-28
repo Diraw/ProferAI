@@ -677,9 +677,12 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   // 被外部化的消息在用户点击「加载全文」后会被换成完整版（见 resolvedBlobMessagesAtom）。
   // 覆盖只放在这一层：下游的 turn 分组、工具结果查找、任务映射都会自动看到完整内容，
   // 不需要任何组件知道「外部化」这件事存在。
-  const resolvedBlobMessages = useAtomValue(resolvedBlobMessagesAtom)
+  const resolvedBlobMessagesBySession = useAtomValue(resolvedBlobMessagesAtom)
+  const resolvedBlobMessages = resolvedBlobMessagesBySession.get(sessionId)
   const allSDKMessages = React.useMemo(
-    () => applyResolvedBlobMessages(allSDKMessagesMerged, resolvedBlobMessages),
+    () => resolvedBlobMessages
+      ? applyResolvedBlobMessages(allSDKMessagesMerged, resolvedBlobMessages)
+      : allSDKMessagesMerged,
     [allSDKMessagesMerged, resolvedBlobMessages],
   )
   const hasContent = allSDKMessages.length > 0 || (imageGenerations?.length ?? 0) > 0
@@ -793,9 +796,14 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     liveMessages,
   })
 
+  const resolvedBasePaths = React.useMemo(
+    () => [...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])],
+    [sessionPath, attachedDirs],
+  )
+
   return (
     <FileAccessSessionProvider sessionId={sessionId}>
-    <BasePathsProvider basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}>
+    <BasePathsProvider basePaths={resolvedBasePaths}>
     <div ref={historySelectionRootRef} className="relative flex min-h-0 flex-1 flex-col">
     <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={sessionId} ready={ready} />
@@ -863,7 +871,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                   allMessages={allSDKMessages}
                   historicalTaskSubjects={historicalTaskSubjects}
                   basePath={sessionPath || undefined}
-                  basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}
+                  basePaths={resolvedBasePaths}
                   onFork={shouldDisableActions ? undefined : onFork}
                   onExplore={shouldDisableActions ? undefined : onExplore}
                   onRewind={shouldDisableActions ? undefined : onRewind}
@@ -908,7 +916,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                             block={block}
                             allMessages={allSDKMessages}
                             basePath={sessionPath || undefined}
-                            basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}
+                            basePaths={resolvedBasePaths}
                             index={index}
                             dimmed={hasVisibleTextContent && block.type !== 'text'}
                             isStreaming={streaming}

@@ -26,7 +26,7 @@ const PROCESS_GROUP_COLLAPSE_DURATION_MS = 500
 const PROCESS_GROUP_AUTO_COLLAPSE_SOUND_DELAY_MS = 900
 const PROCESS_GROUP_AUTO_COLLAPSE_COUNTDOWN_SECONDS = 3
 
-interface IndexedContentBlock {
+export interface IndexedContentBlock {
   block: SDKContentBlock
   index: number
 }
