@@ -15,6 +15,7 @@ import type { TabType, TabMinimapItem } from '@/atoms/tab-atoms'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import { tabMinimapCacheAtom } from '@/atoms/tab-atoms'
 import { TabPreviewPanel } from './TabPreviewPanel'
+import { readNativePageRects, resolveTabPreviewLeft } from '@/lib/tab-preview-position'
 
 export interface TabBarItemProps {
   id: string
@@ -425,13 +426,16 @@ function TabPreviewDropdown({
     const rect = btn.getBoundingClientRect()
     const viewportWidth = window.innerWidth
     const top = rect.bottom
-    let left = rect.left
-    if (left + panelWidth > viewportWidth - 8) {
-      left = viewportWidth - panelWidth - 8
-    }
-    if (left < 8) {
-      left = 8
-    }
+    // 原生 WebContentsView 在 DOM 之上：面板不能压到原生网页区，否则相交部分被盖住。
+    const left = resolveTabPreviewLeft({
+      desiredLeft: rect.left,
+      panelWidth,
+      panelTop: top,
+      // 面板实际高度随内容变化，用 maxHeight 上限做避让判定（宁可多让不可压住）
+      panelHeight: Math.min(420, window.innerHeight * 0.6),
+      hostRects: readNativePageRects(),
+      viewportWidth,
+    })
     setPos({ top, left })
   }, [buttonRef])
 

@@ -213,5 +213,5 @@ export function BrowserViewport({
     }
   }, [panelVisible, sessionId, tabId])
 
-  return <div ref={pageRef} className="flex flex-1 min-h-0 bg-browser-host titlebar-no-drag" aria-label="受管浏览器页面" />
+  return <div ref={pageRef} className="flex flex-1 min-h-0 bg-browser-host titlebar-no-drag" aria-label="受管浏览器页面" data-browser-native-page />
 }
