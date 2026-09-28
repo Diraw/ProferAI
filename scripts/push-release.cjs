@@ -234,7 +234,7 @@ async function ensureGitHubRelease(assets) {
   // 必须先完成所有只读预检；随后才允许构建、上传或 Git/GitHub 写入。
   run(`node scripts/verify-release-preflight.cjs ${VERSION}`);
 
-  console.log(`[1/4] ${ARTIFACTS_ONLY ? '校验已有本地产物' : '执行发布验证门禁'}（Windows x64${UNSIGNED_RELEASE ? ' 未签名' : ' 签名'}正式包）...`);
+  console.log(`[1/5] ${ARTIFACTS_ONLY ? '校验已有本地产物' : '执行发布验证门禁'}（Windows x64${UNSIGNED_RELEASE ? ' 未签名' : ' 签名'}正式包）...`);
   if (!UNSIGNED_RELEASE) assertReleaseSigningConfiguration();
   if (ARTIFACTS_ONLY) {
     run(`bun run ${UNSIGNED_RELEASE ? 'verify:release-assets:unsigned' : 'verify:release-assets'}`, ELECTRON);
@@ -260,7 +260,7 @@ async function ensureGitHubRelease(assets) {
   if (!UPDATE_FEED_URL.startsWith('https://')) {
     throw new Error('更新源必须为 HTTPS，拒绝发布。');
   }
-  console.log(`[2/4] 上传国内自动更新源（${UPDATE_FEED_URL}）...`);
+  console.log(`[2/5] 上传国内自动更新源（${UPDATE_FEED_URL}）...`);
   const installer = assets.find((asset) => asset.name === `Profer-Setup-${VERSION}.exe`);
   const metadata = assets.find((asset) => asset.name === 'latest.yml');
   const metadataSignature = assets.find((asset) => asset.name === 'latest.yml.sig');
@@ -296,11 +296,25 @@ async function ensureGitHubRelease(assets) {
     console.log(`  已上传到 ${target.user}@${target.host}:${target.dir}`);
   }
 
-  console.log('[3/4] 推送源码与版本 tag...');
+  console.log('[3/5] 推送源码与版本 tag...');
   pushSourceAndTag();
 
-  console.log('[4/4] 上传 GitHub Release（本地唯一写入者）...');
+  console.log('[4/5] 上传 GitHub Release（本地唯一写入者）...');
   await ensureGitHubRelease(assets);
+
+  // 商业版「版本历史」的数据源是服务器上的 releases.json（apps/electron/src/main/ipc.ts
+  // 的 fetchServerReleases），它只能从 GitHub Releases 生成。此前没有脚本也没有任何发布
+  // 步骤维护它，两台更新服务器上长期是 404。这里在 Release 落地后立刻刷新，保证版本历史
+  // 不会落后于刚发布的版本。
+  console.log('[5/5] 刷新商业版版本历史数据源 releases.json...');
+  run(`node scripts/build-releases-json.cjs --upload`);
+  // macOS 包只能在 Apple Silicon 上构建，Windows 发布流程无法代劳。历史上 v0.15.84 / v0.15.85
+  // 就是漏了这一步：GitHub Release 与更新源都只有 Windows 资产，macOS 客户端从 0.15.84 起
+  // 再也收不到更新。这里显式提示，避免再次漏发。
+  console.log(
+    `[提示] 还需在一台 Apple Silicon 机器上补发 macOS 资产：` +
+    `node scripts/push-mac-release.cjs ${VERSION}（缺 latest-mac.yml 时 macOS 自动更新会直接失败）`,
+  );
   console.log(`=== 发布完成 ${TAG} ===`);
 })().catch((error) => {
   console.error(`发布失败: ${error.message}`);

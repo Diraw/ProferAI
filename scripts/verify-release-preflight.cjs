@@ -81,7 +81,14 @@ assertMetadata()
 assertCleanWorktree()
 run('git fetch origin --prune')
 if (!tryRun('git merge-base --is-ancestor origin/main HEAD').ok) {
-  throw new Error('本地 main 未包含最新 origin/main；请先人工处理分叉，发布脚本不会 rebase 活跃分支。')
+  // 回填已发布版本的补充资产（典型场景：Windows Release 已发布后，在 Apple Silicon 上
+  // 用 tag 工作树补 macOS 资产）时，HEAD 会停在 tag 上、落后于 origin/main。
+  // 允许这种分叉，但不能因此放宽“tag 必须指向 HEAD / 工作树必须干净”的约束——
+  // 否则就可能把非 tag 内容冒充成该版本发出去。
+  if (!allowPublishedRelease) {
+    throw new Error('本地 main 未包含最新 origin/main；请先人工处理分叉，发布脚本不会 rebase 活跃分支。')
+  }
+  console.warn('[release-preflight] HEAD 落后于 origin/main，按「回填已发布版本资产」处理（仅允许补充资产，不改动版本与 tag）。')
 }
 const head = run('git rev-parse HEAD')
 assertTagTargets(head)
