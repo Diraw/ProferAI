@@ -795,9 +795,14 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     liveMessages,
   })
 
+  const resolvedBasePaths = React.useMemo(
+    () => [...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])],
+    [sessionPath, attachedDirs],
+  )
+
   return (
     <FileAccessSessionProvider sessionId={sessionId}>
-    <BasePathsProvider basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}>
+    <BasePathsProvider basePaths={resolvedBasePaths}>
     <div ref={historySelectionRootRef} className="relative flex min-h-0 flex-1 flex-col">
     <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={sessionId} ready={ready} />
@@ -865,7 +870,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                   allMessages={allSDKMessages}
                   historicalTaskSubjects={historicalTaskSubjects}
                   basePath={sessionPath || undefined}
-                  basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}
+                  basePaths={resolvedBasePaths}
                   onFork={shouldDisableActions ? undefined : onFork}
                   onExplore={shouldDisableActions ? undefined : onExplore}
                   onRewind={shouldDisableActions ? undefined : onRewind}
@@ -910,7 +915,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                             block={block}
                             allMessages={allSDKMessages}
                             basePath={sessionPath || undefined}
-                            basePaths={[...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])]}
+                            basePaths={resolvedBasePaths}
                             index={index}
                             dimmed={hasVisibleTextContent && block.type !== 'text'}
                             isStreaming={streaming}
