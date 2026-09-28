@@ -17,7 +17,7 @@
 import * as React from 'react'
 import { ChevronDown, ChevronsDown, ChevronUp } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { sliceResultWindow } from './collapsible-preview'
+import { canRevealByStep, sliceResultWindow } from './collapsible-preview'
 
 interface CollapsibleResultProps {
   /** 内容文本 */
@@ -95,9 +95,8 @@ export function CollapsibleResult({
 
   const expandAll = React.useCallback((): void => setFullyExpanded(true), [])
 
-  const canRevealMore = resultWindow.hasMoreLines && revealStep > 0
+  const canRevealMore = canRevealByStep(resultWindow, revealStep)
   const wasExpanded = fullyExpanded || revealedLines > previewLines
-  const shownLines = Math.min(revealedLines, resultWindow.totalLines)
 
   // 多行内容报行数更有辨识度；单行超长内容（minified JSON、heredoc）只能报字符数
   const expandLabel = resultWindow.totalLines > previewLines
@@ -130,7 +129,7 @@ export function CollapsibleResult({
 
           {!fullyExpanded && revealedLines > previewLines && (
             <span className="text-[11px] text-muted-foreground/40">
-              已显示 {shownLines.toLocaleString()} / {resultWindow.totalLines.toLocaleString()} 行
+              已显示 {resultWindow.visibleLines.toLocaleString()} / {resultWindow.totalLines.toLocaleString()} 行
             </span>
           )}
         </div>

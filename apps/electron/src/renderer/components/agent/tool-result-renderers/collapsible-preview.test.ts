@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { sliceResultPreview, sliceResultWindow } from './collapsible-preview'
+import { canRevealByStep, sliceResultPreview, sliceResultWindow } from './collapsible-preview'
 
 /** 与 CollapsibleResult 默认值一致 */
 const OPTIONS = { maxChars: 3000, previewLines: 15 }
@@ -162,5 +162,43 @@ describe('工具结果展开窗口', () => {
     expect(window.text).toBe(content)
     expect(window.truncated).toBe(false)
     expect(window.hasMoreLines).toBe(false)
+  })
+})
+
+describe('递进按钮的可见性', () => {
+  test('Given 剩余行数多于一个步长 When 判断是否提供递进 Then 提供', () => {
+    const window = sliceResultWindow(makeLines(801), WINDOW)
+
+    expect(window.visibleLines).toBe(15)
+    expect(canRevealByStep(window, 50)).toBe(true)
+  })
+
+  test('Given 剩余行数不足一个步长 When 判断是否提供递进 Then 只保留全部展开', () => {
+    const window = sliceResultWindow(makeLines(801), { ...WINDOW, revealedLines: 765 })
+
+    expect(window.totalLines - window.visibleLines).toBe(36)
+    expect(canRevealByStep(window, 50)).toBe(false)
+  })
+
+  test('Given 剩余行数恰好等于步长 When 判断是否提供递进 Then 同样合并为全部展开', () => {
+    const window = sliceResultWindow(makeLines(801), { ...WINDOW, revealedLines: 751 })
+
+    // 点一次「再显示 50 行」正好到达全量，与「全部展开」结果相同
+    expect(window.totalLines - window.visibleLines).toBe(50)
+    expect(canRevealByStep(window, 50)).toBe(false)
+  })
+
+  test('Given 未启用渐进展开 When 判断是否提供递进 Then 始终不提供', () => {
+    const window = sliceResultWindow(makeLines(801), WINDOW)
+
+    expect(canRevealByStep(window, 0)).toBe(false)
+    expect(canRevealByStep(window, -1)).toBe(false)
+  })
+
+  test('Given 单行超长内容 When 判断是否提供递进 Then 无行可推故不提供', () => {
+    const window = sliceResultWindow('x'.repeat(637_891), WINDOW)
+
+    expect(window.visibleLines).toBe(1)
+    expect(canRevealByStep(window, 50)).toBe(false)
   })
 })

@@ -38,8 +38,10 @@ export interface ResultWindowOptions extends ResultPreviewOptions {
 export interface ResultWindow extends ResultPreview {
   /** 当前 text 仍不是全文，即 renderContent 的 collapsed 参数 */
   truncated: boolean
-  /** 还有未显示的行，决定是否提供「再显示 N 行」 */
+  /** 还有未显示的行 */
   hasMoreLines: boolean
+  /** 当前决定渲染的行数（因字符封顶可能实际显示的更少） */
+  visibleLines: number
   /** 总行数（按 \r?\n 切分） */
   totalLines: number
 }
@@ -72,7 +74,14 @@ export function sliceResultWindow(
 
   const collapsed = safeContent.length > maxChars || totalLines > options.previewLines
   if (!collapsed) {
-    return { text: safeContent, collapsed: false, truncated: false, hasMoreLines: false, totalLines }
+    return {
+      text: safeContent,
+      collapsed: false,
+      truncated: false,
+      hasMoreLines: false,
+      visibleLines: totalLines,
+      totalLines,
+    }
   }
 
   const revealed = Math.min(Math.max(options.revealedLines, 0), totalLines)
@@ -82,7 +91,25 @@ export function sliceResultWindow(
   const head = (initialPreview ? lines.slice(0, options.previewLines) : lines.slice(0, revealed)).join('\n')
   const text = initialPreview && head.length > maxChars ? sliceAtBoundary(head, maxChars) : head
 
-  return { text, collapsed, truncated: initialPreview || hasMoreLines, hasMoreLines, totalLines }
+  return {
+    text,
+    collapsed,
+    truncated: initialPreview || hasMoreLines,
+    hasMoreLines,
+    visibleLines: revealed,
+    totalLines,
+  }
+}
+
+/**
+ * 是否应当提供「再显示 N 行」。
+ *
+ * 剩余行数不足一个步长时（含恰好等于），点它与点「全部展开」结果相同，
+ * 两个按钮重复，只保留后者。步长传 0（未启用渐进展开）时始终不提供。
+ */
+export function canRevealByStep(resultWindow: ResultWindow, revealStep: number): boolean {
+  if (revealStep <= 0) return false
+  return resultWindow.totalLines - resultWindow.visibleLines > revealStep
 }
 
 /**
