@@ -127,7 +127,7 @@ async function main(): Promise<void> {
 
   // 生产 preload 的公开 API 与真实 IPC 链路：provider 缺失错误保留 requestId/operation。
   const publicFailure = await first.executeJavaScript(`window.profer.workspace.list().then(() => null, (error) => ({ message: error.message, name: error.name }))`) as { message: string; name: string }
-  assert.deepEqual(publicFailure, { message: '该插件能力尚未配置宿主 provider', name: 'Error' })
+  assert.deepEqual(publicFailure, { message: '该插件能力尚未配置宿主 provider', name: 'ProferPluginError' })
 
   // test-only observability bridge 不替代宿主；它只读取同一真实 IPC 的完整 response envelope。
   await expectFailure(raw(first, request('envelope', 'workspace.list', {})), 'envelope', 'workspace.list', 'PLUGIN_OPERATION_NOT_SUPPORTED')

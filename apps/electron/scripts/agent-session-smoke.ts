@@ -25,6 +25,7 @@ import { getAgentWorkspace } from '../src/main/lib/agent-workspace-manager'
 import { createAgentSession, getAgentSessionMeta } from '../src/main/lib/agent-session-manager'
 import { createAgentPreset, listAgentPresets, deleteAgentPreset, getAgentPreset } from '../src/main/lib/agent-preset-manager'
 import { runAgentHeadless } from '../src/main/lib/agent-service'
+import { BUILTIN_AGENT_PRESETS } from '@profer/shared'
 import { readFileSync, existsSync, appendFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -237,8 +238,14 @@ async function main(): Promise<void> {
         disabledToolGroups: ['automation'],
       })
       const resolved = getAgentPreset(workspaceSlug, derived.id)
+      // 期望值取自内置基座定义（「极简」= 关闭全部产品能力组），避免硬编码组数在
+      // 能力组增删后失配；这里验证的是「子预设只能增加禁用」的并集语义。
+      const baseGroups = BUILTIN_AGENT_PRESETS.find((preset) => preset.id === 'minimal')?.disabledToolGroups ?? []
+      const expectedGroups = new Set<string>([...baseGroups, 'automation'])
+      const resolvedGroups = new Set<string>(resolved.disabledToolGroups ?? [])
       derivedMergeOk = (resolved.suppressPromptSections ?? []).length === 4
-        && (resolved.disabledToolGroups ?? []).length === 4
+        && expectedGroups.size > 0
+        && [...expectedGroups].every((group) => resolvedGroups.has(group))
         && (resolved.promptSections?.some((s) => s.includes('极简模式')) ?? false)
       console.log(`[冒烟] 派生预设合并自检: ${derivedMergeOk ? '是 ✅' : '否 ❌'}（suppress=${resolved.suppressPromptSections?.join('/')}，工具组=${resolved.disabledToolGroups?.join('/')}）`)
       deleteAgentPreset(workspaceSlug, derived.id)
