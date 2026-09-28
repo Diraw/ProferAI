@@ -5,6 +5,17 @@
  * 用于智能模式下的自动允许/询问判断。
  */
 
+/** 返回跨 Runtime 共用的逻辑工具短名；兼容 Claude MCP 命名空间和 Pi 原生工具名。 */
+export function canonicalAgentToolName(toolName: string): string {
+  const trimmed = toolName.trim()
+  return trimmed.split('__').at(-1) ?? trimmed
+}
+
+/** 工具名是否匹配指定逻辑工具；避免把 Claude MCP namespace 当成能力名。 */
+export function isCanonicalAgentTool(toolName: string, canonicalName: string): boolean {
+  return canonicalAgentToolName(toolName) === canonicalName
+}
+
 /** 始终安全的工具（免询问） */
 export const SAFE_TOOLS: readonly string[] = [
   'Read',            // 文件读取
@@ -15,6 +26,11 @@ export const SAFE_TOOLS: readonly string[] = [
   // Pi 受管浏览器：网页隔离、私网/下载/弹窗/权限已在主进程策略层拦截。
   'BrowserObserve',
   'BrowserNavigate',
+  'BrowserGoBack',
+  'BrowserGoForward',
+  'BrowserReload',
+  'BrowserScroll',
+  'BrowserExtract',
   'BrowserClick',
   'BrowserFill',
   'BrowserPress',
@@ -22,7 +38,6 @@ export const SAFE_TOOLS: readonly string[] = [
   'BrowserListTabs',
   'BrowserNewTab',
   'BrowserSelectTab',
-  'BrowserCloseTab',
   'BrowserPreviewOpen',
   'TodoRead',        // Todo 列表读取
   'TodoWrite',       // Todo 列表写入（无安全风险）

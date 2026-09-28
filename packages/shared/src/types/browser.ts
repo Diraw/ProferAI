@@ -30,7 +30,7 @@ export interface BrowserViewLayout {
 
 export type BrowserExecutionSource = 'user' | 'automation' | 'delegation' | 'goal'
 
-export type BrowserTraceAction = 'navigate' | 'observe' | 'wait' | 'click' | 'fill' | 'press' | 'dom' | 'script' | 'screenshot' | 'tab'
+export type BrowserTraceAction = 'navigate' | 'observe' | 'wait' | 'click' | 'fill' | 'press' | 'dom' | 'script' | 'screenshot' | 'scroll' | 'extract' | 'tab'
 export type BrowserOperationStatus = 'dispatched' | 'verified' | 'failed' | 'unknown'
 
 /** 脱敏的浏览器操作账本项；绝不含输入正文、Cookie、截图或脚本全文。 */
@@ -159,6 +159,56 @@ export interface BrowserTabInput {
 export interface BrowserCreateTabInput {
   sessionId: string
   url?: string
+}
+
+export type BrowserScrollDirection = 'up' | 'down' | 'left' | 'right'
+
+export interface BrowserScrollInput {
+  direction?: BrowserScrollDirection
+  amount?: number
+  selector?: string
+}
+
+export interface BrowserScrollResult {
+  tabId: string
+  url: string
+  title: string
+  scrollTop: number
+  scrollLeft: number
+  scrollHeight: number
+  scrollWidth: number
+  clientHeight: number
+  clientWidth: number
+  atTop: boolean
+  atBottom: boolean
+  atLeft: boolean
+  atRight: boolean
+}
+
+export type BrowserExtractMode = 'text' | 'links' | 'table' | 'attributes'
+
+export interface BrowserExtractInput {
+  selector?: string
+  mode?: BrowserExtractMode
+  limit?: number
+}
+
+export interface BrowserExtractItem {
+  text?: string
+  href?: string | null
+  attributes?: Record<string, string>
+  headers?: string[]
+  cells?: string[][]
+}
+
+export interface BrowserExtractResult {
+  tabId: string
+  url: string
+  title: string
+  selector: string
+  mode: BrowserExtractMode
+  items: BrowserExtractItem[]
+  truncated: boolean
 }
 
 export interface BrowserTranslateResult {

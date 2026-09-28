@@ -212,7 +212,12 @@ export const AGENT_PRESET_CAPABILITY_GROUPS = [
     id: 'browser', label: '受管浏览器', hint: '网页访问、交互与标签页工具',
     tools: [
       capabilityTool('BrowserObserve', '观察页面', '读取当前页面结构'),
-      capabilityTool('BrowserNavigate', '打开网页', '导航到公开网页', 'external'),
+      capabilityTool('BrowserNavigate', '打开网页', '导航到公网或本地开发网页', 'external'),
+      capabilityTool('BrowserGoBack', '后退', '返回当前页面的上一条导航记录', 'external'),
+      capabilityTool('BrowserGoForward', '前进', '前进到当前页面的下一条导航记录', 'external'),
+      capabilityTool('BrowserReload', '刷新页面', '重新加载当前页面', 'external'),
+      capabilityTool('BrowserScroll', '滚动页面', '滚动当前网页或指定容器', 'external'),
+      capabilityTool('BrowserExtract', '提取页面内容', '结构化读取页面文本、链接或表格'),
       capabilityTool('BrowserWaitFor', '等待页面', '等待页面条件出现', 'external'),
       capabilityTool('BrowserClick', '点击页面', '点击页面控件', 'external'),
       capabilityTool('BrowserFill', '填写页面', '填写输入框或编辑器', 'external'),

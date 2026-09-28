@@ -373,6 +373,8 @@ export interface Channel {
   enabled: boolean
   /** 是否由服务端统一管理（商业模式下从 /v1/account/channels 同步的渠道）。服务端删除后本地自动清理 */
   serverManaged?: boolean
+  /** 官方渠道是否直接请求 New API 数据面；false 时通过 Team Server Relay。 */
+  directDataPlane?: boolean
   /** 服务端管理渠道的语义类型；model-family 表示按模型族汇流的官方模型池。 */
   managedType?: 'model-family' | 'legacy'
   /** 模型族模型池的稳定标识，仅由服务端目录提供。 */

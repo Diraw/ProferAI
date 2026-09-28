@@ -39,7 +39,7 @@
     },
     "apps/electron": {
       "name": "@profer/electron",
-      "version": "0.15.83",
+      "version": "0.15.85",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "0.3.201",
         "@anthropic-ai/sdk": "^0.93.0",
@@ -58,6 +58,7 @@
         "@larksuiteoapi/node-sdk": "^1.65.0",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@pierre/diffs": "^1.1.20",
+        "@profer/agent-fabric": "workspace:*",
         "@profer/core": "workspace:*",
         "@profer/plugin-api": "workspace:*",
         "@profer/project-core": "workspace:*",
@@ -164,6 +165,13 @@
         "@anthropic-ai/claude-agent-sdk-darwin-x64": "0.3.201",
         "@anthropic-ai/claude-agent-sdk-win32-arm64": "0.3.201",
         "@anthropic-ai/claude-agent-sdk-win32-x64": "0.3.201",
+      },
+    },
+    "packages/agent-fabric": {
+      "name": "@profer/agent-fabric",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^5.0.0",
       },
     },
     "packages/core": {
@@ -557,6 +565,8 @@
     "@pierre/theming": ["@pierre/theming@0.0.2", "https://registry.npmmirror.com/@pierre/theming/-/theming-0.0.2.tgz", { "peerDependencies": { "@pierre/theme": "^1.1.0", "@shikijs/themes": "^3.0.0 || ^4.0.0", "react": "^18.3.1 || ^19.0.0", "react-dom": "^18.3.1 || ^19.0.0", "shiki": "^3.0.0 || ^4.0.0" }, "optionalPeers": ["@pierre/theme", "@shikijs/themes", "react", "react-dom", "shiki"] }, "sha512-QM1M4stXfnzfaE8I8YbjXSApV8c+2dBsXJj8eYg9WTpBR/cTmCZIcfGnN4p13iRrYu2Br/R/OJfEL7uR8Qjctw=="],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "https://registry.npmmirror.com/@pkgjs/parseargs/-/parseargs-0.11.0.tgz", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
+
+    "@profer/agent-fabric": ["@profer/agent-fabric@workspace:packages/agent-fabric"],
 
     "@profer/cli": ["@profer/cli@workspace:apps/cli"],
 
