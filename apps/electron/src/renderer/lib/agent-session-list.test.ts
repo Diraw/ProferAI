@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentSessionMeta } from '@profer/shared'
 import {
+  isUnopenedDraftSession,
   sortAgentSessionsByUpdatedAtDesc,
   replaceAgentSessionInFreshnessOrder,
   upsertAgentSession,
@@ -209,5 +210,43 @@ describe('mergeFetchedAgentSessions', () => {
     const result = mergeFetchedAgentSessions(sessions, sessions)
     expect(result.map((s) => s.id)).toEqual(['a', 'b'])
     expect(result).toHaveLength(2)
+  })
+})
+describe('isUnopenedDraftSession — 草稿会话的索引隐身判定', () => {
+  test('Given 持久化草稿且未打开 When 判断 Then 应从项目索引隐身', () => {
+    const session = makeSession('draft-persisted', 1, { draft: true })
+
+    expect(isUnopenedDraftSession(session, new Set(), new Set())).toBe(true)
+  })
+
+  test('给定内存草稿标记且未打开 When 判断 Then 应从项目索引隐身', () => {
+    const session = makeSession('draft-memory', 1)
+
+    expect(isUnopenedDraftSession(session, new Set(['draft-memory']), new Set())).toBe(true)
+  })
+
+  test('Given 持久化草稿但 Tab 已打开（已出现在「当前会话」区）When 判断 Then 不再隐身，项目索引同步展示', () => {
+    const session = makeSession('draft-opened', 1, { draft: true, workspaceId: 'workspace-1' })
+
+    expect(isUnopenedDraftSession(session, new Set(), new Set(['draft-opened']))).toBe(false)
+  })
+
+  test('Given 内存草稿标记但 Tab 已打开 When 判断 Then 不再隐身', () => {
+    const session = makeSession('draft-opened-memory', 1)
+
+    expect(isUnopenedDraftSession(session, new Set(['draft-opened-memory']), new Set(['draft-opened-memory']))).toBe(false)
+  })
+
+  test('Given 普通正式会话（两个草稿标记都没有） When 判断 Then 从不隐身', () => {
+    const session = makeSession('normal', 1)
+
+    expect(isUnopenedDraftSession(session, new Set(), new Set())).toBe(false)
+    expect(isUnopenedDraftSession(session, new Set(), new Set(['normal']))).toBe(false)
+  })
+
+  test('回归：同一次创建同时命中持久化与内存双标记 When Tab 未打开 Then 仍一致隐身', () => {
+    const session = makeSession('dual-draft', 1, { draft: true })
+
+    expect(isUnopenedDraftSession(session, new Set(['dual-draft']), new Set())).toBe(true)
   })
 })
