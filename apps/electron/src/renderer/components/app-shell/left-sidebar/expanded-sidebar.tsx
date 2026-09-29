@@ -9,6 +9,7 @@ import { PluginSidebarEntries } from '@/components/plugins/PluginEntries'
 import { PanelLeftClose, Plus, Search, FolderOpen, LogIn, Archive, ArchiveRestore, ArrowLeft, Settings } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { ModeSwitcher } from '../ModeSwitcher'
 import { SidebarBalanceBar } from '@/components/app-shell/SidebarBalanceBar'
 import { UserAvatar } from '@/components/chat/UserAvatar'
@@ -92,10 +93,11 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     handleProjectDragLeave,
     handleProjectDrop,
     handleProjectDragEnd,
-    setSettingsTab,
     setSettingsOpen,
     handleWorkspaceRename,
     handleRequestDeleteWorkspace,
+    handleToggleWorkspaceArchive,
+    archivedWorkspaces,
     canDeleteWorkspace,
     workspaceSwitchTs,
     progressiveConversationGroups,
@@ -417,6 +419,43 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
               ))}
             </div>
             {sidebarSection === 'projects' && <div className="flex items-center gap-0.5">
+              {/* 已收纳入口：仅在存在收纳项时出现，点击弹出列表可逐个取出 */}
+              {archivedWorkspaces.length > 0 && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      className="size-6 flex items-center justify-center rounded-md text-foreground/35 hover:bg-foreground/[0.06] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                      aria-label={`查看已收纳工作区（${archivedWorkspaces.length}）`}
+                    >
+                      <Archive size={13} />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-56 p-1">
+                    <div className="px-2 py-1 text-[11px] font-medium text-foreground/40">
+                      已收纳工作区 ({archivedWorkspaces.length})
+                    </div>
+                    {archivedWorkspaces.map((ws) => (
+                      <div
+                        key={ws.id}
+                        className="group/archived flex items-center gap-1.5 rounded-md px-2 py-1 text-[13px] text-foreground/70 hover:bg-foreground/[0.05]"
+                      >
+                        <FolderOpen size={13} className="flex-shrink-0 text-foreground/35" />
+                        <span className="flex-1 min-w-0 truncate">{ws.name}</span>
+                        <button
+                          type="button"
+                          aria-label={`取出「${ws.name}」`}
+                          title="取出工作区"
+                          onClick={() => { void handleToggleWorkspaceArchive(ws.id) }}
+                          className="flex-shrink-0 rounded p-0.5 text-foreground/35 transition-colors hover:text-foreground/80 titlebar-no-drag"
+                        >
+                          <ArchiveRestore size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </PopoverContent>
+                </Popover>
+              )}
               {/* 项目排序切换：默认（创建时间）/ 最近 / 名称 三种方式循环 */}
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -511,11 +550,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   onDragLeave={handleProjectDragLeave}
                   onDrop={handleProjectDrop}
                   onDragEnd={handleProjectDragEnd}
-                  onConfigureProject={(workspaceId) => {
-                    handleSelectProject(workspaceId)
-                    setSettingsTab('agent')
-                    setSettingsOpen(true)
-                  }}
+                  onToggleArchiveWorkspace={(workspaceId) => { void handleToggleWorkspaceArchive(workspaceId) }}
                   onRenameWorkspace={handleWorkspaceRename}
                   onRequestDeleteWorkspace={handleRequestDeleteWorkspace}
                   canDeleteWorkspace={canDeleteWorkspace(group.workspace)}

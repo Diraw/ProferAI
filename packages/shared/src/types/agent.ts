@@ -56,6 +56,13 @@ export interface AgentWorkspace {
 
   /** 工作区类型（个人/团队） */
   type?: WorkspaceType
+
+  // 本地收纳（个人工作区归档，与会话归档同构）
+  /** 收纳标记：true 时不出现在项目切换器，数据完整保留 */
+  archived?: boolean
+  /** 收纳时间戳 */
+  archivedAt?: number
+
   /** 软删除标记 */
   isDeleted?: boolean
   /** 软删除时间戳 */

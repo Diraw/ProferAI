@@ -819,8 +819,8 @@ export interface ElectronAPI {
   /** 创建 Agent 工作区 */
   createAgentWorkspace: (name: string) => Promise<AgentWorkspace>
 
-  /** 更新 Agent 工作区 */
-  updateAgentWorkspace: (id: string, updates: { name: string }) => Promise<AgentWorkspace>
+  /** 更新 Agent 工作区（改名 / 收纳切换） */
+  updateAgentWorkspace: (id: string, updates: { name?: string; archived?: boolean }) => Promise<AgentWorkspace>
 
   /** 删除 Agent 工作区 */
   deleteAgentWorkspace: (id: string) => Promise<void>
@@ -2528,7 +2528,7 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_WORKSPACE, name)
   },
 
-  updateAgentWorkspace: (id: string, updates: { name: string }) => {
+  updateAgentWorkspace: (id: string, updates: { name?: string; archived?: boolean }) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_WORKSPACE, id, updates)
   },
 

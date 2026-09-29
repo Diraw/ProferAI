@@ -8,21 +8,29 @@ import type { AgentWorkspace } from '@profer/shared'
  */
 export const TEAM_WORKSPACE_UI_ENABLED = false
 
-export function isAgentWorkspaceVisible(workspace: Pick<AgentWorkspace, 'type'>): boolean {
+/**
+ * 判断工作区是否进入产品入口（侧边栏切换器、TabSwitcher、规划中心等）。
+ *
+ * 两种不可见：
+ * - `archived`：用户主动收纳，纯本地状态，数据完整保留，可随时取出
+ * - 团队工作区：被 `TEAM_WORKSPACE_UI_ENABLED` 统一隐藏
+ */
+export function isAgentWorkspaceVisible(
+  workspace: Pick<AgentWorkspace, 'type'> & { archived?: boolean },
+): boolean {
+  if (workspace.archived) return false
   return TEAM_WORKSPACE_UI_ENABLED || workspace.type !== 'team'
 }
 
-export function getVisibleAgentWorkspaces<T extends Pick<AgentWorkspace, 'type'>>(
-  workspaces: readonly T[],
-): T[] {
-  return TEAM_WORKSPACE_UI_ENABLED
-    ? [...workspaces]
-    : workspaces.filter((workspace) => workspace.type !== 'team')
+export function getVisibleAgentWorkspaces<
+  T extends Pick<AgentWorkspace, 'type'> & { archived?: boolean },
+>(workspaces: readonly T[]): T[] {
+  return workspaces.filter((workspace) => isAgentWorkspaceVisible(workspace))
 }
 
 export function isAgentWorkspaceIdVisible(
   workspaceId: string | null | undefined,
-  workspaces: readonly Pick<AgentWorkspace, 'id' | 'type'>[],
+  workspaces: readonly (Pick<AgentWorkspace, 'id' | 'type'> & { archived?: boolean })[],
 ): boolean {
   if (!workspaceId) return true
   const workspace = workspaces.find((item) => item.id === workspaceId)

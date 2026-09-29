@@ -12,7 +12,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, Cloud, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, Sparkles, X,
+  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, Cloud, FolderOpen, GripVertical, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, Sparkles, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { clearSessionReferenceDragState, setSessionReferenceDragData } from '@/lib/session-reference-drag'
@@ -1067,7 +1067,7 @@ interface AgentProjectGroupItemProps {
   onDragLeave: (e: React.DragEvent) => void
   onDrop: (e: React.DragEvent, workspaceId: string) => void
   onDragEnd: () => void
-  onConfigureProject: (workspaceId: string) => void
+  onToggleArchiveWorkspace: (workspaceId: string) => void
   onRenameWorkspace: (workspaceId: string, newName: string) => Promise<void>
   onRequestDeleteWorkspace: (workspaceId: string) => void
   canDeleteWorkspace: boolean
@@ -1110,7 +1110,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   onDragLeave,
   onDrop,
   onDragEnd,
-  onConfigureProject,
+  onToggleArchiveWorkspace,
   onRenameWorkspace,
   onRequestDeleteWorkspace,
   canDeleteWorkspace,
@@ -1350,10 +1350,10 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-xs py-1 [&>svg]:size-3.5"
-              onSelect={() => onConfigureProject(group.workspace.id)}
+              onSelect={() => onToggleArchiveWorkspace(group.workspace.id)}
             >
-              <Settings size={14} />
-              配置 MCP 与 Skills
+              <Archive size={14} />
+              收纳工作区
             </DropdownMenuItem>
             <DropdownMenuSeparator className="my-0.5" />
             <DropdownMenuItem

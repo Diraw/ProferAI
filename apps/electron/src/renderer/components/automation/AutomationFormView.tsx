@@ -266,6 +266,14 @@ export function AutomationFormView(): React.ReactElement | null {
   const openSession = useOpenSession()
 
   const [form, setForm] = React.useState<AutomationDraft | null>(null)
+
+  // 任务已绑定的工作区可能已被收纳：选项里必须保留它，
+  // 否则 Select 会因缺少对应 value 而显示空白，用户看不清任务归属。
+  const workspaceOptions = React.useMemo(() => {
+    const bound = allWorkspaces.find((ws) => ws.id === form?.workspaceId)
+    if (!bound || workspaces.some((ws) => ws.id === bound.id)) return workspaces
+    return [...workspaces, bound]
+  }, [allWorkspaces, workspaces, form?.workspaceId])
   const [editingName, setEditingName] = React.useState(false)
   const [runningNow, setRunningNow] = React.useState(false)
   const [feishuBindings, setFeishuBindings] = React.useState<FeishuChatBinding[]>([])
@@ -1107,8 +1115,10 @@ export function AutomationFormView(): React.ReactElement | null {
               >
                 <SelectTrigger><SelectValue placeholder="选择工作区" /></SelectTrigger>
                 <SelectContent>
-                  {workspaces.map((ws) => (
-                    <SelectItem key={ws.id} value={ws.id}>{ws.name}</SelectItem>
+                  {workspaceOptions.map((ws) => (
+                    <SelectItem key={ws.id} value={ws.id}>
+                      {ws.name}{ws.archived ? '（已收纳）' : ''}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>

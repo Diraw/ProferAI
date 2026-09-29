@@ -100,6 +100,26 @@ function activateSkillCreatorInAllWorkspaces(index: AgentWorkspacesIndex): void 
 export function writeIndex(index: AgentWorkspacesIndex): void {
   const indexPath = getAgentWorkspacesIndexPath()
 
+  // 溯源保护：收纳标记是纯本地状态，任何写入都不应该把它静默抹掉。
+  // 如果即将写入的内容相比磁盘少了 archived，先把调用栈打出来，
+  // 否则这种丢失只会在重启后表现成“收纳莫名失效”，事后无法定位。
+  try {
+    const onDisk = readJsonFileSafe<AgentWorkspacesIndex>(indexPath)
+    if (onDisk && Array.isArray(onDisk.workspaces)) {
+      for (const previous of onDisk.workspaces) {
+        if (!previous.archived) continue
+        const next = index.workspaces.find((w) => w.id === previous.id)
+        if (next && !next.archived) {
+          console.warn(
+            `[Agent 工作区] 写入即将丢失收纳标记: ${previous.name ?? previous.slug} (${previous.id})\n${new Error().stack ?? ''}`,
+          )
+        }
+      }
+    }
+  } catch {
+    // 溯源检测失败不影响正常写入
+  }
+
   try {
     writeJsonFileAtomic(indexPath, index)
   } catch (error) {
@@ -217,10 +237,10 @@ export function createAgentWorkspace(
   return workspace
 }
 
-/** 更新工作区名称（slug 和目录不变） */
+/** 更新工作区名称或收纳状态（slug 和目录不变） */
 export function updateAgentWorkspace(
   id: string,
-  updates: { name: string },
+  updates: { name?: string; archived?: boolean },
 ): AgentWorkspace {
   const index = readIndex()
   const idx = index.workspaces.findIndex((w) => w.id === id)
@@ -230,22 +250,58 @@ export function updateAgentWorkspace(
   }
 
   const existing = index.workspaces[idx]!
+  const nextName = updates.name ?? existing.name
 
-  const duplicate = index.workspaces.find((w) => w.id !== id && w.name === updates.name)
-  if (duplicate) {
-    throw new Error(`工作区名称「${updates.name}」已存在`)
+  // 仅在实际改名时做重名校验，避免收纳/取出被同名逻辑误伤
+  if (updates.name !== undefined) {
+    const duplicate = index.workspaces.find((w) => w.id !== id && w.name === nextName)
+    if (duplicate) {
+      throw new Error(`工作区名称「${nextName}」已存在`)
+    }
+  }
+
+  let archived = existing.archived
+  let archivedAt = existing.archivedAt
+  if (updates.archived !== undefined) {
+    if (updates.archived) {
+      if (existing.slug === 'default') {
+        throw new Error('默认工作区不能收纳')
+      }
+      // 重复收纳保持首次时间戳，避免刷新排序
+      archivedAt = existing.archived ? existing.archivedAt : Date.now()
+      archived = true
+    } else {
+      archived = false
+      archivedAt = undefined
+    }
   }
 
   const updated: AgentWorkspace = {
     ...existing,
-    name: updates.name,
     updatedAt: Date.now(),
+  }
+
+  // 只改归档状态时完全不触碰 name：读-改-写循环里不能把未提供的字段写成 undefined，
+  // 否则历史数据中缺失 name 的工作区会把键抹掉（旧实现无条件写 name 就漏过这个坑）。
+  if (updates.name !== undefined) {
+    updated.name = nextName
+  }
+
+  // 显式维护归档字段：未收纳时不落盘，保持索引文件干净
+  if (archived) {
+    updated.archived = true
+    updated.archivedAt = archivedAt
+  } else {
+    delete updated.archived
+    delete updated.archivedAt
   }
 
   index.workspaces[idx] = updated
   writeIndex(index)
 
-  console.log(`[Agent 工作区] 已更新工作区: ${updated.name} (${updated.id})`)
+  const archiveNote =
+    updates.archived === undefined ? '' : archived ? ' [已收纳]' : ' [已取出]'
+  console.log(`[Agent 工作区] 已更新工作区: ${updated.name} (${updated.id})${archiveNote}`)
   return updated
 }
 

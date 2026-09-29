@@ -1362,6 +1362,57 @@ export function useLeftSidebar() {
     }
   }, [setWorkspaces])
 
+  /** 已收纳的个人工作区（团队工作区由 TEAM_WORKSPACE_UI_ENABLED 另行控制，不进此列表） */
+  const archivedWorkspaces = React.useMemo(
+    () => workspaces.filter((workspace) => workspace.archived && workspace.type !== 'team'),
+    [workspaces],
+  )
+
+  /**
+   * 收纳 / 取出工作区。
+   *
+   * 收纳只切换 renderer 侧可见性：会话、记忆、Skills、MCP、定时任务全部保留，
+   * 底层 listAgentWorkspaces() 仍返回全量，桥接 / 飞书入口不受影响。
+   */
+  const handleToggleWorkspaceArchive = React.useCallback(
+    async (workspaceId: string): Promise<void> => {
+      const target = workspaces.find((workspace) => workspace.id === workspaceId)
+      if (!target) return
+      const nextArchived = !target.archived
+
+      try {
+        const updated = await window.electronAPI.updateAgentWorkspace(workspaceId, {
+          archived: nextArchived,
+        })
+        setWorkspaces((prev) => prev.map((w) => (w.id === updated.id ? updated : w)))
+
+        // 定时任务不会因收纳而停：任务照常运行，但产物会话不再进入侧边栏。
+        // 这是收纳必须让用户知情的一点，所以在收纳动作上就地提示。
+        const activeAutomationCount = nextArchived
+          ? automations.filter((task) => task.workspaceId === workspaceId && task.active).length
+          : 0
+        toast.success(nextArchived ? `已收纳「${updated.name}」` : `已取出「${updated.name}」`, {
+          description:
+            activeAutomationCount > 0
+              ? `该工作区有 ${activeAutomationCount} 个启用中的定时任务，仍会继续运行，但产物会话不再显示在侧边栏`
+              : undefined,
+        })
+
+        // 收纳的是当前项目时必须切走，否则会停留在不在切换器里的项目上
+        if (nextArchived && workspaceId === currentWorkspaceId) {
+          const fallback =
+            workspaces.find((workspace) => workspace.slug === 'default') ??
+            workspaces.find((workspace) => workspace.id !== workspaceId && !workspace.archived)
+          if (fallback) await handleSelectProject(fallback.id)
+        }
+      } catch (error) {
+        console.error('[侧边栏] 收纳工作区失败:', error)
+        toast.error(error instanceof Error ? error.message : '操作失败')
+      }
+    },
+    [automations, currentWorkspaceId, handleSelectProject, setWorkspaces, workspaces],
+  )
+
   /** 重命名 Agent 会话标题 */
   const handleAgentRename = React.useCallback(async (id: string, newTitle: string): Promise<void> => {
     try {
@@ -1849,6 +1900,8 @@ export function useLeftSidebar() {
     handleCreateProjectKeyDown,
     handleWorkspaceRename,
     handleRequestDeleteWorkspace,
+    archivedWorkspaces,
+    handleToggleWorkspaceArchive,
 
     // 账号能力（free 用户限制）
     accountCaps,
