@@ -152,11 +152,6 @@ function rebuildCache(): void {
 
 // ===== 核心事件分发 =====
 
-/**
- * 全局 keydown 事件处理器
- *
- * 遍历所有注册的快捷键，匹配后执行对应 handler
- */
 /** 判断 macOS 上的 F1–F12，兼容浏览器 key/code 两种上报方式。 */
 export function isMacFunctionKeyEvent(
   event: Pick<KeyboardEvent, 'key' | 'code'>,
@@ -167,43 +162,84 @@ export function isMacFunctionKeyEvent(
     || /^F(?:[1-9]|1[0-2])$/i.test(event.code)
 }
 
-function dispatchShortcut(e: KeyboardEvent): void {
-  // macOS 的 Fn+F1–F12 可能被 Chromium 转成焦点导航，先在 capture 阶段吞掉，
-  // 防止窗口出现整块原生黄色焦点框。Profer 当前没有 F1–F12 快捷键。
-  if (isMacFunctionKeyEvent(e)) {
-    e.preventDefault()
-    e.stopPropagation()
-    return
-  }
+// ===== 分发决策 =====
 
-  // 忽略输入法组合过程
-  if (e.isComposing) return
+/** 按键事件与已启用快捷键定义之间的匹配结果 */
+export type ShortcutMatchResult =
+  /** 没有任何已启用定义匹配该按键 */
+  | 'none'
+  /** 命中了已启用定义，但当前没有注册任何 handler（如未选中会话时的重命名） */
+  | 'no-handler'
+  /** 命中了定义且有 handler 可执行 */
+  | 'handled'
+
+/** 一次按键事件的处理决策 */
+export interface ShortcutDispatchPlan {
+  /** 是否执行已注册的 handler */
+  runHandlers: boolean
+  /** 是否阻止默认行为并停止继续传播 */
+  swallow: boolean
+}
+
+/**
+ * 决定一次按键事件如何处理。
+ *
+ * 功能键的拦截全部在渲染层完成，主进程不参与 —— 主进程若按具体快捷键维护
+ * F1–F12 白名单，平台输入层就会依赖渲染层的快捷键配置，且用户把快捷键改绑到
+ * 其它 F 键时无法生效。
+ *
+ * 两条规则：
+ * 1. 输入法组合期间不执行快捷键（该按键属于输入法），但 macOS 的 F1–F12 仍要吞掉，
+ *    否则组合态按功能键会漏给 Chromium。
+ * 2. 未被任何 handler 消费的 macOS F1–F12 一律吞掉，避免 Chromium 的原生焦点导航
+ *    在窗口内绘制整块黄色焦点框。
+ */
+export function resolveShortcutDispatch(
+  event: Pick<KeyboardEvent, 'key' | 'code' | 'isComposing'>,
+  match: ShortcutMatchResult,
+  mac = isMac,
+): ShortcutDispatchPlan {
+  const isFunctionKey = isMacFunctionKeyEvent(event, mac)
+  const runHandlers = match === 'handled' && !event.isComposing
+
+  return { runHandlers, swallow: runHandlers || isFunctionKey }
+}
+
+/**
+ * 全局 keydown 事件处理器
+ *
+ * capture 阶段先把事件与已启用定义比对，再按 resolveShortcutDispatch 的决策
+ * 执行 handler 与阻止默认行为。
+ */
+function dispatchShortcut(e: KeyboardEvent): void {
+  let match: ShortcutMatchResult = 'none'
+  let handlerEntries: ShortcutHandlerEntry[] = []
 
   for (const [id, parsed] of parsedCache) {
-    if (matchesParsed(e, parsed)) {
-      const handlerSet = handlers.get(id)
-      if (handlerSet && handlerSet.size > 0) {
-        e.preventDefault()
-        e.stopPropagation()
-        const handlerEntries = Array.from(handlerSet)
-        let exclusiveEntry: ShortcutHandlerEntry | undefined
-        for (let i = handlerEntries.length - 1; i >= 0; i--) {
-          if (handlerEntries[i]!.options.exclusive) {
-            exclusiveEntry = handlerEntries[i]
-            break
-          }
-        }
-        if (exclusiveEntry) {
-          exclusiveEntry.callback()
-        } else {
-          // 执行所有注册的 handler
-          for (const entry of handlerEntries) {
-            entry.callback()
-          }
-        }
-      }
-      return // 匹配一个即停止
+    if (!matchesParsed(e, parsed)) continue
+    // 匹配一个即停止。但仍要区分「命中定义但无 handler」（如未选中会话时的重命名）：
+    // 它同样需要走功能键兜底，否则 F 键会漏出原生焦点导航。
+    handlerEntries = Array.from(handlers.get(id) ?? [])
+    match = handlerEntries.length > 0 ? 'handled' : 'no-handler'
+    break
+  }
+
+  const plan = resolveShortcutDispatch(e, match)
+  if (plan.swallow) {
+    e.preventDefault()
+    e.stopPropagation()
+  }
+  if (!plan.runHandlers) return
+
+  // 独占模式：只执行最后注册的 exclusive handler，其余（含非 exclusive）均跳过
+  for (let i = handlerEntries.length - 1; i >= 0; i--) {
+    if (handlerEntries[i]!.options.exclusive) {
+      handlerEntries[i]!.callback()
+      return
     }
+  }
+  for (const entry of handlerEntries) {
+    entry.callback()
   }
 }
 
