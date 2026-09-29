@@ -43,6 +43,7 @@ import { browserStateMapAtom } from '@/atoms/browser-atoms'
 import { currentAgentSessionIdAtom, type SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import type { ConversationMeta, AgentSessionMeta, AgentWorkspace } from '@profer/shared'
 import { formatRelativeUpdatedAt, getRailInitial } from './sidebar-utils'
+import type { ShortcutRegistrationOptions } from '@/lib/shortcut-registry'
 import {
   ACTIVE_SESSION_STATUSES,
   ACTIVE_SESSION_STATUS_PRIORITY,
@@ -56,6 +57,16 @@ import {
 } from './session-tree'
 
 const PROJECT_SESSION_PREVIEW_LIMIT = 5
+
+/**
+ * 重命名快捷键走独占模式。
+ *
+ * 同一个活跃会话可能同时挂在两处：顶部「当前会话」区和项目列表区（置顶区同理）。
+ * 非独占时 registry 会挨个执行该快捷键的全部 handler，两行会同时进入编辑态；
+ * 独占模式只执行最后注册的那一个，即 DOM 里更靠后的列表行。
+ */
+const RENAME_SHORTCUT_OPTIONS: ShortcutRegistrationOptions = { exclusive: true }
+
 // Electron 不提供系统双击间隔；使用保守窗口避免慢双击先打开项目。
 const PROJECT_TITLE_DOUBLE_CLICK_DELAY_MS = 500
 const PROJECT_SESSION_RECENT_WINDOW_MS = 3 * 86_400_000
@@ -487,8 +498,10 @@ export const ConversationItem = React.memo(function ConversationItem({
     }
   }
 
-  // F2 快速重命名当前活跃对话：active 即「活跃 Tab 所属会话」，同一时刻仅一项为 true
-  useShortcut('rename-item', startEdit, active && !editing)
+  // F2 快速重命名当前活跃对话：active 即「活跃 Tab 所属会话」。
+  // 但「同一时刻仅一项 active」只对列表区成立，顶部「当前会话」区会再渲染一份，
+  // 故必须用 exclusive 收敛到单行，否则两行同时进入编辑态。
+  useShortcut('rename-item', startEdit, active && !editing, RENAME_SHORTCUT_OPTIONS)
 
   const isPinned = !!conversation.pinned
 
@@ -768,8 +781,9 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
     }
   }
 
-  // F2 快速重命名当前活跃会话：用 id 精确匹配，避免父行（treeActive 为 true）与子行同时命中
-  useShortcut('rename-item', startEdit, currentAgentSessionId === session.id && !editing)
+  // F2 快速重命名当前活跃会话：用 id 精确匹配，避免父行（treeActive 为 true）与子行同时命中。
+  // 另需 exclusive：同一会话可能同时在顶部「当前会话」区与项目列表区各渲染一行。
+  useShortcut('rename-item', startEdit, currentAgentSessionId === session.id && !editing, RENAME_SHORTCUT_OPTIONS)
 
   const canMove = indicatorStatus === 'idle' || indicatorStatus === 'completed'
 
