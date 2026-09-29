@@ -229,7 +229,6 @@ import {
   DEFAULT_TRAFFIC_LIGHT_POSITION,
   installMacTrafficLightZoomSync,
 } from './lib/mac-traffic-light'
-import { installMacFunctionKeyBlocker } from './lib/mac-function-key-blocker'
 
 const MIGRATION_IPC_OPEN = 'migration:open-import-file'
 
@@ -572,7 +571,6 @@ function createWindow(): void {
   }
   installWindowsZoomInFallback(mainWindow)
   installMacTrafficLightZoomSync(mainWindow)
-  installMacFunctionKeyBlocker(mainWindow)
   updateWindowFrameAppearance(mainWindow)
   browserController.setOwnerWindow(mainWindow)
 
