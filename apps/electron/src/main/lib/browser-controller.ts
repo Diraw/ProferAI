@@ -319,8 +319,12 @@ export class BrowserController {
       this.hideAll(false)
       return
     }
-    this.foregroundSessionId = sessionId
     this.hideOtherBrowserSessions(sessionId)
+    // 同一会话的前台重申（如同会话内切换 Tab、分栏聚焦点击对话区）不得隐藏视图：
+    // 分栏模式下两侧 BrowserViewport 不会重挂载，renderer 未必立刻重发布局，
+    // 隐藏后原生 WebContentsView 会一直黑屏直到下一次几何/滚动事件。
+    if (sessionId === this.foregroundSessionId) return
+    this.foregroundSessionId = sessionId
     const browserSession = this.sessions.get(sessionId)
     if (!browserSession) return
     // 仅切换所有权，不在这里显示视图；显示必须等待当前 renderer 的布局 IPC。

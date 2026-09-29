@@ -340,10 +340,6 @@ export function MainArea(): React.ReactElement {
                   style={{ flex: '1 1 auto' }}
                   onPointerDownCapture={() => focusGroupSide('left')}
                 >
-                  {/* 焦点指示：非焦点栏轻微降对比，替代已退役的 PaneHeader 说明行 */}
-                  {groupViewActive && leftGroupTab && activeTabId !== leftGroupTab.id && (
-                    <div className="pointer-events-none absolute inset-0 z-10 bg-foreground/[0.05]" aria-hidden="true" />
-                  )}
                   {automationFormOpen ? (
                     // 兼容从会话内入口打开任务设置的场景。
                     <AutomationFormView />
@@ -378,9 +374,6 @@ export function MainArea(): React.ReactElement {
                       style={rightPaneStyle}
                       onPointerDownCapture={() => focusGroupSide('right')}
                     >
-                      {rightGroupTab && activeTabId !== rightGroupTab.id && (
-                        <div className="pointer-events-none absolute inset-0 z-10 bg-foreground/[0.05]" aria-hidden="true" />
-                      )}
                       {rightGroupTab ? (
                         <div className="flex-1 min-h-0 titlebar-no-drag">
                           <TabContent tabId={rightGroupTab.id} />
