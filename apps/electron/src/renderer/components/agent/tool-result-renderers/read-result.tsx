@@ -146,6 +146,10 @@ export function ReadResultRenderer({ result, isError, input }: ReadResultRendere
   return (
     <CollapsibleResult
       content={result}
+      // Read 结果只按字符数折叠，不参与按行折叠：
+      // 它有自己的行号 gutter 与 max-h-[400px] 内部滚动，再按 15 行切成
+      // 「前 15 行 + 展开」会与内部滚动重复，且十几行的文件本不该默认折叠。
+      foldByLines={false}
       renderContent={renderCode}
     />
   )

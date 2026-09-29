@@ -243,3 +243,62 @@ describe('展开进度描述', () => {
     expect(progress.remaining).toBe(0)
   })
 })
+
+/**
+ * 不参与按行折叠的渲染器（Read 代码视图、带内部滚动的 default 文本块）
+ * 用 foldByLines: false 退化为「只按字符数折叠」。
+ */
+const NO_LINE_FOLD = { maxChars: 3000, previewLines: 15, foldByLines: false }
+
+describe('仅按字符数折叠（foldByLines 为 false）', () => {
+  test('Given 行数远超预览行数但字符未超限 When 计算预览 Then 不折叠并渲染全文', () => {
+    const content = Array.from({ length: 40 }, (_, i) => `const line${i + 1} = ${i}`).join('\n')
+    expect(content.split('\n').length).toBeGreaterThan(15)
+    expect(content.length).toBeLessThan(3000)
+
+    const preview = sliceResultPreview(content, NO_LINE_FOLD)
+    expect(preview.collapsed).toBe(false)
+    expect(preview.text).toBe(content)
+  })
+
+  test('Given 字符数超限 When 计算预览 Then 折叠并封顶到字符上界', () => {
+    const content = 'x'.repeat(5000)
+    const preview = sliceResultPreview(content, NO_LINE_FOLD)
+    expect(preview.collapsed).toBe(true)
+    expect(preview.text).toHaveLength(NO_LINE_FOLD.maxChars)
+  })
+
+  test('Given 对比默认的按行折叠 When 同为 40 行 Then 默认折叠、foldByLines=false 不折叠', () => {
+    const content = Array.from({ length: 40 }, () => 'a').join('\n')
+    expect(sliceResultPreview(content, { maxChars: 3000, previewLines: 15 }).collapsed).toBe(true)
+    expect(sliceResultPreview(content, NO_LINE_FOLD).collapsed).toBe(false)
+  })
+
+  test('Given 字符数超限 When 全部展开 Then 拿到全文（不再受字符上界截断）', () => {
+    const content = 'y'.repeat(5000)
+    const collapsedWindow = sliceResultWindow(content, { ...NO_LINE_FOLD, revealedLines: 15 })
+    expect(collapsedWindow.text).toHaveLength(3000)
+
+    const expandedWindow = sliceResultWindow(content, {
+      ...NO_LINE_FOLD,
+      revealedLines: Number.POSITIVE_INFINITY,
+    })
+    expect(expandedWindow.text).toBe(content)
+    expect(expandedWindow.truncated).toBe(false)
+  })
+
+  test('Given 仅字符折叠 When 描述进度 Then 以字符为单位', () => {
+    const content = 'z'.repeat(5000)
+    const window = sliceResultWindow(content, { ...NO_LINE_FOLD, revealedLines: 15 })
+    const progress = describeRevealProgress(window, content, 15, false)
+    expect(progress.unit).toBe('字符')
+    expect(progress.total).toBe(5000)
+    expect(progress.remaining).toBe(2000)
+  })
+
+  test('Given 仅字符折叠 When 全部展开 Then 剩余为零', () => {
+    const content = 'z'.repeat(5000)
+    const window = sliceResultWindow(content, { ...NO_LINE_FOLD, revealedLines: Number.POSITIVE_INFINITY })
+    expect(describeRevealProgress(window, content, 15, false).remaining).toBe(0)
+  })
+})

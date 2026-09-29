@@ -124,6 +124,9 @@ export function DefaultResultRenderer({ result, isError, imageAttachments = [] }
     return (
       <CollapsibleResult
         content={cleanText}
+        // 这个 <pre> 自带 max-h + 纵向滚动，限高交给容器；
+        // 再按行折叠会与内部滚动重复，故仅按字符数折叠。
+        foldByLines={false}
         renderContent={(text) => (
           <pre className="rounded-md p-3 text-[12px] font-mono text-foreground/60 bg-muted/30 whitespace-pre-wrap break-all overflow-x-auto max-h-[400px] overflow-y-auto">
             {text}
@@ -144,6 +147,8 @@ export function DefaultResultRenderer({ result, isError, imageAttachments = [] }
       {cleanText && (
         <CollapsibleResult
           content={cleanText}
+          // 同上：内部滚动负责限高，不叠加按行折叠
+          foldByLines={false}
           renderContent={(text) => (
             <pre className="rounded-md p-3 text-[12px] font-mono text-foreground/60 bg-muted/30 whitespace-pre-wrap break-all overflow-x-auto max-h-[400px] overflow-y-auto">
               {text}

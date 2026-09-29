@@ -16,6 +16,14 @@ export interface ResultPreviewOptions {
   maxChars: number
   /** 行数上界：超过即折叠，初始预览只取前 N 行 */
   previewLines: number
+  /**
+   * 是否允许按行数折叠，默认 true。
+   *
+   * 传 false 时只有字符数一条轴参与判定，且「全部展开」可突破字符上界拿到全文。
+   * 适用于自带纵向滚动容器、由容器而非折叠控件限高的渲染器
+   * （Read 代码视图、带 max-h 的文本块）——它们再按行折叠会与内部滚动重复。
+   */
+  foldByLines?: boolean
 }
 
 export interface ResultPreview {
@@ -69,15 +77,32 @@ export function sliceResultWindow(
 ): ResultWindow {
   const safeContent = content ?? ''
   const maxChars = Math.max(0, options.maxChars)
+  const foldByLines = options.foldByLines !== false
   const lines = safeContent.split(/\r?\n/)
   const totalLines = lines.length
 
-  const collapsed = safeContent.length > maxChars || totalLines > options.previewLines
+  const collapsed = safeContent.length > maxChars
+    || (foldByLines && totalLines > options.previewLines)
   if (!collapsed) {
     return {
       text: safeContent,
       collapsed: false,
       truncated: false,
+      hasMoreLines: false,
+      visibleLines: totalLines,
+      totalLines,
+    }
+  }
+
+  // 仅字符轴：没有「行」可推进，折叠态就是前 maxChars 个字符，展开态即全文。
+  // 这条分支必须在下面按行切的逻辑之前返回，否则 previewLines 与「已全部展开」
+  // 同为最大值时 initialPreview 恒为 true，会导致「全部展开」点了没反应。
+  if (!foldByLines) {
+    const expanded = options.revealedLines > options.previewLines
+    return {
+      text: expanded ? safeContent : sliceAtBoundary(safeContent, maxChars),
+      collapsed: true,
+      truncated: !expanded,
       hasMoreLines: false,
       visibleLines: totalLines,
       totalLines,
@@ -137,8 +162,9 @@ export function describeRevealProgress(
   resultWindow: ResultWindow,
   content: string,
   previewLines: number,
+  foldByLines = true,
 ): RevealProgress {
-  const usesLines = resultWindow.totalLines > previewLines
+  const usesLines = foldByLines && resultWindow.totalLines > previewLines
   const revealed = usesLines ? resultWindow.visibleLines : resultWindow.text.length
   const total = usesLines ? resultWindow.totalLines : content.length
 

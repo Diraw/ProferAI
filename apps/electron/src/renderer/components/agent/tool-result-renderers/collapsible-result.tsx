@@ -24,8 +24,20 @@ interface CollapsibleResultProps {
   content: string
   /** 字符数上界，超过此值时启用折叠，默认 3000 */
   threshold?: number
-  /** 折叠时显示的行数，默认 15 */
+  /**
+   * 折叠时显示的行数，默认 15。
+   *
+   * 仅当 foldByLines 为 true 时生效。
+   */
   previewLines?: number
+  /**
+   * 是否允许按行数折叠，默认 true。
+   *
+   * 传 false 时只按字符数阈值折叠，「全部展开」可突破字符上界拿到全文。
+   * 适用于自带纵向滚动容器、由容器而非折叠控件负责限高的渲染器
+   * （Read 代码视图、带 max-h 的文本块）：它们再按行折叠会与内部滚动重复。
+   */
+  foldByLines?: boolean
   /**
    * 「再显示 N 行」的步长，默认 0 表示只提供一次性全部展开。
    *
@@ -67,6 +79,7 @@ export function CollapsibleResult({
   content,
   threshold = 3000,
   previewLines = 15,
+  foldByLines = true,
   revealStep = 0,
   renderContent,
   className,
@@ -79,9 +92,10 @@ export function CollapsibleResult({
     () => sliceResultWindow(safeContent, {
       maxChars: threshold,
       previewLines,
+      foldByLines,
       revealedLines: fullyExpanded ? Number.POSITIVE_INFINITY : revealedLines,
     }),
-    [safeContent, threshold, previewLines, revealedLines, fullyExpanded],
+    [safeContent, threshold, previewLines, foldByLines, revealedLines, fullyExpanded],
   )
 
   const collapse = React.useCallback((): void => {
@@ -95,11 +109,12 @@ export function CollapsibleResult({
 
   const expandAll = React.useCallback((): void => setFullyExpanded(true), [])
 
-  const canRevealMore = canRevealByStep(resultWindow, revealStep)
-  const wasExpanded = fullyExpanded || revealedLines > previewLines
+  // 仅字符折叠时没有「行」可递进，只留「全部展开」
+  const canRevealMore = foldByLines && canRevealByStep(resultWindow, revealStep)
+  const wasExpanded = fullyExpanded || (foldByLines && revealedLines > previewLines)
 
   // 括号里报「还剩多少」而非总量：点「全部展开」补上的正是这一部分
-  const progress = describeRevealProgress(resultWindow, safeContent, previewLines)
+  const progress = describeRevealProgress(resultWindow, safeContent, previewLines, foldByLines)
 
   return (
     <div className={cn('relative', className)}>
