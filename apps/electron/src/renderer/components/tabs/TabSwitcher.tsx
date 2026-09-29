@@ -17,7 +17,6 @@ import {
   tabsAtom,
 } from '@/atoms/tab-atoms'
 import { getInitialTabSwitchIndex, promoteTabMru } from '@/lib/tab-switching'
-import { isUnopenedDraftSession } from '@/lib/agent-session-list'
 import { appModeAtom } from '@/atoms/app-mode'
 import {
   conversationsAtom,
@@ -81,15 +80,6 @@ export function TabSwitcher(): ReactElement | null {
   const agentIndicatorMap = useAtomValue(agentSessionIndicatorMapAtom)
   const unviewedCompletedIds = useAtomValue(unviewedCompletedSessionIdsAtom)
   const draftSessionIds = useAtomValue(draftSessionIdsAtom)
-  // 已打开会话 Tab 的 ID：与「当前会话」区一致（只算 chat/agent），
-  // 与侧栏共用「已打开就不再算隐藏草稿」的规则，避免「当前会话」区看得见、Ctrl+Tab 搜不到。
-  const openSessionIds = useMemo(() => {
-    const ids = new Set<string>()
-    for (const tab of tabs) {
-      if (tab.type === 'chat' || tab.type === 'agent') ids.add(tab.sessionId)
-    }
-    return ids
-  }, [tabs])
   const visibleWorkspaceIds = useMemo(
     () => new Set(getVisibleAgentWorkspaces(agentWorkspaces).map((workspace) => workspace.id)),
     [agentWorkspaces],
@@ -138,7 +128,8 @@ export function TabSwitcher(): ReactElement | null {
     const agentCandidates = agentSessions
       .filter((session) => (
         !session.archived
-        && !isUnopenedDraftSession(session, draftSessionIds, openSessionIds)
+        && !session.draft
+        && !draftSessionIds.has(session.id)
         && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
       ))
       .map(buildAgentCandidate)
@@ -176,7 +167,6 @@ export function TabSwitcher(): ReactElement | null {
     agentWorkspaces,
     conversations,
     draftSessionIds,
-    openSessionIds,
     streamingConversationIds,
     tabMru,
     unviewedCompletedIds,

@@ -72,7 +72,7 @@ import type { AgentStreamEvent, AgentStreamCompletePayload, AgentEvent, AgentStr
 import { inferContextWindow, resolveContextWindowFromModelUsage } from '@profer/shared'
 import { buildExternalAgentRunActivation } from '@/lib/external-agent-run'
 import { buildTodoAgentPrompt } from '@/lib/todo-agent-prompt'
-import { upsertAgentSession, upsertAgentSessionProjection, mergeFetchedAgentSessions } from '@/lib/agent-session-list'
+import { upsertAgentSession, upsertAgentSessionProjection, mergeFetchedAgentSessions, syncDraftSessionId } from '@/lib/agent-session-list'
 import { upsertLiveMessageByUuid } from '@/lib/agent-live-message-upsert'
 import { createSessionUpdateBatcher } from '@/lib/session-update-batcher'
 
@@ -723,16 +723,9 @@ export function useGlobalAgentListeners(): void {
         if (payload.kind === 'session_projection') {
           if (payload.operation === 'upsert') {
             store.set(agentSessionsAtom, (previous) => upsertAgentSessionProjection(previous, payload.session))
-            // 草稿晋升后必须同步解除 renderer 的内存草稿标记：项目索引的隐藏判定同时看
-            // 持久化 draft 与内存标记，只清后者会造成「发过消息的正式会话仍被当草稿隐藏」。
-            if (!payload.session.draft) {
-              store.set(draftSessionIdsAtom, (previous) => {
-                if (!previous.has(payload.session.id)) return previous
-                const next = new Set(previous)
-                next.delete(payload.session.id)
-                return next
-              })
-            }
+            // 草稿晋升后必须同步解除 renderer 的内存草稿标记：可见性判定同时看持久化
+            // draft 与内存标记，迟一步会话就会卡在「已跑起来但仍被当草稿隐藏」。
+            store.set(draftSessionIdsAtom, (previous) => syncDraftSessionId(previous, payload.session))
             if (payload.session.permissionMode) {
               store.set(agentPermissionModeMapAtom, (previous) => {
                 const next = new Map(previous)
@@ -1591,14 +1584,7 @@ export function useGlobalAgentListeners(): void {
     const cleanupSessionUpdated = window.electronAPI.onAgentSessionUpdated(({ session }) => {
       store.set(agentSessionsAtom, (previous) => upsertAgentSession(previous, session))
       store.set(tabsAtom, (tabs) => updateTabTitle(tabs, session.id, session.title))
-      if (!session.draft) {
-        store.set(draftSessionIdsAtom, (previous) => {
-          if (!previous.has(session.id)) return previous
-          const next = new Set(previous)
-          next.delete(session.id)
-          return next
-        })
-      }
+      store.set(draftSessionIdsAtom, (previous) => syncDraftSessionId(previous, session))
     })
 
     // 独立规划窗口启动 Todo Agent 后，主进程通过 TODO_AGENT_SESSION_READY 把会话交接给主窗口。

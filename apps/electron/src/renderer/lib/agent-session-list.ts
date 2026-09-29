@@ -1,22 +1,40 @@
 import type { AgentSessionMeta, AgentSessionUiProjection } from '@profer/shared'
 
 /**
- * 会话是否属于「还没被打开的隐藏草稿」。
+ * 草稿标记集合的幂等增删。
  *
- * 点击项目与点 `+` 新建的会话都是真实持久化会话，只是在用户发出首条消息前处于草稿态
- * （持久化 `draft` 标记，或 renderer 内存里的 `draftSessionIds` 标记）。
- * 隐藏它们的目的是避免「仅仅浏览项目」就把空会话写进侧栏列表，而不是让同一个会话
- * 在不同位置表现不一致：一旦它的 Tab 已打开（即已出现在「当前会话」区），就必须同时
- * 进入项目 / 置顶 / 最近 / 快速切换器索引。因此这里用「已打开」解除隐藏，
- * 而不是无条件显示所有草稿。
+ * 草稿可见性由两处状态共同决定：主进程持久化的 `AgentSessionMeta.draft`，与 renderer
+ * 内存里的 `draftSessionIdsAtom`。两者必须保持一致，否则会话会卡在错误的可见性上
+ * （典型：主进程已晋升为正式，内存标记没清，项目列表就一直把它当草稿藏着）。
  */
-export function isUnopenedDraftSession(
+export function addDraftSessionId(
+  ids: Set<string>,
+  sessionId: string,
+): Set<string> {
+  if (ids.has(sessionId)) return ids
+  const next = new Set(ids)
+  next.add(sessionId)
+  return next
+}
+
+export function removeDraftSessionId(
+  ids: Set<string>,
+  sessionId: string,
+): Set<string> {
+  if (!ids.has(sessionId)) return ids
+  const next = new Set(ids)
+  next.delete(sessionId)
+  return next
+}
+
+/** 按会话的持久化 draft 标记同步内存草稿集：是草稿则标记，已晋升则清除。 */
+export function syncDraftSessionId(
+  ids: Set<string>,
   session: Pick<AgentSessionMeta, 'id' | 'draft'>,
-  inMemoryDraftIds: ReadonlySet<string>,
-  openSessionIds: ReadonlySet<string>,
-): boolean {
-  return (session.draft === true || inMemoryDraftIds.has(session.id))
-    && !openSessionIds.has(session.id)
+): Set<string> {
+  return session.draft === true
+    ? addDraftSessionId(ids, session.id)
+    : removeDraftSessionId(ids, session.id)
 }
 
 /** 按最近更新时间排序 Agent 会话，保持与主进程 listAgentSessions 一致。 */

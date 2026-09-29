@@ -97,9 +97,9 @@ import { detectIsMac } from '@/lib/platform'
 import { navigationController } from '@/lib/navigation-controller'
 import type { NavigationAction } from '@/lib/navigation-actions'
 import {
-  isUnopenedDraftSession,
   replaceAgentSessionInFreshnessOrder,
   sortAgentSessionsByUpdatedAtDesc,
+  syncDraftSessionId,
   upsertAgentSession,
 } from '@/lib/agent-session-list'
 import type { AgentSessionMeta, AgentWorkspace, WorkspaceCapabilities } from '@profer/shared'
@@ -352,20 +352,6 @@ export function useLeftSidebar() {
   }, [progressiveCount, progressiveResetKey])
   const setSearchDialogOpen = useSetAtom(searchDialogOpenAtom)
 
-  /**
-   * 已打开会话 Tab 的 ID。
-   *
-   * 只收 chat / agent：与「当前会话」区的筛选条件一致（preview / browser / plugin 等
-   * 工作 Tab 不计入会话区）。这样才能保证「两处同时显示」是严格同义的。
-   */
-  const openSessionIds = React.useMemo(() => {
-    const ids = new Set<string>()
-    for (const tab of tabs) {
-      if (tab.type === 'chat' || tab.type === 'agent') ids.add(tab.sessionId)
-    }
-    return ids
-  }, [tabs])
-
   React.useEffect(() => {
     const id = window.setInterval(() => setRelativeTimeNow(Date.now()), 60_000)
     return () => window.clearInterval(id)
@@ -540,19 +526,20 @@ export function useLeftSidebar() {
     [conversations, viewMode, draftSessionIds]
   )
 
-  /** 置顶 Agent 会话列表（仅活跃模式显示，跨项目展示；未打开的草稿仍隐藏） */
+  /** 置顶 Agent 会话列表（仅活跃模式显示，跨项目展示，排除 draft） */
   const pinnedAgentSessions = React.useMemo(
     () => {
       if (viewMode !== 'active') return []
       const filtered = agentSessions.filter((s) =>
         s.pinned
-        && !isUnopenedDraftSession(s, draftSessionIds, openSessionIds)
+        && !s.draft
+        && !draftSessionIds.has(s.id)
         && (!s.workspaceId || visibleWorkspaceIds.has(s.workspaceId))
         && !hasPinnedVisibleParent(s, agentSessions)
       )
       return sortAgentSessionsByUpdatedAtDesc(filtered)
     },
-    [agentSessions, viewMode, draftSessionIds, openSessionIds, visibleWorkspaceIds]
+    [agentSessions, viewMode, draftSessionIds, visibleWorkspaceIds]
   )
 
   const pinnedAgentSessionTrees = React.useMemo<AgentSessionTreeItem[]>(
@@ -560,11 +547,12 @@ export function useLeftSidebar() {
       session,
       childSessions: getDirectRelatedChildren(agentSessions, session.id).filter((child) => (
         !child.archived
-        && !isUnopenedDraftSession(child, draftSessionIds, openSessionIds)
+        && !child.draft
+        && !draftSessionIds.has(child.id)
         && (!child.workspaceId || visibleWorkspaceIds.has(child.workspaceId))
       )),
     })),
-    [agentSessions, draftSessionIds, openSessionIds, pinnedAgentSessions, visibleWorkspaceIds],
+    [agentSessions, draftSessionIds, pinnedAgentSessions, visibleWorkspaceIds],
   )
 
   /** 对话按日期分组（根据 viewMode 过滤归档状态，排除 draft） */
@@ -989,10 +977,9 @@ export function useLeftSidebar() {
         return next
       })
       setDraftSessionIds((previous: Set<string>) => {
-        if (previous.has(session.id)) return previous
-        const next = new Set(previous)
-        next.add(session.id)
-        return next
+        // `ensure` 在「草稿已有用户消息、上次晋升失败」时会返回已晋升的会话（draft=false）。
+        // 那种会话已经跑过，不能再当成草稿藏起来，否则恢复晋升后仍进不了项目列表。
+        return syncDraftSessionId(previous, session)
       })
       if (requestId !== projectSelectionRequestRef.current) return
       setCurrentAgentSessionId(session.id)
@@ -1600,7 +1587,8 @@ export function useLeftSidebar() {
         agentSessions.filter((session) =>
           !session.archived
           && !session.pinned
-          && !isUnopenedDraftSession(session, draftSessionIds, openSessionIds)
+          && !session.draft
+          && !draftSessionIds.has(session.id)
           && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
           // 已被置顶母会话收纳的子会话留在置顶区的母会话下面，避免重复显示为项目根会话
           && !hasPinnedVisibleParent(session, agentSessions)
@@ -1621,7 +1609,7 @@ export function useLeftSidebar() {
         sessions: sessionsByWorkspaceId.get(workspace.id) ?? [],
       }))
     },
-    [agentSessions, draftSessionIds, openSessionIds, sortedWorkspaces, visibleWorkspaceIds],
+    [agentSessions, draftSessionIds, sortedWorkspaces, visibleWorkspaceIds],
   )
 
   /** Agent 归档会话按日期分组（跨项目） */
@@ -1629,11 +1617,12 @@ export function useLeftSidebar() {
     () => groupByDate(sortAgentSessionsByUpdatedAtDesc(
       agentSessions.filter((session) => (
         session.archived
-        && !isUnopenedDraftSession(session, draftSessionIds, openSessionIds)
+        && !session.draft
+        && !draftSessionIds.has(session.id)
         && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
       ))
     )),
-    [agentSessions, draftSessionIds, openSessionIds, visibleWorkspaceIds]
+    [agentSessions, draftSessionIds, visibleWorkspaceIds]
   )
 
   /** 归档 Agent 会话渐进切片：先渲染可见数量，空闲补全 */
@@ -1666,7 +1655,7 @@ export function useLeftSidebar() {
 
     const recent = isChatMode
       ? conversations.find((conversation) => !conversation.archived && !draftSessionIds.has(conversation.id))
-      : agentSessions.find((session) => !session.archived && !isUnopenedDraftSession(session, draftSessionIds, openSessionIds))
+      : agentSessions.find((session) => !session.archived && !session.draft && !draftSessionIds.has(session.id))
     if (recent) {
       openSession(targetMode, recent.id, recent.title)
       return
@@ -1715,7 +1704,8 @@ export function useLeftSidebar() {
     return agentSessions
       .filter((session) =>
         !session.archived
-        && !isUnopenedDraftSession(session, draftSessionIds, openSessionIds)
+        && !session.draft
+        && !draftSessionIds.has(session.id)
         && (!currentWorkspaceId || session.workspaceId === currentWorkspaceId)
       )
       .sort((a, b) => {
@@ -1750,7 +1740,6 @@ export function useLeftSidebar() {
     conversations,
     agentSessions,
     draftSessionIds,
-    openSessionIds,
     currentWorkspaceId,
     activeSessionId,
     streamingIds,
