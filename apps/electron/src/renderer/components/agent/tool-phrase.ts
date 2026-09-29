@@ -72,7 +72,10 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
       return phrase(`写入 ${name}`)
     }
 
-    case 'Bash': {
+    // Bash 与 PowerShell 是同一组「命令类工具」，行内短语形态保持一致；
+    // 两者的差异交给图标与结果渲染器体现。
+    case 'Bash':
+    case 'PowerShell': {
       const cmd = input.command
       if (typeof cmd === 'string') {
         return phrase(`执行 ${truncate(cmd, 80)}`)

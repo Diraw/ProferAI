@@ -45,6 +45,8 @@ export function GlobResultRenderer({ result, isError }: GlobResultRendererProps)
     <CollapsibleResult
       content={result}
       previewLines={20}
+      // 每个文件渲染成一行，大目录列表同理按步长递进
+      revealStep={50}
       renderContent={renderList}
     />
   )
