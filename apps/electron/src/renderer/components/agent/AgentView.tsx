@@ -142,7 +142,7 @@ import { MAX_ATTACHMENT_SIZE, isAgentPresetToolGroupDisabled, parseGoalCommand }
 import { fileToBase64, formatFileNames, getFileBaseName, getFileParentPath } from '@/lib/file-utils'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 import { AgentMessageQueue } from './AgentMessageQueue'
-import { normalizeAgentHistoryResult } from './agent-history-pagination'
+import { normalizeAgentHistoryRefresh, normalizeAgentHistoryResult } from './agent-history-pagination'
 import { clearSessionReferenceDragState, getSessionReferenceDragData, canReferenceDraggedSession } from '@/lib/session-reference-drag'
 import { buildQuotedSelectionBlock } from '@/lib/quoted-selection'
 import {
@@ -1201,6 +1201,10 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     let cancelled = false
     // 桌面懒加载：首次只取尾部一页（tail）；refresh（流结束/出错/rewind）时覆盖
     // 已加载条数 + 余量，避免把用户已加载的更早历史丢回空窗。
+    // 注意：tail 的基数已含上一次 refresh 顺带拉回的更早历史，因此 refresh 结果
+    // 不能直接采用 —— 必须裁掉超出原起点的前缀，否则窗口每刷新一次向前膨胀一个
+    // 余量（见 normalizeAgentHistoryRefresh）。
+    const previousStartIndex = isSessionSwitch ? null : historyStartIndexRef.current
     const api = window.electronAPI as unknown as {
       getAgentSessionSDKMessages?: (id: string, opts?: unknown) => Promise<unknown>
     }
@@ -1220,7 +1224,9 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
           { startIndex: historyStartIndexRef.current, hasMore: historyHasMoreRef.current },
           (window.electronAPI as unknown as { getSdkMessagesHasMore?: (id: string) => boolean }).getSdkMessagesHasMore?.(sessionId),
         )
-        const normalized: SDKMessage[] = historyResult.messages
+        // refresh：窗口起点保持不动，只把本轮新消息追加到尾部
+        const refreshed = normalizeAgentHistoryRefresh(historyResult, previousStartIndex)
+        const normalized: SDKMessage[] = refreshed.messages
         // 1.7.1：合并尚未持久化的乐观消息（按 uuid），避免队列自动发送的用户气泡被重载覆盖
         const persistedUuids = new Set(
           normalized.filter((m) => typeof (m as Record<string, unknown>).uuid === 'string')
@@ -1243,10 +1249,10 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
           setMessagesLoaded(true)
 
           // 桌面：从分页结果同步 hasMore；非分页时从服务端读累计状态
-          if (historyResult.isPage) {
-            historyStartIndexRef.current = historyResult.cursor.startIndex
-            historyHasMoreRef.current = historyResult.cursor.hasMore
-            setHistoryHasMore(historyResult.cursor.hasMore)
+          if (refreshed.isPage) {
+            historyStartIndexRef.current = refreshed.cursor.startIndex
+            historyHasMoreRef.current = refreshed.cursor.hasMore
+            setHistoryHasMore(refreshed.cursor.hasMore)
           } else {
             const api = window.electronAPI as unknown as { getSdkMessagesHasMore?: (id: string) => boolean }
             const more = api.getSdkMessagesHasMore?.(sessionId)
