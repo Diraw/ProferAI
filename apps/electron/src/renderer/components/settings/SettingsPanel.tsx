@@ -28,6 +28,7 @@ import {
   UserRound,
   Blocks,
   FlaskConical,
+  Server,
   SlidersHorizontal,
 } from "lucide-react";
 import { ScrollArea } from "@profer/ui/primitives/scroll-area";
@@ -36,7 +37,7 @@ import type { SettingsTab } from "@/atoms/settings-tab";
 import { appModeAtom } from "@/atoms/app-mode";
 import { authStatusAtom } from "@/atoms/identity-atoms";
 import { hasUpdateAtom } from "@/atoms/updater";
-import { tabsAtom, activeTabIdAtom, openTab, TUTORIAL_TAB_ID } from "@/atoms/tab-atoms";
+import { tabsAtom, activeTabIdAtom, openTab, TUTORIAL_TAB_ID, TUTORIAL_TAB_TITLE, FRP_GUIDE_TAB_ID, FRP_GUIDE_TAB_TITLE, type OpenTabInput } from "@/atoms/tab-atoms";
 import { hasEnvironmentIssuesAtom } from "@/atoms/environment";
 import { developerModeEnabledAtom } from "@/atoms/developer-mode";
 import {
@@ -108,11 +109,21 @@ const EXPERIENCE_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "shortcuts", label: "快捷键管理", icon: <Keyboard size={16} /> },
 ];
 
-/** 连接：远程连接 / 代理 */
+/** 连接：远程连接 / 自建 FRP / 代理 */
 const CONNECTION_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "bots", label: "远程连接", icon: <Bot size={16} /> },
+  { id: "frp-guide", label: "自建 FRP 教程", icon: <Server size={16} /> },
   { id: "proxy", label: "代理设置", icon: <Network size={16} /> },
 ];
+
+/**
+ * 设置里的文档入口：不渲染在设置右侧，而是打开主区单例 Tab。
+ * 与 `openTab` 的类型/标题保持一致，避免两处各自演化。
+ */
+const DOC_SETTINGS_TABS: Partial<Record<SettingsTab, OpenTabInput>> = {
+  tutorial: { type: "tutorial", sessionId: TUTORIAL_TAB_ID, title: TUTORIAL_TAB_TITLE },
+  "frp-guide": { type: "frp-guide", sessionId: FRP_GUIDE_TAB_ID, title: FRP_GUIDE_TAB_TITLE },
+};
 
 /** 系统：数据管理 / 隐藏插件入口 */
 const SYSTEM_GROUP_ITEMS: SettingsTabItem[] = [
@@ -187,7 +198,7 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
     case "proxy":
       return <ProxySettings />;
     default:
-      // tutorial 等特殊 tab 由 handleTabChange 拦截打开主区 Tab，不会在此渲染
+      // tutorial / frp-guide 等文档 tab 由 handleTabChange 拦截打开主区 Tab，不会在此渲染
       return <GeneralSettings />;
   }
 }
@@ -221,8 +232,9 @@ export function SettingsPanel({
 
   /** 完成导航（仅在无需确认或用户明确放弃后调用）。 */
   const navigateToTab = (tabId: SettingsTab): void => {
-    if (tabId === 'tutorial') {
-      const result = openTab(mainTabs, { type: 'tutorial', sessionId: TUTORIAL_TAB_ID, title: 'Profer 使用教程' })
+    const docTab = DOC_SETTINGS_TABS[tabId]
+    if (docTab) {
+      const result = openTab(mainTabs, docTab)
       setMainTabs(result.tabs)
       setMainActiveTabId(result.activeTabId)
       setSettingsOpen(false)
@@ -291,7 +303,7 @@ export function SettingsPanel({
   // tabs 为空数组（tabsOverride 传空）时整体不渲染，避免解引用崩溃。
   const effectiveTab: SettingsTab = tabs.some((t) => t.id === activeTab) ? activeTab : (tabs[0]?.id ?? 'general')
 
-  /** 切换标签页时检测是否有未保存内容，tutorial 特殊处理：打开 New Tab 并关闭设置 */
+  /** 切换标签页时检测是否有未保存内容，文档入口（tutorial / frp-guide）特殊处理：打开主区 Tab 并关闭设置 */
   const handleTabChange = (tabId: SettingsTab): void => {
     if (tabId === effectiveTab) return
     if (effectiveTab === 'channels' && channelFormDirty) {

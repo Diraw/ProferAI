@@ -10,6 +10,7 @@
  * - agent: Agent 配置
  * - tools: Chat 工具
  * - bots: 远程连接
+ * - frp-guide: 自建 FRP 服务器教程（打开主区文档 Tab）
  * - shortcuts: 快捷键管理
  * - appearance: 外观设置
  * - proxy: 代理设置
@@ -26,7 +27,7 @@
 
 import { atom } from 'jotai'
 
-export type SettingsTab = 'general' | 'usage' | 'account' | 'channels' | 'appearance' | 'about' | 'agent' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'shortcuts' | 'team' | 'credits' | 'subscription' | 'openapi' | 'data-management' | 'developer' | 'plugins' | 'proxy' | 'devices'
+export type SettingsTab = 'general' | 'usage' | 'account' | 'channels' | 'appearance' | 'about' | 'agent' | 'prompts' | 'tools' | 'bots' | 'tutorial' | 'frp-guide' | 'shortcuts' | 'team' | 'credits' | 'subscription' | 'openapi' | 'data-management' | 'developer' | 'plugins' | 'proxy' | 'devices'
 
 /** 当前设置标签页（不持久化，每次打开设置默认显示通用偏好） */
 export const settingsTabAtom = atom<SettingsTab>('general')

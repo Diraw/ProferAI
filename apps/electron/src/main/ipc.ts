@@ -198,12 +198,13 @@ import {
   openFileDialog,
 } from './lib/attachment-service'
 import { extractTextFromAttachment } from './lib/document-parser'
-import { getTutorialContent, createWelcomeConversation } from './lib/tutorial-service'
+import { getTutorialContent, createWelcomeConversation, getFrpGuideContent } from './lib/tutorial-service'
 import { getUserProfile, updateUserProfile } from './lib/user-profile-service'
 import { getSettings, updateSettings } from './lib/settings-service'
 import { scanSkins, getSkinCss, getSkinPreview, invalidateSkinCache } from './lib/skin-service'
 import { deleteUserSkin, installSkinFromFolder, installSkinFromZip, openSkinTemplateFolder, openUserSkinsFolder, selectSkinFolder, selectSkinZip } from './lib/skin-manager-service'
-import { getRemoteServiceStatus, setRemoteServiceEnabled, restartRemoteService } from './lib/remote-service'
+import { getRemoteServiceStatus, setRemoteServiceEnabled, restartRemoteService, getRemotePairingQr, getRemoteBindings, removeRemoteBinding, getRemoteProfile, getRemotePairingAudit, startRemoteFrp, rotateRemoteTls, getRemoteTlsCertificate } from './lib/remote-service'
+import { getFrpStatus, saveFrpConfig, checkFrpReleases, installFrp, rollbackFrp, startFrp, stopFrp, exportFrpDeployment, copyFrpDeploymentInstructions, getFrpDeploymentInstructions, generateFrpMaterial, regenerateFrpMaterial, testFrpEndpoint, type FrpConfig } from './lib/remote-frp-service'
 import { updateWindowFrameAppearance } from './lib/titlebar-overlay'
 import { setDockBadgeCount } from './lib/dock-badge-service'
 
@@ -1865,6 +1866,14 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 获取“自建 FRP 服务器”教程内容
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.GET_FRP_GUIDE_CONTENT,
+    async (): Promise<string | null> => {
+      return getFrpGuideContent()
+    }
+  )
+
   // 发送消息（触发 AI 流式响应）
   // 注意：通过 event.sender 获取 webContents 用于推送流式事件
   ipcMain.handle(
@@ -2213,6 +2222,31 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  ipcMain.handle('remote:pairing-qr', async () => getRemotePairingQr())
+  ipcMain.handle('remote:pairing-audit', async () => getRemotePairingAudit())
+  ipcMain.handle('remote:bindings', async () => getRemoteBindings())
+  ipcMain.handle('remote:revoke', async (_event, id: string) => { if (typeof id !== 'string') throw new Error('设备ID无效'); removeRemoteBinding(id) })
+  ipcMain.handle('remote:frp', async (_event, action: string, input?: FrpConfig | string) => {
+    const remote = getRemoteServiceStatus()
+    switch (action) {
+      case 'status': return getFrpStatus()
+      case 'save': if (!input || typeof input !== 'object') throw new Error('配置无效'); return saveFrpConfig(input, remote.token)
+      case 'check': return checkFrpReleases()
+      case 'install': if (typeof input !== 'string') throw new Error('版本无效'); return installFrp(input)
+      case 'rollback': return rollbackFrp()
+      case 'start': if (!remote.running) throw new Error('请先开启移动模式'); if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return startRemoteFrp()
+      case 'rotate-tls': return rotateRemoteTls()
+      case 'generate': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return generateFrpMaterial()
+      case 'regenerate': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return regenerateFrpMaterial()
+      case 'deployment-instructions': return copyFrpDeploymentInstructions()
+      case 'deployment-instructions-text': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return getFrpDeploymentInstructions()
+      case 'stop': await stopFrp(); return getFrpStatus()
+      case 'export': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return exportFrpDeployment()
+      case 'test': if (!remote.token) throw new Error('请先开启移动模式'); return testFrpEndpoint(getRemoteProfile(), remote.token, getRemoteTlsCertificate())
+      default: throw new Error('未知 FRP 操作')
+    }
+  })
+
   // 获取移动模式服务状态。Token 只在服务实际监听后随状态返回。
   ipcMain.handle(
     SETTINGS_IPC_CHANNELS.GET_POCKET_MODE_STATUS,
@@ -2225,14 +2259,12 @@ export function registerIpcHandlers(): void {
     async (_event, enabled: boolean) => {
       if (typeof enabled !== 'boolean') throw new Error('移动模式开关参数无效')
       if (!enabled) {
-        const status = setRemoteServiceEnabled(false)
+        const status = await setRemoteServiceEnabled(false)
         updateSettings({ pocketModeEnabled: false })
         return status
       }
 
-      setRemoteServiceEnabled(true)
-      // listen 是异步的；状态会在 UI 随后刷新时带回地址和 Token。
-      const status = getRemoteServiceStatus()
+      const status = await setRemoteServiceEnabled(true)
       updateSettings({ pocketModeEnabled: true })
       return status
     },

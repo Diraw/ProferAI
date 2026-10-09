@@ -8,7 +8,9 @@ declare module 'ws' {
     static readonly CLOSING: number
     static readonly CLOSED: number
     readonly readyState: number
-    constructor(url: string, options?: { headers?: Record<string, string> })
+    readonly protocol: string
+    constructor(url: string, options?: { headers?: Record<string, string>; handshakeTimeout?: number; rejectUnauthorized?: boolean })
+    constructor(url: string, protocols: string | string[], options?: { headers?: Record<string, string>; handshakeTimeout?: number; rejectUnauthorized?: boolean; ca?: string })
     send(data: Buffer | ArrayBuffer | Uint8Array | string): void
     close(code?: number, reason?: string): void
     terminate(): void
@@ -21,6 +23,7 @@ declare module 'ws' {
   export class WebSocketServer extends EventEmitter {
     readonly clients: Set<WebSocket>
     constructor(options?: { server?: HttpServer; path?: string })
+    handleUpgrade(request: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer, callback: (socket: WebSocket, request: IncomingMessage) => void): void
     close(cb?: () => void): void
     on(event: 'connection', listener: (socket: WebSocket, request: IncomingMessage) => void): this
     on(event: string, listener: (...args: never[]) => void): this

@@ -376,6 +376,9 @@ export interface ElectronAPI {
   /** 创建欢迎对话（含教程附件） */
   createWelcomeConversation: () => Promise<ConversationMeta | null>
 
+  /** 获取“自建 FRP 服务器”教程内容 */
+  getFrpGuideContent: () => Promise<string | null>
+
   // ===== 消息发送 =====
 
   /** 发送消息（触发 AI 流式响应） */
@@ -526,6 +529,11 @@ export interface ElectronAPI {
   onDeveloperSettingsChanged: (callback: (settings: DeveloperSettingsSnapshot) => void) => () => void
 
   /** 获取移动模式（试验版）状态与连接信息 */
+  getRemotePairingQr: () => Promise<{ dataUrl: string; expiresAt: number }>
+  getRemotePairingAudit: () => Promise<import('../main/lib/remote-pairing').PairingAudit[]>
+  getRemoteBindings: () => Promise<Array<{ id: string; name: string; createdAt: number }>>
+  revokeRemoteBinding: (id: string) => Promise<void>
+  remoteFrp: (action: 'status' | 'save' | 'check' | 'install' | 'rollback' | 'start' | 'stop' | 'export' | 'test' | 'rotate-tls' | 'generate' | 'regenerate' | 'deployment-instructions' | 'deployment-instructions-text', input?: import('../main/lib/remote-frp-core').FrpConfig | string) => Promise<import('../main/lib/remote-frp-service').FrpStatus | string | null>
   getPocketModeStatus: () => Promise<PocketModeStatus>
   /** 启用或关闭移动模式（试验版） */
   setPocketModeEnabled: (enabled: boolean) => Promise<PocketModeStatus>
@@ -1944,6 +1952,10 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(CHAT_IPC_CHANNELS.CREATE_WELCOME_CONVERSATION)
   },
 
+  getFrpGuideContent: () => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_FRP_GUIDE_CONTENT)
+  },
+
   // 消息发送
   sendMessage: (input: ChatSendInput) => {
     return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SEND_MESSAGE, input)
@@ -2129,6 +2141,11 @@ const electronAPI: ElectronAPI = {
     return () => { ipcRenderer.removeListener(SETTINGS_IPC_CHANNELS.ON_DEVELOPER_SETTINGS_CHANGED, listener) }
   },
 
+  getRemotePairingQr: () => ipcRenderer.invoke('remote:pairing-qr'),
+  getRemotePairingAudit: () => ipcRenderer.invoke('remote:pairing-audit'),
+  getRemoteBindings: () => ipcRenderer.invoke('remote:bindings'),
+  revokeRemoteBinding: (id) => ipcRenderer.invoke('remote:revoke', id),
+  remoteFrp: (action, input) => ipcRenderer.invoke('remote:frp', action, input),
   getPocketModeStatus: () => {
     return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.GET_POCKET_MODE_STATUS) as Promise<PocketModeStatus>
   },

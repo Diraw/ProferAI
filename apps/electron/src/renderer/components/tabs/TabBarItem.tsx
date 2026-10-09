@@ -194,7 +194,7 @@ export function TabBarItem({
         ? <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         : type === 'browser'
           ? <Globe2 className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-          : type === 'tutorial'
+          : (type === 'tutorial' || type === 'frp-guide')
           ? <BookOpen className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
           : type === 'plugin'
             ? <Blocks className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />

@@ -319,7 +319,7 @@ export function TabBar({
             })
             .catch(console.error);
         }
-      } else if (tab.type === "scratch" || tab.type === "tutorial") {
+      } else if (tab.type === "scratch" || tab.type === "tutorial" || tab.type === "frp-guide") {
         setCurrentConversationId(null);
         // 个人 Agent 模式下保留 appMode，避免切到 Scratch 时收起右侧文件面板；
         // 团队模式必须退出 TeamWorkspaceView，否则草稿/教程标签会被团队文件页遮住。

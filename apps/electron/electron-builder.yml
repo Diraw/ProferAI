@@ -80,6 +80,9 @@ extraResources:
   # 教程文件（教程查看器 + 欢迎对话使用）
   - from: ../../tutorial/tutorial-v2.md
     to: tutorial.md
+  # 自建 FRP 服务器教程（设置 → 连接 → 自建 FRP 教程；guide-service 打包路径 process.resourcesPath/frp-server-guide.md）
+  - from: resources/frp-server-guide.md
+    to: frp-server-guide.md
   # Proma 品牌 Logo 素材（品牌素材下载功能使用）
   - from: resources/profer-logos
     to: profer-logos

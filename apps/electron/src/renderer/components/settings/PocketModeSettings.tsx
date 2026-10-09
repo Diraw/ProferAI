@@ -4,6 +4,8 @@ import { toast } from 'sonner'
 import { Button } from '@profer/ui/primitives/button'
 import { Input } from '@profer/ui/primitives/input'
 import { SettingsCard, SettingsSection, SettingsToggle } from './primitives'
+import { RemoteFrpSettings } from './RemoteFrpSettings'
+import { RemotePairingSettings } from './RemotePairingSettings'
 import type { PocketModeStatus } from '../../../types'
 
 /** 安卓版 APK 扫码下载信息 */
@@ -27,7 +29,7 @@ function ConnectionValue({ label, value, secret = false }: { label: string; valu
     <div className="flex items-center gap-3 px-4 py-3">
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-foreground">{label}</div>
-        <code className={`mt-1 block truncate text-xs text-muted-foreground ${secret ? 'select-all' : ''}`}>{value}</code>
+        <code className={`mt-1 block truncate text-xs text-muted-foreground ${secret ? 'select-all' : ''}`}>{secret ? `••••••••${value.slice(-4)}` : value}</code>
       </div>
       <Button variant="ghost" size="icon" className="shrink-0" onClick={() => void copy()} aria-label={`复制${label}`}>
         <Copy className="size-4" />
@@ -175,7 +177,7 @@ export function PocketModeSettings(): React.ReactElement {
 
   return (
     <div className="space-y-6">
-      <SettingsSection title="移动模式（试验版）" description="将 Agent 工作区连接到同一局域网内的移动设备浏览器。">
+      <SettingsSection title="移动模式（试验版）" description="通过一次性扫码配对，在局域网或自建可信 WSS 公网入口连接 Pocket。">
         <SettingsCard divided>
           <SettingsToggle
             label="启用移动端连接"
@@ -259,13 +261,14 @@ export function PocketModeSettings(): React.ReactElement {
       {status.enabled && (
         <SettingsSection
           title="连接信息"
-          description={status.running ? '请在移动设备浏览器打开以下局域网地址，并输入连接 Token。' : '正在启动服务，请稍候...'}
+          description={status.running ? 'Pocket 配对' : '正在启动服务，请稍候...'}
         >
           <SettingsCard divided={false}>
-            {status.running && status.lanUrl ? (
+            {status.running ? (
               <>
-                <ConnectionValue label="移动端访问地址" value={status.lanUrl} />
-                {status.token && <ConnectionValue label="连接 Token" value={status.token} secret />}
+                {status.lanUrl && <ConnectionValue label="移动端访问地址" value={status.lanUrl} />}
+                <RemotePairingSettings />
+                {status.token && <ConnectionValue label="手动兼容凭据（仅可信局域网）" value={status.token} secret />}
               </>
             ) : (
               <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在监听端口 {status.port}...</div>
@@ -273,10 +276,12 @@ export function PocketModeSettings(): React.ReactElement {
           </SettingsCard>
           <div className="mt-3 flex gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
             <Wifi className="mt-0.5 size-4 shrink-0 text-amber-600" />
-            <span>仅支持同一局域网。Token 等同连接凭据，请勿分享给不受信任的人；关闭开关会立即断开移动端连接。</span>
+            <span>公网入口须配置可信 WSS 域名；关闭开关会立即断开移动端连接并停止本应用 FRP。</span>
           </div>
         </SettingsSection>
       )}
+
+      <RemoteFrpSettings />
 
       {/* 安卓版 App 扫码下载：指向官网 profer.cn 域名直链，任何场景都可用，不依赖移动模式是否开启。 */}
       <SettingsSection
