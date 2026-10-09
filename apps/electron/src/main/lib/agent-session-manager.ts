@@ -8,9 +8,10 @@
  * 照搬 conversation-manager.ts 的模式。
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync, readdirSync, cpSync, copyFileSync, createReadStream, createWriteStream, statSync, type WriteStream } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync, readdirSync, cpSync, copyFileSync, createReadStream, createWriteStream, type WriteStream } from 'node:fs'
 import { createInterface } from 'node:readline'
-import { writeJsonFileAtomic, readJsonFileSafe } from './safe-file'
+import { createAgentSessionIndexStore } from './agent-session-index'
+import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, join, relative, resolve, dirname } from 'node:path'
 import {
@@ -24,6 +25,7 @@ import {
   getSdkConfigDir,
 } from './config-paths'
 import { getAgentWorkspace } from './agent-workspace-manager'
+import { collectAttachedDirectories } from './agent-directory-utils'
 import { assertEnabledModelForChannel } from './agent-model-selection'
 import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
 import { copyForkFile, buildForkProjectKey, renameForkFile, removeForkPath } from './fork-file-ops'
@@ -114,36 +116,10 @@ import {
 } from '@profer/project-core'
 // GPT Image 生图工具仅在 Chat 模式可用，Agent 模式不需要清理逻辑
 
-/**
- * 会话索引文件格式
- */
-interface AgentSessionsIndex {
-  /** 配置版本号 */
-  version: number
-  /** 会话元数据列表 */
-  sessions: AgentSessionMeta[]
-}
-
-/** 当前索引版本 */
-const INDEX_VERSION = 1
-
-/**
- * 会话索引的内存缓存。
- *
- * Agent 运行期间会多次读取和更新会话元数据。索引随历史会话增长后，反复同步
- * readFile + JSON.parse 会直接阻塞主进程；用 mtime 和 size 校验可保留外部修改感知。
- */
-let indexCache: { data: AgentSessionsIndex; mtimeMs: number; size: number } | null = null
-
-function cacheIndex(data: AgentSessionsIndex): void {
-  try {
-    const stat = statSync(getAgentSessionsIndexPath())
-    indexCache = { data, mtimeMs: stat.mtimeMs, size: stat.size }
-  } catch {
-    // 无法确认磁盘版本时绝不复用内存数据，交给下次读取走恢复路径。
-    indexCache = null
-  }
-}
+// 索引存储独立管理缓存与原子读写；manager 保留现有公开入口。
+const sessionIndex = createAgentSessionIndexStore(getAgentSessionsIndexPath)
+const readIndex = sessionIndex.read
+const writeIndex = sessionIndex.write
 
 /** UPDATE_SESSION_AGENT_RUNTIME 需要原子回滚的 runtime-owned 元数据快照。 */
 export interface AgentRuntimeMetaSnapshot {
@@ -198,84 +174,6 @@ export function restoreAgentRuntimeMeta(id: string, snapshot: AgentRuntimeMetaSn
   index.sessions[idx] = restored
   writeIndex(index)
   return restored
-}
-
-/**
- * 在存储边界统一补全 runtime：历史/非法值绝不进入 Pi，均回退 Claude。
- * 此处只更新内存对象，不在读取阶段改写用户索引；下一次正常元数据写入会自然持久化。
- */
-function normalizeSessionRuntime(session: AgentSessionMeta): AgentSessionMeta {
-  const agentRuntime = normalizeAgentRuntime(session.agentRuntime)
-  return session.agentRuntime === agentRuntime ? session : { ...session, agentRuntime }
-}
-
-/** 移除 Agent 知识库下线前遗留的 session allowlist，不影响 Chat 消息中的同名字段。 */
-function removeLegacyAgentKnowledgeReferences(session: AgentSessionMeta): AgentSessionMeta {
-  if (!Object.prototype.hasOwnProperty.call(session, 'knowledgeReferences')) return session
-  const { knowledgeReferences: _removed, ...withoutKnowledgeReferences } = session as AgentSessionMeta & { knowledgeReferences?: unknown }
-  return withoutKnowledgeReferences
-}
-
-/**
- * 读取会话索引文件
- */
-function readIndex(): AgentSessionsIndex {
-  const indexPath = getAgentSessionsIndexPath()
-
-  if (indexCache) {
-    try {
-      const stat = statSync(indexPath)
-      if (stat.mtimeMs === indexCache.mtimeMs && stat.size === indexCache.size) {
-        return indexCache.data
-      }
-    } catch {
-      indexCache = null
-    }
-  }
-
-  const data = readJsonFileSafe<AgentSessionsIndex>(indexPath)
-  if (data) {
-    let removedLegacyKnowledgeReferences = false
-    const sessions = Array.isArray(data.sessions)
-      ? data.sessions.map((session) => {
-          const normalized = normalizeSessionRuntime(session)
-          const cleaned = removeLegacyAgentKnowledgeReferences(normalized)
-          if (cleaned !== normalized) removedLegacyKnowledgeReferences = true
-          return cleaned
-        })
-      : []
-    const normalized: AgentSessionsIndex = { ...data, sessions }
-    let cacheNormalized = true
-    if (removedLegacyKnowledgeReferences) {
-      try {
-        writeJsonFileAtomic(indexPath, normalized)
-        console.info('[Agent 会话] 已清理下线前遗留的知识库引用字段')
-      } catch (error) {
-        cacheNormalized = false
-        console.warn('[Agent 会话] 清理遗留知识库引用字段失败，将在下次读取时重试:', error)
-      }
-    }
-    if (cacheNormalized) cacheIndex(normalized)
-    return normalized
-  }
-  return { version: INDEX_VERSION, sessions: [] }
-}
-
-/**
- * 写入会话索引文件
- */
-function writeIndex(index: AgentSessionsIndex): void {
-  const indexPath = getAgentSessionsIndexPath()
-
-  try {
-    writeJsonFileAtomic(indexPath, index)
-    cacheIndex(index)
-  } catch (error) {
-    // 调用方可能已原地修改缓存对象；写入失败后不能继续返回未落盘数据。
-    indexCache = null
-    console.error('[Agent 会话] 写入索引文件失败:', error)
-    throw new Error('写入 Agent 会话索引失败')
-  }
 }
 
 /**
@@ -341,30 +239,17 @@ export function createDelegatedChildSessionMeta(params: {
  * @param includeArchived 是否包含已归档会话；默认 false（高频侧边栏刷新只拉活跃）
  */
 export function listAgentSessions(includeArchived = false): AgentSessionMeta[] {
-  const index = readIndex()
-  return index.sessions
-    .filter((s) => includeArchived || !s.archived)
-    .sort((a, b) => b.updatedAt - a.updatedAt)
+  return sessionIndex.list(includeArchived)
 }
 
-/**
- * 已归档 Agent 会话数量（轻量计数，不排序、不返回 meta）
- */
+/** 已归档 Agent 会话数量；不含隐藏草稿。 */
 export function countArchivedAgentSessions(): number {
-  const index = readIndex()
-  let count = 0
-  for (const s of index.sessions) {
-    if (s.archived && !s.draft) count += 1
-  }
-  return count
+  return sessionIndex.countArchived()
 }
 
-/**
- * 获取单个会话的元数据
- */
+/** 获取单个会话的元数据。 */
 export function getAgentSessionMeta(id: string): AgentSessionMeta | undefined {
-  const index = readIndex()
-  return index.sessions.find((s) => s.id === id)
+  return sessionIndex.get(id)
 }
 
 /**
@@ -1653,7 +1538,32 @@ export function moveSessionToWorkspace(sessionId: string, targetWorkspaceId: str
     ...session,
     workspaceId: targetWorkspaceId,
     sdkSessionId: undefined, // SDK 上下文与工作区 cwd 绑定，必须清空
+    ...(normalizeAgentRuntime(session.agentRuntime) === 'pi'
+      ? { piSessionFile: undefined, piEntryBindings: undefined, piFileCheckpoints: undefined }
+      : {}),
     updatedAt: Date.now(),
+  }
+  if (normalizeAgentRuntime(session.agentRuntime) === 'pi') {
+    // Pi transcript 与文件检查点包含旧 cwd 的状态；迁移后重建 runtime，避免在新工作区恢复旧目录快照。
+    const piSessionDir = join(getSdkConfigDir(), 'sessions', 'pi')
+    const oldPiSessionFile = session.piSessionFile && isPathWithin(piSessionDir, session.piSessionFile)
+      ? session.piSessionFile
+      : session.sdkSessionId
+        ? findPiSessionJsonl(session.sdkSessionId)
+        : undefined
+    if (oldPiSessionFile && existsSync(oldPiSessionFile)) {
+      try {
+        unlinkSync(oldPiSessionFile)
+      } catch (error) {
+        console.warn(`[Agent 会话] 迁移工作区时清理旧 Pi transcript 失败: ${oldPiSessionFile}`, error)
+      }
+    }
+    try {
+      const keepPaths = collectForeignCheckpointPaths(sessionId)
+      prunePiFileCheckpoints(getPiCheckpointsDir(), sessionId, { keepPaths })
+    } catch (error) {
+      console.warn(`[Agent 会话] 迁移工作区时清理旧 Pi 检查点失败: sessionId=${sessionId}`, error)
+    }
   }
   index.sessions[idx] = updated
   writeIndex(index)
@@ -2028,6 +1938,140 @@ export async function rewindPiSession(
     remainingMessages: kept.length,
     fileRewind,
   }
+}
+
+/**
+ * 从主路径里挑出「第一轮」的文件检查点路径。
+ *
+ * Pi 在每轮开始前保存工作区基线，并把基线绑定到该轮的 assistant entry，
+ * 所以主路径（root→leaf）上**最早**一个有绑定的 entry 对应的基线就是「第一轮开始前」。
+ *
+ * 该 entry 没有可用检查点时不向后找：后面轮次的基线对应的是中间状态，
+ * 拿来当会话起点会静默恢复出错误的文件状态，宁可返回 undefined 让调用方明确降级。
+ */
+export function resolveFirstTurnCheckpoint(params: {
+  /** 主路径上的 entry id，按 root→leaf 顺序 */
+  branchEntryIds: readonly string[]
+  /** assistant uuid → entry id */
+  bindings: Record<string, string>
+  /** entry id → 检查点路径 */
+  checkpoints: Record<string, string>
+}): string | undefined {
+  const boundEntryIds = new Set(Object.values(params.bindings))
+  for (const entryId of params.branchEntryIds) {
+    if (boundEntryIds.has(entryId)) return params.checkpoints[entryId]
+  }
+  return undefined
+}
+
+/**
+ * 清空 Pi 会话（置回会话起点）。
+ *
+ * 与 `rewindPiSession` 的区别：这里没有可保留的锚点（首轮就失败），目标是
+ * transcript 只剩 header。文件按**第一轮**的 pre-turn 基线恢复：Pi 每轮开始时
+ * 保存工作区基线并绑定到该轮的 assistant entry，因此最早一个有绑定的 entry
+ * 对应的检查点就是「第一轮开始前」的状态。
+ *
+ * 没有可用基线时降级为「只清对话、不动文件」并明确告知，而不是静默假装已回退。
+ */
+export async function resetPiSession(
+  sessionId: string,
+  sessionMeta: AgentSessionMeta,
+): Promise<RewindSessionResult> {
+  const piSessionFile = sessionMeta.piSessionFile
+  // 没有 Pi artifact（会话在第一轮建会话之前就失败了）时无 transcript 可截断。
+  // 清 Profer JSONL 本身就足够且完整（下一轮会建一个全新的 Pi 会话），
+  // 不能因为“没东西可截断”把整个清空卡住。
+  const hasPiArtifact = Boolean(piSessionFile) && existsSync(piSessionFile!)
+
+  /**
+   * 收尾：清空展示 JSONL + 回收 entry 绑定与文件检查点。
+   * 有/无 Pi artifact 两条路径都必须走，避免其中一条漏掉清理。
+   */
+  const finish = (fileRewind: RewindSessionResult['fileRewind'], clearPiSessionFile: boolean): RewindSessionResult => {
+    clearSDKMessages(sessionId)
+    try {
+      const keepPaths = new Set(collectForeignCheckpointPaths(sessionId))
+      prunePiFileCheckpoints(getPiCheckpointsDir(), sessionId, { keepPaths })
+    } catch (error) {
+      console.warn('[Agent 会话] 回收 Pi 文件检查点失败:', error)
+    }
+    updateAgentSessionMeta(sessionId, {
+      ...(clearPiSessionFile ? { piSessionFile: undefined } : {}),
+      piEntryBindings: undefined,
+      piFileCheckpoints: undefined,
+      resumeAtMessageUuid: undefined,
+    })
+    return { remainingMessages: 0, fileRewind }
+  }
+
+  if (!hasPiArtifact) {
+    console.warn(`[Agent 会话] Pi 清空对话：没有可用的 Pi artifact，仅清空对话记录 (sessionId=${sessionId})`)
+    return finish(
+      { canRewind: false, error: '该会话还没有 Pi session artifact，工作区文件未被改动' },
+      true,
+    )
+  }
+
+  const bindings = sessionMeta.piEntryBindings ?? {}
+  const sdk = await import('@earendil-works/pi-coding-agent')
+  const sessionDir = join(getSdkConfigDir(), 'sessions', 'pi')
+  const workspace = sessionMeta.workspaceId ? getAgentWorkspace(sessionMeta.workspaceId) : undefined
+  const sourceDir = workspace ? getAgentSessionWorkspacePath(workspace.slug, sessionMeta.id) : undefined
+  const manager = sdk.SessionManager.open(piSessionFile!, sessionDir, sourceDir)
+  const header = manager.getHeader()
+  if (!header) {
+    throw new Error('Pi session artifact 缺少 header，无法清空对话')
+  }
+
+  // 1. 文件恢复：主路径上最早一个有 entry 绑定的轮次即第一轮，其基线是「第一轮开始前」。
+  //    必须在截断 transcript 之前完成：文件恢复不安全时要整体取消，避免对话已清而文件未知。
+  const checkpointPath = resolveFirstTurnCheckpoint({
+    branchEntryIds: manager.getBranch().map((entry) => entry.id),
+    bindings,
+    checkpoints: sessionMeta.piFileCheckpoints ?? {},
+  })
+
+  let fileRewind: RewindSessionResult['fileRewind']
+  if (!checkpointPath) {
+    console.warn(`[Agent 会话] Pi 清空对话：首轮无文件检查点，跳过文件恢复 (sessionId=${sessionId})`)
+    fileRewind = { canRewind: false, error: '首轮没有文件检查点（旧会话或检查点创建失败），工作区文件未被改动' }
+  } else {
+    let restored: ReturnType<typeof restorePiFileCheckpoint> | undefined
+    try {
+      const cwd = workspace ? getAgentSessionWorkspacePath(workspace.slug, sessionId) : process.cwd()
+      restored = restorePiFileCheckpoint(loadPiFileCheckpoint(checkpointPath), cwd)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[Agent 会话] Pi 文件恢复不可用，将只清空对话: ${message}`)
+      fileRewind = { canRewind: false, error: message }
+    }
+    if (restored) {
+      if (restored.failed) {
+        const message = restored.skipped.map((item) => `${item.path}: ${item.reason}`).join('；') || '无法安全恢复文件检查点'
+        console.warn(`[Agent 会话] Pi 文件恢复不安全，已取消清空对话: ${message}`)
+        throw new Error(`文件恢复不可用，已取消清空对话: ${message}`)
+      }
+      fileRewind = {
+        canRewind: true,
+        filesChanged: restored.changed,
+        ...(restored.skipped.length > 0 && { skippedFiles: restored.skipped.map((item) => item.path) }),
+        ...(restored.incomplete && { incomplete: true }),
+      }
+    }
+  }
+
+  // 2. 物理截断 Pi session 文件：只保留 header（先写临时文件再原子替换）
+  const tempSessionFile = `${piSessionFile}.reset-${process.pid}-${Date.now()}.tmp`
+  try {
+    writeFileSync(tempSessionFile, `${JSON.stringify(header)}\n`, 'utf-8')
+    renameSync(tempSessionFile, piSessionFile!)
+  } finally {
+    if (existsSync(tempSessionFile)) unlinkSync(tempSessionFile)
+  }
+  console.log(`[Agent 会话] Pi session 已清空: sessionId=${sessionId}`)
+
+  return finish(fileRewind, false)
 }
 
 interface CopyForkStoredSDKMessagesInput {
@@ -2539,6 +2583,28 @@ export function truncateSDKMessages(id: string, upToUuidInclusive: string): SDKM
   return kept
 }
 
+/** SDK session JSONL 中的「真实用户消息」：有 uuid 且不是 tool_result。 */
+function isRealUserMessageInSdkJsonl(m: Record<string, unknown>): boolean {
+  if (m.type !== 'user' || !m.uuid) return false
+  const content = (m.message as { content?: Array<{ type: string }> } | undefined)?.content
+  const hasToolResult = Array.isArray(content) && content.some((b) => b.type === 'tool_result')
+  return !hasToolResult
+}
+
+/**
+ * 清空会话的全部展示消息（保留会话本身、标题与元数据）。
+ *
+ * 与 `truncateSDKMessages` 的区别：这里没有可保留的锚点（首轮就失败），
+ * 目标是空历史。写成空文件而不是删文件，保持“会话消息文件始终存在”的隐含约定。
+ */
+export function clearSDKMessages(id: string): SDKMessage[] {
+  const filePath = getAgentSessionMessagesPath(id)
+  const previousCount = getAgentSessionSDKMessages(id).length
+  writeFileSync(filePath, '', 'utf-8')
+  console.log(`[Agent 会话] 消息已清空: sessionId=${id}, 原有 ${previousCount} 条`)
+  return []
+}
+
 /**
  * 从 SDK session JSONL 中查找指定 assistant message 之后最近的 user message UUID
  *
@@ -2621,12 +2687,7 @@ export function resolveUserUuidFromSDK(
     // 如果找不到（最后一个 turn），返回 '__LAST_TURN__' 特殊标记 —— 因为当前文件系统
     // 已经是最后一个 turn 完成后的状态，不需要文件回退。
 
-    const isRealUserMessage = (m: Record<string, unknown>): boolean => {
-      if (m.type !== 'user' || !m.uuid) return false
-      const content = (m.message as { content?: Array<{ type: string }> } | undefined)?.content
-      const hasToolResult = Array.isArray(content) && content.some((b) => b.type === 'tool_result')
-      return !hasToolResult
-    }
+    const isRealUserMessage = isRealUserMessageInSdkJsonl
 
     // 向后找下一条真实 user message
     for (let i = assistantIdx + 1; i < messages.length; i++) {
@@ -2643,6 +2704,113 @@ export function resolveUserUuidFromSDK(
   } catch (err) {
     console.warn(`[Agent 会话] 读取 SDK session JSONL 失败:`, err)
     return undefined
+  }
+}
+
+/**
+ * 从 SDK session JSONL 中查找**第一条**真实用户消息的 UUID。
+ *
+ * 用于「清空对话」时的文件恢复：快照记录的是 user 消息发出时的文件状态，
+ * 恢复到第一条用户消息的快照 = 回到会话起点（第一个 turn 执行前）的状态。
+ *
+ * 与 `resolveUserUuidFromSDK` 一样兼顾 fork：fork 会话自己的 JSONL 已复制了前缀，
+ * 因此先查本会话，再回退到源会话。找不到时返回 undefined（调用方明确降级提示）。
+ */
+export function resolveFirstUserUuidFromSDK(
+  sdkSessionId: string,
+  projectDir?: string,
+  forkSourceSdkSessionId?: string,
+): string | undefined {
+  const candidates = [sdkSessionId, forkSourceSdkSessionId]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+  for (const candidate of candidates) {
+    const sessionFilePath = findSdkSessionJsonl(candidate, projectDir)
+    if (!sessionFilePath) continue
+    try {
+      const lines = readFileSync(sessionFilePath, 'utf-8').split('\n').filter(Boolean)
+      for (const line of lines) {
+        let message: Record<string, unknown>
+        try {
+          message = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        if (isRealUserMessageInSdkJsonl(message)) {
+          console.log(`[Agent 会话] 解析到首条 user uuid=${String(message.uuid)} (sdkSessionId=${candidate})`)
+          return message.uuid as string
+        }
+      }
+    } catch (err) {
+      console.warn('[Agent 会话] 读取 SDK session JSONL 失败:', err)
+    }
+  }
+  console.warn(`[Agent 会话] 未找到首条 user message UUID: sdkSessionId=${sdkSessionId}`)
+  return undefined
+}
+
+/**
+ * 清空整段对话（Claude 路径）：首轮就失败、没有可保留锚点时使用。
+ *
+ * 1. 文件恢复到**第一条用户消息**的快照 = 会话起点（第一个 turn 执行前）
+ * 2. 清空 Profer 展示 JSONL
+ * 3. 同时清掉 `sdkSessionId`：否则下一轮仍会 resume 出已被清空的那段对话；
+ *    没有 sdkSessionId 时编排层会走「上下文回填」路径，而历史已空，即真正从头开始。
+ *
+ * 文件恢复失败时仍然清空对话（优雅降级，结果里带上原因），
+ * 不能让快照问题把用户卡在“既清不掉也重来不了”的状态。
+ */
+export function resetClaudeSession(sessionId: string, sessionMeta: AgentSessionMeta): RewindSessionResult {
+  let projectDir: string | undefined
+  let workspaceSlug: string | undefined
+  if (sessionMeta.workspaceId) {
+    const ws = getAgentWorkspace(sessionMeta.workspaceId)
+    if (ws) {
+      workspaceSlug = ws.slug
+      projectDir = getAgentSessionWorkspacePath(ws.slug, sessionMeta.id)
+    }
+  }
+
+  let fileRewind: RewindSessionResult['fileRewind']
+  const firstUserUuid = sessionMeta.sdkSessionId
+    ? resolveFirstUserUuidFromSDK(sessionMeta.sdkSessionId, projectDir, sessionMeta.forkSourceSdkSessionId)
+    : undefined
+  if (!sessionMeta.sdkSessionId) {
+    console.log(`[Agent 会话] 清空对话: 会话还没有 SDK session，跳过文件恢复 (sessionId=${sessionId})`)
+    fileRewind = { canRewind: false, error: '会话还没有 SDK session，文件未回退' }
+  } else if (!firstUserUuid) {
+    fileRewind = { canRewind: false, error: '无法从 SDK session 中解析首条 user message UUID' }
+  } else {
+    try {
+      let cwd = homedir()
+      if (projectDir) cwd = projectDir
+      const rewindAttachedDirs = collectAttachedDirectories({ sessionMeta, workspaceSlug })
+      console.log(`[Agent 会话] 清空对话: 从首条 user 快照恢复文件 (cwd=${cwd}, attachedDirs=${rewindAttachedDirs.length})`)
+      fileRewind = rewindFilesFromSnapshot(
+        sessionMeta.sdkSessionId,
+        firstUserUuid,
+        cwd,
+        projectDir,
+        sessionMeta.forkSourceSdkSessionId,
+        rewindAttachedDirs,
+      )
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.warn('[Agent 会话] 文件恢复失败，继续清空对话:', errMsg)
+      fileRewind = { canRewind: false, error: errMsg }
+    }
+  }
+
+  const kept = clearSDKMessages(sessionId)
+  updateAgentSessionMeta(sessionId, {
+    resumeAtMessageUuid: undefined,
+    sdkSessionId: undefined,
+  })
+
+  console.log(`[Agent 会话] 对话已清空: sessionId=${sessionId}, 文件恢复=${fileRewind?.canRewind ?? '跳过'}`)
+
+  return {
+    remainingMessages: kept.length,
+    fileRewind,
   }
 }
 

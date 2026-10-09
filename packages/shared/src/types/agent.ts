@@ -669,6 +669,7 @@ export type ProferEvent =
   | { type: 'context_window'; contextWindow: number }
   | { type: 'permission_mode_changed'; mode: ProferPermissionMode }
   | { type: 'image_generation_updated'; sessionId: string; record: AgentImageGenerationCard }
+  | { type: 'visualization_updated'; sessionId: string; record: import('./visualization').VisualizationRecord }
   | { type: 'title_updated'; title: string }
   | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; parentSessionId?: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; session?: AgentSessionMeta; initiator?: AgentRunInitiator }
   | { type: 'delegation_session_updated'; session: AgentSessionMeta }
@@ -1312,10 +1313,45 @@ export interface WorkspaceCapabilities {
 
 export type AgentGoalStatus = 'active' | 'paused' | 'completed' | 'blocked' | 'failed' | 'stopped' | 'stopping' | 'budget_limited'
 
+export type AgentGoalReasonCode =
+  | 'created'
+  | 'resumed'
+  | 'user_pause'
+  | 'user_stop'
+  | 'app_restart'
+  | 'blocked'
+  | 'failed'
+  | 'completed'
+  | 'budget_limited'
+  | 'cleared'
+  | 'superseded'
+  | 'user_interrupt'
+  | 'retry_exhausted'
+  | 'run_error'
+  | 'unknown'
+
+export type AgentGoalLifecycleTarget = AgentGoalStatus | 'cleared'
+
+export interface AgentGoalLifecycleEvent {
+  id: string
+  goalId: string
+  sessionId: string
+  from: AgentGoalStatus | null
+  to: AgentGoalLifecycleTarget
+  reason: AgentGoalReasonCode
+  detail?: string
+  revision: number
+  at: number
+  runId?: string
+}
+
 export interface AgentGoalLimits {
-  maxIterations: number
+  /** 可选轮次上限；未设置表示不限。 */
+  maxIterations?: number
+  /** 连续无进展轮次上限（空回复 / 工具全部失败 / 运行失败）。 */
   maxConsecutiveFailures: number
-  maxDurationMs: number
+  /** 可选净运行时长上限；未设置表示不限，只在轮次边界检查。 */
+  maxDurationMs?: number
   /** 可选 token 预算；在 runtime 用量记账边界核对。 */
   maxTokens?: number
 }
@@ -1382,7 +1418,23 @@ export interface AgentGoalState {
   blockedTodoId?: string
   lastSummary?: string
   lastEvidence?: string[]
+  /** Goal 生命周期审计轨迹，最多保留最近若干条。 */
+  lifecycle?: AgentGoalLifecycleEvent[]
+  /** 结构化停止/暂停原因；stopReason 保留用于兼容旧数据和展示。 */
+  reasonCode?: AgentGoalReasonCode
+  reasonDetail?: string
   stopReason?: string
+  /** 可重试错误的自动重试进度；成功一轮或离开 active 后清空。 */
+  retry?: AgentGoalRetryState
+  /** Goal 仍为 active 但暂不运行的原因（如计划模式下等待切换）。 */
+  waiting?: 'plan_mode'
+}
+
+export interface AgentGoalRetryState {
+  /** 已安排的第几次重试（1 起） */
+  attempt: number
+  nextAt: number
+  error: string
 }
 
 export type AgentGoalCommand =
@@ -1397,6 +1449,8 @@ export interface AgentGoalIterationResult {
   evidence: string[]
   outcome?: 'success' | 'failed' | 'stopped' | 'deferred'
   error?: string
+  /** 运行级错误分类：retryable 退避重试，fatal 直接暂停；两者都不计入无进展次数。 */
+  errorKind?: 'retryable' | 'fatal'
   /** 本轮模型 usage（由 runtime result/assistant message 归一化） */
   usage?: AgentGoalUsage
 }
@@ -1580,8 +1634,13 @@ export interface ForkSessionInput {
 export interface RewindSessionInput {
   /** Profer 会话 ID */
   sessionId: string
-  /** 回退到哪条 assistant message（inclusive，截断该消息之后的一切） */
-  assistantMessageUuid: string
+  /**
+   * 回退到哪条 assistant message（inclusive，截断该消息之后的一切）。
+   *
+   * 省略时表示**清空整个对话**（重置到会话起点）：用于首轮就失败、没有可保留锚点的场景。
+   * 清空会同时重置运行时会话（Claude 丢弃 sdkSessionId、Pi 截断到 header），使下一轮从头开始。
+   */
+  assistantMessageUuid?: string
 }
 
 /** 快照回退结果 */
@@ -2221,6 +2280,10 @@ export const AGENT_IPC_CHANNELS = {
   READ_SKILL_CONTENT: 'agent:read-skill-content',
   /** 写入 SKILL.md 全文内容 */
   WRITE_SKILL_CONTENT: 'agent:write-skill-content',
+  /** 读取 Skill 路由卡片（SKILL.json）：触发词、依赖、策略、来源 */
+  READ_SKILL_CARD: 'agent:read-skill-card',
+  /** 合并写入 Skill 路由卡片（补丁语义：null / 空值 = 删除字段） */
+  WRITE_SKILL_CARD: 'agent:write-skill-card',
   /** 列出 Skill 目录下的子文件树（不含 SKILL.md） */
   LIST_SKILL_FILES: 'agent:list-skill-files',
   /** 读取 Skill 目录下的子文件内容 */

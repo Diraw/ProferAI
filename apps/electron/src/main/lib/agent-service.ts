@@ -53,6 +53,13 @@ import { AgentRuntimeContextStore } from './agent-runtime-context'
 // ===== 实例创建 =====
 
 const eventBus = new AgentEventBus()
+
+/** 订阅任意会话的运行结束（含桌面与 headless 入口），回传本轮发起者。返回取消函数。 */
+export function onAgentRunComplete(listener: (sessionId: string, initiator: AgentRunInitiator | undefined) => void): () => void {
+  return eventBus.on((sessionId, payload) => {
+    if (payload.kind === 'run_complete') listener(sessionId, payload.completion.initiator)
+  })
+}
 configureAgentSessionProjectionPublisher(eventBus)
 // 目录失效发布器单例：ipc.ts / remote-service.ts / workspace-watcher.ts 共享同一 revision 序列，
 // 保证 Pocket 按 (catalog, workspaceSlug) 去重时看到的 revision 单调可信。
@@ -701,11 +708,14 @@ export function endAgentSessionDeletion(sessionId: string): void {
 }
 
 /**
- * 快照回退：回退到指定消息点，恢复文件 + 截断对话
+ * 快照回退 / 清空对话：截断到指定消息点，恢复文件 + 截断对话。
+ *
+ * `assistantMessageUuid` 省略时表示清空整个对话（重置到会话起点），
+ * 用于首轮就失败、没有可保留锚点的场景。
  */
 export async function rewindAgentSession(
   sessionId: string,
-  assistantMessageUuid: string,
+  assistantMessageUuid?: string,
 ): Promise<import('@profer/shared').RewindSessionResult> {
   return orchestrator.rewindSession(sessionId, assistantMessageUuid)
 }

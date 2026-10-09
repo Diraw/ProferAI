@@ -5,7 +5,8 @@ import {
   goalBudgetReason,
   GOAL_HISTORY_LIMIT,
 } from './goal-loop'
-import type { AgentGoalContract, AgentGoalIterationRecord, AgentGoalIterationResult, AgentGoalState, AgentGoalLimits } from '@profer/shared'
+import { applyGoalLimitsPatch, applyGoalTransition, getGoalActions, isValidGoalLimits, normalizeGoalReason } from '@profer/shared'
+import type { AgentGoalContract, AgentGoalIterationRecord, AgentGoalIterationResult, AgentGoalLimitsPatch, AgentGoalState } from '@profer/shared'
 
 type TimerHandle = unknown
 
@@ -20,7 +21,12 @@ type GoalControllerDependencies = {
   }) => Promise<AgentGoalIterationResult>
   stopTurn: (sessionId: string, runId?: string) => Promise<void>
   onStateChange?: (state: AgentGoalState) => void
+  /** 清除前持久归档失败时保留 live Goal。 */
+  onBeforeClear?: (state: AgentGoalState) => void
   canRun?: (sessionId: string) => boolean
+  /** Goal 仍 active 但需等待外部条件（如计划模式），等待期间不计轮次。 */
+  waitingReason?: (sessionId: string) => AgentGoalState['waiting']
+  random?: () => number
   now?: () => number
   schedule?: (callback: () => void, delay?: number) => TimerHandle
   cancelSchedule?: (handle: TimerHandle) => void
@@ -32,7 +38,6 @@ type GoalControllerDependencies = {
 type Runtime = {
   state: AgentGoalState
   schedule?: TimerHandle
-  deadline?: TimerHandle
   generation: number
   scheduleEpoch: number
   activeRun?: { runId: string; iteration: number; startedAt: number; baseElapsedMs: number }
@@ -40,6 +45,10 @@ type Runtime = {
 }
 
 const RETRY_DELAY_MS = 250
+/** 等待外部条件时的兜底轮询；正常由 nudge() 立即唤醒。 */
+const WAITING_FALLBACK_POLL_MS = 30_000
+/** 可重试错误的退避间隔（对齐 Claude Code：1 / 5 / 15 分钟，±20% 抖动）。 */
+export const GOAL_ERROR_RETRY_DELAYS_MS = [60_000, 300_000, 900_000] as const
 
 export class GoalController {
   private readonly runtimes = new Map<string, Runtime>()
@@ -50,6 +59,7 @@ export class GoalController {
   private readonly setTimer: (callback: () => void, delay: number) => TimerHandle
   private readonly clearTimer: (handle: TimerHandle) => void
   private readonly stopTimeoutMs: number
+  private readonly random: () => number
 
   constructor(private readonly deps: GoalControllerDependencies) {
     this.now = deps.now ?? Date.now
@@ -58,6 +68,7 @@ export class GoalController {
     this.setTimer = deps.setTimer ?? ((callback, delay) => setTimeout(callback, delay))
     this.clearTimer = deps.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 5_000
+    this.random = deps.random ?? Math.random
   }
 
   get(sessionId: string): AgentGoalState | undefined { return this.runtimes.get(sessionId)?.state }
@@ -71,8 +82,10 @@ export class GoalController {
       if (restored.has(state.sessionId)) continue
       const isRunnable = state.status === 'active' || state.status === 'stopping'
       const nextState = isRunnable
-        ? { ...state, status: 'paused' as const, stopReason: 'app_restart', activeRunId: undefined, revision: (state.revision ?? 0) + 1, updatedAt: this.now() }
-        : { ...state, activeRunId: undefined, revision: state.revision ?? 1 }
+        ? { ...applyGoalTransition(state, 'paused', { at: this.now(), reason: 'app_restart', detail: 'app_restart', runId: state.activeRunId }), activeRunId: undefined }
+        : { ...state, activeRunId: undefined, revision: state.revision ?? 1, lifecycle: state.lifecycle ?? [] }
+      delete nextState.retry
+      delete nextState.waiting
       restored.set(state.sessionId, { state: nextState, generation: (state.revision ?? 0) + 1, scheduleEpoch: 0, stopping: false })
     }
     this.runtimes.clear()
@@ -88,7 +101,7 @@ export class GoalController {
     if (existing && existing.state.status !== 'completed') throw new Error('该会话已有未完成的 Goal，请先恢复或清除它')
     if (existing) { this.cancelPending(existing); this.runtimes.delete(sessionId) }
     const runtime: Runtime = {
-      state: { ...createGoalState(sessionId, goal, now, { ...DEFAULT_GOAL_LIMITS }, contract), revision: (this.revisions.get(sessionId) ?? 0) + 1 },
+      state: createGoalState(sessionId, goal, now, { ...DEFAULT_GOAL_LIMITS }, contract, (this.revisions.get(sessionId) ?? 0) + 1),
       generation: (existing?.generation ?? 0) + 1,
       scheduleEpoch: 0,
       stopping: false,
@@ -104,13 +117,28 @@ export class GoalController {
   }
 
   async stop(sessionId: string): Promise<AgentGoalState> {
-    return this.requestStop(sessionId, 'stopped', 'user')
+    return this.requestStop(sessionId, 'stopped', 'user_stop')
+  }
+
+  /** 外部条件变化（如切换权限模式）时立即重新检查等待中的 Goal。 */
+  nudge(sessionId: string): void {
+    const runtime = this.runtimes.get(sessionId)
+    if (!runtime || runtime.state.status !== 'active' || runtime.activeRun || runtime.stopping || !runtime.state.waiting) return
+    this.cancelPending(runtime)
+    this.scheduleNext(sessionId, runtime, 0)
+  }
+
+  /** 用户中断当前轮：只暂停，用户再发消息即可自动续上。 */
+  async pauseForInterrupt(sessionId: string): Promise<AgentGoalState> {
+    return this.requestStop(sessionId, 'paused', 'user_interrupt')
   }
 
   async resume(sessionId: string): Promise<AgentGoalState> {
     const runtime = this.require(sessionId)
     this.assertOwnerFree(runtime)
-    if (!['paused', 'blocked', 'failed', 'stopped', 'budget_limited'].includes(runtime.state.status)) throw new Error('只有暂停、阻塞、失败、停止或预算耗尽的 Goal 才能恢复')
+    const actions = getGoalActions(runtime.state)
+    if (!actions.canResume && !actions.budgetEditRequired) throw new Error('只有暂停、阻塞、失败、停止或预算耗尽的 Goal 才能恢复')
+    if (runtime.state.status === 'active' || runtime.state.status === 'stopping' || runtime.state.status === 'completed') throw new Error('当前 Goal 不能恢复')
     const budget = goalBudgetReason(runtime.state)
     if (budget) {
       this.transition(runtime, 'budget_limited', budget)
@@ -118,19 +146,19 @@ export class GoalController {
     }
     runtime.stopping = false
     runtime.generation++
-    runtime.state = { ...runtime.state, consecutiveFailures: 0 }
+    runtime.state = { ...runtime.state, consecutiveFailures: 0, retry: undefined }
     this.transition(runtime, 'active', undefined)
     this.scheduleNext(sessionId, runtime, 0)
     return runtime.state
   }
 
   /** 仅允许在没有 active owner 时修改目标、契约和预算。 */
-  update(sessionId: string, patch: { goal?: string; contract?: AgentGoalContract; limits?: Partial<AgentGoalLimits> }): AgentGoalState {
+  update(sessionId: string, patch: { goal?: string; contract?: AgentGoalContract; limits?: AgentGoalLimitsPatch }): AgentGoalState {
     const runtime = this.require(sessionId)
     this.assertOwnerFree(runtime)
-    if (runtime.state.status === 'active' || runtime.state.status === 'stopping') throw new Error('运行中的 Goal 不能更新')
-    const limits = patch.limits ? { ...runtime.state.limits, ...patch.limits } : runtime.state.limits
-    if (!Number.isSafeInteger(limits.maxIterations) || limits.maxIterations <= 0 || !Number.isSafeInteger(limits.maxConsecutiveFailures) || limits.maxConsecutiveFailures <= 0 || !Number.isFinite(limits.maxDurationMs) || limits.maxDurationMs <= 0 || (limits.maxTokens !== undefined && (!Number.isSafeInteger(limits.maxTokens) || limits.maxTokens <= 0))) throw new Error('Goal 预算必须为有效正数；轮次与 token 必须为整数')
+    if (!getGoalActions(runtime.state).canEdit) throw new Error('运行中的 Goal 不能更新')
+    const limits = patch.limits ? applyGoalLimitsPatch(runtime.state.limits, patch.limits) : runtime.state.limits
+    if (!isValidGoalLimits(limits)) throw new Error('Goal 预算必须为有效正数；轮次与 token 必须为整数')
     if (patch.goal !== undefined && !patch.goal.trim()) throw new Error('Goal 不能为空')
     runtime.state = {
       ...runtime.state,
@@ -152,18 +180,21 @@ export class GoalController {
     return runtime.state
   }
 
-  clear(sessionId: string): void {
+  clear(sessionId: string): AgentGoalState {
     const runtime = this.require(sessionId)
     this.assertOwnerFree(runtime)
-    if (runtime.state.status === 'active' || runtime.state.status === 'stopping') throw new Error('运行中的 Goal 不能直接清除')
+    if (!getGoalActions(runtime.state).canClear) throw new Error('运行中的 Goal 不能直接清除')
     this.cancelPending(runtime)
+    const cleared = applyGoalTransition(runtime.state, 'cleared', { at: this.now(), reason: 'cleared', detail: 'cleared' })
+    this.deps.onBeforeClear?.(cleared)
     this.runtimes.delete(sessionId)
-    this.emit({ ...runtime.state, status: 'stopped', stopReason: 'cleared', revision: (runtime.state.revision ?? 0) + 1, updatedAt: this.now() })
+    this.emit(cleared)
+    return cleared
   }
 
   stopAll(): void {
     for (const [sessionId, runtime] of this.runtimes) {
-      if (runtime.state.status === 'active') {
+      if (runtime.state.status === 'active' || runtime.state.status === 'stopping') {
         runtime.stopping = true
         runtime.generation++
         this.cancelPending(runtime)
@@ -175,7 +206,10 @@ export class GoalController {
 
   private async requestStop(sessionId: string, status: 'paused' | 'stopped' | 'budget_limited', reason: string): Promise<AgentGoalState> {
     const runtime = this.require(sessionId)
-    if (runtime.state.status === 'completed') throw new Error('已完成的 Goal 无需停止')
+    if (runtime.state.status === status) return runtime.state
+    const actions = getGoalActions(runtime.state)
+    if (status === 'paused' && !actions.canPause) throw new Error('当前 Goal 不能暂停')
+    if (status === 'stopped' && !actions.canStop) throw new Error('当前 Goal 不能停止')
     const generation = ++runtime.generation
     runtime.stopping = true
     this.cancelPending(runtime)
@@ -216,6 +250,12 @@ export class GoalController {
   private async runTurn(sessionId: string, runtime: Runtime, generation: number): Promise<void> {
     if (this.runtimes.get(sessionId) !== runtime || runtime.generation !== generation || runtime.stopping || runtime.activeRun || runtime.state.status !== 'active') return
     if (this.deps.canRun && !this.deps.canRun(sessionId)) { this.scheduleNext(sessionId, runtime, RETRY_DELAY_MS); return }
+    const waiting = this.deps.waitingReason?.(sessionId)
+    if (waiting !== runtime.state.waiting) {
+      runtime.state = { ...runtime.state, waiting, revision: (runtime.state.revision ?? 0) + 1, updatedAt: this.now() }
+      this.emit(runtime.state)
+    }
+    if (waiting) { this.scheduleNext(sessionId, runtime, WAITING_FALLBACK_POLL_MS); return }
     const budget = goalBudgetReason(runtime.state)
     if (budget) { this.transition(runtime, 'budget_limited', budget); return }
     const iteration = runtime.state.iteration + 1
@@ -224,11 +264,7 @@ export class GoalController {
     runtime.activeRun = { runId, iteration, startedAt: turnStartedAt, baseElapsedMs: runtime.state.elapsedMs ?? 0 }
     runtime.state = { ...runtime.state, iteration, activeRunId: runId, revision: (runtime.state.revision ?? 0) + 1, updatedAt: turnStartedAt }
     this.emit(runtime.state)
-    const remainingMs = Math.max(0, runtime.state.limits.maxDurationMs - (runtime.state.elapsedMs ?? 0))
-    runtime.deadline = this.setTimer(() => {
-      if (runtime.activeRun?.runId !== runId || runtime.generation !== generation) return
-      void this.requestStop(sessionId, 'budget_limited', '已达到 Goal 最大运行时长')
-    }, remainingMs)
+    // 时长预算只在轮次边界检查，不在轮中砍断（对齐 Codex：到点收尾而不是中断）。
     try {
       const result = await this.deps.runTurn({
         sessionId,
@@ -259,7 +295,6 @@ export class GoalController {
 
   private async finishTurn(sessionId: string, runtime: Runtime, generation: number, runId: string, iteration: number, turnStartedAt: number, result: AgentGoalIterationResult): Promise<void> {
     if (this.runtimes.get(sessionId) !== runtime || runtime.activeRun?.runId !== runId) return
-    if (runtime.deadline !== undefined) { this.clearTimer(runtime.deadline); runtime.deadline = undefined }
     const finishedAt = this.now()
     const baseElapsedMs = runtime.activeRun.baseElapsedMs
     const elapsedMs = baseElapsedMs + Math.max(0, finishedAt - turnStartedAt)
@@ -274,6 +309,10 @@ export class GoalController {
       runtime.state = { ...runtime.state, activeRunId: undefined, elapsedMs, usage, revision: (runtime.state.revision ?? 0) + 1, updatedAt: finishedAt }
       runtime.stopping = false
       this.emit(runtime.state)
+      return
+    }
+    if (result.outcome === 'failed' && result.errorKind) {
+      this.handleRunError(sessionId, runtime, result, { iteration, elapsedMs, usage, finishedAt, runId })
       return
     }
     const decision = evaluateGoalContinuation(result, {
@@ -304,9 +343,10 @@ export class GoalController {
       evidence: result.evidence,
       usage: result.usage,
     }
+    const detail = 'reason' in decision ? decision.reason : nextStatus === 'completed' ? result.summary : undefined
+    const transitioned = applyGoalTransition(runtime.state, nextStatus, { at: finishedAt, detail, runId })
     runtime.state = {
-      ...runtime.state,
-      status: nextStatus,
+      ...transitioned,
       activeRunId: undefined,
       elapsedMs,
       consecutiveFailures: decision.consecutiveFailures,
@@ -314,18 +354,39 @@ export class GoalController {
       usage,
       lastSummary: result.summary,
       lastEvidence: result.evidence,
-      stopReason: 'reason' in decision ? decision.reason : undefined,
-      revision: (runtime.state.revision ?? 0) + 1,
-      updatedAt: finishedAt,
+      retry: undefined,
+      revision: transitioned === runtime.state ? (runtime.state.revision ?? 0) + 1 : transitioned.revision,
+      updatedAt: Math.max(finishedAt, transitioned.updatedAt),
     }
     this.emit(runtime.state)
     if (decision.action === 'continue' && !runtime.stopping) this.scheduleNext(sessionId, runtime, 0)
   }
 
+  /** 运行级错误不计入无进展：可重试的按退避重排，用尽或不可恢复则暂停等用户处理。 */
+  private handleRunError(sessionId: string, runtime: Runtime, result: AgentGoalIterationResult, turn: { iteration: number; elapsedMs: number; usage: AgentGoalState['usage']; finishedAt: number; runId: string }): void {
+    // 出错的轮次不占用轮次预算，但已消耗的时间和 token 照常记账。
+    runtime.state = { ...runtime.state, activeRunId: undefined, iteration: turn.iteration - 1, elapsedMs: turn.elapsedMs, usage: turn.usage }
+    const error = result.error || result.summary
+    const attempt = (runtime.state.retry?.attempt ?? 0) + 1
+    const delay = GOAL_ERROR_RETRY_DELAYS_MS[attempt - 1]
+    if (result.errorKind === 'retryable' && delay !== undefined) {
+      const jittered = Math.round(delay * (0.8 + this.random() * 0.4))
+      runtime.state = { ...runtime.state, retry: { attempt, nextAt: turn.finishedAt + jittered, error }, revision: (runtime.state.revision ?? 0) + 1, updatedAt: turn.finishedAt }
+      this.emit(runtime.state)
+      this.scheduleNext(sessionId, runtime, jittered)
+      return
+    }
+    const reason = result.errorKind === 'retryable' ? 'retry_exhausted' : 'run_error'
+    runtime.state = applyGoalTransition({ ...runtime.state, retry: undefined }, 'paused', { at: turn.finishedAt, reason, detail: error, runId: turn.runId })
+    this.emit(runtime.state)
+  }
+
   private assertOwnerFree(runtime: Runtime): void { if (runtime.activeRun) throw new Error('Goal runtime 仍在运行，等待其 owner 释放') }
   private transition(runtime: Runtime, status: AgentGoalState['status'], reason?: string): void {
     const elapsedMs = runtime.activeRun ? runtime.activeRun.baseElapsedMs + Math.max(0, this.now() - runtime.activeRun.startedAt) : runtime.state.elapsedMs
-    runtime.state = { ...runtime.state, status, elapsedMs, stopReason: reason, revision: (runtime.state.revision ?? 0) + 1, updatedAt: this.now() }
+    const next = applyGoalTransition(runtime.state, status, { at: this.now(), reason: normalizeGoalReason(reason, status === 'active' ? 'resumed' : status === 'budget_limited' ? 'budget_limited' : 'unknown'), detail: reason, runId: runtime.activeRun?.runId })
+    if (next === runtime.state) return
+    runtime.state = { ...next, elapsedMs, ...(status === 'active' ? {} : { retry: undefined, waiting: undefined }) }
     this.emit(runtime.state)
   }
   private require(sessionId: string): Runtime {
@@ -336,7 +397,6 @@ export class GoalController {
   private cancelPending(runtime: Runtime): void {
     runtime.scheduleEpoch++
     if (runtime.schedule !== undefined) { this.cancelSchedule(runtime.schedule); runtime.schedule = undefined }
-    if (runtime.deadline !== undefined) { this.clearTimer(runtime.deadline); runtime.deadline = undefined }
   }
   private emit(state: AgentGoalState): void {
     this.revisions.set(state.sessionId, state.revision ?? 0)

@@ -10,6 +10,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, LARK_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, CHANGELOG_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, SYNC_IPC_CHANNELS, TEAM_IPC_CHANNELS, SKILL_MARKETPLACE_IPC_CHANNELS, SKILL_MASTER_IPC_CHANNELS, GLOBAL_SKILL_IPC_CHANNELS, TEAM_FILE_IPC_CHANNELS, TEAM_MEMORY_IPC_CHANNELS, SSE_IPC_CHANNELS, KNOWLEDGE_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, type Todo, type CalendarEvent, type TodoListQuery, type CalendarEventListQuery, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type PlanningAgentOperation, type PlanningChange, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type CreatePlanningTagInput, type UpdatePlanningTagInput, type SnoozePlanningReminderInput, type StartTodoAgentInput, type StartTodoAgentResult, type TodoAgentSessionActivation, type TeamMemoryApiResult, type TeamMemoryDocument, type TeamMemoryRevision, type ChangelogEntry, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult } from '@profer/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, NOTIFICATION_SOUND_IPC_CHANNELS, DESKTOP_NOTIFICATION_IPC_CHANNELS } from '../types'
 import { PROFER_PLUGIN_IPC_CHANNELS, type ProferInstalledPlugin, type ProferPluginOperationResult, type ProferPluginViewInstance, type ProferPluginViewLayout } from '@profer/plugin-api'
+import { VISUALIZATION_IPC, type VisualizationContent, type VisualizationRecord, type VisualizationViewState } from '@profer/shared'
 import type { CustomNotificationSound } from '../types'
 import type { PresetReference, PresetReferenceReport, PresetScopeRebindResult, LarkCliStatus, LarkCliOperationResult, LarkLoginStartResult, LarkLoginEvent, LarkMcpCredentialsInput, LarkMcpSetupResult, LarkMcpStatus } from '@profer/shared'
 import type {
@@ -158,6 +159,14 @@ import { QUICK_TASK_IPC_CHANNELS, TRAY_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNEL
  * 暴露给渲染进程的 API 接口定义
  */
 export interface ElectronAPI {
+  /** 会话内可视化记录、HTML 修订及受限的持久化视图状态。 */
+  listVisualizations: (sessionId: string) => Promise<VisualizationRecord[]>
+  readVisualization: (input: { sessionId: string; id: string; revision?: string }) => Promise<VisualizationContent>
+  readVisualizationViewState: (input: { sessionId: string; id: string; revision: string }) => Promise<VisualizationViewState>
+  saveVisualizationViewState: (input: { sessionId: string; id: string; revision: string; state: VisualizationViewState }) => Promise<void>
+  /** theme 为渲染进程当前生效的宿主 token（含皮肤）；缺省时导出页走浅色基线 */
+  exportVisualization: (input: { sessionId: string; id: string; revision: string; theme?: Record<string, string> }) => Promise<string | null>
+
   /** 获取宿主操作系统和 CPU 架构，供安装包选择使用 */
   getPlatformInfo: () => { platform: NodeJS.Platform; arch: string }
 
@@ -284,11 +293,13 @@ export interface ElectronAPI {
   onWindowResize: (callback: () => void) => () => void
   /** 订阅 macOS 原生全屏状态变化 */
   onWindowFullScreenChanged: (callback: (isFullScreen: boolean) => void) => () => void
+  /** 订阅窗口最大化/还原状态变化 */
+  onWindowMaximizeChanged: (callback: (isMaximized: boolean) => void) => () => void
 
   // ===== 渠道管理相关 =====
 
   /** 获取所有渠道列表（apiKey 保持加密态） */
-  listChannels: () => Promise<Channel[]>
+  listChannels: (options?: { localOnly?: boolean }) => Promise<Channel[]>
   /** 获取官方模型最近可用性 */
   getOfficialModelHealth: () => Promise<import('@profer/shared').OfficialChannelHealth[]>
 
@@ -313,6 +324,9 @@ export interface ElectronAPI {
   /** 从供应商拉取可用模型列表（直接传入凭证，无需已保存渠道） */
   fetchModels: (input: FetchModelsInput) => Promise<FetchModelsResult>
 
+  /** 取消本窗口发起的渠道测试/发现请求。 */
+  cancelChannelRequest: (requestId: string) => Promise<void>
+
   /** 查询渠道订阅 Plan 额度 */
   getChannelPlanQuota: (channelId: string) => Promise<ChannelPlanQuotaResult>
 
@@ -327,8 +341,18 @@ export interface ElectronAPI {
 
   /** 获取构建目标 */
   getBuildTarget: () => Promise<'oss' | 'commercial'>
-  /** 在已保存的 xAI 渠道上启动订阅 OAuth 登录。 */
-  loginXaiOAuth: (channelId: string) => Promise<Channel>
+  /** xAI 订阅授权成功后创建或更新渠道。 */
+  loginXaiOAuth: (input: import('@profer/shared').XaiOAuthLoginInput) => Promise<Channel>
+  /** 取消 xAI 订阅授权。 */
+  cancelXaiOAuthLogin: () => Promise<void>
+  /** 获取 Pi 内置 xAI 模型目录。 */
+  listXaiModels: () => Promise<import('@profer/shared').ChannelModel[]>
+  /** ChatGPT Codex 登录成功后才创建或更新渠道，不回传明文凭据。 */
+  loginCodexOAuth: (input: import('@profer/shared').CodexOAuthLoginInput) => Promise<Channel>
+  /** 取消当前进行中的 ChatGPT Codex OAuth 登录。 */
+  cancelCodexOAuthLogin: () => Promise<void>
+  /** 获取 Pi 当前内置的 ChatGPT Codex 模型目录。 */
+  listCodexModels: () => Promise<import('@profer/shared').ChannelModel[]>
 
   // ===== 对话管理相关 =====
 
@@ -794,7 +818,7 @@ export interface ElectronAPI {
   stopAgent: (sessionId: string) => Promise<void>
   startGoal: (sessionId: string, goal: string, contract?: import('@profer/shared').AgentGoalContract) => Promise<import('@profer/shared').AgentGoalState>
   getGoal: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState | null>
-  updateGoal: (sessionId: string, patch: { goal?: string; contract?: import('@profer/shared').AgentGoalContract; limits?: Partial<import('@profer/shared').AgentGoalLimits> }) => Promise<import('@profer/shared').AgentGoalState>
+  updateGoal: (sessionId: string, patch: { goal?: string; contract?: import('@profer/shared').AgentGoalContract; limits?: import('@profer/shared').AgentGoalLimitsPatch }) => Promise<import('@profer/shared').AgentGoalState>
   getGoalHistory: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState[]>
   listGoals: () => Promise<import('@profer/shared').AgentGoalState[]>
   pauseGoal: (sessionId: string) => Promise<import('@profer/shared').AgentGoalState>
@@ -889,6 +913,12 @@ export interface ElectronAPI {
 
   /** 写入 SKILL.md 全文内容 */
   writeSkillContent: (workspaceSlug: string, skillSlug: string, content: string) => Promise<void>
+
+  /** 读取 Skill 路由卡片（SKILL.json） */
+  readSkillCard: (workspaceSlug: string, skillSlug: string) => Promise<import('@profer/shared').WorkspaceSkillCardState>
+
+  /** 合并写入 Skill 路由卡片（null / 空值 = 删除该字段） */
+  writeSkillCard: (workspaceSlug: string, skillSlug: string, patch: import('@profer/shared').SkillManifestPatch) => Promise<import('@profer/shared').WorkspaceSkillCardState>
 
   /** 列出 Skill 目录下的子文件树（不含 SKILL.md） */
   listSkillFiles: (workspaceSlug: string, skillSlug: string) => Promise<import('@profer/shared').SkillFileNode[]>
@@ -1674,6 +1704,12 @@ interface MigrationExportResult {
 let _settingsPromise: Promise<AppSettings> | null = null
 
 const electronAPI: ElectronAPI = {
+  listVisualizations: (sessionId) => ipcRenderer.invoke(VISUALIZATION_IPC.LIST, sessionId),
+  readVisualization: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.READ, input),
+  readVisualizationViewState: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.VIEW_STATE, input),
+  saveVisualizationViewState: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.SAVE_VIEW_STATE, input),
+  exportVisualization: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.EXPORT, input),
+
   getPlatformInfo: () => ({ platform: process.platform, arch: process.arch }),
 
   // 运行时
@@ -1823,6 +1859,12 @@ const electronAPI: ElectronAPI = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_FULL_SCREEN_CHANGED, handler)
   },
 
+  onWindowMaximizeChanged: (callback: (isMaximized: boolean) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, isMaximized: boolean): void => callback(isMaximized)
+    ipcRenderer.on(IPC_CHANNELS.WINDOW_MAXIMIZE_CHANGED, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.WINDOW_MAXIMIZE_CHANGED, handler)
+  },
+
   onWindowResize: (callback: () => void) => {
     const handler = (): void => callback()
     window.addEventListener('resize', handler)
@@ -1830,8 +1872,8 @@ const electronAPI: ElectronAPI = {
   },
 
   // 渠道管理
-  listChannels: () => {
-    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.LIST)
+  listChannels: (options?: { localOnly?: boolean }) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.LIST, options)
   },
   getOfficialModelHealth: () => {
     return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.GET_OFFICIAL_HEALTH)
@@ -1865,6 +1907,10 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.FETCH_MODELS, input)
   },
 
+  cancelChannelRequest: (requestId: string) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.CANCEL_REQUEST, requestId)
+  },
+
   getChannelPlanQuota: (channelId: string) => {
     return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.GET_PLAN_QUOTA, channelId)
   },
@@ -1885,9 +1931,16 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.GET_BUILD_TARGET)
   },
 
-  loginXaiOAuth: (channelId: string) => {
-    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.XAI_LOGIN, channelId)
+  loginXaiOAuth: (input: import('@profer/shared').XaiOAuthLoginInput) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.XAI_LOGIN, input)
   },
+  cancelXaiOAuthLogin: () => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.XAI_LOGIN_CANCEL),
+  listXaiModels: () => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.XAI_MODELS),
+  loginCodexOAuth: (input: import('@profer/shared').CodexOAuthLoginInput) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.CODEX_LOGIN, input)
+  },
+  cancelCodexOAuthLogin: () => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.CODEX_LOGIN_CANCEL),
+  listCodexModels: () => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.CODEX_MODELS),
 
   // 对话管理
   listConversations: (includeArchived?: boolean) => {
@@ -2644,6 +2697,23 @@ const electronAPI: ElectronAPI = {
       workspaceSlug,
       skillSlug,
       content,
+    )
+  },
+
+  readSkillCard: (workspaceSlug: string, skillSlug: string) => {
+    return ipcRenderer.invoke(
+      AGENT_IPC_CHANNELS.READ_SKILL_CARD,
+      workspaceSlug,
+      skillSlug,
+    )
+  },
+
+  writeSkillCard: (workspaceSlug: string, skillSlug: string, patch: import('@profer/shared').SkillManifestPatch) => {
+    return ipcRenderer.invoke(
+      AGENT_IPC_CHANNELS.WRITE_SKILL_CARD,
+      workspaceSlug,
+      skillSlug,
+      patch,
     )
   },
 

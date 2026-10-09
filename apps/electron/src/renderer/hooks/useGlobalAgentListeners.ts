@@ -8,7 +8,12 @@
  */
 
 import { useEffect } from 'react'
+import { channelsAtom, channelsLoadedAtom, selectedModelAtom, channelCatalogRefreshAtom } from '@/atoms/chat-atoms'
+import { isChannelEnabledForChat } from '@profer/shared'
+import { authStatusAtom } from '@/atoms/identity-atoms'
+import { subscribeChannelCatalog } from '@/lib/channel-catalog-listener'
 import { agentGoalsAtom, hydrateAgentGoalsAtom, mergeAgentGoalAtom } from '@/atoms/goal-atoms'
+import { visualizationsAtom, updateVisualizationSessionCache } from '@/atoms/visualization-atoms'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useStore } from 'jotai'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
@@ -361,6 +366,30 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
 export function useGlobalAgentListeners(): void {
   const store = useStore()
 
+  useEffect(() => subscribeChannelCatalog({
+    subscribe: window.electronAPI.onAgentStreamEvent,
+    subscribeAccount: (callback) => store.sub(authStatusAtom, callback),
+    getAccount: () => store.get(authStatusAtom),
+    subscribeRefresh: (callback) => store.sub(channelCatalogRefreshAtom, callback),
+    listLocalChannels: () => window.electronAPI.listChannels({ localOnly: true }),
+    listInitialChannels: () => window.electronAPI.listChannels({ localOnly: true }),
+    getCatalogSnapshot: () => store.get(channelsAtom),
+    onAccountChange: () => {
+      // 账号切换期间旧目录不再作为可发送绑定，也不继续显示为有效。
+      store.set(channelsLoadedAtom, false)
+      store.set(channelsAtom, [])
+    },
+    apply: (channels) => {
+      store.set(channelsAtom, channels)
+      store.set(channelsLoadedAtom, true)
+      const selected = store.get(selectedModelAtom)
+      if (selected && !channels.some((channel) => channel.id === selected.channelId
+        && isChannelEnabledForChat(channel)
+        && channel.models.some((model) => model.id === selected.modelId && model.enabled))) store.set(selectedModelAtom, null)
+    },
+    onFailure: (error) => console.error('[渠道目录] 本地目录刷新失败，保留当前列表:', error),
+    initialRefresh: true,
+  }), [store])
   useEffect(() => {
     let effectActive = true
     // 启动时水合 Goal 状态（含重启后待恢复的 paused Goal）
@@ -719,6 +748,9 @@ export function useGlobalAgentListeners(): void {
         unstable_batchedUpdates(() => {
         const { sessionId, payload } = streamEvent
 
+        // 目录事件由全局目录监听消费，不属于会话流，禁止触发未知会话刷新。
+        if (payload.kind === 'catalog_invalidation') return
+
         // 终态（run_complete / run_error）的语义由专用 IPC（STREAM_COMPLETE / STREAM_ERROR）
         // 统一承担：agent-service 在刷新恢复时会为终态 payload 补发同名 IPC，因此这里直接跳过。
         // 若在这里抢先落后状态，专用 handler 的竞态保护（isCurrentAgentStreamCompletion 要求
@@ -825,6 +857,8 @@ export function useGlobalAgentListeners(): void {
               next.set(sessionId, upsertAgentImageGeneration(previous.get(sessionId) ?? [], proferEvent.record))
               return next
             })
+          } else if (proferEvent.type === 'visualization_updated' && proferEvent.sessionId === sessionId && proferEvent.record.sessionId === sessionId) {
+            store.set(visualizationsAtom, (previous) => updateVisualizationSessionCache(previous, sessionId, [proferEvent.record]))
           } else if (proferEvent.type === 'external_run_started') {
             activateExternalAgentRun(proferEvent)
           } else if (proferEvent.type === 'delegation_session_updated' || proferEvent.type === 'session_updated') {

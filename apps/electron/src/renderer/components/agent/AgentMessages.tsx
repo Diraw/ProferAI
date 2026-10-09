@@ -6,7 +6,8 @@
  */
 
 import * as React from 'react'
-import { useAtomValue, useSetAtom } from 'jotai'
+import { useStore, useAtomValue, useSetAtom } from 'jotai'
+import { visualizationsAtom, updateVisualizationSessionCache } from '@/atoms/visualization-atoms'
 import { Bot, RotateCw, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react'
 import { WelcomeEmptyState } from '@/components/welcome/WelcomeEmptyState'
 import {
@@ -21,23 +22,26 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from '@/components/ai-elements/conversation'
-import { useStickToBottomContext } from 'use-stick-to-bottom'
+import { useConversationScroll } from '@/components/ai-elements/conversation-scroll'
+import { ConversationFollowTrigger } from '@/components/ai-elements/conversation-follow-trigger'
+import { ConversationHistoryButton } from '@/components/ai-elements/conversation-history-button'
 import { ScrollMinimap } from '@/components/ai-elements/scroll-minimap'
 import type { MinimapItem } from '@/components/ai-elements/scroll-minimap'
 import { StickyUserMessage } from '@/components/ai-elements/sticky-user-message'
-import { useSmoothStream } from '@profer/ui'
+import { useCompletionTransition } from '@/hooks/useCompletionTransition'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { tabMinimapCacheAtom } from '@/atoms/tab-atoms'
 import { channelsAtom } from '@/atoms/chat-atoms'
-import { allPendingAskUserRequestsAtom, resolvedBlobMessagesAtom } from '@/atoms/agent-atoms'
+import { resolvedBlobMessagesAtom } from '@/atoms/agent-atoms'
 import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@profer/ui/primitives/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
-import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
+import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, getLatestUserGroupId, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
 import { extractUserText } from '@profer/session-core'
+import { shouldRegenerateFromRetry } from '@/lib/agent-regenerate-anchor'
 import { buildLiveGroupSet } from './live-group-set'
 import { mergeMessagesByUuid } from '@/lib/agent-message-merge'
 import { applyResolvedBlobMessages } from '@/lib/resolved-blob-messages'
@@ -46,7 +50,7 @@ import { ContentBlock } from './ContentBlock'
 import { parseThinkTagsFromText } from './thinking-tag-parser'
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
 import type { AgentEventUsage, RetryAttempt, SDKMessage, AgentImageGenerationCard, AgentRuntime } from '@profer/shared'
-import { isGoalIterationMessage } from '@profer/shared'
+import { isGoalIterationMessage, shouldShowAgentThinking } from '@profer/shared'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
 import { AgentImageGenerationCardView } from './AgentImageGenerationCard'
 import { getPendingImageGenerationCards, mergeAgentImageGenerationTimeline } from './agent-image-generation-timeline'
@@ -102,7 +106,7 @@ interface AgentMessagesProps {
   sessionId: string
   /** 用户在前端选择的模型 ID（用于显示渠道配置的 Model Name） */
   sessionModelId?: string
-  /** 当前 Agent runtime；Pi/GPT 的 reasoning 仅作为执行状态，不展示不可读的概览文本。 */
+  /** 当前 Agent runtime；与渠道 provider 一同决定 thinking 块是否渲染（见 shouldShowAgentThinking）。 */
   agentRuntime?: AgentRuntime
   /** 消息是否已完成首次加载 */
   messagesLoaded?: boolean
@@ -124,6 +128,12 @@ interface AgentMessagesProps {
   streamError?: string | null
   onRetry?: () => void
   onRetryInNewSession?: () => void
+  /**
+   * 重新生成最后一轮（截断最后一轮再重发），同时作为两个入口的回调：
+   * 最后一条用户消息下的重新生成按钮，以及最新一轮错误卡片的「重试」。
+   * 不传时错误卡片回落 `onRetry` 的追加语义（无回退锚点，如首轮就失败）。
+   */
+  onRegenerateLastTurn?: () => void
   onFork?: (upToMessageUuid: string) => void
   /** 探索分支回调（Pi `/tree`）；仅 Pi 会话可用 */
   onExplore?: (upToMessageUuid: string) => void
@@ -159,11 +169,11 @@ function TopHistoryLoader({
   historyMoreAvailable?: boolean
   historyLoadingEarlier?: boolean
 }): React.ReactElement | null {
-  const { scrollRef } = useStickToBottomContext()
+  const { scrollRef, beginLayout, following } = useConversationScroll()
   const armedRef = React.useRef(true)
 
   React.useEffect(() => {
-    if (!onLoadEarlierHistory) return
+    if (!onLoadEarlierHistory || following) return
     // 失败后允许用户仍停留在顶部时再次触发；成功后若仍有更早内容，
     // 也会在布局更新后的下一次 scroll 事件中继续分页。
     if (!historyLoadingEarlier && historyMoreAvailable !== false) armedRef.current = true
@@ -183,57 +193,13 @@ function TopHistoryLoader({
         armedRef.current
       ) {
         armedRef.current = false
+        beginLayout()
         onLoadEarlierHistory()
       }
     }
     el.addEventListener('scroll', handleScroll, { passive: true })
     return () => el.removeEventListener('scroll', handleScroll)
-  }, [onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, scrollRef])
-
-  return null
-}
-
-/**
- * 新一轮对话自动跟随滚动控制器（必须渲染在 <Conversation>(=StickToBottom) 内部）。
- *
- * use-stick-to-bottom 的默认行为：一旦用户向上滚动离开底部（escapedFromLock=true），
- * isAtBottom 会保持 false 且不再自动恢复；此后即便内容高度增加，scrollToBottom 首帧
- * 也会因 `!state.isAtBottom` 直接中止，导致"翻看历史后再输入新指令，界面不跟着往下走"。
- *
- * 两个触发信号，只要满足其一就主动调用 scrollToBottom()（scrollToBottom() 默认不带
- * preserveScrollPosition，会先把 isAtBottom 置回 true 并解锁锁定，再平滑滚回底部）：
- * 1. streaming 由 false→true：普通新一轮对话开始（用户发新消息）。
- * 2. 本 session 的 pending AskUser 请求由有→无：AskUserQuestion 追问已解决，
- *    agent 继续输出新内容时也要回到底部跟随（追问期间 streaming 一直保持 true，
- *    不会经历 false→true，必须用这个独立信号补）。
- */
-function StreamScrollFollow({ sessionId, streaming }: { sessionId: string; streaming: boolean }): React.ReactElement | null {
-  const { scrollToBottom } = useStickToBottomContext()
-  const pendingAskUsers = useAtomValue(allPendingAskUserRequestsAtom)
-  const prevStreamingRef = React.useRef(streaming)
-  const prevPendingCountRef = React.useRef(pendingAskUsers.get(sessionId)?.length ?? 0)
-
-  React.useEffect(() => {
-    // 信号1：streaming false → true（新一轮对话开始）
-    const wasStreaming = prevStreamingRef.current
-    prevStreamingRef.current = streaming
-    let shouldScroll = false
-
-    if (streaming && !wasStreaming) {
-      shouldScroll = true
-    }
-
-    // 信号2：本 session 的 AskUser 追问已解决（请求数由 >0 变 0）
-    const currentPendingCount = pendingAskUsers.get(sessionId)?.length ?? 0
-    if (prevPendingCountRef.current > 0 && currentPendingCount === 0) {
-      shouldScroll = true
-    }
-    prevPendingCountRef.current = currentPendingCount
-
-    if (shouldScroll) {
-      scrollToBottom({ animation: 'smooth', wait: true })
-    }
-  }, [streaming, pendingAskUsers, sessionId, scrollToBottom])
+  }, [onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, scrollRef, beginLayout, following])
 
   return null
 }
@@ -529,7 +495,17 @@ function AgentRunningIndicator({ startedAt }: { startedAt?: number }): React.Rea
   )
 }
 
-export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onFork, onExplore, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
+export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onRegenerateLastTurn, onFork, onExplore, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
+  const store = useStore()
+  React.useEffect(() => {
+    if (!window.electronAPI?.listVisualizations) return
+    let cancelled = false
+    window.electronAPI.listVisualizations(sessionId).then((records) => {
+      if (cancelled) return
+      store.set(visualizationsAtom, (previous) => updateVisualizationSessionCache(previous, sessionId, records))
+    }).catch((error: unknown) => console.error('[可视化] 加载结果失败:', error))
+    return () => { cancelled = true }
+  }, [sessionId, store])
   const userProfile = useAtomValue(userProfileAtom)
   const setMinimapCache = useSetAtom(tabMinimapCacheAtom)
   const channels = useAtomValue(channelsAtom)
@@ -584,50 +560,32 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   const retrying = streamState?.retrying
   const startedAt = streamState?.startedAt
 
-  const { displayedContent: rawSmoothContent } = useSmoothStream({
-    content: streamingContent,
-    isStreaming: streaming,
-  })
+  // 是否渲染模型的 thinking 块。
+  // 早期实现是 `agentRuntime !== 'pi'`：它把「内核」当成了「模型能力」，在 Pi 内核只承载
+  // GPT/Codex 的年代等价于「摘要型 reasoning 不展示」，但 Pi 后来接管了 deepseek / kimi /
+  // GLM / qwen 等可读 CoT 模型，一刀切会让这些模型的思考被整轮折叠进「执行过程」而看不到。
+  const showThinking = React.useMemo(
+    () => shouldShowAgentThinking({
+      agentRuntime,
+      provider: streamingModelId ? resolveModelProvider(streamingModelId, channels) : undefined,
+      modelId: streamingModelId,
+    }),
+    [agentRuntime, streamingModelId, channels],
+  )
 
-  // 流式阶段优先使用最新的原始 chunk，确保 Markdown renderer 能随每个增量及时更新。
-  const visibleContent = streamingContent || rawSmoothContent
+  // 直接使用最新 chunk；持久化完成清空时同帧移除 fallback，避免平滑队列残留。
+  const visibleContent = streamingContent
   const visibleContentBlocks = React.useMemo(() => {
     if (!visibleContent) return []
     return parseThinkTagsFromText(visibleContent)
   }, [visibleContent])
   const hasVisibleTextContent = visibleContentBlocks.some((block) => block.type === 'text')
 
-  /**
-   * 流式完成过渡：streaming 结束到持久化消息加载完成之间，
-   * 强制 resize="instant" 避免中间高度变化触发平滑滚动动画。
-   *
-   * 使用 render-phase 计算避免 useEffect 延迟一帧的问题：
-   * - streaming 变 false 的第一帧就能立即切到 instant，防止闪动
-   * - 后续通过 ref+timeout 延迟 150ms 才允许切回 smooth
-   */
-  const [transitioningCooldown, setTransitioningCooldown] = React.useState(false)
-  const wasStreamingRef = React.useRef(streaming)
-
-  // render-phase 判断：是否处于需要 instant resize 的过渡期
-  // liveMessages 非空说明持久化消息还没加载完（加载完后会清空 liveMessages）
-  const needsInstant = !streaming && (!!streamingContent || !!visibleContent || (liveMessages != null && liveMessages.length > 0))
-
-  React.useEffect(() => {
-    // 刚从 streaming → not-streaming：启动 cooldown
-    if (wasStreamingRef.current && !streaming) {
-      setTransitioningCooldown(true)
-    }
-    wasStreamingRef.current = streaming
-  }, [streaming])
-
-  React.useEffect(() => {
-    if (needsInstant) return
-    // 过渡完成后延迟 150ms 才关闭 cooldown，给 StickToBottom 时间稳定
-    const timer = setTimeout(() => setTransitioningCooldown(false), 150)
-    return () => clearTimeout(timer)
-  }, [needsInstant])
-
-  const transitioning = needsInstant || transitioningCooldown
+  // liveMessages 在持久化替换完成后清空；正文内容本身不代表仍在等待持久化。
+  const transitioning = useCompletionTransition(
+    streaming,
+    (liveMessages?.length ?? 0) > 0,
+  )
 
   // 合并持久化 + 实时 SDKMessage（供 ContentBlock 内查找工具结果）
   const allSDKMessagesMerged = React.useMemo(() => {
@@ -782,6 +740,9 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
       })
   }, [visibleGroups])
 
+  // 会话最后一条用户消息（Goal 迭代分隔条不是用户发言）——「重新生成」入口只挂在这一条下面
+  const latestUserGroupId = React.useMemo(() => getLatestUserGroupId(allGroups), [allGroups])
+
   // 实时消息中是否已有可渲染的助手内容
   // 流式中：通过 liveGroupSet 精确判断（只有 streaming 时 liveGroupSet 才非空）
   // 流式结束后：直接检查 liveMessages 中是否有助手消息，
@@ -805,18 +766,18 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     <FileAccessSessionProvider sessionId={sessionId}>
     <BasePathsProvider basePaths={resolvedBasePaths}>
     <div ref={historySelectionRootRef} className="relative flex min-h-0 flex-1 flex-col">
-    <Conversation resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
+    <Conversation key={sessionId} resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={sessionId} ready={ready} />
       <TopHistoryLoader
         onLoadEarlierHistory={onLoadEarlierHistory}
         historyMoreAvailable={historyMoreAvailable}
         historyLoadingEarlier={historyLoadingEarlier}
       />
-      <StreamScrollFollow sessionId={sessionId} streaming={streaming} />
+      <ConversationFollowTrigger sessionId={sessionId} loaded={messagesLoaded !== false && ready} />
       <ConversationContent>
         {onLoadEarlierHistory && hasContent && (
           <div className="flex justify-center py-3">
-            <button
+            <ConversationHistoryButton
               type="button"
               disabled={!historyMoreAvailable || historyLoadingEarlier}
               className="rounded-md border border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-60"
@@ -832,18 +793,18 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
               ) : (
                 '加载更早消息'
               )}
-            </button>
+            </ConversationHistoryButton>
           </div>
         )}
         {!onLoadEarlierHistory && hasEarlierGroups && (
           <div className="flex justify-center py-3">
-            <button
+            <ConversationHistoryButton
               type="button"
               className="rounded-md border border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={loadEarlierGroups}
             >
               加载更早消息（还剩 {resolvedVisibleGroupStart} 组）
-            </button>
+            </ConversationHistoryButton>
           </div>
         )}
         {!hasContent && !streaming && runningDelegationCount === 0 ? (
@@ -867,6 +828,16 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
               // （中断态不显示分叉/回退属预期，但未读仍应可确认）。
               const isLatestAssistantTurn = group.type === 'assistant-turn'
                 && getGroupId(group) === getGroupId(allGroups.findLast((g) => g.type === 'assistant-turn') ?? group)
+              // 「重新生成」入口只挂在会话最后一条用户消息下；会话活跃（流式/后台任务/子 Agent）时不暴露，
+              // 避免与正在运行的 agent session 冲突（与 AgentView 侧的 rewind 护栏一致）。
+              const isLatestUserTurn = group.type === 'user'
+                && !isGoalIterationMessage(group.message)
+                && getGroupId(group) === latestUserGroupId
+              // 最新一轮错误卡片的「重试」也走重新生成（截断+重发）；历史错误卡片不带这个回调，
+              // 否则会用一个只认「最后一条用户消息」的锚点去截断与本卡片无关的最新一轮。
+              const retryLatestTurn = shouldRegenerateFromRetry({ isLatestTurn: isLatestAssistantTurn, sessionActive: isSessionActive })
+                ? onRegenerateLastTurn
+                : undefined
               return (
                 <MessageGroupRenderer
                   key={getGroupId(group)}
@@ -879,13 +850,14 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                   onFork={shouldDisableActions ? undefined : onFork}
                   onExplore={shouldDisableActions ? undefined : onExplore}
                   onRewind={shouldDisableActions ? undefined : onRewind}
-                  onRetry={shouldDisableActions ? undefined : onRetry}
+                  onRetry={shouldDisableActions ? undefined : (retryLatestTurn ?? onRetry)}
                   onRetryInNewSession={shouldDisableActions ? undefined : onRetryInNewSession}
                   onCompact={(shouldDisableActions || isSessionActive) ? undefined : onCompact}
+                  onRegenerateLastUserMessage={(isLatestUserTurn && !shouldDisableActions && !isSessionActive) ? onRegenerateLastTurn : undefined}
                   isStreaming={isLive || undefined}
                   stoppedByUser={isLastAssistantTurn || undefined}
                   sessionModelId={sessionModelId}
-                  showThinking={agentRuntime !== 'pi'}
+                  showThinking={showThinking}
                   isLatestAssistantTurn={isLatestAssistantTurn}
                 />
               )
@@ -925,7 +897,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                             index={index}
                             dimmed={hasVisibleTextContent && block.type !== 'text'}
                             isStreaming={streaming}
-                            showThinking={agentRuntime !== 'pi'}
+                            showThinking={showThinking}
                           />
                         ))}
                       </div>

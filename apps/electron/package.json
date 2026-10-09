@@ -1,6 +1,6 @@
 {
   "name": "@profer/electron",
-  "version": "0.15.88",
+  "version": "0.16.0",
   "description": "Profer",
   "main": "dist/main.cjs",
   "author": "Profer Team",
@@ -47,6 +47,7 @@
     "test:memory-search": "node scripts/memory-search-verify.mjs",
     "diagnose:openai-reasoning": "node scripts/diagnose-openai-reasoning.mjs",
     "generate:icons": "cd resources && ./generate-icons.sh",
+    "generate:brand-logos": "node scripts/generate-brand-logos.mjs",
     "verify:build-target:oss": "node scripts/verify-build-target.cjs oss dist/main.cjs",
     "verify:build-target:commercial": "node scripts/verify-build-target.cjs commercial dist/main.cjs",
     "pack": "bun run build && bun run sync:runtime-deps && node scripts/run-electron-builder.cjs --dir",
@@ -192,7 +193,8 @@
     "iconv-lite": "^0.6.3",
     "mammoth": "^1.12.0",
     "react-arborist": "3.15.0",
-    "typebox": "1.1.38"
+    "typebox": "1.1.38",
+    "echarts": "6.1.0"
   },
   "electronmon": {
     "patterns": [
