@@ -11,6 +11,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync, readdirSync, cpSync, copyFileSync, createReadStream, createWriteStream, type WriteStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { createAgentSessionIndexStore } from './agent-session-index'
+import { createSnippet, extractTextFromPersistedMessage, matchAgentJsonlLine } from './agent-session-search'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, join, relative, resolve, dirname } from 'node:path'
@@ -2781,86 +2782,14 @@ async function findFirstMatchInAgentJsonl(
 
   try {
     for await (const line of rl) {
-      if (!line.trim()) continue
-      let parsed: {
-        role?: string
-        id?: string
-        uuid?: string
-        content?: unknown
-        message?: { role?: string; id?: string; content?: Array<{ type: string; text?: string }> }
-      }
-      try {
-        parsed = JSON.parse(line)
-      } catch {
-        continue
-      }
-
-      const rawRole = parsed.role ?? parsed.message?.role ?? 'assistant'
-      // 收窄到 AgentMessageSearchResult.role 允许的联合类型；不在白名单的退化为 assistant
-      const role: AgentMessageSearchResult['role'] =
-        rawRole === 'user' || rawRole === 'assistant' || rawRole === 'tool' || rawRole === 'status'
-          ? rawRole
-          : 'assistant'
-      const messageId = parsed.id ?? parsed.uuid ?? parsed.message?.id ?? ''
-
-      let textContent = ''
-      if (typeof parsed.content === 'string') {
-        textContent = parsed.content
-      } else if (Array.isArray(parsed.message?.content)) {
-        textContent = parsed.message.content
-          .filter((b) => b.type === 'text' && b.text)
-          .map((b) => b.text!)
-          .join('\n')
-      }
-      if (!textContent) continue
-
-      const contentLower = textContent.toLowerCase()
-      const matchIndex = contentLower.indexOf(queryLower)
-      if (matchIndex === -1) continue
-
-      const snippetStart = Math.max(0, matchIndex - 40)
-      const snippetEnd = Math.min(textContent.length, matchIndex + queryLength + 40)
-      const snippet = (snippetStart > 0 ? '...' : '') +
-        textContent.slice(snippetStart, snippetEnd) +
-        (snippetEnd < textContent.length ? '...' : '')
-      const matchStart = matchIndex - snippetStart + (snippetStart > 0 ? 3 : 0)
-
-      return { messageId, role, snippet, matchStart }
+      const hit = matchAgentJsonlLine(line, queryLower, queryLength)
+      if (hit) return hit
     }
     return null
   } finally {
     rl.close()
     stream.destroy()
   }
-}
-
-function extractTextFromPersistedMessage(parsed: unknown): string {
-  if (!parsed || typeof parsed !== 'object') return ''
-  const record = parsed as {
-    content?: unknown
-    message?: { content?: Array<{ type: string; text?: string }> }
-  }
-
-  if (typeof record.content === 'string') {
-    return record.content
-  }
-
-  if (Array.isArray(record.message?.content)) {
-    return record.message.content
-      .filter((b) => b.type === 'text' && b.text)
-      .map((b) => b.text!)
-      .join('\n')
-  }
-
-  return ''
-}
-
-function createSnippet(text: string, matchIndex: number, matchLength: number): string {
-  const snippetStart = Math.max(0, matchIndex - 48)
-  const snippetEnd = Math.min(text.length, matchIndex + matchLength + 48)
-  return (snippetStart > 0 ? '...' : '') +
-    text.slice(snippetStart, snippetEnd) +
-    (snippetEnd < text.length ? '...' : '')
 }
 
 function findSessionMessageSnippet(sessionId: string, query: string): string | undefined {
