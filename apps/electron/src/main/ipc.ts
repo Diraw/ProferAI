@@ -296,6 +296,7 @@ import { assertMainWindowSender } from './lib/ipc-sender-guard'
 import { registerVisualizationIpc } from './lib/visualization-ipc'
 import { registerAutomationIpc } from './lib/automation-ipc'
 import { registerSettingsIpc } from './lib/settings-ipc'
+import { registerHeatmapMigrationIpc } from './lib/heatmap-migration-ipc'
 import type { MainWindowGetter } from './lib/ipc-sender-guard'
 import { getMainWindow } from './lib/main-window-state'
 import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getWorkspaceSkillsDir, getWorkspaceFilesDir, getScratchPadPath, getCustomSoundsDir, getAgentWorkspacePath } from './lib/config-paths'
@@ -6081,36 +6082,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ===== 工作区热力图 =====
-
-  ipcMain.handle(AGENT_IPC_CHANNELS.GET_WORKSPACE_HEATMAP_DAILY, async (_, workspaceId: string) => {
-    const { loadWorkspaceHeatmapDaily } = await import('./lib/workspace-heatmap-query')
-    return loadWorkspaceHeatmapDaily(workspaceId)
-  })
-
-  // 迁移取消时清理临时解压目录
-  ipcMain.handle('migration:cancelImport', async (_, tempDir: string) => {
-    if (!tempDir || typeof tempDir !== 'string') return
-    try {
-      // 安全校验：解析真实路径，确保只清理 tmpdir 下的 profer-import-* 目录
-      const resolved = realpathSync(resolve(tempDir))
-      const tmpRoot = realpathSync(tmpdir())
-      if (!resolved.startsWith(tmpRoot + sep)) {
-        console.warn('[迁移] 拒绝清理非临时目录:', tempDir)
-        return
-      }
-      const dirName = basename(resolved)
-      if (!dirName.startsWith('profer-import-')) {
-        console.warn('[迁移] 目录名不匹配，拒绝清理:', dirName)
-        return
-      }
-      if (existsSync(resolved)) {
-        rmSync(resolved, { recursive: true, force: true })
-        console.log(`[迁移] 已清理临时目录: ${resolved}`)
-      }
-    } catch {
-      // 目录不存在或无法解析，无需清理
-    }
-  })
+  registerHeatmapMigrationIpc()
 
   // 启动时自动清理临时文件
   const runStartupCleanup = async (): Promise<void> => {
