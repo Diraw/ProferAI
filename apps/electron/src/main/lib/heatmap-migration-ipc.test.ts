@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
  */
 const source = readFileSync(resolve(import.meta.dir, 'heatmap-migration-ipc.ts'), 'utf8')
 const ipc = readFileSync(resolve(import.meta.dir, '..', 'ipc.ts'), 'utf8')
+const storage = readFileSync(resolve(import.meta.dir, 'storage-ipc.ts'), 'utf8')
 
 describe('热力图与迁移取消 IPC 注册（结构检查）', () => {
   test('注册入口为导出函数，且包含 2 个 ipcMain 注册', () => {
@@ -28,9 +29,9 @@ describe('热力图与迁移取消 IPC 注册（结构检查）', () => {
     expect(() => readFileSync(resolve(import.meta.dir, 'workspace-heatmap-query.ts'))).not.toThrow()
   })
 
-  test('ipc.ts 在原位置调用注册函数，且启动清理仍保留在 ipc.ts', () => {
+  test('ipc.ts 在原位置调用注册函数，且启动清理仍保留在存储模块', () => {
     expect(ipc).toContain('registerHeatmapMigrationIpc()')
-    expect(ipc).toContain('runStartupCleanup()')
+    expect(storage).toContain('runStartupCleanup()')
     expect(ipc).not.toContain("'migration:cancelImport', async")
   })
 })
