@@ -18,8 +18,7 @@ describe('Planning IPC 注册（结构检查）', () => {
       expect(PLANNING_IPC_CHANNELS[key]).toBeDefined()
     }
   })
-  test('保留团队分支、Todo Agent 跨窗口转交和变更广播', () => {
-    expect(source).toContain("getAgentWorkspace(input.workspaceId)?.type === 'team'")
+  test('Todo Agent 跨窗口转交和变更广播', () => {
     expect(source).toContain('feishuBridgeManager.ensureSessionMirror(session)')
     expect(source).toContain("searchParams.get('window')")
     expect(source).toContain('TODO_AGENT_SESSION_READY')

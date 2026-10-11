@@ -17,7 +17,7 @@
  * 向上取整到 126px。顶栏内的内联变体（34px 按钮）留出的余量更大，同样安全。
  *
  * 已知尚未改为引用本常量的字面量（属历史债务，改动需 Windows 真机验收）：
- * - `components/app-shell/AppShell.tsx`、`components/chat/ChatHeader.tsx`、`components/agent/TeamWorkspaceView.tsx`
+ * - `components/app-shell/AppShell.tsx`、`components/chat/ChatHeader.tsx`
  * - `components/diff/PreviewPanel.tsx`（本地常量）、`components/agent/SidePanel.tsx`、`components/browser/BrowserPanel.tsx`
  */
 export const WINDOWS_WINDOW_CONTROLS_SAFE_WIDTH = 126

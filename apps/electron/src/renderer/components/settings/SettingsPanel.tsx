@@ -63,14 +63,12 @@ import { ToolSettings } from "./ToolSettings";
 import { BotHubSettings } from "./BotHubSettings";
 import { ShortcutSettings } from "./ShortcutSettings";
 import { DataManagementSettings } from "./DataManagementSettings";
-import { TeamWorkspaceSettings } from "./TeamWorkspaceSettings";
 import { CreditsSettings } from "./CreditsSettings";
 import { SubscriptionSettings } from "./SubscriptionSettings";
 import { OpenApiSettings } from "./OpenApiSettings";
 import { ProxySettings } from "./ProxySettings";
 import { PluginSettings } from "./PluginSettings";
 import { DeveloperSettings } from "./DeveloperSettings";
-import { TEAM_WORKSPACE_UI_ENABLED } from "@/lib/product-feature-flags";
 import { DevicesSettings } from "./DevicesSettings";
 import { matchesSettingsSearch } from "./settings-search";
 
@@ -95,9 +93,6 @@ const ACCOUNT_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "account", label: "账户与资料", icon: <UserRound size={16} />, searchTerms: ["登录", "注册", "用户名", "头像", "个人信息", "团队账户"] },
   { id: "credits", label: "额度与用量", icon: <Coins size={16} />, searchTerms: ["积分", "余额", "用量", "API 请求", "请求历史"] },
   { id: "subscription", label: "订阅方案", icon: <CreditCard size={16} />, searchTerms: ["套餐", "会员", "VIP", "兑换码", "价格"] },
-  ...(TEAM_WORKSPACE_UI_ENABLED
-    ? [{ id: "team" as const, label: "团队管理", icon: <Users size={16} />, searchTerms: ["团队工作区", "成员", "邀请", "邀请码", "权限"] }]
-    : []),
 ];
 
 /** 模型与能力：渠道 / Agent / 提示词 / Chat 工具 */
@@ -185,8 +180,6 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
       return <DeveloperSettings />;
     case "plugins":
       return <PluginSettings />;
-    case "team":
-      return <TeamWorkspaceSettings />;
     case "credits":
       return <CreditsSettings />;
     case "subscription":

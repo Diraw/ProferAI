@@ -1044,54 +1044,13 @@ async function bootstrap(): Promise<void> {
     }
   }, 0)
 
-  // 启动时恢复团队会话：先检查已登录，否则用 refreshToken 尝试恢复
-  safeRun('restoreTeamSession', async () => {
+  // 启动时恢复账号会话：先检查已登录，否则用 refreshToken 尝试恢复
+  safeRun('restoreAccountSession', async () => {
     const { getAuthStatus, scheduleAutoRefresh, tryRestoreSession } = require('./lib/auth-service')
 
-    // 如果 accessToken 已过期但 refreshToken 存在，先尝试恢复
     const restored = await tryRestoreSession()
-
-    if (restored) {
-      console.log('[启动] 团队会话已恢复，开始同步...')
+    if (restored || getAuthStatus().isLoggedIn) {
       scheduleAutoRefresh()
-      const { startSyncEngine } = require('./lib/sync-manager')
-      startSyncEngine()
-      // 延迟 3 秒同步团队工作区，等窗口 IPC 就绪
-      setTimeout(() => {
-        const { listTeamWorkspaces } = require('./lib/team-manager')
-        const { syncTeamWorkspacesToIndex } = require('./lib/agent-workspace-manager')
-        listTeamWorkspaces().then((teamWs: unknown[]) => {
-          syncTeamWorkspacesToIndex(teamWs)
-          for (const w of BrowserWindow.getAllWindows()) {
-            w.webContents.send('team:workspaces-synced')
-          }
-          console.log(`[启动] 团队工作区同步完成: ${(teamWs as unknown[]).length} 个`)
-        }).catch((err: unknown) => {
-          // 同步失败绝不能清空本地团队索引；保留上一次成功结果，下一次启动/登录会再试。
-          console.error('[启动] 团队工作区同步失败（已保留本地团队列表）:', err)
-        })
-      }, 3000)
-    } else if (getAuthStatus().isLoggedIn) {
-      // 向后兼容：如果 getAuthStatus 返回 true，tryRestoreSession 也会返回 true，已处理
-      // 这里仅当 token 有效但 refreshToken 不存在时也有可能
-      console.log('[启动] 检测到已登录，恢复团队同步...')
-      scheduleAutoRefresh()
-      const { startSyncEngine } = require('./lib/sync-manager')
-      startSyncEngine()
-      setTimeout(() => {
-        const { listTeamWorkspaces } = require('./lib/team-manager')
-        const { syncTeamWorkspacesToIndex } = require('./lib/agent-workspace-manager')
-        listTeamWorkspaces().then((teamWs: unknown[]) => {
-          syncTeamWorkspacesToIndex(teamWs)
-          for (const w of BrowserWindow.getAllWindows()) {
-            w.webContents.send('team:workspaces-synced')
-          }
-          console.log(`[启动] 团队工作区同步完成: ${(teamWs as unknown[]).length} 个`)
-        }).catch((err: unknown) => {
-          // 同步失败绝不能清空本地团队索引；保留上一次成功结果，下一次启动/登录会再试。
-          console.error('[启动] 团队工作区同步失败（已保留本地团队列表）:', err)
-        })
-      }, 3000)
     }
   })
 
@@ -1112,26 +1071,9 @@ async function bootstrap(): Promise<void> {
   // 休眠恢复：系统唤醒后重建网络连接，必要时用 refreshToken 恢复会话
   powerMonitor.on('resume', () => {
     console.log('[系统] 从休眠恢复，重建连接...')
-    safeRun('resume:refreshTeamSession', async () => {
+    safeRun('resume:refreshAccountSession', async () => {
       const { tryRestoreSession } = require('./lib/auth-service')
-
-      // 如果 token 在休眠期间过期，用 refreshToken 尝试恢复
-      const restored = await tryRestoreSession()
-
-      if (restored) {
-        const { startSyncEngine } = require('./lib/sync-manager')
-        startSyncEngine()
-        setTimeout(() => {
-          const { listTeamWorkspaces } = require('./lib/team-manager')
-          const { syncTeamWorkspacesToIndex } = require('./lib/agent-workspace-manager')
-          listTeamWorkspaces().then((teamWs: unknown[]) => {
-            syncTeamWorkspacesToIndex(teamWs)
-            for (const w of BrowserWindow.getAllWindows()) {
-              w.webContents.send('team:workspaces-synced')
-            }
-          }).catch(() => {})
-        }, 2000)
-      }
+      await tryRestoreSession()
     })
     safeRun('resume:channelsSync', () => {
       const { getTeamAuth } = require('./lib/auth-service')
@@ -1244,9 +1186,6 @@ app.on('before-quit', () => {
   stopRemoteService()
   // 停止 Agent Fabric 本地服务
   void stopAgentFabricService()
-  // 停止同步引擎
-  const { stopSyncEngine } = require('./lib/sync-manager')
-  stopSyncEngine()
   // 释放飞书同步防休眠
   stopFeishuSyncSleepBlocker()
   // 注销全局快捷键

@@ -12,7 +12,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, Cloud, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X,
+  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useShortcut } from '@/hooks/useShortcut'
@@ -1178,11 +1178,8 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   const isCurrent = group.workspace.id === currentWorkspaceId
   /** 最近 1.2 秒内切换到此工作区时，短暂高亮 */
   const justSwitchedTo = isCurrent && workspaceSwitchTs > 0 && Date.now() - workspaceSwitchTs < 1200
-  const isTeamWorkspace = group.workspace.type === 'team'
   const renderWorkspaceIcon = (size: number, className: string) =>
-    isTeamWorkspace
-      ? <Cloud size={size} className={className} />
-      : <FolderOpen size={size} className={className} />
+    <FolderOpen size={size} className={className} />
 
   const [renamingWorkspace, setRenamingWorkspace] = React.useState(false)
   const [workspaceEditName, setWorkspaceEditName] = React.useState('')

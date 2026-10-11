@@ -12,10 +12,9 @@ import { writeFile } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, SYNC_IPC_CHANNELS, TEAM_IPC_CHANNELS, SKILL_MARKETPLACE_IPC_CHANNELS, isAgentRuntime, isChannelEnabledForRuntime, isProferPermissionMode, normalizePathForCompare, DEFAULT_PRESET_ID, type AgentThinkingLevel, type AgentEffort, PLANNING_CONFLICT_ERROR, type Todo, type TodoListQuery, type CalendarEvent, type CalendarEventListQuery, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type StartTodoAgentInput, type StartTodoAgentResult, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type SnoozePlanningReminderInput, type TodoAgentSessionActivation, type ProviderType, type ReasoningCapability, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult, type OtherWorkspacePresetsGroup, type PresetReference, type PresetReferenceReport, type PresetScopeRebindResult } from '@profer/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, isAgentRuntime, isChannelEnabledForRuntime, isProferPermissionMode, normalizePathForCompare, DEFAULT_PRESET_ID, type AgentThinkingLevel, type AgentEffort, PLANNING_CONFLICT_ERROR, type Todo, type TodoListQuery, type CalendarEvent, type CalendarEventListQuery, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type StartTodoAgentInput, type StartTodoAgentResult, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type SnoozePlanningReminderInput, type TodoAgentSessionActivation, type ProviderType, type ReasoningCapability, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult, type OtherWorkspacePresetsGroup, type PresetReference, type PresetReferenceReport, type PresetScopeRebindResult } from '@profer/shared'
 import { SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS } from '../types'
 import { registerRuntimeGitIpc } from './lib/runtime-git-ipc'
-import { registerSseIpc } from './lib/sse-ipc'
 import { getBuildTarget } from './lib/build-target'
 import { agentFilePreviewSessionManager } from './lib/agent-file-preview-session'
 import { resolvePiReasoningCapability } from './lib/adapters/pi-model-registry'
@@ -156,14 +155,12 @@ import { registerVoiceDictationIpc } from './lib/voice-dictation-ipc'
 import { registerMigrationIpc } from './lib/migration-ipc'
 import { registerWindowIpc } from './lib/window-ipc'
 import { registerPlanningIpc } from './lib/planning-ipc'
-import { registerAccountTeamIpc } from './lib/account-team-ipc'
-import { registerSkillMarketplaceIpc } from './lib/skill-marketplace-ipc'
+import { registerAccountIpc } from './lib/account-ipc'
 import { registerLarkIpc } from './lib/lark-ipc'
 import { registerWeChatIpc } from './lib/wechat-ipc'
 import { registerDingTalkIpc } from './lib/dingtalk-ipc'
 import { registerFeishuIpc } from './lib/feishu-ipc'
 import { registerGlobalSkillIpc } from './lib/global-skill-ipc'
-import { registerTeamContentIpc } from './lib/team-content-ipc'
 import { registerKnowledgeIpc } from './lib/knowledge-ipc'
 import { registerDesktopNotificationIpc } from './lib/desktop-notification-ipc'
 import { getSettings, updateSettings } from './lib/settings-service'
@@ -4659,17 +4656,8 @@ export function registerIpcHandlers(): void {
   // ===== 定时任务（Automation）=====
   registerAutomationIpc()
 
-  // ===== 身份认证 / 同步 / 团队管理 =====
-  registerAccountTeamIpc()
-
-  // ===== SSE 实时事件 =====
-  registerSseIpc()
-
-  // ===== 技能市场（复用团队文件系统）=====
-  registerSkillMarketplaceIpc()
-
-  // ===== 团队文件与团队记忆 =====
-  registerTeamContentIpc({ assertSensitiveAgentIpcSender })
+  // ===== 身份认证 =====
+  registerAccountIpc()
 
   // ===== 通用个人资料库相关 =====
   registerKnowledgeIpc()

@@ -69,7 +69,6 @@ import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-servi
 import { buildPiRuntimeCredentialOptions, resolveRuntimeCredentials } from './agent-runtime-credentials'
 import { injectAutomationMcpServer } from './automation-agent-tools'
 import { injectMemoryArchiveMcpServer } from './memory-archive-agent-tools'
-import { injectTeamMemoryMcpServer } from './team-memory-agent-tools'
 import { injectTaskGraphMcpServer } from './task-graph-agent-tools'
 import { injectAgentPresetMcpServer } from './agent-preset-tools'
 import {
@@ -98,7 +97,7 @@ import type { SDKUserMessage } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { generateCodexTitle } from './adapters/pi-codex-title-generator'
-import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, createFallbackTitle, createWindowFallbackTitle, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle } from './title-generation'
+import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle } from './title-generation'
 import { isCommercialBuild } from './build-target'
 import { isOfficialManagedChannel } from './official-channel'
 import {
@@ -148,7 +147,7 @@ import { askUserService } from './agent-ask-user-service'
 import { exitPlanService, type ExitPlanPermissionResult } from './agent-exit-plan-service'
 import { applyAgentModelRoutingToEnv, resolveAgentModelRouting } from './agent-model-routing'
 
-import { validateToolInput, validateToolPathPlatform } from './agent-tool-input-validator'
+import { validateToolInput, validateToolPathPlatform, validateWriteTargetParent } from './agent-tool-input-validator'
 import { estimateTokenCount, WRITE_CONTENT_TOKEN_THRESHOLD } from './agent-tool-token-estimator'
 
 // 已提取的工具模块
@@ -519,10 +518,6 @@ export class AgentOrchestrator {
     const titlePrompt = contextMessages && contextMessages.length > 0
       ? buildWindowTitlePrompt(contextMessages)
       : buildTitlePrompt(userMessage)
-    // 无法调用标题模型时的本地兜底：窗口路径取最早一条有效来源的首行。
-    const localFallbackTitle = contextMessages && contextMessages.length > 0
-      ? createWindowFallbackTitle(contextMessages)
-      : createFallbackTitle(userMessage)
     console.log('[Agent 标题生成] 开始生成标题:', {
       channelId,
       modelId,
@@ -535,17 +530,16 @@ export class AgentOrchestrator {
       const channel = channels.find((c) => c.id === channelId)
       if (!channel) {
         console.warn('[Agent 标题生成] 渠道不存在:', channelId)
-        return localFallbackTitle
+        return null
       }
 
       if (channel.provider === 'xai') {
         // xAI subscription uses Pi's provider-specific OAuth transport; title generation's
-        // generic channel adapter only understands API keys, so retain a local deterministic title.
-        return localFallbackTitle
+        // generic channel adapter only understands API keys.
+        return null
       }
 
       if (channel.provider === 'openai-codex') {
-        const fallbackTitle = localFallbackTitle
         try {
           const [credentials, proxyUrl] = await Promise.all([resolveCodexOAuthCredentials(channelId), getEffectiveProxyUrl()])
           const generatedTitle = await generateCodexTitle({
@@ -560,11 +554,11 @@ export class AgentOrchestrator {
             console.log(`[Agent 标题生成] ChatGPT OAuth 语义标题生成成功: "${title}"`)
             return title
           }
-          console.warn('[Agent 标题生成] ChatGPT OAuth 返回空标题，使用本地兜底')
+          console.warn('[Agent 标题生成] ChatGPT OAuth 返回空标题')
         } catch (error) {
-          console.warn('[Agent 标题生成] ChatGPT OAuth 语义标题生成失败，使用本地兜底:', error)
+          console.warn('[Agent 标题生成] ChatGPT OAuth 语义标题生成失败:', error)
         }
-        return fallbackTitle
+        return null
       }
 
       let apiKey: string
@@ -573,7 +567,7 @@ export class AgentOrchestrator {
         const auth = await getTeamAuthWithRefresh()
         if (!auth) {
           console.warn('[Agent 标题生成] 团队账号登录已过期，跳过 AI 标题生成')
-          return localFallbackTitle
+          return null
         }
         const proxyPath = (this.adapter.isAnthropicProxyProvider?.(channel.provider) ?? true) ? '/v1/proxy/messages' : '/v1/proxy/chat'
         proxyBaseUrl = `${auth.baseUrl}${proxyPath}`
@@ -595,22 +589,22 @@ export class AgentOrchestrator {
       const fetchFn = getFetchFn(proxyUrl)
       const title = await fetchTitle(request, providerAdapter, fetchFn)
       if (!title) {
-        console.warn('[Agent 标题生成] API 返回空标题，使用本地兜底')
-        return localFallbackTitle
+        console.warn('[Agent 标题生成] API 返回空标题')
+        return null
       }
 
       const cleaned = sanitizeGeneratedTitle(title)
       if (!cleaned) {
-        console.warn('[Agent 标题生成] 标题清洗后为空，使用本地兜底')
-        return localFallbackTitle
+        console.warn('[Agent 标题生成] 标题清洗后为空')
+        return null
       }
       const result = cleaned
 
       console.log(`[Agent 标题生成] 生成标题成功: "${result}"`)
       return result
     } catch (error) {
-      console.warn('[Agent 标题生成] 生成失败，使用本地兜底:', error)
-      return localFallbackTitle
+      console.warn('[Agent 标题生成] 生成失败:', error)
+      return null
     }
   }
 
@@ -639,7 +633,6 @@ export class AgentOrchestrator {
       if (anchorId && anchorIndex < 0) {
         console.warn('[Agent 编排] 探索分支命名未找到分叉锚点，改为仅用本次消息命名')
       } else {
-        // 找到锚点时只取分叉之后的用户消息。
         const startIndex = anchorId ? anchorIndex + 1 : 0
         for (let index = startIndex; index < groups.length; index++) {
           const group = groups[index]!
@@ -649,14 +642,20 @@ export class AgentOrchestrator {
           texts.push(extractUserText(userMessage) ?? '')
         }
       }
+      // 兼容只有 user 消息已落盘、assistant 尚未成功写入的首轮失败场景。
+      if (texts.length === 0) {
+        texts = messages
+          .filter((message): message is SDKUserMessage => message.type === 'user' && isUserInputMessage(message as SDKUserMessage))
+          .map((message) => extractUserText(message) ?? '')
+      }
     } catch (error) {
       console.warn('[Agent 编排] 读取会话转录用于命名失败，改为仅用本次消息:', error)
       texts = []
     }
-    // 兜底追加本次消息：转录可能尚未落盘（或消息正文被截断），
-    // 重复时由 collectTitleSources 按归一化文本去重。
     if (fallbackMessage) texts.push(fallbackMessage)
-    return collectTitleSources(texts)
+    const sources = collectTitleSources(texts)
+    console.log('[Agent 编排] 标题来源收集完成:', { sessionId, sourceCount: sources.length })
+    return sources
   }
 
   /**
@@ -733,20 +732,6 @@ export class AgentOrchestrator {
       callbacks.onTitleUpdated(title)
       console.log(`[Agent 编排] 自动标题生成完成: "${title}"（来源 ${sources.length} 条，${lockNow ? '已定稿' : '待精修'}）`)
     } catch (error) {
-      const fallbackTitle = createWindowFallbackTitle(this.collectSessionTitleSources(sessionId, meta, userMessage))
-      if (fallbackTitle) {
-        const latestMeta = getAgentSessionMeta(sessionId)
-        if (latestMeta && !latestMeta.titleLockedAt && latestMeta.title === meta.title) {
-          updateAgentSessionMeta(sessionId, {
-            title: fallbackTitle,
-            titleAutoGeneratedAt: Date.now(),
-            titleLockedAt: Date.now(),
-          })
-          callbacks.onTitleUpdated(fallbackTitle)
-          console.warn('[Agent 编排] 自动标题异常，已使用本地兜底:', error)
-          return
-        }
-      }
       console.warn('[Agent 编排] 自动标题生成失败:', error)
     }
   }
@@ -761,8 +746,7 @@ export class AgentOrchestrator {
 
     const sources = this.collectSessionTitleSources(sessionId, meta, '')
     if (sources.length === 0) {
-      console.log('[Agent 编排] 重新生成标题：没有有效来源')
-      return null
+      throw new Error('重新生成标题失败：当前会话没有可用于生成标题的有效用户消息')
     }
 
     const title = await this.generateTitle({
@@ -771,12 +755,13 @@ export class AgentOrchestrator {
       modelId,
       contextMessages: sources,
     })
-    if (!title) return null
+    if (!title) {
+      throw new Error('重新生成标题失败：标题模型没有返回可用结果')
+    }
 
     const latestMeta = getAgentSessionMeta(sessionId)
     if (!latestMeta || (latestMeta.revision ?? 0) !== requestRevision) {
-      console.warn('[Agent 编排] 手动重新生成标题结果已过期，跳过写入:', { sessionId })
-      return null
+      throw new Error('重新生成标题失败：生成期间会话状态已变化，请重试')
     }
     updateAgentSessionMeta(sessionId, {
       title,
@@ -1273,7 +1258,6 @@ export class AgentOrchestrator {
     // 6. 状态初始化
     const accumulatedMessages: SDKMessage[] = []
     let resolvedModel = modelId || DEFAULT_MODEL_ID
-    let titleGenerationStarted = false
     let agentCwd: string | undefined
     let workspaceSlug: string | undefined
     let workspace: import('@profer/shared').AgentWorkspace | undefined
@@ -1370,6 +1354,12 @@ export class AgentOrchestrator {
           writeFileSync(settingsPath, JSON.stringify(sdkProjectSettings, null, 2))
           console.log(`[Agent 编排] 已设置 SDK settings (plansDirectory, skipWebFetchPreflight, autoMemoryDirectory, autoCompact)`)
         }
+      }
+
+      // Pi/Claude 都要求 Write 不能隐式创建父目录；产品约定的计划目录在这里显式准备。
+      if (workspaceSlug) {
+        const planDir = join(agentCwd, '.context', 'plan')
+        if (!existsSync(planDir)) mkdirSync(planDir, { recursive: true })
       }
 
       // 9.6 直接信任已保存的 sdkSessionId，跳过 listSessions 预验证
@@ -1481,9 +1471,6 @@ export class AgentOrchestrator {
             },
             disabledTools,
           )
-          if (workspace?.type === 'team') {
-            await injectTeamMemoryMcpServer(sdk, mcpServers, { workspaceId }, disabledTools)
-          }
         }
         if (!disabledToolGroups.has('collaboration')) {
           await injectAgentCollaborationMcpServer(
@@ -1522,7 +1509,6 @@ export class AgentOrchestrator {
           await injectPlanningMcpServer(sdk, mcpServers, {
             sessionId,
             workspaceId,
-            isTeamWorkspace: workspace?.type === 'team',
             disabledTools,
           })
         }
@@ -1638,7 +1624,7 @@ export class AgentOrchestrator {
       if (promptMode === 'standard' && customMcpServers) {
         const customEntries = Object.entries(customMcpServers)
           .filter(([name]) => isEffectiveAgentPresetMcpServerAllowed(presetPolicy, name))
-          // 外部 MCP 不得覆盖 Profer 已注册的内置 MCP（如 automation/planning/team-memory）。
+          // 外部 MCP 不得覆盖 Profer 已注册的内置 MCP（如 automation/planning）。
           .filter(([name]) => !Object.prototype.hasOwnProperty.call(mcpServers, name))
         Object.assign(mcpServers, Object.fromEntries(customEntries))
         const rejectedCount = Object.keys(customMcpServers).length - customEntries.length
@@ -1754,7 +1740,6 @@ export class AgentOrchestrator {
               modelId,
               agentRuntime,
               workspaceId,
-              isTeamWorkspace: workspace?.type === 'team',
               workspaceSlug,
               agentCwd,
               allowedRoots: browserAllowedRoots,
@@ -1915,6 +1900,12 @@ export class AgentOrchestrator {
         if (validationFailure) {
           console.warn(`[Agent 工具验证] 参数缺失: tool=${toolName}, mode=${currentMode}`)
           return validationFailure
+        }
+
+        const writeParentFailure = validateWriteTargetParent(input, agentCwd, toolName)
+        if (writeParentFailure) {
+          console.warn(`[Agent 工具验证] Write 父目录不存在: tool=${toolName}, path=${String(input.file_path ?? input.path)}`)
+          return writeParentFailure
         }
 
         // 非 Windows 平台上的 Windows 绝对路径会被 node:path 当成相对路径拼进会话目录，
@@ -2143,8 +2134,6 @@ export class AgentOrchestrator {
           claudeAvailable,
           deepSeekSubagentModel: modelRouting.subagentModel,
           isPiRuntime: agentRuntime === 'pi',
-          isTeamWorkspace: workspace?.type === 'team',
-          teamMemoryAvailable: workspace?.type === 'team' && !disabledToolGroups.has('memory'),
           disabledToolGroups: [...disabledToolGroups].filter((group): group is import('@profer/shared').AgentPresetToolGroup => AGENT_PRESET_CAPABILITY_GROUPS.some((item) => item.id === group)),
           disabledTools: disabledTools ? [...disabledTools] : undefined,
           pptCapabilityActive: presetPolicy.pptCapabilityActive,
@@ -2312,15 +2301,6 @@ export class AgentOrchestrator {
             } catch (err) {
               console.error(`[Agent 编排] 保存 SDK session_id 失败:`, err)
             }
-          }
-
-          // SDK 初始化完成后立即触发标题生成，使多会话并发时用户能快速区分
-          // goal 等机器注入的 prompt 不作为命名来源，改用调用方提供的干净文本（如 goal 本身）
-          if (!titleGenerationStarted) {
-            titleGenerationStarted = true
-            this.autoGenerateTitle(sessionId, input.titleSourceText ?? userMessage, channelId, resolvedModel, callbacks).catch((err) =>
-              console.error('[Agent 编排] 标题生成未捕获异常:', err),
-            )
           }
         },
         onModelResolved: (model: string) => {
@@ -3245,6 +3225,16 @@ export class AgentOrchestrator {
 
           // 15. 持久化 assistant 消息
           this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
+
+          if (!wasStoppedByUser && !capturedResultErrors?.length) {
+            await this.autoGenerateTitle(
+              sessionId,
+              input.titleSourceText ?? userMessage,
+              channelId,
+              resolvedModel,
+              callbacks,
+            )
+          }
 
           try {
             updateAgentSessionMeta(sessionId, wasStoppedByUser ? { stoppedByUser: true } : {})

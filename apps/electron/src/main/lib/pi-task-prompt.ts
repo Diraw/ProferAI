@@ -79,7 +79,7 @@ export function buildPiTaskPrompt(options: PiTaskPromptOptions): string {
   const piMemory = removeHeadingSection(prompt, '### Pi Runtime 与文件记忆')
   if (piMemory) {
     prompt = piMemory.rest
-    const hasMemoryTool = hasAnyTool(tools, (name) => name.startsWith('mcp__memory-archive__') || name.startsWith('mcp__team-memory__'))
+    const hasMemoryTool = hasAnyTool(tools, (name) => name.startsWith('mcp__memory-archive__'))
     // 完整的知识维护与收尾回写规则由常驻的「Profer 知识维护架构」承载；此处只保留
     // Pi 专属文件操作细节，按记忆任务按需恢复，避免普通本地任务重复携带长段落。
     const needsPiMemory = hasMemoryTool
@@ -90,9 +90,6 @@ export function buildPiTaskPrompt(options: PiTaskPromptOptions): string {
   const teamMemory = removeSection(prompt, '## 团队共享知识记忆', '## 不确定性处理')
   if (teamMemory) {
     prompt = teamMemory.rest
-    const needsTeamMemory = hasAnyTool(tools, (name) => name.startsWith('mcp__team-memory__'))
-      && matches(task, /(?:团队记忆|共享知识|团队规范|team memory|团队.*(?:记住|记录|经验))/i)
-    if (needsTeamMemory) lowFrequency.push(teamMemory.text)
   }
 
   const knowledgeGovernance = removeSection(prompt, '## Profer 知识维护架构', '## 任务完成标准')
@@ -110,7 +107,8 @@ export function buildPiTaskPrompt(options: PiTaskPromptOptions): string {
     if (needsAutomation) lowFrequency.push(automation.text)
   }
 
-  const delivery = removeSection(prompt, '8. **发送既有本地图片**', '## Profer 受管浏览器')
+  // 以下一个 ## 标题为边界：浏览器段关闭时不会出现 Browser 标题，不能依赖它作为结束标记。
+  const delivery = removeHeadingSection(prompt, '8. **发送既有本地图片**')
   if (delivery) {
     prompt = delivery.rest
     const hasImageOutput = tools.has('send_local_image')

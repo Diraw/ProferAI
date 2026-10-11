@@ -22,7 +22,7 @@ const COMPACT_DESCRIPTIONS: Record<string, string> = {
   TaskList: '列出当前回合的可见进度任务。',
   TodoRead: '读取当前回合待办列表。',
   TodoWrite: '以兼容格式更新当前回合待办列表。',
-  send_local_image: '发送授权目录内已有 PNG/JPEG/GIF/WebP；不生成、不输出内部图片标记。',
+  send_local_image: '把授权目录内已有 PNG/JPEG/GIF/WebP 附加到回复；相对路径基于会话 cwd。',
   create_skin: '仅用户明确要求时创建/安装皮肤。skinCss 必须含 :root token 且仅引用本地 assets/；壁纸须经授权，工具会复制、校验并安装。返回 installedPath；不要再搜索文件。previewPath 可指定缩略图，否则由壁纸生成。replace 仅在用户明确授权覆盖时使用。',
   open_file_preview: '在 Profer 正式可见预览中打开授权 PPTX；不要创建 Preview.html、浏览器预览或截图。',
   inspect_file_preview: '读取同一 Profer 可见 PPTX 预览的页级信息；不要创建隐藏渲染链路。',
@@ -127,7 +127,6 @@ function compactMcpDescription(name: string): string | undefined {
     if (name.endsWith('list_delegations')) return '列出当前父会话的协作子会话状态。'
     return '列出当前渠道可用的协作模型。'
   }
-  if (name.startsWith('mcp__team-memory__')) return '读取或维护团队共享记忆；创建需用户明确确认，更新前读 expectedVersion，冲突不得覆盖。'
   return undefined
 }
 

@@ -8,38 +8,8 @@ import type { AgentRuntime } from './agent-provider'
 
 // ===== Agent 工作区 =====
 
-/** 工作区类型 */
-export type WorkspaceType = 'personal' | 'team'
-
-/** 用户在团队工作区中的角色 */
-export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer'
-
-/** 工作区可见性 */
-export type WorkspaceVisibility = 'private' | 'team' | 'public'
-
-/** 团队工作区品牌定制 */
-export interface WorkspaceBrand {
-  /** 工作区图标（emoji 或 data URL） */
-  icon?: string
-  /** 品牌色（HSL 格式，如 "220 15% 30%"） */
-  primaryColor?: string
-  /** 品牌 Logo URL */
-  logoUrl?: string
-  /** 自定义应用名称（替换 "Profer"） */
-  appName?: string
-  /** 自定义 CSS 注入 */
-  customCss?: string
-}
-
-/** 团队成员摘要（仅缓存展示用） */
-export interface WorkspaceMemberSummary {
-  userId: string
-  displayName: string
-  avatar: string
-  role: WorkspaceRole
-  joinedAt: number
-  isOnline?: boolean
-}
+/** Agent 工作区类型；团队工作区已下线，新建工作区仅为个人。 */
+export type WorkspaceType = 'personal'
 
 /** Agent 工作区 */
 export interface AgentWorkspace {
@@ -54,7 +24,7 @@ export interface AgentWorkspace {
   /** 更新时间戳 */
   updatedAt: number
 
-  /** 工作区类型（个人/团队） */
+  /** 工作区类型 */
   type?: WorkspaceType
 
   // 本地收纳（个人工作区归档，与会话归档同构）
@@ -71,28 +41,9 @@ export interface AgentWorkspace {
   restoredAt?: number
   /** 冷静期到期时间（仅 deleted 状态下有意义） */
   expiresAt?: number
-
-  // 团队工作区专属字段（type === 'team' 时有效）
-  /** 团队 ID */
-  teamId?: string
-  /** 当前用户在此工作区的角色 */
-  role?: WorkspaceRole
-  /** 工作区可见性 */
-  visibility?: WorkspaceVisibility
-  /** 最后同步时间戳 */
-  lastSyncedAt?: number
-  /** 待同步变更数 */
-  pendingSyncCount?: number
-  /** 工作区品牌配置 */
-  brand?: WorkspaceBrand
-  /** 团队成员摘要 */
-  memberSummary?: WorkspaceMemberSummary[]
 }
 
-// ===== SDK 新增类型声明（0.2.52 ~ 0.2.63） =====
-
-/**
- * 思考模式配置
+/** 思考模式配置
  *
  * 控制 Claude 的推理/思考行为：
  * - adaptive: Claude 自行决定何时以及思考多少（Opus 4.6+ 默认）
@@ -1222,7 +1173,7 @@ export interface SkillConflict {
 }
 
 /** 技能存储域 */
-export type SkillDomain = 'local' | 'workspace-team' | 'global'
+export type SkillDomain = 'local' | 'global'
 
 /** 技能发布状态 */
 export type SkillPublishState = 'draft' | 'pending-review' | 'published' | 'deprecated'
@@ -2512,47 +2463,7 @@ export const AUTH_IPC_CHANNELS = {
   VERIFY_REGISTRATION_OTP: 'auth:verify-registration-otp',
 } as const
 
-/** 同步 IPC 通道 */
-export const SYNC_IPC_CHANNELS = {
-  GET_STATUS: 'sync:get-status',
-  TRIGGER_SYNC: 'sync:trigger-sync',
-  GET_PENDING_CHANGES: 'sync:get-pending-changes',
-  DISCARD_PENDING_CHANGES: 'sync:discard-pending-changes',
-  /** 同步状态变更推送（主进程 → 渲染进程） */
-  STATUS_CHANGED: 'sync:status-changed',
-} as const
 
-/** 团队管理 IPC 通道 */
-export const TEAM_IPC_CHANNELS = {
-  LIST_WORKSPACES: 'team:list-workspaces',
-  CREATE_WORKSPACE: 'team:create-workspace',
-  DELETE_WORKSPACE: 'team:delete-workspace',
-  GET_MEMBERS: 'team:get-members',
-  CREATE_INVITATION: 'team:create-invitation',
-  LIST_INVITATIONS: 'team:list-invitations',
-  CANCEL_INVITATION: 'team:cancel-invitation',
-  GET_STATS: 'team:get-stats',
-  VERIFY_INVITATION: 'team:verify-invitation',
-  ACCEPT_INVITATION: 'team:accept-invitation',
-  DECLINE_INVITATION: 'team:decline-invitation',
-  UPDATE_MEMBER_ROLE: 'team:update-member-role',
-  REMOVE_MEMBER: 'team:remove-member',
-  APPLY_BRANDING: 'team:apply-branding',
-  GET_BRANDING: 'team:get-branding',
-  SET_WORKSPACE_BRAND: 'team:set-workspace-brand',
-  LEAVE_WORKSPACE: 'team:leave-workspace',
-  TRANSFER_OWNERSHIP: 'team:transfer-ownership',
-  RESTORE_WORKSPACE: 'team:restore-workspace',
-} as const
-
-/** 技能市场 IPC 通道 */
-export const SKILL_MARKETPLACE_IPC_CHANNELS = {
-  PUBLISH: 'skill:publish',
-  UNPUBLISH: 'skill:unpublish',
-  LIST_TEAM_SKILLS: 'skill:list-team-skills',
-  INSTALL_TEAM_SKILL: 'skill:install-team-skill',
-  CHECK_FOR_UPDATES: 'skill:check-for-updates',
-} as const
 
 /** 全局 Skill 体系 IPC 通道；旧 master 通道保留兼容。 */
 export const GLOBAL_SKILL_IPC_CHANNELS = {
@@ -2583,103 +2494,8 @@ export const SKILL_MASTER_IPC_CHANNELS = {
   DETECT_CONFLICT: 'skill-master:detect-conflict',
 } as const
 
-/** 文件同步 IPC 通道（废弃，保留向后兼容） */
-export const FILE_SYNC_IPC_CHANNELS = {
-  GET_FILE_MANIFEST: 'file-sync:get-manifest',
-  DOWNLOAD_FILE: 'file-sync:download-file',
-  GET_FILE_STATUS: 'file-sync:get-file-status',
-  RESOLVE_CONFLICT: 'file-sync:resolve-conflict',
-} as const
 
-/** 团队文件操作 IPC 通道（用户主动上传/下载） */
-export const TEAM_FILE_IPC_CHANNELS = {
-  UPLOAD: 'team-file:upload',
-  DOWNLOAD: 'team-file:download',
-  DELETE: 'team-file:delete',
-  GET_MANIFEST: 'team-file:get-manifest',
-  CREATE_DIRECTORY: 'team-file:create-directory',
-  MOVE: 'team-file:move',
-  RENAME: 'team-file:rename',
-  SEARCH: 'team-file:search',
-  GET_METADATA: 'team-file:get-metadata',
-  PATCH_METADATA: 'team-file:patch-metadata',
-  GET_TAGS: 'team-file:get-tags',
-  GET_STATUSES: 'team-file:get-statuses',
-  SET_PREFERENCE: 'team-file:set-preference',
-  GET_ACTIVITIES: 'team-file:get-activities',
-  LIST_TRASH: 'team-file:list-trash',
-  RESTORE_TRASH: 'team-file:restore-trash',
-  PURGE_TRASH: 'team-file:purge-trash',
-} as const
 
-/** 团队共享知识记忆文档。个人工作区记忆不使用此类型。 */
-export interface TeamMemoryDocument {
-  id: string
-  path: string
-  title: string
-  content: string
-  version: number
-  createdBy: string
-  updatedBy: string
-  createdAt: number
-  updatedAt: number
-  archivedAt?: number
-}
-
-export interface TeamMemoryRevision {
-  id: string
-  version: number
-  changeSummary: string
-  editedBy: string
-  editedAt: number
-}
-
-export interface TeamMemoryApiResult<T> {
-  ok: boolean
-  status?: number
-  data?: T
-  error?: string
-  conflict?: { code: 'TEAM_MEMORY_VERSION_CONFLICT'; current: TeamMemoryDocument }
-}
-
-/** 团队共享知识记忆 IPC 通道。 */
-export const TEAM_MEMORY_IPC_CHANNELS = {
-  LIST: 'team-memory:list',
-  READ: 'team-memory:read',
-  CREATE: 'team-memory:create',
-  UPDATE: 'team-memory:update',
-  LIST_REVISIONS: 'team-memory:list-revisions',
-  ARCHIVE: 'team-memory:archive',
-  UNARCHIVE: 'team-memory:unarchive',
-} as const
-
-/** 团队文件回收站中的一项（仅 Owner/Admin 的治理界面使用）。 */
-export interface TeamTrashEntry {
-  id: string
-  fileId: string
-  originalPath: string
-  deletedBy: string | null
-  deletedAt: number
-  expiresAt: number
-}
-
-/** 团队文件 HTTP/IPC 代理的标准结果。 */
-export interface TeamFileApiResult<T> {
-  ok: boolean
-  status?: number
-  data?: T
-  error?: string
-}
-
-/** SSE 实时事件推送 IPC 通道 */
-export const SSE_IPC_CHANNELS = {
-  /** 主进程 → 渲染进程：SSE 事件推送 */
-  EVENT: 'sse:event',
-  /** 主进程 → 渲染进程：连接状态变更 */
-  CONNECTION_CHANGED: 'sse:connection-changed',
-} as const
-
-/** 团队服务器配置 */
 export interface TeamServerConfig {
   id: string
   name: string
@@ -2688,30 +2504,10 @@ export interface TeamServerConfig {
   syncEndpoint: string
   provider: 'self-hosted' | 'proma-cloud'
   enabled: boolean
-  lastHealthCheck?: {
-    ok: boolean
-    checkedAt: number
-    error?: string
-  }
+  lastHealthCheck?: { ok: boolean; checkedAt: number; error?: string }
 }
 
-/** 工作区邀请 */
-export interface WorkspaceInvitation {
-  id: string
-  workspaceId: string
-  workspaceName: string
-  inviterId: string
-  inviterName: string
-  inviteeEmail: string
-  role: WorkspaceRole
-  token: string
-  status: 'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled'
-  createdAt: number
-  expiresAt: number
-  acceptedAt?: number
-}
-
-/** 记忆双链 [[...]] 解析结果 */
+/** 认证服务 IPC 共用服务器配置；团队工作区数据不再由客户端消费。 */
 export interface MemoryWikilinkTarget {
   relativePath: string
   kind: 'archive' | 'auto'
