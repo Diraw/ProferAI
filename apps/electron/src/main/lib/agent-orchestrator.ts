@@ -148,7 +148,7 @@ import { askUserService } from './agent-ask-user-service'
 import { exitPlanService, type ExitPlanPermissionResult } from './agent-exit-plan-service'
 import { applyAgentModelRoutingToEnv, resolveAgentModelRouting } from './agent-model-routing'
 
-import { validateToolInput } from './agent-tool-input-validator'
+import { validateToolInput, validateToolPathPlatform } from './agent-tool-input-validator'
 import { estimateTokenCount, WRITE_CONTENT_TOKEN_THRESHOLD } from './agent-tool-token-estimator'
 
 // 已提取的工具模块
@@ -1915,6 +1915,14 @@ export class AgentOrchestrator {
         if (validationFailure) {
           console.warn(`[Agent 工具验证] 参数缺失: tool=${toolName}, mode=${currentMode}`)
           return validationFailure
+        }
+
+        // 非 Windows 平台上的 Windows 绝对路径会被 node:path 当成相对路径拼进会话目录，
+        // 产生误导性的「文件不存在」。在共享边界直接纠正，两套 runtime 同享。
+        const platformPathFailure = validateToolPathPlatform(toolName, input)
+        if (platformPathFailure) {
+          console.warn(`[Agent 工具验证] 平台路径不匹配: tool=${toolName}, path=${String(input.file_path ?? input.path)}`)
+          return platformPathFailure
         }
 
         // ── Write 大文件 token 截断防护 ──
