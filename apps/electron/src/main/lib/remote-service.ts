@@ -55,6 +55,7 @@ import {
 } from './agent-session-manager'
 import { getAgentSessionsDir, getConfigDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
 import { getSettings } from './settings-service'
+import { projectAgentPayloadForPocket, projectSdkMessageForPocket } from './pocket-agent-projection'
 import {
   listAgentWorkspaces,
   createAgentWorkspace,
@@ -192,7 +193,7 @@ function isPartialSdkPayload(payload: unknown): boolean {
 
 /** 真正把一条 agent_event 帧广播给所有已连接移动端客户端。 */
 function broadcastAgentFrame(sessionId: string, payload: import('@profer/shared').AgentStreamPayload): void {
-  const record = remoteAgentEventLog.append(sessionId, payload)
+  const record = remoteAgentEventLog.append(sessionId, projectAgentPayloadForPocket(payload))
   const frame = JSON.stringify({
     kind: 'agent_event',
     eventId: record.eventId,
@@ -885,14 +886,20 @@ export async function handleRemoteCommand(
         parsed.before !== undefined ||
         parsed.targetMessages !== undefined
       if (!wantsPaged) {
-        // 返回原始 SDKMessage 数组，供桌面式 AgentMessages 渲染（与持久化格式一致）
-        return { ok: true, data: messages }
+        // Pocket 只接收正文、工具名称和必要 usage，不接收思考正文、工具入参或工具结果。
+        return { ok: true, data: messages.map(projectSdkMessageForPocket) }
       }
       const page = paginateSDKMessages(messages, {
         before: typeof parsed.before === 'number' ? parsed.before : undefined,
         targetMessages: typeof parsed.targetMessages === 'number' ? parsed.targetMessages : undefined,
       })
-      return { ok: true, data: page }
+      return {
+        ok: true,
+        data: {
+          ...page,
+          messages: page.messages.map(projectSdkMessageForPocket),
+        },
+      }
     }
 
     case 'session_detail': {
