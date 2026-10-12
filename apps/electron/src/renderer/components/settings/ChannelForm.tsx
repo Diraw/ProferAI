@@ -587,11 +587,14 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     if (!options?.keepPreviousResult) setFetchResult(null)
 
     try {
+      // 只配置 Claude 的渠道按 Claude 端点拉取目录；混合或 Pi 渠道保持主地址。
+      const claudeOnly = agentRuntimes.length === 1 && agentRuntimes[0] === 'claude'
       const result = await window.electronAPI.fetchModels({
         requestId: networkId,
         provider,
         baseUrl,
         apiKey,
+        ...(claudeOnly ? { runtime: 'claude' as const, agentBaseUrl } : {}),
       })
 
       if (!mountedRef.current || !isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) return
@@ -608,7 +611,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       activeNetworkRequestsRef.current.delete(networkId)
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) setFetchingModels(false)
     }
-  }, [canDiscoverModels, provider, baseUrl, apiKey])
+  }, [canDiscoverModels, provider, baseUrl, apiKey, agentRuntimes, agentBaseUrl])
 
   /** 手动「从供应商获取」：覆盖上一次结果提示，并记下尝试键避免与自动发现重复请求 */
   const handleFetchModels = (): void => {

@@ -288,6 +288,14 @@ describe('Agent SDK 1M 选择（模型 ID + beta 同步）', () => {
     })
   })
 
+  test('Given 模型 ID 已带 [1m] When 手动关闭 Then 去掉后缀且不发 beta', () => {
+    expect(resolveAgentSdk1MSelection('deepseek-v4-pro[1m]', 'deepseek', false)).toEqual({
+      modelId: 'deepseek-v4-pro',
+      oneMillionContextEnabled: false,
+      source: 'forced-off',
+    })
+  })
+
   test('Given 模型 ID 已带 [1m] When 自动判定生效 Then 不重复追加且补上 beta', () => {
     expect(resolveAgentSdk1MSelection('deepseek-v4-pro[1m]', 'deepseek')).toEqual({
       modelId: 'deepseek-v4-pro[1m]',

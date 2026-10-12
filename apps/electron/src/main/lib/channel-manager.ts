@@ -1730,8 +1730,7 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
       }
       const agentUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
       if (!agentUrl) return { success: false, message: '未配置 Claude 端点' }
-      const provider = ['custom', 'openai', 'openai-responses', 'google', 'zhipu', 'doubao', 'qwen', 'opencode-go-openai'].includes(input.provider)
-        ? 'anthropic' : input.provider
+      const provider = claudeProtocolProvider(input.provider)
       const result = await testAnthropicCompatible(agentUrl, input.apiKey, proxyUrl, provider, input.modelId, signal)
       return { ...result, message: `Claude 端点：${result.message}` }
     }
@@ -1767,11 +1766,26 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
  * 直接使用传入的凭证（无需已保存渠道），支持创建渠道时预先拉取模型。
  * 针对不同供应商使用不同的 API 端点和响应解析。
  */
+/** Claude 协议请求时，兼容网关统一按 Anthropic 协议处理；目录拉取与连接测试共用。 */
+function claudeProtocolProvider(provider: ProviderType): ProviderType {
+  return ['custom', 'openai', 'openai-responses', 'google', 'zhipu', 'doubao', 'qwen', 'opencode-go-openai'].includes(provider)
+    ? 'anthropic' : provider
+}
+
 export async function fetchModels(input: FetchModelsInput, signal?: AbortSignal): Promise<FetchModelsResult> {
   try {
     signal?.throwIfAborted()
     const proxyUrl = await getEffectiveProxyUrl()
     signal?.throwIfAborted()
+    // Claude-only 渠道的目录必须来自 Claude 端点，与运行时、连接测试使用同一地址推导。
+    if (input.runtime === 'claude') {
+      if (input.provider === 'xai' || input.provider === 'openai-codex') {
+        return { success: false, message: '此供应商不支持 Claude 内核', models: [] }
+      }
+      const claudeUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+      if (!claudeUrl) return { success: false, message: '未配置 Claude 端点', models: [] }
+      return await fetchAnthropicCompatibleModels(claudeUrl, input.apiKey, proxyUrl, claudeProtocolProvider(input.provider), signal)
+    }
     switch (resolveChatAdapterKind(input.provider)) {
       case 'anthropic':
         return await fetchAnthropicCompatibleModels(input.baseUrl, input.apiKey, proxyUrl, input.provider, signal)
