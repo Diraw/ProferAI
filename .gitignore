@@ -52,6 +52,9 @@ vendor
 # 本地工作区辅助目录（含嵌套 worktree，不入库）
 .claude/
 
+# 本地开发 .context 目录：会话产物、调试残留与临时交接文档，一律不入库
+.context/
+
 # 打包内置二进制(体积大，构建产物，不入库)
 apps/electron/resources/bin/
 
