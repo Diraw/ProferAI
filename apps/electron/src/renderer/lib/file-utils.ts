@@ -105,3 +105,8 @@ export function fileToBase64(file: File): Promise<string> {
     reader.readAsDataURL(file)
   })
 }
+
+/** 判断附件数据是否异常缺失；0 字节文件本来就对应空字符串。 */
+export function isMissingAttachmentData(size: number, data: string | undefined): boolean {
+  return size > 0 && !data
+}

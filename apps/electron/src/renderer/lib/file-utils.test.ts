@@ -1,5 +1,20 @@
 import { describe, expect, test } from 'bun:test'
-import { getFileBaseName, getFileParentPath, getLastPathSegments, isAbsoluteFilePath, resolveRelativeToAbsolute } from './file-utils'
+import { getFileBaseName, getFileParentPath, getLastPathSegments, isAbsoluteFilePath, isMissingAttachmentData, resolveRelativeToAbsolute } from './file-utils'
+
+describe('isMissingAttachmentData（附件数据完整性）', () => {
+  test('Given 0 字节文件 When 数据为空 Then 不判定为失效附件', () => {
+    expect(isMissingAttachmentData(0, '')).toBe(false)
+  })
+
+  test('Given 非空文件 When 数据为空 Then 判定为失效附件', () => {
+    expect(isMissingAttachmentData(12, '')).toBe(true)
+    expect(isMissingAttachmentData(12, undefined)).toBe(true)
+  })
+
+  test('Given 非空文件 When 数据存在 Then 不判定为失效附件', () => {
+    expect(isMissingAttachmentData(12, 'YWJj')).toBe(false)
+  })
+})
 
 describe('getFileBaseName（R1 统一实现）', () => {
   test('正斜杠路径', () => {
