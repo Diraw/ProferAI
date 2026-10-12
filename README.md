@@ -76,14 +76,11 @@ Set recurring tasks with cron-like schedules (daily / weekly / monthly / interva
 
 Use your phone to trigger desktop agents or review their work. The mobile client (Capacitor-based, separate repo: [Profer-pocket](https://github.com/Yuan-lai-ru-ci/Profer-pocket)) connects over local network or VPN—no cloud relay required.
 
-### 👥 Team workspaces (optional)
+### 🔒 Local-first by default
 
-Personal use is fully local. For teams:
+Workspaces, sessions, skills and files stay on your machine—no account required.
 
-- Invite-only workspaces with role-based access (Owner / Admin / Member / Viewer)  
-- Shared skill library: package reusable prompts, workflows, integrations  
-- Cloud sync for files, context, and conversation history  
-- Self-hostable backend (lightweight Hono + SQLite)
+> **2026-10-11 变更**：桌面端内置的团队工作区运行时已移除（产品入口、IPC 与同步链路一并下线），本仓库不再分发团队功能。
 
 ---
 
@@ -158,7 +155,7 @@ Agents show you their execution plan before making irreversible changes.
 
 ## Architecture
 
-Profer is a **local-first Electron app** with optional cloud layer for teams.
+Profer is a **local-first Electron app**: workspaces, sessions and files stay on your machine.
 
 <img src="./docs/assets/architecture-diagram.svg" alt="Profer architecture diagram" width="100%" />
 
@@ -171,9 +168,8 @@ Profer is a **local-first Electron app** with optional cloud layer for teams.
 - **Rich content**: TipTap editor, Beautiful Mermaid, KaTeX math, Shiki syntax highlighting  
 - **Agent SDKs**:  
   - [`@anthropic-ai/claude-agent-sdk@0.3.201`](https://github.com/anthropics/claude-agent-sdk)  
-  - [`@earendil-works/pi-agent@0.82.1`](https://www.npmjs.com/package/@earendil-works/pi-agent-core)  
+  - [`@earendil-works/pi-agent@0.86.1`](https://www.npmjs.com/package/@earendil-works/pi-agent-core)  
 - **Mobile**: Capacitor (Android client in [Profer-pocket repo](https://github.com/Yuan-lai-ru-ci/Profer-pocket))  
-- **Team backend**: Hono + better-sqlite3 + JWT  
 
 ---
 
@@ -189,10 +185,9 @@ profer/
 │   ├── project-core/   # Project / workspace domain
 │   ├── session-core/   # Session domain
 │   └── ui/             # Shared React components
-├── apps/
-│   ├── electron/       # Electron desktop app
-│   └── cli/            # CLI tools
-└── server/             # Team sync backend (Hono + SQLite)
+└── apps/
+    ├── electron/       # Electron desktop app
+    └── cli/            # CLI tools
 ```
 
 ### Setup
@@ -207,11 +202,12 @@ bun test           # Run tests
 ### Build for production
 
 ```bash
-bun run build:mac       # macOS universal binary
-bun run build:win       # Windows installer
+cd apps/electron
+bun run dist:mac       # macOS binary（当前架构）
+bun run dist:win       # Windows installer（需在 Windows 主机执行，见 verify:packaging-host:win）
 ```
 
-Artifacts appear in `apps/electron/dist`.
+Artifacts appear in `apps/electron/out`.
 
 ### Contributing
 
@@ -225,24 +221,15 @@ We welcome PRs! Before submitting:
 - New IPC: update types in `shared/`, handler in `main/`, preload bridge, and renderer call  
 - Bump patch version in affected `package.json` when changing package behavior  
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.
+See [AGENTS.md](./AGENTS.md) for repository conventions and contribution guidelines.
 
 ---
 
-## Self-hosting team backend (optional)
+## Team backend (separate repository)
 
-For team collaboration features, deploy the lightweight backend:
+> **2026-10-11 变更**：桌面端团队工作区运行时已移除，本仓库内**没有** `server/` 目录，也不再包含团队后端。
 
-```bash
-git clone https://github.com/Yuan-lai-ru-ci/ProferAI.git
-cd ProferAI/server
-npm install
-node index.js
-```
-
-Default port: `3000`. Use a reverse proxy (nginx / Caddy) for HTTPS in production.
-
-Configure team server URL in **Profer → Settings → Branding**.
+团队后端维护在独立仓库（`profer-server`，Hono + better-sqlite3 + JWT），**不随本公开仓库发布**。如需自托管，请从该独立仓库获取部署说明。
 
 ---
 
