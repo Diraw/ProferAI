@@ -1,7 +1,7 @@
 # Codex 源码核验：Visualize 与 Skills 机制（2026-10-04 晚）
 
 > 前置：[`2026-10-04-codex-visualize-comparison.md`](./2026-10-04-codex-visualize-comparison.md)（基于官方文档与 issue 的早期判断）、
-> [`2026-10-04-codex-open-source-harness-2026-10-04.md`](./2026-10-04-codex-open-source-harness-2026-10-04.md)（下午的 harness 核验）。
+> [`2026-10-04-codex-open-source-harness.md`](./2026-10-04-codex-open-source-harness.md)（下午的 harness 核验）。
 > 本文在 Profer 侧已完成 `present_visualization` 工具 + `present-visualization` Skill + LaTeX/MathML 公式链路之后，
 > 回到 Codex 源码逐文件核对，只记录能在快照里引用的原文，不再用宣传页或推测补空。
 >

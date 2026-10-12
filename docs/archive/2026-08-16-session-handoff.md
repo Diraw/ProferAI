@@ -1,8 +1,10 @@
 # 会话交接快照(2026-08-16) — 新会话/子代理接手起点
 
+> **归档状态**：历史交接快照（归档日期：2026-10-12）。原因：验证兜底/Harness 自动续轮与 Agent 知识库引用已于 2026-08-19 移除。
+
 > 历史交接快照：验证兜底/Harness 自动续轮和 Agent 知识库引用/读取已于 2026-08-19 移除；当前实现不再自动追加验证轮次，Chat 仍保留通用资料库。其余预设相关历史信息仍需以当前源码复核。
 > 用途:主线上下文过长时,新 agent 读本文件即可无损接手,无需回读对话历史。
-> 关联文档:`docs/plans/2026-08-16-agent-preset-phase-b-plan.md`(Phase B 任务清单,以它为准)
+> 关联文档:`docs/archive/2026-08-16-agent-preset-phase-b-plan.md`(Phase B 任务清单,以它为准)
 
 ## 1. 历史改动快照（部分方案已废止）
 
@@ -20,7 +22,7 @@
 | 测试 | pi-harness / pi-harness-eval(+fixture) / agent-prompt-builder / agent-preset-manager 新增用例 |
 | 版本 | shared 0.1.33→0.1.34;electron 0.15.46→0.15.47 |
 | `apps/electron/scripts/agent-session-smoke.ts` | 新增:端到端冒烟资产(见 §4) |
-| `docs/plans/2026-08-16-agent-preset-phase-b-plan.md` | 新增:Phase B 计划 |
+| `docs/archive/2026-08-16-agent-preset-phase-b-plan.md` | 新增:Phase B 计划 |
 
 ## 2. 验证状态
 

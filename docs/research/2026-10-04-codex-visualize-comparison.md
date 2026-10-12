@@ -3,7 +3,7 @@
 > **2026-10-04 晚补注**：源码逐文件复核见 [Codex 源码核验：Visualize 与 Skills 机制](2026-10-04-codex-source-verified-visualize-and-skills.md)。该文以 `openai/codex` 快照 `b8dceb0d` 为准，修订了本文与 harness 文中若干推断（如 Codex 隐式技能路由目前仅在影子实验、开源可视化路径无公式支持）。
 
 
-> 本文是上午基于产品文档和issue的早期判断。下午源码核验已修订关键结论，见 [开源 harness 调研](2026-10-04-codex-open-source-harness-2026-10-04.md)：标准数据图存在 charts_widget_v2 的JSON路径，复杂交互仍是受约束HTML片段；TUI browser viewer明确使用sandbox iframe。不能据此把“React原生组件全面替换iframe”当作Codex实现，也不能把所有HTML降级为仅兼容模式。下文native-first全面切换属于当时设计建议，不作为已验证架构事实。
+> 本文是上午基于产品文档和issue的早期判断。下午源码核验已修订关键结论，见 [开源 harness 调研](2026-10-04-codex-open-source-harness.md)：标准数据图存在 charts_widget_v2 的JSON路径，复杂交互仍是受约束HTML片段；TUI browser viewer明确使用sandbox iframe。不能据此把“React原生组件全面替换iframe”当作Codex实现，也不能把所有HTML降级为仅兼容模式。下文native-first全面切换属于当时设计建议，不作为已验证架构事实。
 
 ## 已核验资料
 

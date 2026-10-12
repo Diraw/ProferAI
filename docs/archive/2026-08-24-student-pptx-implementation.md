@@ -1,5 +1,7 @@
 # Profer 学生 PPTX 首个纵向版本实施计划
 
+> **归档状态**：已被取代（归档日期：2026-10-12）。原因：学生 PPTX 纵向版本已冻结，不作为 Profer 可交付 PPT 主链路，见同目录 v1 冻结说明。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 在 Profer Agent 原生对话流中，交付一个面向学生组会与课程作业的、可追溯且语义级可编辑的 `.pptx` 生成纵向版本。

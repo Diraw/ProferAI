@@ -2,7 +2,7 @@
 
 > 2026-09-11 修订：原桌面仓库内的平板 Web UI（`renderer/tablet/`）与 `tablet-app/`（Capacitor 壳）
 > 已随 tablet 线退役移除，客户端改由独立仓库 **Profer-pocket** 承担。
-> 本文档只描述仍然保留在桌面端的远程服务本身。历史设计见 `docs/plans/2026-08-07-tablet-settings-design.md`。
+> 本文档只描述仍然保留在桌面端的远程服务本身。历史设计见 `docs/archive/2026-08-07-tablet-settings-design.md`。
 
 ## 这是什么
 
