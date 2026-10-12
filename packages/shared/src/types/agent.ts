@@ -2030,6 +2030,34 @@ export interface PermissionResponse {
   alwaysAllow: boolean
 }
 
+// ===== 消息导航索引（跨进程传输） =====
+
+/**
+ * 导航索引条目 —— 「消息导航」面板的一行。
+ *
+ * `id`（消息 uuid）与渲染层 data-message-id 同源，可直接当滚动锚点；磁盘上确实无 uuid 的
+ * 分组（interruption_record、部分旧格式输入）为 null，渲染层用 matchKey 在本已加载的 DOM 里
+ * 找回对应节点，而不是点了没反应。
+ */
+export interface AgentNavigationIndexEntry {
+  /** 滚动锚点 id（消息 uuid）；无 uuid 时为 null，需用 matchKey 回退 */
+  id: string | null
+  role: 'user' | 'assistant' | 'status'
+  /** 单行预览（<=200 字） */
+  preview: string
+  /** assistant 回合的模型 id（用于取模型图标） */
+  model?: string
+  /** 无 uuid 时的稳定匹配键：`${role}:${subtype}:${createdAt}` */
+  matchKey: string
+}
+
+/** 会话导航索引载荷：全会话的一轮一行，不随渲染窗口/折叠变化。 */
+export interface AgentNavigationIndexPayload {
+  entries: AgentNavigationIndexEntry[]
+  /** 全会话轮次总数（= entries.length） */
+  total: number
+}
+
 // ===== IPC 通道常量 =====
 
 /**
@@ -2047,6 +2075,8 @@ export const AGENT_IPC_CHANNELS = {
   ENSURE_PROJECT_DRAFT_SESSION: 'agent:ensure-project-draft-session',
   /** 获取会话 SDKMessage（Phase 4 新格式） */
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
+  /** 获取会话「消息导航」的全量轮次索引（一轮一行，覆盖整个会话；只读） */
+  GET_NAVIGATION_INDEX: 'agent:get-navigation-index',
   /** 列出当前会话已持久化的图片生成独立时间线卡片 */
   LIST_IMAGE_GENERATIONS: 'agent:list-image-generations',
   /** 仅按 generation ID 重试失败的图片生成；参数在主进程重建 */

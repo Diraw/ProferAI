@@ -39,7 +39,7 @@ import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@profer/ui/primitives/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
-import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupPreview, getLatestUserGroupId, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
+import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupNavKey, getGroupPreview, getLatestUserGroupId, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
 import { extractUserText } from '@profer/session-core'
 import { shouldRegenerateFromRetry } from '@/lib/agent-regenerate-anchor'
 import { buildLiveGroupSet } from './live-group-set'
@@ -49,11 +49,12 @@ import { shouldShowAgentRunningIndicator } from '@/lib/agent-running-indicator'
 import { ContentBlock } from './ContentBlock'
 import { parseThinkTagsFromText } from './thinking-tag-parser'
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
-import type { AgentEventUsage, RetryAttempt, SDKMessage, AgentImageGenerationCard, AgentRuntime } from '@profer/shared'
+import type { AgentEventUsage, RetryAttempt, SDKMessage, AgentImageGenerationCard, AgentRuntime, AgentNavigationIndexEntry, AgentNavigationIndexPayload } from '@profer/shared'
 import { isGoalIterationMessage, shouldShowAgentThinking } from '@profer/shared'
 import type { AgentStreamState } from '@/atoms/agent-atoms'
 import { AgentImageGenerationCardView } from './AgentImageGenerationCard'
 import { getPendingImageGenerationCards, mergeAgentImageGenerationTimeline } from './agent-image-generation-timeline'
+import { buildNavigationItems } from './navigation-items'
 
 function stableStringify(value: unknown): string {
   if (value == null || typeof value !== 'object') return JSON.stringify(value) ?? String(value)
@@ -700,18 +701,53 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     })
   }, [allGroups, liveMessages, streaming])
 
-  // 迷你地图数据 — 直接使用统一的 allGroups（无需去重）
+  // ── 迷你地图数据 ──
+  //
+  // 总数必须来自全会话：渲染层手上只有已加载的尾部消息，本地还会再切一刀渲染窗口
+  // （HISTORY_GROUP_PAGE_SIZE），用它当导航总数就会出现「会话越长总数越小」。
+  // 所以导航骨架取主进程的全量轮次索引（同一套分组口径与 id 规则）；本地已加载的
+  // 分组在索引里就地补上头像（头像来自本地 profile，不进入主进程）。
+
+  const [sessionNavEntries, setSessionNavEntries] = React.useState<AgentNavigationIndexEntry[] | null>(null)
+
+  // 持久化消息的身份签名（条数 + 首尾 uuid）。落盘窗口变化（发送、流式结束、回退、重生成、
+  // 压缩截断）都会改变它，据此重建索引：因为主进程索引按文件版本缓存，而回退/重生成会
+  // 把会话文件截短，光靠会话切换与「本地只多不少」的追加是无法反映的。
+  // 取 uuid 而不是数组引用：流式期间每帧新数组引用，不能当依赖。
+  const persistedNavSignature = React.useMemo(() => {
+    const msgs = persistedSDKMessages ?? []
+    if (msgs.length === 0) return '0'
+    const uuidOf = (m: SDKMessage): string => {
+      const uuid = (m as unknown as Record<string, unknown>).uuid
+      return typeof uuid === 'string' ? uuid : ''
+    }
+    return `${msgs.length}:${uuidOf(msgs[0]!)}:${uuidOf(msgs[msgs.length - 1]!)}`
+  }, [persistedSDKMessages])
+
+  React.useEffect(() => {
+    setSessionNavEntries(null)
+    const api = window.electronAPI as unknown as {
+      getAgentNavigationIndex?: (id: string) => Promise<AgentNavigationIndexPayload>
+    }
+    if (!api.getAgentNavigationIndex) return
+    let cancelled = false
+    api.getAgentNavigationIndex(sessionId)
+      .then((payload) => {
+        if (cancelled) return
+        setSessionNavEntries(payload?.entries ?? [])
+      })
+      .catch((error: unknown) => {
+        // 索引不可用（会话新建无文件 / 读取失败）时不阻塞会话：回退到本地分组。
+        console.warn('[消息导航] 加载全会话索引失败，回退到已加载消息:', error)
+        if (!cancelled) setSessionNavEntries(null)
+      })
+    return () => { cancelled = true }
+    // 会话切换或落盘窗口变化时重建；流式期间靠本地分组即时反映新轮次，不每帧打主进程。
+  }, [sessionId, persistedNavSignature])
+
   const minimapItems: MinimapItem[] = React.useMemo(
-    () => visibleGroups.map((group) => ({
-      id: getGroupId(group),
-      role: group.type === 'user' ? 'user' as const
-        : group.type === 'system' ? 'status' as const
-        : 'assistant' as const,
-      preview: getGroupPreview(group),
-      avatar: group.type === 'user' ? userProfile.avatar : undefined,
-      model: group.type === 'assistant-turn' ? group.model : undefined,
-    })),
-    [visibleGroups, userProfile.avatar]
+    () => buildNavigationItems(sessionNavEntries, visibleGroups, userProfile.avatar),
+    [sessionNavEntries, visibleGroups, userProfile.avatar],
   )
 
   // 同步 minimap 缓存到 Tab 级别（供 Tab hover 预览使用）
@@ -944,7 +980,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
           </>
         )}
       </ConversationContent>
-      <ScrollMinimap items={minimapItems} />
+      <ScrollMinimap items={minimapItems} onRequestEarlier={onLoadEarlierHistory} />
       <ConversationScrollButton />
       {allUserMessagesData.length > 0 && (
         <StickyUserMessage userMessages={allUserMessagesData} />

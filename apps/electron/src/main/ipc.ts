@@ -222,6 +222,7 @@ import {
   countArchivedAgentSessions,
 } from './lib/agent-session-manager'
 import { listAgentPresets, listGlobalAgentPresets, getDefaultPresetId, setDefaultPresetId, setDefaultPresetReference, enableGlobalPresetInWorkspace, disableGlobalPresetInWorkspace, rebindAndDisableGlobalPresetScope, setWorkspacePresetEnabled, rebindAgentSessionPreset, rebindAutomationPreset, createAgentPreset, createGlobalAgentPreset, promoteWorkspacePresetToGlobal, copyAgentPreset, copyPresetToWorkspace, updateAgentPreset, updateGlobalAgentPreset, deleteAgentPreset, deleteGlobalAgentPreset, getAgentPreset, getPresetReferenceReport, serializeAgentPresetsForExport, importAgentPresets } from './lib/agent-preset-manager'
+import { getAgentSessionNavigationIndex } from './lib/agent-navigation-index'
 import { onAgentRunComplete, runAgent, stopAgent, stopAgentAndWait, stopGoalRunAndWait, isGoalRunActive, beginAgentSessionDeletion, endAgentSessionDeletion, generateAgentTitle, regenerateAgentTitle, saveFilesToAgentSession, saveFilesToWorkspaceFiles, isAgentSessionActive, queueAgentMessage, updateAgentPermissionMode, rewindAgentSession, restoreActiveAgentStreams, getAgentRuntimeCapabilities, getAgentTaskOutput, stopAgentTask, emitSessionStreamEvent, agentCatalogInvalidationPublisher } from './lib/agent-service'
 import { publishAgentSessionProjection, setAgentSessionUnread, updateAgentSessionUiMeta } from './lib/agent-session-ui-projection-publisher'
 import { buildArchiveToggleUpdates } from './lib/agent-unread-policy'
@@ -2170,6 +2171,15 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.GET_SDK_MESSAGES,
     async (_, id: string, opts?: { tail?: number; before?: number }): Promise<SDKMessage[] | import('./lib/agent-session-manager').SDKMessagePage> => {
       return opts ? getAgentSessionSDKMessages(id, opts) : getAgentSessionSDKMessages(id)
+    }
+  )
+
+  // 获取会话「消息导航」全量轮次索引（只读）
+  // 渲染层只加载尾部一页消息；导航总数必须来自全会话，否则会话越长总数越小。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_NAVIGATION_INDEX,
+    async (_, id: string): Promise<import('./lib/agent-navigation-index').NavigationIndex> => {
+      return getAgentSessionNavigationIndex(id)
     }
   )
 

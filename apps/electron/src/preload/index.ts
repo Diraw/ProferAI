@@ -12,6 +12,7 @@ import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS, SC
 import { PROFER_PLUGIN_IPC_CHANNELS, type ProferInstalledPlugin, type ProferPluginOperationResult, type ProferPluginViewInstance, type ProferPluginViewLayout } from '@profer/plugin-api'
 import { VISUALIZATION_IPC, type VisualizationContent, type VisualizationRecord, type VisualizationViewState } from '@profer/shared'
 import type { CustomNotificationSound } from '../types'
+import type { AgentNavigationIndexEntry, AgentNavigationIndexPayload } from '@profer/shared'
 import type { PresetReference, PresetReferenceReport, PresetScopeRebindResult, LarkCliStatus, LarkCliOperationResult, LarkLoginStartResult, LarkLoginEvent, LarkMcpCredentialsInput, LarkMcpSetupResult, LarkMcpStatus } from '@profer/shared'
 import type {
   RuntimeStatus,
@@ -746,6 +747,9 @@ export interface ElectronAPI {
     (id: string): Promise<SDKMessage[]>
     (id: string, opts: { tail?: number; before?: number }): Promise<{ messages: SDKMessage[]; total: number; startIndex: number; endIndex: number; hasMore: boolean }>
   }
+
+  /** 获取会话「消息导航」全量轮次索引（一轮一行，覆盖整个会话；只读） */
+  getAgentNavigationIndex: (id: string) => Promise<AgentNavigationIndexPayload>
 
   /** 更新 Agent 会话标题 */
   updateAgentSessionTitle: (id: string, title: string) => Promise<AgentSessionMeta>
@@ -2343,6 +2347,10 @@ const electronAPI: ElectronAPI = {
 
   getAgentSessionSDKMessages: (id: string, opts?: { tail?: number; before?: number }) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SDK_MESSAGES, id, opts)
+  },
+
+  getAgentNavigationIndex: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_NAVIGATION_INDEX, id)
   },
 
   restoreActiveAgentStreams: () => {

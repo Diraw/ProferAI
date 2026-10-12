@@ -26,6 +26,7 @@ export {
 export {
   groupIntoTurns,
   countTurns,
+  buildNavigationEntries,
   getGroupPreview,
   extractUserText,
   extractMeta,
@@ -34,6 +35,7 @@ export {
   type MessageGroup,
   type AssistantTurn,
   type MessageMeta,
+  type NavigationEntry,
 } from './group'
 
 // <think> 标签归一
