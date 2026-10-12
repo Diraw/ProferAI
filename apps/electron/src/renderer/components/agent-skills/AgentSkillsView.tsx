@@ -56,6 +56,14 @@ import { MasterSkillDetailSheet } from "./MasterSkillDetailSheet";
 import { CreateWorkspaceSkillDialog } from "./CreateWorkspaceSkillDialog";
 import { WorkspaceScopeSelectDialog } from "./WorkspaceScopeSelectDialog";
 import { AgentSkillsToolbar } from "./AgentSkillsToolbar";
+import {
+  isBuiltinReferenceSkill,
+  isWorkspaceLocalSkill,
+  skillDirectoryPath,
+  skillListKey,
+  skillToggleSourceId,
+  partitionSkills,
+} from "./skillListSections";
 
 type CapabilityTab = "skills" | "mcp" | "memory" | "presets";
 
@@ -122,19 +130,12 @@ export function AgentSkillsView(): React.ReactElement {
     );
   }, [data.skills, q]);
 
-  const workspaceSkills = filteredSkills.filter(
-    (s) => s.actualSource === "workspace",
-  );
-  const globalSkills = filteredSkills.filter(
-    (s) =>
-      s.sourceSkillType === "user-global" && s.actualSource !== "workspace",
-  );
-  const builtinSkills = filteredSkills.filter(
-    (s) =>
-      s.sourceSkillType === "builtin-meta" && s.actualSource !== "workspace",
-  );
+  // 分区按身份（workspaceSkillId）而非 actualSource：已关闭的副本在 skills-inactive/
+  // 重新扫描后 actualSource 为 none，按加载层过滤会让它从列表里彻底消失。
+  const { workspaceSkills, globalSkills, builtinSkills } =
+    partitionSkills(filteredSkills);
   const updateCount = data.skills.filter(
-    (s) => s.hasUpdate && s.actualSource === "workspace",
+    (s) => s.hasUpdate && isWorkspaceLocalSkill(s),
   ).length;
 
   const serverEntries = React.useMemo(() => {
@@ -196,22 +197,20 @@ export function AgentSkillsView(): React.ReactElement {
     [setTab, tabList],
   );
 
-  const skillKey = (skill: SkillMeta): string =>
-    skill.sourceSkillId && skill.actualSource !== "workspace"
-      ? `global:${skill.sourceSkillId}`
-      : `workspace:${skill.workspaceSkillId ?? skill.slug}`;
+  const skillKey = skillListKey;
   const selectedSkill =
     data.skills.find((s) => skillKey(s) === selectedSkillKey) ?? null;
-  // sourceSkillId 标识全局/元源；actualSource 只表示当前实际加载层，不能用来判断已关闭的全局条目。
+  // workspaceSkillId 标识工作区副本（含已关闭的）；actualSource 只表示当前实际加载层，
+  // 不能用来判断一个条目是不是全局定义。
   const selectedIsGlobal = Boolean(
-    selectedSkill?.sourceSkillId && selectedSkill.actualSource !== "workspace",
+    selectedSkill && skillKey(selectedSkill).startsWith("global:"),
   );
   const selectedIsBuiltin =
     selectedIsGlobal && selectedSkill?.sourceSkillType === "builtin-meta";
 
-  const openSkillFolder = (slug: string): void => {
-    if (data.skillsDir)
-      window.electronAPI.openFile(`${data.skillsDir}/${slug}`);
+  const openSkillFolder = (skill: SkillMeta): void => {
+    const target = skillDirectoryPath(skill, data.skillsDir);
+    if (target) window.electronAPI.openFile(target);
   };
 
   if (!data.hasWorkspace && !globalConfigOpen) {
@@ -572,18 +571,14 @@ export function AgentSkillsView(): React.ReactElement {
             data.toggleSkill(
               selectedSkill.slug,
               enabled,
-              selectedSkill.actualSource === "workspace"
-                ? ""
-                : (selectedSkill.sourceSkillId ?? ""),
+              skillToggleSourceId(selectedSkill),
             )
           }
           onUpdate={() => selectedSkill && data.updateSkill(selectedSkill.slug)}
           onRequestDelete={() =>
             selectedSkill && setPendingDeleteSkill(selectedSkill)
           }
-          onOpenFolder={() =>
-            selectedSkill && openSkillFolder(selectedSkill.slug)
-          }
+          onOpenFolder={() => selectedSkill && openSkillFolder(selectedSkill)}
           onChanged={() => bumpCapabilities((v) => v + 1)}
         />
       )}
@@ -605,6 +600,7 @@ export function AgentSkillsView(): React.ReactElement {
           const ok = await data.deleteSkill(
             pendingDeleteSkill.slug,
             pendingDeleteSkill.name,
+            pendingDeleteSkill.workspaceSkillId,
           );
           setIsDeletingSkill(false);
           setPendingDeleteSkill(null);
@@ -866,29 +862,20 @@ function SkillSection({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {skills.map((skill) => (
           <SkillCard
-            key={skill.sourceSkillId ?? skill.slug}
+            key={skillListKey(skill)}
             skill={skill}
-            isBuiltin={
-              skill.actualSource !== "workspace" &&
-              skill.sourceSkillType === "builtin-meta"
-            }
+            isBuiltin={isBuiltinReferenceSkill(skill)}
             updating={updatingSkill === skill.slug}
             onOpen={() => onOpen(skill)}
             onToggle={(enabled) =>
-              onToggle(
-                skill.slug,
-                enabled,
-                skill.actualSource === "workspace"
-                  ? ""
-                  : (skill.sourceSkillId ?? ""),
-              )
+              onToggle(skill.slug, enabled, skillToggleSourceId(skill))
             }
             onUpdate={() => onUpdate(skill.slug)}
             onPublish={onPublish ? () => onPublish(skill.slug) : undefined}
             publishing={publishingSlug === skill.slug}
             interactive={interactive}
             onPromote={
-              onPromote && title === "工作区 Skills"
+              onPromote && title === "工作区 Skills" && skill.enabled
                 ? () => onPromote(skill)
                 : undefined
             }
