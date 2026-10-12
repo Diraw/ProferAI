@@ -14,6 +14,7 @@ let events: Array<{ topic: string; payload: { error?: string; model?: string } }
 let persisted: unknown[] = []
 let streamCalls = 0
 let titleCalls = 0
+let titleResult: string | null = 'fixture-title'
 let recover = false
 let commercial = false
 let synced = 0
@@ -63,7 +64,7 @@ mock.module('@profer/core', () => ({
     input.onEvent({ type: 'chunk', delta: 'fixture-reply' })
     return { content: 'fixture-reply' }
   },
-  fetchTitle: async () => { titleCalls += 1; return 'fixture-title' },
+  fetchTitle: async () => { titleCalls += 1; return titleResult },
   detectInsufficientCredits: () => null,
 }))
 const { sendMessage, generateTitle } = await import('./chat-service')
@@ -72,6 +73,7 @@ const input: ChatSendInput = { conversationId: 'fixture-conversation', runId: 'f
 beforeEach(() => {
   channels = [{ ...fixture }]; refreshedChannels = []
   decrypts = 0; requests = []; events = []; persisted = []; streamCalls = 0; titleCalls = 0
+  titleResult = 'fixture-title'
   recover = false; commercial = false; synced = 0; decryptFails = false; invalidRelay = false
 })
 
@@ -122,6 +124,15 @@ describe('Chat 服务资格与事件（完全 mock）', () => {
     expect(decrypts).toBe(0)
     expect(await generateTitle({ channelId: 'fixture', modelId: 'model', userMessage: 'fixture 长消息用于标题生成并保持指定模型绑定' })).toBe('fixture-title')
     expect(requests.map((request) => request.modelId)).toEqual(['model'])
+  })
+  test('provider 标题响应失败返回 null，不用首条消息伪装成功', async () => {
+    titleResult = null
+    const title = await generateTitle({
+      channelId: 'fixture', modelId: 'model',
+      userMessage: '请梳理 Profer 标题链路和重新生成失败原因',
+      contextMessages: ['请梳理 Profer 标题链路和重新生成失败原因'],
+    })
+    expect(title).toBeNull()
   })
   for (const patch of [
     { enabled: false }, { provider: 'openai-codex' as const },

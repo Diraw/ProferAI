@@ -105,13 +105,11 @@ export function createFallbackTitle(userMessage: string): string | null {
 
 // ===== 自动命名策略 =====
 
-/**
- * 兼容旧会话元数据的最大尝试次数。新会话在首条有效来源后直接定稿。
- */
+/** 窗口内最多发起的模型调用次数（含首次）；用尽后停止自动改名，保留默认/最近标题供用户手动处理。 */
 export const TITLE_REFINE_MAX_ATTEMPTS = 3
 
-/** 首条有信息量的用户消息即可完成自动命名。 */
-export const TITLE_LOCK_MIN_SOURCES = 1
+/** 首两条有信息量的用户消息后完成自动命名；首条只生成临时标题，第二条用于精修定稿。 */
+export const TITLE_LOCK_MIN_SOURCES = 2
 
 /** 参与命名的来源消息条数上限（只取最早的若干条，避免长会话把窗口拖长）。 */
 export const TITLE_SOURCE_MAX_COUNT = 4
@@ -322,16 +320,15 @@ export function planTitleWindow(input: TitleWindowInput): TitleWindowDecision {
   }
 
   const attempts = input.titleRefineAttempts ?? 0
-  // 旧会话可能记录了失败尝试，但默认标题仍必须允许首次成功命名。
-  if (attempts >= TITLE_REFINE_MAX_ATTEMPTS && !isDefaultTitle) return { action: 'lock', reason: 'attempts-exhausted' }
+  if (attempts >= TITLE_REFINE_MAX_ATTEMPTS) return { action: 'lock', reason: 'attempts-exhausted' }
 
   // 无有效来源（纯寒暄/命令）不消耗调用次数，也不关窗，等下一个有内容的轮次。
   if (input.sourceCount <= 0) return { action: 'skip', reason: 'no-source' }
 
   return {
     action: 'generate',
-    attempts: Math.min(attempts + 1, TITLE_REFINE_MAX_ATTEMPTS),
-    lockAfterApply: true,
+    attempts: attempts + 1,
+    lockAfterApply: shouldLockTitle(input.sourceCount),
   }
 }
 

@@ -651,11 +651,12 @@ export async function regenerateAgentTitle(
   const resolvedChannelId = channelId || meta.channelId
   const resolvedModelId = modelId || meta.modelId
   if (!resolvedChannelId || !resolvedModelId) {
+    const error = new Error('重新生成标题失败：当前会话没有可用渠道或模型')
     console.warn('[Agent 服务] 重新生成标题缺少可用渠道/模型:', { sessionId })
-    return null
+    throw error
   }
   const title = await orchestrator.regenerateTitle(sessionId, resolvedChannelId, resolvedModelId)
-  if (!title) return null
+  if (!title) throw new Error('重新生成标题失败：标题模型没有返回可用结果')
   const session = getAgentSessionMeta(sessionId)
   return session ? { title, session } : null
 }
