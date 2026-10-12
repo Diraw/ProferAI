@@ -5,6 +5,9 @@
  * 返回描述性 deny message 引导模型重试。
  */
 
+import { statSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+
 /** 已知工具的必需参数映射（使用权限层 canonical 字段名） */
 export const TOOL_REQUIRED_PARAMS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([
   ['Write', ['file_path', 'content']],
@@ -158,11 +161,34 @@ export interface ToolValidationFailure {
 }
 
 /**
- * 校验工具调用的必需参数是否存在且非空。
- *
- * 未知工具或参数完整时返回 null；
- * 参数缺失时返回 deny 结果，message 中列出缺失的参数名。
+ * Write 工具不能隐式创建父目录。Pi SDK 默认会对父目录执行 mkdir({ recursive: true })，
+ * 所以必须在两套 runtime 的共享权限边界先拒绝不存在的父目录。
  */
+export function validateWriteTargetParent(
+  input: Record<string, unknown>,
+  cwd: string | undefined,
+  toolName = 'Write',
+): ToolValidationFailure | null {
+  if (toolName !== 'Write') return null
+
+  const rawPath = input.file_path ?? input.path
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return null
+
+  const targetPath = resolve(cwd ?? process.cwd(), rawPath)
+  const parentPath = dirname(targetPath)
+  try {
+    if (statSync(parentPath).isDirectory()) return null
+  } catch {
+    // 统一返回“父目录不存在”，避免把 ENOENT/ENOTDIR 细节泄露给模型。
+  }
+
+  return {
+    behavior: 'deny',
+    message: `${toolName} target parent directory does not exist: ${parentPath}. Create the directory explicitly first, then retry the file write. Profer will not create parent directories implicitly.`,
+  }
+}
+
+/** 校验工具调用的必需参数是否存在且非空。 */
 export function validateToolInput(
   toolName: string,
   input: Record<string, unknown>,
