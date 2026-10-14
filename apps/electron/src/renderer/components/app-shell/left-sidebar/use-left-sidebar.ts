@@ -728,18 +728,21 @@ export function useLeftSidebar() {
   }, [])
 
   /**
-   * Delete 快捷键作用的会话：未选中、草稿未落盘、或不属于当前模式列表时传 null。
+   * Delete 快捷键作用的会话：未选中、草稿未落盘、侧边栏已收起、或不属于当前
+   * 模式列表时传 null。
    *
    * 后半条是防御性的：activeSessionId 是全局「活跃 Tab 所属会话」，与侧边栏当前模式
-   * 未必同源；而确认框最终按 mode 分派 chat / agent 两套 API，拿错 id 会调错接口。
+   * 未必同源；而确认框最终按会话归属分派 chat / agent 两套 API，拿错 id 会调错接口。
+   * 收起态不提供目标：用户看不到列表，缺少「正在删哪个会话」的视觉上下文。
    */
   const deleteShortcutTargetId = React.useMemo((): string | null => {
+    if (sidebarCollapsed) return null
     if (!activeSessionId || draftSessionIds.has(activeSessionId)) return null
     const exists = mode === 'agent'
       ? agentSessions.some((session) => session.id === activeSessionId)
       : conversations.some((conversation) => conversation.id === activeSessionId)
     return exists ? activeSessionId : null
-  }, [activeSessionId, draftSessionIds, mode, agentSessions, conversations])
+  }, [sidebarCollapsed, activeSessionId, draftSessionIds, mode, agentSessions, conversations])
 
   /** Delete 快捷键：同一个键开 / 关删除确认框 */
   const handleDeleteShortcut = React.useCallback((): void => {
@@ -844,17 +847,29 @@ export function useLeftSidebar() {
     }
   }, [store, setConversations, setTabs, setActiveTabId, cleanupMapAtoms, syncActiveTabSideEffects, refreshArchivedCounts])
 
+  /**
+   * 待删除会话的归属（agent / chat）：按 id 实际所在的列表判定，而非确认时刻的
+   * mode —— 确认框打开期间 mode 可能被快捷键切走，按 mode 分派会调错删除接口。
+   * 列表里已找不到（如刚被别处删除）时退回当前 mode。
+   */
+  const pendingDeleteIsAgent = React.useMemo((): boolean => {
+    if (!pendingDeleteId) return mode === 'agent'
+    if (agentSessions.some((session) => session.id === pendingDeleteId)) return true
+    if (conversations.some((conversation) => conversation.id === pendingDeleteId)) return false
+    return mode === 'agent'
+  }, [pendingDeleteId, agentSessions, conversations, mode])
+
   const pendingDeleteSessionIds = React.useMemo(() => (
-    mode === 'agent' && pendingDeleteId
+    pendingDeleteIsAgent && pendingDeleteId
       ? collectDelegatedDeletionSessionIds(agentSessions, pendingDeleteId)
       : new Set<string>()
-  ), [agentSessions, mode, pendingDeleteId])
+  ), [agentSessions, pendingDeleteIsAgent, pendingDeleteId])
   const pendingDeleteDelegatedChildCount = Math.max(0, pendingDeleteSessionIds.size - 1)
 
   /** 确认删除对话 */
   const handleConfirmDelete = async (): Promise<void> => {
     if (!pendingDeleteId) return
-    const deletedSessionIds = mode === 'agent'
+    const deletedSessionIds = pendingDeleteIsAgent
       ? collectDelegatedDeletionSessionIds(agentSessions, pendingDeleteId)
       : new Set([pendingDeleteId])
 
@@ -888,7 +903,7 @@ export function useLeftSidebar() {
         setExpandedRelatedParentIds((prev) => deleteSetEntry(prev, sessionId))
       }
 
-      if (mode === 'agent') {
+      if (pendingDeleteIsAgent) {
         // 清理整棵删除树的消息缓存，避免已删除会话的消息数组滞留内存。
         setAgentMessagesCache((prev) => {
           if (![...deletedSessionIds].some((sessionId) => prev.has(sessionId))) return prev
@@ -899,7 +914,7 @@ export function useLeftSidebar() {
       }
     }
 
-    if (mode === 'agent') {
+    if (pendingDeleteIsAgent) {
       try {
         await window.electronAPI.deleteAgentSession(pendingDeleteId)
         removeDeletedClientState()
