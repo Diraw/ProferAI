@@ -6,6 +6,7 @@
  * 映射成 Pi customTools。
  */
 
+import { isEffectiveAgentPresetToolDisabled, type EffectiveAgentPresetPolicy } from '@profer/shared'
 import { createHash } from 'node:crypto'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -36,7 +37,7 @@ interface PiMcpServerConfig {
   timeout?: unknown
 }
 
-type PiMcpServers = Record<string, Record<string, unknown>>
+export type PiMcpServers = Record<string, Record<string, unknown>>
 
 type McpToolInfo = Awaited<ReturnType<Client['listTools']>>['tools'][number]
 
@@ -71,14 +72,14 @@ function configHash(config: unknown): string {
   return createHash('sha256').update(stableStringify(config)).digest('hex').slice(0, 16)
 }
 
-function normalizeToolSegment(segment: string): string {
+export function normalizeMcpToolNameSegment(segment: string): string {
   const normalized = segment.replace(/[^A-Za-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '')
   if (!normalized) return 'unnamed'
   return /^[A-Za-z_]/.test(normalized) ? normalized : `_${normalized}`
 }
 
-function mcpToolName(serverName: string, toolName: string): string {
-  return `mcp__${normalizeToolSegment(serverName)}__${normalizeToolSegment(toolName)}`
+export function mcpToolName(serverName: string, toolName: string): string {
+  return `mcp__${normalizeMcpToolNameSegment(serverName)}__${normalizeMcpToolNameSegment(toolName)}`
 }
 
 function getHeaders(config: PiMcpServerConfig): Record<string, string> | undefined {
@@ -375,6 +376,10 @@ function isMcpConnectionError(error: unknown): boolean {
 }
 
 const manager = new PiMcpClientManager()
+const mcpPolicyIdentities = new WeakMap<ToolDefinition, string>()
+export function getMcpPolicyToolName(tool: ToolDefinition): string {
+  return mcpPolicyIdentities.get(tool) ?? tool.name
+}
 
 function createPiMcpToolDefinition(binding: McpToolBinding): ToolDefinition {
   const toolName = mcpToolName(binding.serverName, binding.originalToolName)
@@ -400,9 +405,15 @@ function createPiMcpToolDefinition(binding: McpToolBinding): ToolDefinition {
  * 注意：本函数仅供 Pi runtime 使用；Claude runtime 仍直接把 mcpServers 交给
  * Claude Agent SDK，不经过这里。
  */
-export async function buildPiMcpTools(mcpServers: PiMcpServers): Promise<ToolDefinition[]> {
-  const tools: ToolDefinition[] = []
-  const seenToolNames = new Set<string>()
+export interface DiscoveredMcpTool {
+  serverName: string
+  config: PiMcpServerConfig
+  tool: McpToolInfo
+}
+
+/** 保留原始服务器/工具身份，策略判断不能使用 Pi 转换后的调用别名。 */
+export async function discoverExternalMcpTools(mcpServers: PiMcpServers): Promise<DiscoveredMcpTool[]> {
+  const discovered: DiscoveredMcpTool[] = []
 
   // 并行连接所有 MCP 服务器，避免串行等待导致启动慢
   const entries = Object.entries(mcpServers).filter(([, rawConfig]) => {
@@ -424,21 +435,32 @@ export async function buildPiMcpTools(mcpServers: PiMcpServers): Promise<ToolDef
       continue
     }
     const { serverName, config, mcpTools } = result.value
-    for (const tool of mcpTools) {
+    for (const tool of mcpTools) discovered.push({ serverName, config, tool })
+  }
+  return discovered
+}
+
+export async function buildPiMcpTools(mcpServers: PiMcpServers, policy?: EffectiveAgentPresetPolicy): Promise<ToolDefinition[]> {
+  const tools: ToolDefinition[] = []
+  const seenToolNames = new Set<string>()
+  for (const { serverName, config, tool } of await discoverExternalMcpTools(mcpServers)) {
+      const originalName = `mcp__${serverName}__${tool.name}`
       const piToolName = mcpToolName(serverName, tool.name)
+      if (policy && (isEffectiveAgentPresetToolDisabled(policy, originalName) || policy.disabledTools?.includes(originalName) || policy.disabledTools?.includes(piToolName))) continue
       if (seenToolNames.has(piToolName)) {
         console.warn(`[Pi MCP] 工具名冲突 ${piToolName}，已跳过 ${serverName}/${tool.name}`)
         continue
       }
       seenToolNames.add(piToolName)
-      tools.push(createPiMcpToolDefinition({
+      const definition = createPiMcpToolDefinition({
         serverName,
         originalToolName: tool.name,
         tool,
         manager,
         managerConfig: config,
-      }))
-    }
+      })
+      mcpPolicyIdentities.set(definition, originalName)
+      tools.push(definition)
   }
 
   if (tools.length > 0) {

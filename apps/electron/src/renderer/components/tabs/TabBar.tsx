@@ -52,6 +52,7 @@ import {
   isGroupEligibleTab,
   isSessionConsistentGroup,
   planGroupDrop,
+  resolveGroupDropSide,
   removeTabGroup,
   replaceTabGroup,
   tabGroupsAtom,
@@ -60,17 +61,17 @@ import {
 } from "@/atoms/tab-group-atoms";
 import { panelVisibilityAtom } from "@/atoms/panel-layout-atoms";
 import { automationFormAtom } from "@/atoms/automation-atoms";
-import { Button } from "@/components/ui/button";
+import { Button } from "@profer/ui/primitives/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@profer/ui/primitives/tooltip";
 import { WindowControlsHost } from "@/components/WindowControlsTemplate";
 import { TabBarItem } from "./TabBarItem";
 import { TabGroupItem } from "./TabGroupItem";
 import { useCloseTab } from "@/hooks/useCloseTab";
-import { detectIsWindows } from "@/lib/platform";
+import { detectIsWindows } from "@profer/ui";
 import { registerShortcut } from "@/lib/shortcut-registry";
 import { cn } from "@/lib/utils";
 import { replaceAgentSessionInFreshnessOrder } from "@/lib/agent-session-list";
@@ -84,9 +85,7 @@ import {
   TOPBAR_HEIGHT,
 } from "./topbar-layout";
 
-export function TabBar({
-  teamMode = false,
-}: { teamMode?: boolean } = {}): React.ReactElement {
+export function TabBar(): React.ReactElement {
   const tabs = useAtomValue(tabsAtom);
   const setTabs = useSetAtom(tabsAtom);
   const [activeTabId, setActiveTabId] = useAtom(activeTabIdAtom);
@@ -321,11 +320,7 @@ export function TabBar({
       } else if (tab.type === "scratch" || tab.type === "tutorial") {
         setCurrentConversationId(null);
         // 个人 Agent 模式下保留 appMode，避免切到 Scratch 时收起右侧文件面板；
-        // 团队模式必须退出 TeamWorkspaceView，否则草稿/教程标签会被团队文件页遮住。
-        if (teamMode) {
-          setAppMode("scratch");
-          setCurrentAgentSessionId(null);
-        } else if (appMode !== "agent") {
+        if (appMode !== "agent") {
           setCurrentAgentSessionId(null);
         }
       }
@@ -338,7 +333,6 @@ export function TabBar({
       agentSessions,
       agentWorkspaces,
       appMode,
-      teamMode,
       setAppMode,
       setCurrentConversationId,
       setCurrentAgentSessionId,
@@ -565,7 +559,6 @@ export function TabBar({
         onClose={requestClose}
         onDragStart={handleDragStart}
         onCancelSort={() => sortCancelRef.current?.()}
-        teamMode={teamMode}
       />
     </>
   );
@@ -583,7 +576,6 @@ function TabBarInner({
   onClose,
   onDragStart,
   onCancelSort,
-  teamMode,
 }: {
   tabs: TabItem[];
   activeTabId: string | null;
@@ -596,7 +588,6 @@ function TabBarInner({
   onDragStart: (tabId: string, e: React.PointerEvent) => void;
   /** 取消进行中的标签排序（合并手势中途接管时调用） */
   onCancelSort: () => void;
-  teamMode: boolean;
 }): React.ReactElement {
   const agentSessions = useAtomValue(agentSessionsAtom);
   const browserStateMap = useAtomValue(browserStateMapAtom);
@@ -675,7 +666,7 @@ function TabBarInner({
   // 窗口按钮和顶栏入口共用同一块弹性操作面板；窗口按钮被右侧面板接管时，
   // 面板只保留工具入口，不再预留固定的 132px 空洞。
   const showTabBarWindowControls =
-    isWindows && !teamMode && !hasRightSideContent;
+    isWindows && !hasRightSideContent;
   const togglePanel = React.useCallback(() => {
     if (!activeAgentSessionId) return;
     if (isPanelOpen) {
@@ -763,7 +754,7 @@ function TabBarInner({
     {
       id: "managed-browser",
       // 工具优先于标签：浏览器分栏压窄会话区时仍保留完整入口，标签区自行滚动压缩。
-      visible: !teamMode && showBrowserButton,
+      visible: showBrowserButton,
       label: "打开受管浏览器",
       tooltip: "打开受管浏览器",
       icon: <Globe2 className="size-3.5" />,
@@ -773,7 +764,7 @@ function TabBarInner({
     },
     {
       id: "file-panel",
-      visible: !teamMode && showOpenPanelButton,
+      visible: showOpenPanelButton,
       label: "打开文件面板",
       tooltip: `打开文件面板 (${navigator.platform.includes("Mac") ? "⌘⇧B" : "Ctrl+Shift+B"})`,
       icon: <PanelRight className="size-3.5" />,
@@ -785,7 +776,7 @@ function TabBarInner({
     },
     {
       id: "plugin-pages",
-      visible: !teamMode && activeSessionId !== null && hasPluginPages,
+      visible: activeSessionId !== null && hasPluginPages,
       label: "打开插件页面",
       tooltip: "打开插件页面",
       icon: <Blocks className="size-3.5" />,
@@ -793,7 +784,7 @@ function TabBarInner({
     },
     {
       id: "coach-tour",
-      visible: !teamMode,
+      visible: true,
       label: "界面引导",
       tooltip: "播放界面引导（Esc 退出）",
       icon: <Compass className="size-3.5" />,
@@ -806,7 +797,7 @@ function TabBarInner({
     {
       id: "tab-group",
       // 只在左右双栏（组合）状态下出现：常态不提供入口按钮，创建入口只有"把标签向下拖"手势。
-      visible: !teamMode && !!activeGroup,
+      visible: !!activeGroup,
       label: "解散组合",
       tooltip: "解散当前组合（两个标签都保留）",
       icon: <Ungroup className="size-3.5" />,
@@ -969,11 +960,17 @@ function TabBarInner({
           return;
         }
 
-        // 左右落点以真实分界线为准（由 MainArea 发布在 data-group-drop-split 上）：
-        // 比例拖过、或空栏只占 1/3 时，容器中点与两栏实际边界并不重合。
+        // 按当前真实 pane 边界判定，避免 ResizeObserver 尚未刷新时使用陈旧比例。
+        const leftPaneRect = region?.querySelector<HTMLElement>("[data-group-drop-left-pane]")?.getBoundingClientRect() ?? null;
+        const rightPaneRect = region?.querySelector<HTMLElement>("[data-group-drop-right-pane]")?.getBoundingClientRect() ?? null;
         const splitOffset = Number(region?.dataset.groupDropSplit ?? "");
-        const splitX = regionRect.left + (Number.isFinite(splitOffset) ? splitOffset : regionRect.width / 2);
-        hoveredSide = me.clientX < splitX ? "left" : "right";
+        const fallbackSplitX = regionRect.left + (Number.isFinite(splitOffset) ? splitOffset : regionRect.width / 2);
+        hoveredSide = resolveGroupDropSide({
+          clientX: me.clientX,
+          leftPane: leftPaneRect,
+          rightPane: rightPaneRect,
+          fallbackSplitX,
+        });
         committable = me.clientY >= barRect.bottom + GROUP_DROP_COMMIT_MARGIN;
         setTabGroupDrag({ draggingTabId: tabId, hoveredPosition: hoveredSide });
       };
@@ -1040,14 +1037,21 @@ function TabBarInner({
     [tabs, onDragStart, handleGroupTabDrag],
   );
 
-  // 鼠标滚轮横向滚动（使用原生事件监听器以支持 preventDefault）
+  // 滚轮 / 触控板横向滚动：按主轴方向分流。
+  // deltaX 占优（触控板双指横滑）→ 交给原生横向滚动，保留 macOS 惯性与橡皮筋手感；
+  // deltaY 占优（鼠标滚轮 / 触控板竖滑）→ preventDefault 后换算成横向滚动。
+  // 旧实现 `deltaY || deltaX` 在触控板斜滑时会吃到接近 0 的 deltaY，看起来"卡住不顺"，
+  // 且恒 preventDefault 让原生惯性完全失效。
   React.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
     const handleWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
       e.preventDefault();
-      el.scrollLeft += e.deltaY || e.deltaX;
+      const lineFactor =
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 33 : 1;
+      el.scrollLeft += e.deltaY * lineFactor;
     };
 
     el.addEventListener("wheel", handleWheel, { passive: false });

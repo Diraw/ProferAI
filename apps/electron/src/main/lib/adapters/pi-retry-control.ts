@@ -6,6 +6,8 @@ export type PiRetryUpdate =
   | { status: 'cleared' }
   | { status: 'failed'; attemptData: RetryAttempt }
 
+export type PiNativeRetryOutcome = 'succeeded' | 'exhausted' | 'cancelled'
+
 /**
  * Pi native retry 事件（对齐 @earendil-works/pi-coding-agent@0.82.1 + Profer 引入的
  * `pi-coding-agent@0.82.1.patch` 扩展）。
@@ -32,7 +34,7 @@ type PiNativeRetryDetails = {
 type PiNativeRetryEvent =
   | ({ type: 'auto_retry_start' } & PiNativeRetryDetails)
   | ({ type: 'auto_retry_attempt_start' } & PiNativeRetryDetails)
-  | ({ type: 'auto_retry_end'; success: boolean; outcome?: 'succeeded' | 'exhausted' | 'cancelled'; finalError?: string } & PiNativeRetryDetails)
+  | ({ type: 'auto_retry_end'; success: boolean; outcome?: PiNativeRetryOutcome; finalError?: string } & PiNativeRetryDetails)
 
 /**
  * Pi native retry 的终态事件门控。
@@ -60,6 +62,12 @@ export function createPiRetryTerminalGate<T>(): {
       return terminalError
     },
   }
+}
+
+export function getPiNativeRetryOutcome(event: PiNativeRetryEvent): PiNativeRetryOutcome | undefined {
+  if (event.type !== 'auto_retry_end') return undefined
+  if (event.outcome) return event.outcome
+  return event.success ? 'succeeded' : 'exhausted'
 }
 
 /**

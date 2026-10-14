@@ -21,18 +21,18 @@ import {
 } from "lucide-react";
 import { SkillDetailSheetFrame } from "./SkillDetailSheetFrame";
 import { SkillDetailLayout } from "./SkillDetailLayout";
-import { Button } from "@/components/ui/button";
+import { Button } from "@profer/ui/primitives/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@profer/ui/primitives/tooltip";
 import { SettingsCard } from "@/components/settings/primitives";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from "@/components/ui/popover";
+} from "@profer/ui/primitives/popover";
 import type {
   AgentWorkspace,
   GlobalSkillMeta,

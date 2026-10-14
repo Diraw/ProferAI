@@ -19,7 +19,7 @@ import { cn } from '@/lib/utils'
 import type { FileIndexEntry } from '@profer/shared'
 import { FileTypeIcon } from './FileTypeIcon'
 import { ChevronRight, Folder } from 'lucide-react'
-import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@profer/ui/primitives/tooltip'
 import { MAX_FILE_MENTION_ITEMS, limitMentionGroups } from '@/components/agent/mention-query-utils'
 
 // ===== Error Boundary =====

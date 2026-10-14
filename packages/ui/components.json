@@ -1,0 +1,20 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "new-york",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "../../apps/electron/tailwind.config.js",
+    "css": "../../apps/electron/src/renderer/styles/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "aliases": {
+    "components": "@profer/ui/primitives",
+    "ui": "@profer/ui/primitives",
+    "utils": "@profer/ui/lib/cn",
+    "lib": "@profer/ui/lib",
+    "hooks": "@profer/ui/hooks"
+  }
+}

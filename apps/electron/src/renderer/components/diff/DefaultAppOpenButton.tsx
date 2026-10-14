@@ -8,7 +8,7 @@
 
 import * as React from 'react'
 import type { FileAccessOptions } from '@profer/shared'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { useDefaultAppForFile } from '@/hooks/useDefaultAppForFile'
 import { cn } from '@/lib/utils'
 

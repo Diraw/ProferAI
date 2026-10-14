@@ -56,6 +56,7 @@ export class RuntimeRoutingAgentAdapter implements AgentProviderAdapter {
     this.sessionRuntimes.set(input.sessionId, { runtime, token })
     this.knownSessionRuntimes.set(input.sessionId, runtime)
     try {
+      input.onRuntimeRegistered?.()
       yield* adapter.query({ ...input, agentRuntime: runtime })
     } finally {
       // 不删除已被后续运行替换的绑定；stop-and-wait 仍可精确路由到最新 query。

@@ -5,6 +5,9 @@
  * 返回描述性 deny message 引导模型重试。
  */
 
+import { statSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+
 /** 已知工具的必需参数映射（使用权限层 canonical 字段名） */
 export const TOOL_REQUIRED_PARAMS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([
   ['Write', ['file_path', 'content']],
@@ -19,6 +22,65 @@ export const TOOL_REQUIRED_PARAMS: ReadonlyMap<string, ReadonlyArray<string>> = 
 
 function canonicalToolName(toolName: string): string {
   return toolName === 'MultiEdit' ? 'Edit' : toolName
+}
+
+/** 会把第一个参数当作文件系统路径的工具（Claude canonical 名、Pi 显示名与 Pi 原生小写名）。 */
+const FILESYSTEM_PATH_TOOLS: ReadonlySet<string> = new Set([
+  'Read',
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'LS',
+  'Ls',
+  'Glob',
+  'Grep',
+  'read',
+  'write',
+  'edit',
+  'ls',
+  'glob',
+  'grep',
+  'find',
+])
+
+/** 形如 `C:\Users\…` / `C:/Users/…` 的 Windows 盘符绝对路径。 */
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:[\\/]/
+
+/**
+ * 拒绝在非 Windows 平台上传入的 Windows 绝对路径。
+ *
+ * `node:path.isAbsolute('C:\\Users\\alex\\dev')` 在 macOS/Linux 上返回 false，
+ * 于是路径被当成相对路径拼到会话工作目录后面（`…/session/C:\Users\alex\dev`），
+ * 生成形状正确、实际不存在的伪路径。模型看不出自己写错了什么，只会得出
+ * 「文件不存在」的错误结论。
+ *
+ * 这里在共享权限边界（两套 runtime 的 canUseTool）统一拦截，模型在写错平台路径的
+ * 当轮就能得到明确纠正，而不是拿到一条语义误导的 ENOENT。
+ */
+export function validateToolPathPlatform(
+  toolName: string,
+  input: Record<string, unknown>,
+  platform: NodeJS.Platform = process.platform,
+): ToolValidationFailure | null {
+  // Windows 上盘符路径是合法绝对路径，不能拦。
+  if (platform === 'win32') return null
+
+  const canonical = canonicalToolName(toolName)
+  if (!FILESYSTEM_PATH_TOOLS.has(canonical) && !FILESYSTEM_PATH_TOOLS.has(toolName)) return null
+
+  const rawPath = input.file_path ?? input.path
+  if (typeof rawPath !== 'string') return null
+
+  const trimmed = rawPath.trim()
+  if (!WINDOWS_DRIVE_PATH.test(trimmed)) return null
+
+  return {
+    behavior: 'deny',
+    message:
+      `Path "${trimmed}" is a Windows absolute path, but this session runs on ${platform}, ` +
+      'where it is not absolute and would be resolved relative to the session directory. ' +
+      'Use the real POSIX path under the current workspace, or list the target directory first to confirm where things actually live.',
+  }
 }
 
 function firstPiEdit(input: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -99,11 +161,34 @@ export interface ToolValidationFailure {
 }
 
 /**
- * 校验工具调用的必需参数是否存在且非空。
- *
- * 未知工具或参数完整时返回 null；
- * 参数缺失时返回 deny 结果，message 中列出缺失的参数名。
+ * Write 工具不能隐式创建父目录。Pi SDK 默认会对父目录执行 mkdir({ recursive: true })，
+ * 所以必须在两套 runtime 的共享权限边界先拒绝不存在的父目录。
  */
+export function validateWriteTargetParent(
+  input: Record<string, unknown>,
+  cwd: string | undefined,
+  toolName = 'Write',
+): ToolValidationFailure | null {
+  if (toolName !== 'Write') return null
+
+  const rawPath = input.file_path ?? input.path
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return null
+
+  const targetPath = resolve(cwd ?? process.cwd(), rawPath)
+  const parentPath = dirname(targetPath)
+  try {
+    if (statSync(parentPath).isDirectory()) return null
+  } catch {
+    // 统一返回“父目录不存在”，避免把 ENOENT/ENOTDIR 细节泄露给模型。
+  }
+
+  return {
+    behavior: 'deny',
+    message: `${toolName} target parent directory does not exist: ${parentPath}. Create the directory explicitly first, then retry the file write. Profer will not create parent directories implicitly.`,
+  }
+}
+
+/** 校验工具调用的必需参数是否存在且非空。 */
 export function validateToolInput(
   toolName: string,
   input: Record<string, unknown>,

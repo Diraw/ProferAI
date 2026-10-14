@@ -60,6 +60,52 @@ describe('applyModelDiscoveryResult', () => {
       { id: 'brand-new', name: '新模型', enabled: false, source: 'fetched' },
     ])
   })
+
+  test('Given 手动模型与远端同 ID When 刷新 Then 保留手动来源和用户设置', () => {
+    const configured: ChannelModel[] = [
+      { id: 'manual-model', name: '我的别名', enabled: true, context1m: true, source: 'manual' },
+      { id: 'stale-fetched', name: '旧发现', enabled: true, source: 'fetched' },
+    ]
+    const discovered: ChannelModel[] = [
+      { id: 'manual-model', name: '供应商名称', enabled: false },
+      { id: 'fresh-model', name: '新模型', enabled: true },
+    ]
+
+    expect(applyModelDiscoveryResult(configured, result(true, discovered))).toEqual([
+      { id: 'manual-model', name: '我的别名', enabled: true, context1m: true, source: 'manual' },
+      { id: 'fresh-model', name: '新模型', enabled: false, source: 'fetched' },
+    ])
+  })
+
+  test('Given 历史未标记模型与手工模型 When 目录先同 ID 后为空 Then 两次刷新都保留本地配置', () => {
+    const configured: ChannelModel[] = [
+      { id: 'legacy', name: '历史别名', enabled: false, context1m: false },
+      { id: 'manual', name: '手工别名', enabled: true, source: 'manual' },
+    ]
+    const refreshed = applyModelDiscoveryResult(configured, result(true, [
+      { id: 'legacy', name: '远端别名', enabled: true },
+      { id: 'manual', name: '远端别名', enabled: false },
+    ]))
+    expect(refreshed).toEqual(configured)
+    expect(applyModelDiscoveryResult(refreshed, result(true))).toEqual(configured)
+  })
+
+  test('Given builtin catalog When refreshing with a reduced list Then remove stale catalog models and preserve source', () => {
+    const configured: ChannelModel[] = [
+      { id: 'removed', name: '已下线', enabled: true, source: 'builtin-catalog' },
+      { id: 'kept', name: '旧名称', enabled: false, context1m: true, source: 'builtin-catalog' },
+      { id: 'manual', name: '手动模型', enabled: true, source: 'manual' },
+    ]
+
+    expect(applyModelDiscoveryResult(configured, result(true, [
+      { id: 'kept', name: '新名称', enabled: true },
+      { id: 'new', name: '新模型', enabled: true },
+    ]), 'builtin-catalog')).toEqual([
+      { id: 'manual', name: '手动模型', enabled: true, source: 'manual' },
+      { id: 'kept', name: '新名称', enabled: false, context1m: true, source: 'builtin-catalog' },
+      { id: 'new', name: '新模型', enabled: false, source: 'builtin-catalog' },
+    ])
+  })
 })
 
 describe('buildModelDiscoveryAttemptKey', () => {

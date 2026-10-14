@@ -9,8 +9,7 @@
 
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { MarkdownPreview, MARKDOWN_PREVIEW_LIGHT_COMPONENTS } from '@profer/ui'
 import { AlertTriangle } from 'lucide-react'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { getModelLogo, resolveModelProvider } from '@/lib/model-logo'
@@ -24,18 +23,6 @@ interface TabPreviewPanelProps {
   isLeaving: boolean
 }
 
-// ── Markdown 预览配置（轻量级） ──
-
-const PREVIEW_REMARK_PLUGINS = [remarkGfm]
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-const PREVIEW_MD_COMPONENTS = {
-  pre: ({ children }: { children?: React.ReactNode }) => <pre className="text-[11px] opacity-70 truncate">{children}</pre>,
-  code: ({ children }: { children?: React.ReactNode }) => <code className="text-[11px] bg-muted/50 px-0.5 rounded">{children}</code>,
-  img: () => null as unknown as React.ReactElement,
-  a: ({ children }: { children?: React.ReactNode }) => <span>{children}</span>,
-} as const
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 // ── 子组件 ──
 
@@ -66,9 +53,9 @@ function Preview({ text }: { text: string }): React.ReactElement {
 
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none text-xs text-popover-foreground/80 prose-p:my-0 prose-headings:my-0.5 prose-headings:text-xs prose-li:my-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 line-clamp-2 overflow-hidden">
-      <Markdown remarkPlugins={PREVIEW_REMARK_PLUGINS} components={PREVIEW_MD_COMPONENTS}>
+      <MarkdownPreview components={MARKDOWN_PREVIEW_LIGHT_COMPONENTS}>
         {text}
-      </Markdown>
+      </MarkdownPreview>
     </div>
   )
 }

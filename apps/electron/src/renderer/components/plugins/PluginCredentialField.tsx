@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 export function PluginCredentialField({ pluginId, id, title, origin }: { pluginId: string; id: string; title: string; origin: string }): React.ReactElement {
   const [secret, setSecret] = React.useState(''), [busy, setBusy] = React.useState(false)
   const save = async (clear: boolean): Promise<void> => {

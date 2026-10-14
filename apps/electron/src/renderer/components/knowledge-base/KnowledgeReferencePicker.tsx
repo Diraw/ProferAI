@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { Check, FileText, Loader2 } from 'lucide-react'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@profer/ui/primitives/dialog'
 import type { KnowledgeItem } from '@profer/shared'
 import { getItemKind } from './knowledge-base-workbench-utils'
 import { cn } from '@/lib/utils'

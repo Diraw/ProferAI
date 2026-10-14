@@ -3,7 +3,7 @@ import { ChevronLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useTocHeadings } from '@/hooks/useTocHeadings'
 import { useScrollSpy } from '@/hooks/useScrollSpy'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 
 interface MarkdownTocProps {
   /** 预览滚动容器，标题提取与跳转都基于它 */

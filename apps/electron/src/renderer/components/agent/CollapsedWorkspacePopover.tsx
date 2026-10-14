@@ -13,7 +13,7 @@
 import * as React from 'react'
 import { FolderOpen, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover, PopoverContent, PopoverTrigger } from '@profer/ui/primitives/popover'
 import { useProjectActions } from '@/hooks/useProjectActions'
 
 /** Popover hover 关闭延迟（ms），与项目其他 hover popover 一致 */

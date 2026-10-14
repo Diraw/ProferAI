@@ -24,10 +24,10 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { SCREENSHOT_LIMITS } from '@profer/shared'
-import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
-import { Separator } from '@/components/ui/separator'
+import { Button } from '@profer/ui/primitives/button'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
+import { Popover, PopoverTrigger, PopoverContent } from '@profer/ui/primitives/popover'
+import { Separator } from '@profer/ui/primitives/separator'
 import { cn } from '@/lib/utils'
 
 interface MarkdownEditorToolbarProps {

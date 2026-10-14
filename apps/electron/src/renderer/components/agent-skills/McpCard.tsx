@@ -6,8 +6,8 @@
 
 import * as React from 'react'
 import { Plug, ShieldCheck, CheckCircle2, XCircle, Trash2 } from 'lucide-react'
-import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Switch } from '@profer/ui/primitives/switch'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 import type { McpServerEntry } from '@profer/shared'
 

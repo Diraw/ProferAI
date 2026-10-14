@@ -3,11 +3,12 @@
  *
  * 负责渠道的 CRUD 操作、API Key 加密/解密、连接测试。
  * 使用 Electron safeStorage 进行 API Key 加密（底层使用 OS 级加密）。
- * 数据持久化到 ~/.proma/channels.json。
+ * 数据持久化到 ~/.profer/channels.json（历史 ~/.proma 路径由 config-paths 迁移）。
  */
 
 import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { writeJsonFileAtomic } from './safe-file'
 import { getChannelsPath } from './config-paths'
 import { encryptToken, decryptToken } from './token-crypto'
 import type {
@@ -23,13 +24,13 @@ import type {
   ProviderType,
   XaiOAuthCredentials,
 } from '@profer/shared'
-import { isAgentEnabledForChannel, isCodexCredentialExpired, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
+import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApiToken, isAgentEnabledForChannel, isCodexCredentialExpired, isLocalOllamaBaseUrl, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveProviderNativeProtocol, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
-import { normalizeBaseUrl, normalizeAnthropicProviderUrl, normalizeOpenAIBaseUrlForSdk, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
+import { assertSdkBaseUrlSupportsRouting, isAnthropicShapedEndpoint, resolveAnthropicMessagesUrl, resolveAnthropicModelsUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
 import { parseMiniMaxGeneralQuotaWindows } from './channel-plan-quota-parsers'
 import { parseCodexPlanQuotaResponse } from './codex-plan-quota'
-import { refreshCodexOAuth } from './codex-oauth-service'
+import { loginCodexOAuth, refreshCodexOAuth } from './codex-oauth-service'
 import { refreshXaiOAuth } from './xai-oauth-service'
 import { refreshXaiOAuthCredentialsSerial, rememberXaiOAuthCredentials } from './xai-oauth-credentials'
 import { isCommercialBuild } from './build-target'
@@ -91,7 +92,8 @@ export function applyPresetModelCandidateUpdates(config: ChannelsConfig): { conf
 }
 
 function withTimeout(init: RequestInit, timeoutMs: number = CHANNEL_TEST_TIMEOUT_MS): RequestInit {
-  return { ...init, signal: AbortSignal.timeout(timeoutMs) }
+  const timeout = AbortSignal.timeout(timeoutMs)
+  return { ...init, signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout }
 }
 
 /** 余额/额度查询专用：短超时，快速失败 */
@@ -104,11 +106,31 @@ export function resolveChannelAgentBaseUrl(channel: Pick<Channel, 'provider' | '
 }
 
 /**
+ * Chat 抓取器/测试器分派：把 provider 归类到具体请求实现。
+ * 规则与能力描述符 chatProtocol 对齐（单一事实源），三处 switch（testChannel /
+ * testChannelDirect / fetchModels）共用，不再各写一份 provider 枚举。
+ * ollama 与 google 有独立实现，单列；deepseek 走 OpenAI 兼容（chatProtocol=openai）。
+ */
+type ChatAdapterKind = 'anthropic' | 'openai' | 'google' | 'ollama' | 'unsupported'
+function resolveChatAdapterKind(provider: ProviderType): ChatAdapterKind {
+  // openai-codex 走 OAuth 内置目录，没有可用的 vendor Chat/抓取 API，原 switch
+  // 落 default 返回「不支持」；分派表保持这个行为。
+  if (provider === 'openai-codex') return 'unsupported'
+  if (provider === 'ollama') return 'ollama'
+  if (provider === 'google') return 'google'
+  return PROVIDER_CAPABILITIES[provider].chatProtocol === 'anthropic' ? 'anthropic' : 'openai'
+}
+
+/**
  * 合并服务端下发的渠道模型与本地状态。
  *
  * 服务端只负责「有哪些模型」，以下两项属于用户本地决定，不得被同步洗掉：
  * - 模型级 enabled（用户启停）
  * - 模型上的 1M 勾选（context1m）
+ *
+ * 注意：这里的 localModels 只会是「同 ID 的服务端渠道」上次同步留下的本地记录
+ * （官方/模型族渠道在 UI 上没有 1M 开关，用户改不了 context1m），
+ * 不会与用户自配渠道（id 不同）发生交叉。
  */
 export function mergeServerChannelModels(
   serverModels: readonly Partial<ChannelModel>[],
@@ -125,19 +147,65 @@ export function mergeServerChannelModels(
   })
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** 先校验再迁移，结构损坏不得伪装成空配置并覆盖原文件。 */
+function assertChannelsConfig(value: unknown): asserts value is ChannelsConfig {
+  if (!isRecord(value) || value.version !== CONFIG_VERSION || !Array.isArray(value.channels)
+    || (value.appliedPresetModelUpdates !== undefined && (!Array.isArray(value.appliedPresetModelUpdates)
+      || value.appliedPresetModelUpdates.some((item) => typeof item !== 'string')))) {
+    throw new Error('渠道配置结构无效')
+  }
+  const ids = new Set<string>()
+  for (const channel of value.channels) {
+    if (!isRecord(channel) || typeof channel.id !== 'string' || !channel.id || ids.has(channel.id)
+      || typeof channel.name !== 'string' || typeof channel.provider !== 'string'
+      || !Object.hasOwn(PROVIDER_DEFAULT_URLS, channel.provider)
+      || typeof channel.baseUrl !== 'string' || typeof channel.apiKey !== 'string'
+      || typeof channel.enabled !== 'boolean' || !Array.isArray(channel.models)
+      || typeof channel.createdAt !== 'number' || !Number.isFinite(channel.createdAt)
+      || typeof channel.updatedAt !== 'number' || !Number.isFinite(channel.updatedAt)
+      || (channel.serverManaged !== undefined && typeof channel.serverManaged !== 'boolean')
+      || (channel.agentBaseUrl !== undefined && typeof channel.agentBaseUrl !== 'string')
+      || (channel.agentRuntimes !== undefined && (!Array.isArray(channel.agentRuntimes)
+        || channel.agentRuntimes.some((mode) => mode !== 'pi' && mode !== 'claude')))
+      || (channel.credentialMode !== undefined && channel.credentialMode !== 'oauth' && channel.credentialMode !== 'api-key')
+      || (channel.agentExperimentalEnabled !== undefined && typeof channel.agentExperimentalEnabled !== 'boolean')) {
+      throw new Error('渠道配置包含无效渠道')
+    }
+    ids.add(channel.id)
+    const modelIds = new Set<string>()
+    for (const model of channel.models) {
+      if (!isRecord(model) || typeof model.id !== 'string' || !model.id || modelIds.has(model.id)
+        || typeof model.name !== 'string' || typeof model.enabled !== 'boolean'
+        || (model.context1m !== undefined && typeof model.context1m !== 'boolean')
+        || (model.source !== undefined && model.source !== 'manual' && model.source !== 'fetched' && model.source !== 'builtin-catalog')) {
+        throw new Error('渠道配置包含无效模型')
+      }
+      modelIds.add(model.id)
+    }
+  }
+}
+
 /**
  * 读取渠道配置文件
  */
 function readConfig(): ChannelsConfig {
   const configPath = getChannelsPath()
 
-  if (!existsSync(configPath)) {
-    return { version: CONFIG_VERSION, channels: [] }
+  let raw: string
+  try {
+    raw = readFileSync(configPath, 'utf-8')
+  } catch (error) {
+    if (isRecord(error) && error.code === 'ENOENT') return { version: CONFIG_VERSION, channels: [] }
+    throw new Error('读取渠道配置失败，已中止操作以保留原文件')
   }
 
   try {
-    const raw = readFileSync(configPath, 'utf-8')
-    const parsed = JSON.parse(raw) as ChannelsConfig
+    const parsed: unknown = JSON.parse(raw)
+    assertChannelsConfig(parsed)
     const normalized = normalizeConfigForCurrentSchema(parsed)
     const channelsWithCredentialModes = normalized.config.channels.map((channel) => {
       if (channel.provider !== 'xai' || channel.credentialMode) return channel
@@ -151,16 +219,16 @@ function readConfig(): ChannelsConfig {
     const presetUpdated = applyPresetModelCandidateUpdates({ ...normalized.config, channels: channelsWithCredentialModes })
     if (normalized.changed || credentialModeChanged || presetUpdated.changed) {
       try {
-        writeFileSync(configPath, JSON.stringify(presetUpdated.config, null, 2), 'utf-8')
+        writeConfig(presetUpdated.config)
         console.log('[渠道管理] 已应用渠道配置迁移或预设模型更新')
       } catch (error) {
         console.warn('[渠道管理] 写入迁移后的渠道配置失败，将继续使用内存中的迁移结果:', error)
       }
     }
     return presetUpdated.config
-  } catch (error) {
-    console.error('[渠道管理] 读取配置文件失败:', error)
-    return { version: CONFIG_VERSION, channels: [] }
+  } catch {
+    console.error('[渠道管理] 读取配置文件失败：内容损坏或格式不受支持')
+    throw new Error('渠道配置损坏或格式不受支持，已中止操作以保留原文件')
   }
 }
 
@@ -171,7 +239,8 @@ function writeConfig(config: ChannelsConfig): void {
   const configPath = getChannelsPath()
 
   try {
-    writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
+    assertChannelsConfig(config)
+    writeJsonFileAtomic(configPath, config)
   } catch (error) {
     console.error('[渠道管理] 写入配置文件失败:', error)
     throw new Error('写入渠道配置失败')
@@ -232,7 +301,8 @@ export function backupChannelsForAccount(accountId: string | undefined | null): 
   if (!existsSync(configPath)) return null
 
   const raw = readFileSync(configPath, 'utf-8')
-  const parsed = JSON.parse(raw) as ChannelsConfig
+  const parsed: unknown = JSON.parse(raw)
+  assertChannelsConfig(parsed)
   const userManagedChannels = getUserManagedChannelsForLogout(parsed.channels || [])
   if (userManagedChannels.length === 0) {
     // 无自配渠道时无需备份，也不应视为失败（清空官方渠道无损失）
@@ -306,6 +376,7 @@ export function restoreChannelsForAccount(accountId: string): RestoreChannelsRes
   let parsed: ChannelsConfig
   try {
     parsed = JSON.parse(raw) as ChannelsConfig
+    assertChannelsConfig(parsed)
   } catch (err) {
     return { restored: 0, error: `渠道备份解析失败（已保留备份文件供抢救）: ${(err as Error).message}`, backupRetained: true }
   }
@@ -319,7 +390,12 @@ export function restoreChannelsForAccount(accountId: string): RestoreChannelsRes
 
   // 合并而不是要求当前配置完全为空：登录其他账号后，官方渠道可能已先同步到本地，
   // 不能因此阻断原账号自配渠道的恢复。已有同 ID 渠道不覆盖。
-  const current = readConfig()
+  let current: ChannelsConfig
+  try {
+    current = readConfig()
+  } catch {
+    return { restored: 0, error: '本地渠道配置无法读取（已保留原文件和备份）', backupRetained: true }
+  }
   const existingIds = new Set(current.channels.map((channel) => channel.id))
   const channelsToRestore = backedUpChannels.filter((channel) => !existingIds.has(channel.id))
   if (channelsToRestore.length === 0) {
@@ -345,11 +421,13 @@ export function restoreChannelsForAccount(accountId: string): RestoreChannelsRes
  * 仅商业模式下调用。拉取服务端渠道 → 加密 API Key → 覆盖本地 channels.json。
  * 同时备份旧配置到 channels.json.server-backup。
  */
-export async function syncChannelsFromServer(serverBaseUrl: string, accessToken: string): Promise<void> {
+export async function syncChannelsFromServer(serverBaseUrl: string, accessToken: string): Promise<boolean> {
   // 记录请求发起时的账号身份。登出后旧请求即使返回成功，也不得把官方渠道写回本地。
-  const { getTeamAuth } = require('./auth-service') as typeof import('./auth-service')
+  const { getTeamAuth, getAuthSessionGeneration } = require('./auth-service') as typeof import('./auth-service')
+  const generationAtStart = getAuthSessionGeneration()
   const authAtStart = getTeamAuth()
-  if (!authAtStart || authAtStart.baseUrl !== serverBaseUrl || authAtStart.teamAccountId === undefined) {
+  if (generationAtStart === null || !authAtStart || authAtStart.baseUrl !== serverBaseUrl || authAtStart.teamAccountId === undefined
+    || authAtStart.token !== accessToken) {
     throw new Error('渠道同步已跳过：当前团队会话已失效')
   }
   const accountIdAtStart = authAtStart.teamAccountId
@@ -381,11 +459,13 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
     }>
   }
 
-  if (!data.commercialMode || !data.channels) return
+  if (!data.commercialMode || !data.channels) return false
 
   // 请求期间可能发生登出或切换账号；再次校验账号后再落盘，避免旧响应污染新会话。
   const authBeforeWrite = getTeamAuth()
-  if (!authBeforeWrite || authBeforeWrite.baseUrl !== serverBaseUrl || authBeforeWrite.teamAccountId !== accountIdAtStart) {
+  if (!authBeforeWrite || authBeforeWrite.baseUrl !== serverBaseUrl || authBeforeWrite.teamAccountId !== accountIdAtStart
+    || authBeforeWrite.token !== authAtStart.token
+    || generationAtStart !== getAuthSessionGeneration()) {
     throw new Error('渠道同步已跳过：请求完成时团队会话已变化')
   }
 
@@ -393,9 +473,10 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
   // 空结果通常是服务端异常导致，不应将客户端全部渠道清空。
   if (data.channels.length === 0) {
     console.warn('[渠道管理] 服务端返回空渠道列表，跳过同步以保留现有渠道')
-    return
+    return false
   }
 
+  const existingConfig = readConfig()
   // 备份旧配置
   const configPath = getChannelsPath()
   if (existsSync(configPath)) {
@@ -406,7 +487,6 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
   }
 
   // 将服务端渠道写入本地，保留用户自建的本地渠道
-  const existingConfig = readConfig()
   const serverIds = new Set(data.channels.map((ch) => ch.id))
 
   // 清理已不在服务端列表中的 serverManaged 渠道（服务端已删除的渠道）
@@ -476,6 +556,10 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
       console.warn('[渠道管理] 自动配置 Agent 供应商失败:', err)
     }
   }
+  // 所有同步入口（启动、续期、LIST、恢复）共用完成通知；不广播凭据或配置正文。
+  const { agentCatalogInvalidationPublisher } = require('./agent-service') as typeof import('./agent-service')
+  agentCatalogInvalidationPublisher.invalidate('channels')
+  return true
 }
 
 /** 当前是否处于商业模式（渠道由服务端统一管理） */
@@ -529,6 +613,9 @@ export function getChannelById(id: string): Channel | undefined {
  */
 export function createChannel(input: ChannelCreateInput): Channel {
   if (isCommercialMode() && !canSelfConfig()) throw new Error('商业模式下不允许手动创建渠道，渠道由服务端统一管理')
+  if (input.provider === 'xai' && input.credentialMode === 'oauth' && !parseXaiCredentials(input.apiKey)) {
+    throw new Error('xAI OAuth 渠道必须先完成订阅登录')
+  }
   const config = readConfig()
   const now = Date.now()
 
@@ -564,23 +651,32 @@ export function createChannel(input: ChannelCreateInput): Channel {
  * @returns 更新后的渠道
  */
 export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
+  const config = readConfig()
+  const index = config.channels.findIndex((c) => c.id === id)
+  if (index === -1) throw new Error(`渠道不存在: ${id}`)
+  const existing = config.channels[index]!
+
   // 官方同步渠道（newapi-*）：允许切换 channel enabled + 模型 enabled，不允许改名称/供应商/API Key/增删模型
-  if (isOfficialManagedChannel({ id })) {
+  if (isOfficialManagedChannel(existing)) {
     if (input.name !== undefined || input.provider !== undefined ||
         input.baseUrl !== undefined || input.agentBaseUrl !== undefined ||
         input.agentRuntimes !== undefined ||
+        input.credentialMode !== undefined || input.agentExperimentalEnabled !== undefined ||
         input.apiKey !== undefined) {
       throw new Error('官方渠道由平台统一管理，不可修改')
     }
     if (input.models !== undefined) {
-      const config = readConfig()
-      const existing = config.channels.find((c) => c.id === id)
-      if (existing) {
-        const oldIds = new Set(existing.models.map(m => m.id))
-        const newIds = new Set(input.models.map(m => m.id))
-        if (oldIds.size !== newIds.size || ![...oldIds].every(oid => newIds.has(oid))) {
-          throw new Error('官方渠道不可增删模型，仅可控制启用/停用')
+      if (existing.models.length !== input.models.length || input.models.some((model) => {
+        const old = existing.models.find((candidate) => candidate.id === model.id)
+        if (!old) return true
+        const keys = new Set([...Object.keys(old), ...Object.keys(model)])
+        for (const key of keys) {
+          if (key !== 'enabled' && key !== 'context1m'
+            && Reflect.get(old, key) !== Reflect.get(model, key)) return true
         }
+        return false
+      })) {
+        throw new Error('官方渠道不可修改模型目录，仅可控制启用/停用和 1M 偏好')
       }
     }
   }
@@ -595,24 +691,19 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
       input.credentialMode !== undefined ||
       input.agentExperimentalEnabled !== undefined ||
       input.apiKey !== undefined ||
-      input.models !== undefined
+      (input.models !== undefined && !isOfficialManagedChannel(existing))
     if (hasStructuralChange) {
       throw new Error('商业模式下不允许修改渠道，渠道由服务端统一管理')
     }
   }
-  const config = readConfig()
-  const index = config.channels.findIndex((c) => c.id === id)
-
-  if (index === -1) {
-    throw new Error(`渠道不存在: ${id}`)
-  }
-
-  const existing = config.channels[index]!
   const targetProvider = input.provider ?? existing.provider
-  if (targetProvider === 'xai') {
-    const existingSecret = existing.provider === 'xai' ? decryptKey(existing.apiKey) : ''
+  // 普通字段更新不依赖解密成功；损坏凭据也允许用户替换，而不是二次加密旧密文。
+  if (targetProvider === 'xai' && (input.apiKey
+    || (input.credentialMode !== undefined && input.credentialMode !== existing.credentialMode)
+    || targetProvider !== existing.provider)) {
+    const existingSecret = !input.apiKey && existing.provider === 'xai' ? decryptKey(existing.apiKey) : ''
     const targetMode = input.credentialMode ?? existing.credentialMode
-    if (targetMode === 'oauth' && !parseXaiCredentials(input.apiKey ?? existingSecret)) {
+    if (targetMode === 'oauth' && !parseXaiCredentials(input.apiKey || existingSecret)) {
       throw new Error('xAI OAuth 渠道必须先完成订阅登录')
     }
     if (targetMode === 'api-key'
@@ -641,7 +732,7 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
     name: input.name ?? existing.name,
     provider: nextProvider,
     baseUrl: nextBaseUrl,
-    ...(input.provider === 'xai'
+    ...(nextProvider === 'xai'
       ? { credentialMode: input.credentialMode ?? existing.credentialMode, agentExperimentalEnabled: input.agentExperimentalEnabled ?? existing.agentExperimentalEnabled }
       : { credentialMode: undefined, agentExperimentalEnabled: undefined }),
     agentBaseUrl: nextAgentBaseUrl,
@@ -665,7 +756,6 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
  * 删除渠道
  */
 export function deleteChannel(id: string): void {
-  if (isOfficialManagedChannel({ id })) throw new Error('官方同步渠道不可删除，请在 New API 后台管理')
   if (isCommercialMode() && !canSelfConfig()) throw new Error('商业模式下不允许删除渠道，渠道由服务端统一管理')
   const config = readConfig()
   const index = config.channels.findIndex((c) => c.id === id)
@@ -674,6 +764,7 @@ export function deleteChannel(id: string): void {
     throw new Error(`渠道不存在: ${id}`)
   }
 
+  if (isOfficialManagedChannel(config.channels[index]!)) throw new Error('官方同步渠道不可删除，请在 New API 后台管理')
   const removed = config.channels.splice(index, 1)[0]!
   writeConfig(config)
 
@@ -694,6 +785,44 @@ export function decryptApiKey(channelId: string): string {
   }
 
   return decryptKey(channel.apiKey)
+}
+
+let inflightCodexLogin: Promise<Channel> | undefined
+
+/** 授权前不落盘；失败/取消无孤儿渠道，同一时刻拒绝重复登录或创建。 */
+export async function loginCodexChannel(input: import('@profer/shared').CodexOAuthLoginInput): Promise<Channel> {
+  if (inflightCodexLogin) throw new Error('Codex 登录正在进行，请先完成或取消')
+  if (isCommercialMode() && !canSelfConfig()) throw new Error('商业模式下不允许自配 Codex 渠道')
+  if (typeof input === 'string') {
+    const channel = getChannelById(input)
+    if (!channel || channel.provider !== 'openai-codex' || isOfficialManagedChannel(channel)) {
+      throw new Error('Codex 渠道不存在或不可重新授权')
+    }
+  } else if (!input || !input.name.trim() || !input.models.some((model) => model.enabled)) {
+    throw new Error('请填写渠道名称并至少启用一个 Codex 模型')
+  }
+  const operation = (async () => {
+    const credentials = await loginCodexOAuth()
+    if (typeof input === 'string') {
+      const current = getChannelById(input)
+      if (!current || current.provider !== 'openai-codex' || isOfficialManagedChannel(current)) {
+        throw new Error('Codex 渠道已删除或类型改变，请重新选择渠道')
+      }
+    }
+    if (typeof input !== 'string') {
+      return createChannel({ ...input, provider: 'openai-codex', apiKey: serializeCodexCredentials(credentials) })
+    }
+    updateChannel(input, { apiKey: serializeCodexCredentials(credentials) })
+    const updated = getChannelById(input)
+    if (!updated) throw new Error('Codex 登录完成，但渠道读取失败')
+    return updated
+  })()
+  inflightCodexLogin = operation
+  try {
+    return await operation
+  } finally {
+    if (inflightCodexLogin === operation) inflightCodexLogin = undefined
+  }
 }
 
 /**
@@ -764,6 +893,45 @@ export async function resolveCodexOAuthCredentials(channelId: string): Promise<C
 /** 返回当前有效的 Codex access token，兼容只需要 bearer token 的调用方。 */
 export async function resolveCodexAccessToken(channelId: string): Promise<string> {
   return (await resolveCodexOAuthCredentials(channelId)).access
+}
+
+let inflightXaiLogin: Promise<Channel> | undefined
+
+/** xAI 授权事务：授权前不落盘，重试不留下孤儿渠道，已有渠道原位更新。 */
+export async function loginXaiChannel(input: import('@profer/shared').XaiOAuthLoginInput): Promise<Channel> {
+  if (inflightXaiLogin) throw new Error('xAI 登录正在进行，请先完成或取消')
+  if (isCommercialMode() && !canSelfConfig()) throw new Error('商业模式下不允许自配 xAI 渠道')
+  if (typeof input === 'string') {
+    const channel = getChannelById(input)
+    if (!channel || channel.provider !== 'xai' || isOfficialManagedChannel(channel)) {
+      throw new Error('xAI 渠道不存在或不可重新授权')
+    }
+  } else if (!input || !input.name.trim() || !input.models.some((model) => model.enabled)) {
+    throw new Error('请填写渠道名称并至少启用一个 xAI 模型')
+  }
+  const operation = (async () => {
+    const { loginXaiOAuth } = await import('./xai-oauth-service')
+    const credentials = await loginXaiOAuth()
+    if (typeof input !== 'string') {
+      const channel = createChannel({ ...input, provider: 'xai', credentialMode: 'oauth', apiKey: serializeXaiCredentials(credentials) })
+      rememberXaiOAuthCredentials(channel.id, credentials, true)
+      return channel
+    }
+    const current = getChannelById(input)
+    if (!current || current.provider !== 'xai' || isOfficialManagedChannel(current)) {
+      throw new Error('xAI 渠道已删除或类型改变，请重新选择渠道')
+    }
+    persistXaiOAuthCredentials(input, credentials)
+    const updated = getChannelById(input)
+    if (!updated) throw new Error('xAI 登录完成，但渠道读取失败')
+    return updated
+  })()
+  inflightXaiLogin = operation
+  try {
+    return await operation
+  } finally {
+    if (inflightXaiLogin === operation) inflightXaiLogin = undefined
+  }
 }
 
 /** 保存 Pi 或 Profer 刷新后的完整 xAI OAuth 凭据。 */
@@ -844,26 +1012,12 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
   const proxyUrl = await getEffectiveProxyUrl()
 
   try {
-    switch (channel.provider) {
+    // ollama 无独立测试实现，沿用 Anthropic 兼容测试（与原 switch 一致）。
+    const adapterKind = channel.provider === 'ollama' ? 'anthropic' : resolveChatAdapterKind(channel.provider)
+    switch (adapterKind) {
       case 'anthropic':
-      case 'anthropic-compatible':
-      case 'kimi-api':
-      case 'kimi-coding':
-      case 'zhipu-coding':
-      case 'minimax':
-      case 'xiaomi':
-      case 'xiaomi-token-plan':
-      case 'ollama':
         return await testAnthropicCompatible(channel.baseUrl, apiKey, proxyUrl, channel.provider)
       case 'openai':
-      case 'openai-responses':
-      case 'xai':
-      case 'opencode-go-openai':
-      case 'deepseek':
-      case 'zhipu':
-      case 'doubao':
-      case 'qwen':
-      case 'custom':
         return await testOpenAICompatible(channel.baseUrl, apiKey, proxyUrl)
       case 'google':
         return await testGoogle(channel.baseUrl, apiKey, proxyUrl)
@@ -879,7 +1033,7 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
 /**
  * 测试 Anthropic 兼容 API 连接（Anthropic / DeepSeek / Kimi API / Kimi Coding Plan / MiniMax）
  *
- * DeepSeek / Kimi 的 Anthropic API 端点无需 /v1 前缀。
+ * 未指定模型时只校验目录；指定模型时调用真实的 Messages 端点。
  * Kimi Coding Plan 必须发送 Profer User-Agent，否则返回 403。
  */
 async function testAnthropicCompatible(
@@ -887,39 +1041,16 @@ async function testAnthropicCompatible(
   apiKey: string,
   proxyUrl?: string,
   provider: ProviderType = 'anthropic',
+  modelId?: string,
+  signal?: AbortSignal,
 ): Promise<ChannelTestResult> {
-  const url = normalizeAnthropicProviderUrl(baseUrl, provider)
-  const fetchFn = getFetchFn(proxyUrl)
-
-  let testModel: string
-  switch (provider) {
-    case 'deepseek':
-      testModel = 'deepseek-v4-pro'
-      break
-    case 'kimi-api':
-      testModel = 'k3'
-      break
-    case 'kimi-coding':
-      testModel = 'kimi-for-coding'
-      break
-    case 'zhipu-coding':
-      testModel = 'glm-5.2'
-      break
-    case 'minimax':
-      testModel = 'MiniMax-M3'
-      break
-    case 'xiaomi':
-    case 'xiaomi-token-plan':
-      testModel = 'mimo-v2.5-pro'
-      break
-    case 'ollama':
-      // testChannelDirect 没有选中模型参数，因此只验证服务和模型目录可达性。
-      // 实际模型存在性由 /api/tags 拉取结果与用户选择共同保证。
-      testModel = ''
-      break
-    default:
-      testModel = 'claude-sonnet-4-6'
+  if (!modelId?.trim()) {
+    const result = provider === 'ollama'
+      ? await fetchOllamaModels(baseUrl, apiKey, proxyUrl, signal)
+      : await fetchAnthropicCompatibleModels(baseUrl, apiKey, proxyUrl, provider, signal)
+    return { success: result.success, message: result.success ? '模型目录可达（未验证模型生成）' : result.message }
   }
+  const fetchFn = getFetchFn(proxyUrl)
 
   const headers: Record<string, string> = {
     'anthropic-version': '2023-06-01',
@@ -927,8 +1058,9 @@ async function testAnthropicCompatible(
   }
   if (provider === 'ollama') {
     headers.Authorization = `Bearer ${apiKey || 'ollama'}`
-  } else if (provider === 'kimi-coding' || provider === 'zhipu-coding') {
-    headers.Authorization = `Bearer ${apiKey}`
+  } else if (provider === 'kimi-coding' || provider === 'zhipu-coding' || provider === 'zhipu-coding-team') {
+    const token = provider === 'zhipu-coding-team' ? extractZhipuCodingTeamApiToken(apiKey) : apiKey
+    headers.Authorization = `Bearer ${token}`
     headers['User-Agent'] = getProferUserAgent(pkg.version)
   } else if (provider === 'xiaomi-token-plan') {
     headers.Authorization = `Bearer ${apiKey}`
@@ -940,30 +1072,21 @@ async function testAnthropicCompatible(
     headers.Authorization = `Bearer ${apiKey}`
   }
 
-  if (provider === 'ollama') {
-    const rootUrl = normalizeBaseUrl(baseUrl).replace(/\/v1$/, '')
-    const tagsResponse = await fetchFn(`${rootUrl}/api/tags`, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${apiKey || 'ollama'}` },
-    })
-    if (tagsResponse.ok) return { success: true, message: 'Ollama 服务连接成功，已可读取本机模型' }
-    const tagsText = await tagsResponse.text().catch(() => '')
-    return { success: false, message: `Ollama 服务不可用 (${tagsResponse.status})${tagsText ? `: ${tagsText.slice(0, 200)}` : ''}` }
-  }
-
-  const endpoint = `${url}/messages`
-  const response = await fetchFn(endpoint, {
+  const endpoint = resolveAnthropicMessagesUrl(baseUrl, provider)
+  const response = await fetchFn(endpoint, withTimeout({
+    signal,
     method: 'POST',
     headers,
     body: JSON.stringify({
-      model: testModel,
+      model: modelId,
       max_tokens: 1,
       messages: [{ role: 'user', content: 'hi' }],
     }),
-  })
+  }))
 
   if (response.ok) {
-    return { success: true, message: '连接成功' }
+    assertGenerationResponse(await response.json(), 'anthropic')
+    return { success: true, message: `模型 ${modelId} 生成测试成功` }
   }
 
   const text = await response.text().catch(() => '')
@@ -983,19 +1106,30 @@ async function testAnthropicCompatible(
 /**
  * 测试 OpenAI 兼容 API 连接（OpenAI / Custom）
  */
-async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<ChannelTestResult> {
-  const url = normalizeOpenAIBaseUrlForSdk(baseUrl)
+async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: string, modelId?: string, provider: ProviderType = 'openai', signal?: AbortSignal): Promise<ChannelTestResult> {
+  if (!modelId?.trim()) {
+    const result = await fetchOpenAICompatibleModels(baseUrl, apiKey, proxyUrl, signal)
+    return { success: result.success, message: result.success ? '模型目录可达（未验证模型生成）' : result.message }
+  }
+  const responsesApi = provider === 'openai-responses' || provider === 'xai'
+  const url = responsesApi ? resolveOpenAIResponsesUrl(baseUrl) : resolveOpenAIChatCompletionsUrl(baseUrl, provider)
   const fetchFn = getFetchFn(proxyUrl)
 
-  const response = await fetchFn(`${url}/models`, {
-    method: 'GET',
+  const response = await fetchFn(url, withTimeout({
+    signal,
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
     },
-  })
+    body: JSON.stringify(responsesApi
+      ? { model: modelId, input: 'hi', max_output_tokens: 16 }
+      : { model: modelId, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 }),
+  }))
 
   if (response.ok) {
-    return { success: true, message: '连接成功' }
+    assertGenerationResponse(await response.json(), responsesApi ? 'responses' : 'openai')
+    return { success: true, message: `模型 ${modelId} 生成测试成功` }
   }
 
   if (response.status === 401) {
@@ -1009,16 +1143,25 @@ async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: 
 /**
  * 测试 Google Generative AI API 连接
  */
-async function testGoogle(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<ChannelTestResult> {
-  const url = normalizeBaseUrl(baseUrl)
+async function testGoogle(baseUrl: string, apiKey: string, proxyUrl?: string, modelId?: string, signal?: AbortSignal): Promise<ChannelTestResult> {
+  if (!modelId?.trim()) {
+    const result = await fetchGoogleModels(baseUrl, apiKey, proxyUrl, signal)
+    return { success: result.success, message: result.success ? '模型目录可达（未验证模型生成）' : result.message }
+  }
+  const url = new URL(resolveGoogleModelsUrl(baseUrl, apiKey))
+  url.pathname += `/${encodeURIComponent(modelId.replace(/^models\//, ''))}:generateContent`
   const fetchFn = getFetchFn(proxyUrl)
 
-  const response = await fetchFn(`${url}/v1beta/models?key=${apiKey}`, {
-    method: 'GET',
-  })
+  const response = await fetchFn(url.toString(), withTimeout({
+    signal,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: 'hi' }] }], generationConfig: { maxOutputTokens: 1 } }),
+  }))
 
   if (response.ok) {
-    return { success: true, message: '连接成功' }
+    assertGenerationResponse(await response.json(), 'google')
+    return { success: true, message: `模型 ${modelId} 生成测试成功` }
   }
 
   if (response.status === 400 || response.status === 403) {
@@ -1498,8 +1641,12 @@ export async function getChannelPlanQuota(channelId: string): Promise<import('@p
   }
 
   let apiKey: string
+  let channelUpdatedAt = channel.updatedAt
   try {
-    apiKey = decryptKey(channel.apiKey)
+    apiKey = provider === 'openai-codex'
+      ? (await resolveCodexOAuthCredentials(channelId)).access
+      : decryptKey(channel.apiKey)
+    if (provider === 'openai-codex') channelUpdatedAt = getChannelById(channelId)?.updatedAt ?? channelUpdatedAt
   } catch {
     return createUnsupportedPlanQuota(provider, '无法读取渠道 API Key')
   }
@@ -1507,7 +1654,7 @@ export async function getChannelPlanQuota(channelId: string): Promise<import('@p
   // 统一注入渠道 updatedAt，renderer 侧据此区分「渠道是否为当前版本」并命中缓存。
   const withChannelVersion = (
     result: import('@profer/shared').ChannelPlanQuotaResult,
-  ): import('@profer/shared').ChannelPlanQuotaResult => ({ ...result, channelUpdatedAt: channel.updatedAt })
+  ): import('@profer/shared').ChannelPlanQuotaResult => ({ ...result, channelUpdatedAt })
 
   try {
     const proxyUrl = await getEffectiveProxyUrl()
@@ -1553,39 +1700,61 @@ export async function getChannelPlanQuota(channelId: string): Promise<import('@p
  * 使用传入的明文凭证直接向提供商发送测试请求。
  * 适用于创建/编辑渠道时用户在保存前先验证连接。
  */
-export async function testChannelDirect(input: FetchModelsInput): Promise<ChannelTestResult> {
-  const proxyUrl = await getEffectiveProxyUrl()
-
+export async function testChannelDirect(input: FetchModelsInput, signal?: AbortSignal): Promise<ChannelTestResult> {
   try {
-    switch (input.provider) {
+    signal?.throwIfAborted()
+    // Agent 测试不能把直接 fetch 成功误报为 SDK 路由可用。
+    // 测试地址必须与运行时实际消费的派生地址一致（resolveRuntimeBaseUrl 的分派）：
+    // Claude 用 inferAgentBaseUrl；Pi 对 Anthropic 协议渠道也吃 agentBaseUrl，
+    // 不能只用 input.baseUrl——否则「测试通过 ≠ Agent 可用」。
+    if (input.runtime) {
+      const runtimeUrl = input.runtime === 'claude'
+        ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+        : resolveProviderNativeProtocol(input.provider, input.baseUrl) === 'anthropic-messages'
+          ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+          : input.baseUrl
+      try {
+        if (runtimeUrl) assertSdkBaseUrlSupportsRouting(runtimeUrl)
+      } catch (error) {
+        return { success: false, message: error instanceof Error ? error.message : 'Agent SDK 端点无效' }
+      }
+    }
+    const proxyUrl = await getEffectiveProxyUrl()
+    signal?.throwIfAborted()
+    if (input.modelId !== undefined && !input.modelId.trim()) {
+      return { success: false, message: '测试模型 ID 不能为空' }
+    }
+    if (input.runtime === 'claude') {
+      if (input.provider === 'xai' || input.provider === 'openai-codex') {
+        return { success: false, message: '此供应商不支持 Claude 内核测试' }
+      }
+      const agentUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+      if (!agentUrl) return { success: false, message: '未配置 Claude 端点' }
+      const provider = claudeProtocolProvider(input.provider)
+      const result = await testAnthropicCompatible(agentUrl, input.apiKey, proxyUrl, provider, input.modelId, signal)
+      return { ...result, message: `Claude 端点：${result.message}` }
+    }
+    if (input.provider === 'deepseek' && isAnthropicShapedEndpoint(input.baseUrl)) {
+      return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider, input.modelId, signal)
+    }
+    // 远程 Ollama 的 Pi runtime 使用 OpenAI Chat Completions；本机 Ollama 保留
+    // 现有 Anthropic 兼容测试路径，避免把本机 Agent sentinel 当成网络协议。
+    const directAdapterKind = input.provider === 'ollama' && input.runtime === 'pi' && !isLocalOllamaBaseUrl(input.baseUrl)
+      ? 'openai'
+      : input.provider === 'ollama' ? 'anthropic' : resolveChatAdapterKind(input.provider)
+    switch (directAdapterKind) {
       case 'anthropic':
-      case 'anthropic-compatible':
-      case 'kimi-api':
-      case 'kimi-coding':
-      case 'zhipu-coding':
-      case 'minimax':
-      case 'xiaomi':
-      case 'xiaomi-token-plan':
-      case 'ollama':
-        return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider)
+        return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider, input.modelId, signal)
       case 'openai':
-      case 'openai-responses':
-      case 'xai':
-      case 'opencode-go-openai':
-      case 'deepseek':
-      case 'zhipu':
-      case 'doubao':
-      case 'qwen':
-      case 'custom':
-        return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl)
+        return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl, input.modelId, input.provider, signal)
       case 'google':
-        return await testGoogle(input.baseUrl, input.apiKey, proxyUrl)
+        return await testGoogle(input.baseUrl, input.apiKey, proxyUrl, input.modelId, signal)
       default:
         return { success: false, message: `不支持的提供商: ${input.provider}` }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误'
-    return { success: false, message: `连接测试失败: ${message}` }
+    if (signal?.aborted) return { success: false, cancelled: true, message: '请求已取消' }
+    return { success: false, message: error instanceof Error && error.name === 'TimeoutError' ? '连接测试超时（15 秒），请重试' : '连接测试失败，请检查端点、凭据或供应商响应' }
   }
 }
 
@@ -1597,88 +1766,117 @@ export async function testChannelDirect(input: FetchModelsInput): Promise<Channe
  * 直接使用传入的凭证（无需已保存渠道），支持创建渠道时预先拉取模型。
  * 针对不同供应商使用不同的 API 端点和响应解析。
  */
-export async function fetchModels(input: FetchModelsInput): Promise<FetchModelsResult> {
-  const proxyUrl = await getEffectiveProxyUrl()
+/** Claude 协议请求时，兼容网关统一按 Anthropic 协议处理；目录拉取与连接测试共用。 */
+function claudeProtocolProvider(provider: ProviderType): ProviderType {
+  return ['custom', 'openai', 'openai-responses', 'google', 'zhipu', 'doubao', 'qwen', 'opencode-go-openai'].includes(provider)
+    ? 'anthropic' : provider
+}
 
+export async function fetchModels(input: FetchModelsInput, signal?: AbortSignal): Promise<FetchModelsResult> {
   try {
-    switch (input.provider) {
+    signal?.throwIfAborted()
+    const proxyUrl = await getEffectiveProxyUrl()
+    signal?.throwIfAborted()
+    // Claude-only 渠道的目录必须来自 Claude 端点，与运行时、连接测试使用同一地址推导。
+    if (input.runtime === 'claude') {
+      if (input.provider === 'xai' || input.provider === 'openai-codex') {
+        return { success: false, message: '此供应商不支持 Claude 内核', models: [] }
+      }
+      const claudeUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+      if (!claudeUrl) return { success: false, message: '未配置 Claude 端点', models: [] }
+      return await fetchAnthropicCompatibleModels(claudeUrl, input.apiKey, proxyUrl, claudeProtocolProvider(input.provider), signal)
+    }
+    switch (resolveChatAdapterKind(input.provider)) {
       case 'anthropic':
-      case 'anthropic-compatible':
-      case 'kimi-api':
-      case 'kimi-coding':
-      case 'zhipu-coding':
-      case 'minimax':
-      case 'xiaomi':
-      case 'xiaomi-token-plan':
-        return await fetchAnthropicCompatibleModels(input.baseUrl, input.apiKey, proxyUrl, input.provider)
+        return await fetchAnthropicCompatibleModels(input.baseUrl, input.apiKey, proxyUrl, input.provider, signal)
       case 'ollama':
-        return await fetchOllamaModels(input.baseUrl, input.apiKey, proxyUrl)
+        return await fetchOllamaModels(input.baseUrl, input.apiKey, proxyUrl, signal)
       case 'openai':
-      case 'openai-responses':
-      case 'xai':
-      case 'opencode-go-openai':
-      case 'deepseek':
-      case 'zhipu':
-      case 'doubao':
-      case 'qwen':
-      case 'custom':
-        return await fetchOpenAICompatibleModels(input.baseUrl, input.apiKey, proxyUrl)
+        return await fetchOpenAICompatibleModels(input.baseUrl, input.apiKey, proxyUrl, signal)
       case 'google':
-        return await fetchGoogleModels(input.baseUrl, input.apiKey, proxyUrl)
-      default:
+        return await fetchGoogleModels(input.baseUrl, input.apiKey, proxyUrl, signal)
+      case 'unsupported':
         return { success: false, message: `不支持的供应商: ${input.provider}`, models: [] }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误'
-    console.error('[渠道管理] 拉取模型列表失败:', error)
-    return { success: false, message: `拉取模型失败: ${message}`, models: [] }
+    if (signal?.aborted) return { success: false, cancelled: true, message: '请求已取消', models: [] }
+    return { success: false, message: error instanceof Error && error.name === 'TimeoutError' ? '拉取模型超时（15 秒），请重试' : '拉取模型失败，请检查端点、凭据或供应商响应', models: [] }
   }
 }
 
-/**
- * Anthropic API 模型响应项
- */
-interface AnthropicModelItem {
-  id: string
-  display_name?: string
-  type?: string
+/** 响应必须是成功对象，不能把 HTTP 200 错误包当权威空目录。 */
+function assertApiObject(value: unknown): asserts value is Record<string, unknown> {
+  if (!isRecord(value) || value.error !== undefined || value.type === 'error' || value.success === false
+    || (value.code !== undefined && value.code !== 0 && value.code !== 200 && value.code !== '0' && value.code !== '200')) {
+    throw new Error('供应商响应结构无效或返回错误')
+  }
 }
 
-/**
- * 从 Anthropic 兼容 API 拉取模型列表（Anthropic / DeepSeek / Kimi API / Kimi Coding Plan / MiniMax）
- *
- * DeepSeek / Kimi 的 Anthropic API 端点无需 /v1 前缀。
- * Kimi Coding Plan 必须发送 Profer User-Agent。
- * 文档: https://docs.anthropic.com/en/api/models-list
- */
-interface OllamaTagItem {
-  name: string
-  size?: number
-  modified_at?: string
+function assertGenerationResponse(value: unknown, protocol: 'anthropic' | 'openai' | 'responses' | 'google'): void {
+  assertApiObject(value)
+  const field = protocol === 'anthropic' ? 'content' : protocol === 'openai' ? 'choices' : protocol === 'responses' ? 'output' : 'candidates'
+  const output = value[field]
+  if (!Array.isArray(output) || output.length === 0 || output.some((item) => !isRecord(item))) throw new Error('模型生成响应结构无效')
+}
+
+function modelString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !value.trim() || value !== value.trim()) throw new Error(`模型目录 ${field} 无效`)
+  return value
+}
+
+function modelPage(value: unknown, field: 'data' | 'models'): { data: Record<string, unknown>; items: Record<string, unknown>[] } {
+  assertApiObject(value)
+  if ((value.object !== undefined && value.object !== 'list') || !Array.isArray(value[field])) throw new Error('模型目录响应结构无效')
+  const items: Record<string, unknown>[] = []
+  for (const item of value[field]) {
+    if (!isRecord(item)) throw new Error('模型目录包含无效条目')
+    items.push(item)
+  }
+  return { data: value, items }
+}
+
+function fetchedModel(id: string, name: string = id): ChannelModel {
+  return { id, name, enabled: true, source: 'fetched' }
+}
+
+function modelsResult(models: ChannelModel[], sort = false): FetchModelsResult {
+  const byId = new Map<string, ChannelModel>()
+  for (const model of models) if (!byId.has(model.id)) byId.set(model.id, model)
+  const unique = [...byId.values()]
+  if (sort) unique.sort((a, b) => a.id.localeCompare(b.id))
+  return { success: true, message: `成功获取 ${unique.length} 个模型`, models: unique }
+}
+
+/** Google / Ollama 原生端点只操作 pathname，保留既有 query 路由。 */
+function resolveGoogleModelsUrl(baseUrl: string, apiKey: string): string {
+  const url = new URL(baseUrl.trim())
+  const path = url.pathname.replace(/\/+$/, '')
+  url.pathname = path.endsWith('/models') ? path : `${path.replace(/\/v1beta$/, '')}/v1beta/models`
+  url.searchParams.set('key', apiKey)
+  return url.toString()
+}
+
+function resolveOllamaTagsUrl(baseUrl: string): string {
+  const url = new URL(baseUrl.trim())
+  url.pathname = `${url.pathname.replace(/\/+$/, '').replace(/\/v1$/, '').replace(/\/api\/tags$/, '')}/api/tags`
+  return url.toString()
 }
 
 /** 从 Ollama 原生 API 读取本机已安装模型；此操作不会触发下载。 */
-async function fetchOllamaModels(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<FetchModelsResult> {
-  const rootUrl = normalizeBaseUrl(baseUrl).replace(/\/v1$/, '')
+async function fetchOllamaModels(baseUrl: string, apiKey: string, proxyUrl?: string, signal?: AbortSignal): Promise<FetchModelsResult> {
   const fetchFn = getFetchFn(proxyUrl)
-  const response = await fetchFn(`${rootUrl}/api/tags`, {
+  const response = await fetchFn(resolveOllamaTagsUrl(baseUrl), withTimeout({
+    signal,
     method: 'GET',
     headers: { Authorization: `Bearer ${apiKey || 'ollama'}` },
-  })
+  }))
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     const hint = response.status === 404 ? '；请确认 Ollama 服务已启动' : ''
     return { success: false, message: `Ollama 请求失败 (${response.status})${hint}${text ? `: ${text.slice(0, 200)}` : ''}`, models: [] }
   }
-  const data = await response.json() as { models?: OllamaTagItem[] }
-  const models = (data.models ?? []).filter((item) => typeof item.name === 'string' && item.name.trim()).map((item) => ({
-    id: item.name,
-    name: item.name,
-    enabled: true,
-    source: 'fetched' as const,
-  }))
-  models.sort((a, b) => a.id.localeCompare(b.id))
-  return { success: true, message: `成功读取 ${models.length} 个 Ollama 模型`, models }
+  const { items } = modelPage(await response.json(), 'models')
+  return modelsResult(items.map((item) => fetchedModel(modelString(item.name, 'name'))), true)
 }
 
 async function fetchAnthropicCompatibleModels(
@@ -1686,15 +1884,17 @@ async function fetchAnthropicCompatibleModels(
   apiKey: string,
   proxyUrl?: string,
   provider: ProviderType = 'anthropic',
+  signal?: AbortSignal,
 ): Promise<FetchModelsResult> {
-  const url = normalizeAnthropicProviderUrl(baseUrl, provider)
+  const url = new URL(resolveAnthropicModelsUrl(baseUrl, provider))
   const fetchFn = getFetchFn(proxyUrl)
 
   const headers: Record<string, string> = {
     'anthropic-version': '2023-06-01',
   }
-  if (provider === 'kimi-coding' || provider === 'zhipu-coding') {
-    headers.Authorization = `Bearer ${apiKey}`
+  if (provider === 'kimi-coding' || provider === 'zhipu-coding' || provider === 'zhipu-coding-team') {
+    const token = provider === 'zhipu-coding-team' ? extractZhipuCodingTeamApiToken(apiKey) : apiKey
+    headers.Authorization = `Bearer ${token}`
     headers['User-Agent'] = getProferUserAgent(pkg.version)
   } else if (provider === 'xiaomi-token-plan') {
     headers.Authorization = `Bearer ${apiKey}`
@@ -1706,43 +1906,30 @@ async function fetchAnthropicCompatibleModels(
     headers.Authorization = `Bearer ${apiKey}`
   }
 
-  const response = await fetchFn(`${url}/models`, {
-    method: 'GET',
-    headers,
-  })
-
-  if (response.status === 401) {
-    const text = await response.text().catch(() => '')
-    return { success: false, message: `API Key 无效${text ? `: ${text.slice(0, 150)}` : ''}`, models: [] }
+  // 整次分页共用 15s signal；失败时不返回部分目录，以免 renderer 删除未取完的模型。
+  const init = withTimeout({ method: 'GET', headers, signal })
+  const models: ChannelModel[] = []
+  const cursors = new Set<string>()
+  for (let page = 0; page < 100; page += 1) {
+    const response = await fetchFn(url.toString(), init)
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      return { success: false, message: response.status === 401 ? 'API Key 无效' : `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
+    }
+    const { data, items } = modelPage(await response.json(), 'data')
+    for (const item of items) {
+      if (item.type !== undefined && item.type !== 'model') throw new Error('模型目录条目 type 无效')
+      const id = modelString(item.id, 'id')
+      models.push(fetchedModel(id, item.display_name === undefined ? id : modelString(item.display_name, 'display_name')))
+    }
+    if (data.has_more !== undefined && typeof data.has_more !== 'boolean') throw new Error('模型目录分页结构无效')
+    if (data.has_more !== true) return modelsResult(models)
+    const cursor = modelString(data.last_id, 'last_id')
+    if (items.length === 0 || cursors.has(cursor) || !items.some((item) => item.id === cursor)) throw new Error('模型目录分页未前进')
+    cursors.add(cursor)
+    url.searchParams.set('after_id', cursor)
   }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
-  }
-
-  const data = await response.json() as { data?: AnthropicModelItem[] }
-  const items = data.data ?? []
-
-  const models: ChannelModel[] = items.map((item) => ({
-    id: item.id,
-    name: item.display_name || item.id,
-    enabled: true,
-  }))
-
-  return {
-    success: true,
-    message: `成功获取 ${models.length} 个模型`,
-    models,
-  }
-}
-
-/**
- * OpenAI 兼容 API 模型响应项
- */
-interface OpenAIModelItem {
-  id: string
-  owned_by?: string
+  throw new Error('模型目录分页超出上限')
 }
 
 /**
@@ -1751,16 +1938,17 @@ interface OpenAIModelItem {
  * API: GET {baseUrl}/models
  * 通用 OpenAI 兼容格式，适用于大部分第三方供应商。
  */
-async function fetchOpenAICompatibleModels(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<FetchModelsResult> {
+async function fetchOpenAICompatibleModels(baseUrl: string, apiKey: string, proxyUrl?: string, signal?: AbortSignal): Promise<FetchModelsResult> {
   const url = resolveOpenAIModelsUrl(baseUrl)
   const fetchFn = getFetchFn(proxyUrl)
 
-  const response = await fetchFn(url, {
+  const response = await fetchFn(url, withTimeout({
+    signal,
     method: 'GET',
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
-  })
+  }))
 
   if (response.status === 401) {
     return { success: false, message: 'API Key 无效', models: [] }
@@ -1771,33 +1959,15 @@ async function fetchOpenAICompatibleModels(baseUrl: string, apiKey: string, prox
     return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
   }
 
-  const data = await response.json() as { data?: OpenAIModelItem[] }
-  const items = data.data ?? []
-
-  const models: ChannelModel[] = items.map((item) => ({
-    id: item.id,
-    name: item.id,
-    enabled: true,
-  }))
-
-  // 按模型 ID 字母排序，方便用户查找
-  models.sort((a, b) => a.id.localeCompare(b.id))
-
-  return {
-    success: true,
-    message: `成功获取 ${models.length} 个模型`,
-    models,
-  }
-}
-
-/**
- * Google Generative AI 模型响应项
- */
-interface GoogleModelItem {
-  name: string
-  displayName?: string
-  description?: string
-  supportedGenerationMethods?: string[]
+  const { data, items } = modelPage(await response.json(), 'data')
+  // 标准 OpenAI /models 无分页；未知兼容分页协议不可把首页冒充完整清单。
+  if ((data.has_more !== undefined && data.has_more !== false) || data.nextPageToken || data.next) throw new Error('此 OpenAI 模型目录分页协议不受支持')
+  return modelsResult(items.map((item) => {
+    if (item.object !== undefined && item.object !== 'model') throw new Error('模型目录条目 object 无效')
+    const id = modelString(item.id, 'id')
+    if (item.name !== undefined) modelString(item.name, 'name')
+    return fetchedModel(id)
+  }), true)
 }
 
 /**
@@ -1806,44 +1976,32 @@ interface GoogleModelItem {
  * API: GET /v1beta/models?key={apiKey}
  * 仅返回支持 generateContent 的模型（排除纯 embedding 模型）。
  */
-async function fetchGoogleModels(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<FetchModelsResult> {
-  const url = normalizeBaseUrl(baseUrl)
+async function fetchGoogleModels(baseUrl: string, apiKey: string, proxyUrl?: string, signal?: AbortSignal): Promise<FetchModelsResult> {
+  const url = new URL(resolveGoogleModelsUrl(baseUrl, apiKey))
   const fetchFn = getFetchFn(proxyUrl)
-
-  const response = await fetchFn(`${url}/v1beta/models?key=${apiKey}`, {
-    method: 'GET',
-  })
-
-  if (response.status === 400 || response.status === 403) {
-    return { success: false, message: 'API Key 无效', models: [] }
-  }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
-  }
-
-  const data = await response.json() as { models?: GoogleModelItem[] }
-  const items = data.models ?? []
-
-  // 过滤出支持 generateContent 的模型（排除纯 embedding 模型）
-  const chatModels = items.filter((item) =>
-    item.supportedGenerationMethods?.includes('generateContent')
-  )
-
-  const models: ChannelModel[] = chatModels.map((item) => {
-    // Google 模型 name 格式为 "models/gemini-pro"，提取实际 ID
-    const id = item.name.replace(/^models\//, '')
-    return {
-      id,
-      name: item.displayName || id,
-      enabled: true,
+  const init = withTimeout({ method: 'GET', signal })
+  const models: ChannelModel[] = []
+  const tokens = new Set<string>()
+  for (let page = 0; page < 100; page += 1) {
+    const response = await fetchFn(url.toString(), init)
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      return { success: false, message: response.status === 400 || response.status === 403 ? 'API Key 无效' : `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
     }
-  })
-
-  return {
-    success: true,
-    message: `成功获取 ${models.length} 个模型`,
-    models,
+    const { data, items } = modelPage(await response.json(), 'models')
+    for (const item of items) {
+      const name = modelString(item.name, 'name')
+      if (!name.startsWith('models/') || !name.slice(7).trim()) throw new Error('Google 模型 name 无效')
+      const id = name.slice(7)
+      const displayName = item.displayName === undefined ? id : modelString(item.displayName, 'displayName')
+      if (!Array.isArray(item.supportedGenerationMethods) || item.supportedGenerationMethods.some((method) => typeof method !== 'string')) throw new Error('Google 模型生成能力结构无效')
+      if (item.supportedGenerationMethods.includes('generateContent')) models.push(fetchedModel(id, displayName))
+    }
+    if (data.nextPageToken === undefined || data.nextPageToken === '') return modelsResult(models)
+    const token = modelString(data.nextPageToken, 'nextPageToken')
+    if (tokens.has(token)) throw new Error('模型目录分页未前进')
+    tokens.add(token)
+    url.searchParams.set('pageToken', token)
   }
+  throw new Error('模型目录分页超出上限')
 }

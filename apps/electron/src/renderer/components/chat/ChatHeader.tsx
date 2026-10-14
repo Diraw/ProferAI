@@ -11,8 +11,8 @@ import { conversationsAtom } from '@/atoms/chat-atoms'
 import { useConversationParallelMode } from '@/hooks/useConversationSettings'
 import type { ConversationMeta } from '@profer/shared'
 import { SystemPromptSelector } from './SystemPromptSelector'
-import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Button } from '@profer/ui/primitives/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 
 interface ChatHeaderProps {

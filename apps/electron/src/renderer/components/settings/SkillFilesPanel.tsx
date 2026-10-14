@@ -22,7 +22,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import type { SkillFileNode, SkillFileContent } from '@profer/shared'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { SettingsCard } from './primitives'
 import { cn } from '@/lib/utils'
 

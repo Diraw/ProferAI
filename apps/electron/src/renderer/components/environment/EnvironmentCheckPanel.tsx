@@ -8,7 +8,7 @@
 import * as React from 'react'
 import { useAtom, useSetAtom } from 'jotai'
 import { Loader2, RefreshCw } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { EnvironmentCheckCard } from './EnvironmentCheckCard'
 import {
   installerManifestAtom,
@@ -17,7 +17,7 @@ import {
   isNodeJsOkAtom,
 } from '@/atoms/environment'
 import { useAtomValue } from 'jotai'
-import { detectIsMac, detectIsWindows } from '@/lib/platform'
+import { detectIsMac, detectIsWindows } from '@profer/ui'
 
 interface EnvironmentCheckPanelProps {
   /** 首次挂载时是否自动跑一次检测（Onboarding 用），Dialog 场景可设 false */

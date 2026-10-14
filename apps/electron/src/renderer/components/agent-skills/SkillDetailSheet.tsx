@@ -12,19 +12,21 @@ import { toast } from "sonner";
 import { Pencil, Save, X, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { SkillDetailSheetFrame } from "./SkillDetailSheetFrame";
 import { SkillDetailLayout } from "./SkillDetailLayout";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@profer/ui/primitives/button";
+import { Switch } from "@profer/ui/primitives/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@profer/ui/primitives/tabs";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@profer/ui/primitives/tooltip";
 import { SettingsCard } from "@/components/settings/primitives";
 import { SkillFilesPanel } from "@/components/settings/SkillFilesPanel";
 import { cn } from "@/lib/utils";
 import type { SkillMeta } from "@profer/shared";
 import { extractSkillBody, rebuildSkillMd } from "./skillMdUtils";
+import { skillLocationLabel } from "./skillListSections";
+import { SkillCardSection } from "./SkillCardSection";
 
 interface SkillDetailSheetProps {
   skill: SkillMeta | null;
@@ -317,8 +319,18 @@ function SkillDetailBody({
                           : "无来源"
                   }
                 />
-                <MetaRow label="位置" value={`skills/${skill.slug}`} />
+                {/* 已关闭的副本仍在列表里可选，位置必须指向它真实所在的 skills-inactive/，
+                    否则用户会以为是目录丢失。 */}
+                <MetaRow label="位置" value={skillLocationLabel(skill)} />
               </SettingsCard>
+
+              {/* 路由卡片：触发词 / 依赖 / 触发方式（名称与描述仍由上面的元数据编辑区负责） */}
+              <SkillCardSection
+                workspaceSlug={workspaceSlug}
+                skillSlug={skill.slug}
+                canEdit={!isBuiltin}
+                onChanged={onChanged}
+              />
             </div>
 
             {/* 说明 / 资源文件 */}

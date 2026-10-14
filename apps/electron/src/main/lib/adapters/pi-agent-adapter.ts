@@ -10,8 +10,9 @@ import type { Dispatcher } from 'undici'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { execFile } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { stat as statAsync, writeFile as writeFileAsync } from 'node:fs/promises'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type {
   AgentThinkingLevel,
   AgentProviderAdapter,
@@ -39,13 +40,13 @@ import {
 } from '@profer/shared'
 import type { CanUseToolOptions, PermissionResult } from '../agent-permission-service'
 import { TRANSIENT_NETWORK_PATTERN, isMalformedResponseError, isTransientUpstreamText } from '../error-patterns'
-import { normalizeDefaultSkillSlug, normalizeDefaultSkillSlugs, RENAMED_DEFAULT_SKILLS } from '../default-skill-slugs'
+import { createPromaSkillsOverride, preparePromptForPiSkillQueue, preparePromptWithPromaSkills } from './pi-skill-resources'
+export { createPromaSkillsOverride, preparePromptForPiSkillQueue, preparePromptWithPromaSkills } from './pi-skill-resources'
 
 import type {
   AgentSession,
   AgentSessionEvent,
   ResourceLoader,
-  Skill,
   ToolDefinition,
 } from '@earendil-works/pi-coding-agent'
 import type { Transport as PiAgentTransport } from '@earendil-works/pi-ai'
@@ -63,7 +64,7 @@ import { createCodexFastModeExtension, withCodexFastModeServiceTier } from './pi
 import { createCodexRequestSettingsExtension } from './pi-codex-request-settings'
 import { createDeepSeekReasoningRequestExtension } from './pi-deepseek-reasoning-request-settings'
 import { createOpenAIReasoningRequestExtension } from './pi-openai-reasoning-request-settings'
-import { inferReasoningTransport, resolveReasoningProfile, calculatePiAutoCompactionReserveTokens } from '@profer/shared'
+import { inferReasoningTransport, isLocalOllamaBaseUrl, resolveReasoningProfile, calculatePiAutoCompactionReserveTokens } from '@profer/shared'
 import { mergeRuntimeEnv, type AgentRuntimeEnv } from '../agent-runtime-env'
 import { commandExecutionErrorCode, createCommandExecutionFailure, type CommandExecutionCallbacks, type CommandExecutionErrorKind, type CommandExecutionResult, type StructuredExecRequest } from '../command-execution'
 import {
@@ -81,7 +82,7 @@ import {
 import { DEFAULT_CONTEXT_WINDOW, buildModel, normalizePiApi } from './pi-model-registry'
 import { createPartialMessageCoalescer, type PartialMessageCoalescer } from './pi-streaming-control'
 import { runPiPromptChain, type PiInterruptReservation } from './pi-prompt-chain'
-import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
+import { createPiRetryTerminalGate, getPiNativeRetryOutcome, mapPiNativeRetryEvent } from './pi-retry-control'
 import { mapPiHarnessLifecycleEvent, type PiHarnessLifecycleObserver } from './pi-harness-lifecycle'
 import { createWindowsPowerShellToolDefinition } from './pi-powershell-tool'
 import {
@@ -92,11 +93,11 @@ import {
 } from './pi-request-proxy'
 import { registerPendingPiRuntimeProcess, registerPiRuntimeProcessShell } from '../runtime-process-registry'
 import { piBackgroundTaskManager } from '../pi-background-task-manager'
+import { compactPiToolDefinitions } from '../pi-tool-definition-compaction'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 type BashOperations = import('@earendil-works/pi-coding-agent').BashOperations
 type BashToolOptions = import('@earendil-works/pi-coding-agent').BashToolOptions
-type SkillLoadResult = ReturnType<ResourceLoader['getSkills']>
 
 const PI_NATIVE_MAX_RETRIES = 8
 const PI_NATIVE_RETRY_BASE_DELAY_MS = 1_000
@@ -145,6 +146,8 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
     options: CanUseToolOptions,
   ) => Promise<PermissionResult>
   systemPrompt: string
+  /** 本轮工具装载；空数组表示纯对话，不改变预设权限。 */
+  tools?: string[]
   /** Profer 已验证的项目根 instruction files；不触发 Pi 的磁盘自动发现。 */
   projectInstructionFiles?: ProferProjectInstructionFile[]
   /** 用于 typed 文件工具的会话级子目录指令激活；不会解析 Bash。 */
@@ -162,17 +165,12 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   onModelResolved?: (model: string) => void
   onContextWindow?: (contextWindow: number) => void
   onRetry?: (update: import('./pi-retry-control').PiRetryUpdate) => void
+  onNativeRetryOutcome?: (outcome: import('./pi-retry-control').PiNativeRetryOutcome) => void
   /** Structured local command evidence, keyed by the exact Pi tool call id. */
   onToolExecutionResult?: (toolCallId: string, result: CommandExecutionResult) => void
   /** Passive lifecycle feed for Pi Host Harness; observers cannot control Session or queue prompts. */
   onHarnessLifecycle?: PiHarnessLifecycleObserver
   thinkingLevel?: AgentThinkingLevel
-  /**
-   * DeepSeek V4 思考总开关（已废弃：思考强度与开关统一由 thinkingLevel 驱动，
-   * 通过 createDeepSeekReasoningRequestExtension 注入 output_config.effort）。
-   * 保留字段仅为兼容 orchestrator 旧传参，adapter 不再消费。
-   */
-  deepSeekV4ThinkingEnabled?: boolean
   maxBudgetUsd?: number
   outputFormat?: JsonSchemaOutputFormat
   /** Proma 聚合的附加目录；Pi 内置工具 factory 不接收多 root 参数，编排层会把它们注入 systemPrompt。 */
@@ -285,15 +283,6 @@ function isNonNegativeFiniteNumber(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value >= 0
 }
 
-function isLocalOllamaBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false
-  try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase()
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
-  } catch {
-    return false
-  }
-}
 
 export function buildPiRemoteConnectionSettings(
   input: Pick<
@@ -424,7 +413,6 @@ const PROMPT_TOO_LONG_PATTERNS = [
   'exceeds the model',
   'exceed the model',
 ] as const
-const SKILL_COMMAND_PATTERN = /\/skill:([A-Za-z0-9][A-Za-z0-9._-]*)/g
 
 function createActivePiSession(): ActivePiSession {
   let resolveReady!: (session: AgentSession) => void
@@ -750,211 +738,6 @@ function findSessionFile(sessionDir: string, sdkSessionId: string): string | und
   scanDirectory(sessionDir)
   // Pi 文件按 cwd 分子目录存储；不能对 session ID 做 includes 模糊匹配，重复 ID 也不能任选。
   return sessionFileIndex.get(sdkSessionId)
-}
-
-function isPathWithinRoot(path: string, root: string): boolean {
-  if (path === root) return true
-  const rel = relative(root, path)
-  return !!rel && !rel.startsWith('..') && !isAbsolute(rel)
-}
-
-function buildAllowedSkillRoots(additionalSkillPaths: string[] | undefined): string[] {
-  return (additionalSkillPaths ?? [])
-    .map((path) => resolveGuardedRealPath(path))
-    .filter((path, index, arr) => arr.indexOf(path) === index)
-}
-
-function isPromaSkillPath(path: string | undefined, allowedRoots: string[]): boolean {
-  if (!path || allowedRoots.length === 0) return false
-  const guardedPath = resolveGuardedRealPath(path)
-  return allowedRoots.some((root) => isPathWithinRoot(guardedPath, root))
-}
-
-/**
- * 按预设 skillSlugs 白名单过滤 skill。
- * 名字匹配规则与 skillCommandAliases 一致：SKILL.md name / 目录名 / 父目录名。
- * undefined = 不裁剪；空 Set（skillSlugs: []）= 0 个 skill，全部隐藏。
- */
-function matchesSkillSlug(skill: Skill, slugs: Set<string> | undefined): boolean {
-  if (slugs === undefined) return true
-  return skillCommandAliases(skill).some((alias) => slugs.has(normalizeDefaultSkillSlug(alias)))
-}
-
-/** 若 Skill 是已改名默认 Skill 的任一版本，返回其当前规范 slug。 */
-function canonicalRenamedDefaultSkillSlug(skill: Skill): string | undefined {
-  const aliases = skillCommandAliases(skill)
-  for (const [oldSlug, newSlug] of RENAMED_DEFAULT_SKILLS) {
-    if (aliases.includes(oldSlug) || aliases.includes(newSlug)) return newSlug
-  }
-  return undefined
-}
-
-function isCanonicalDefaultSkillPath(skill: Skill, canonicalSlug: string): boolean {
-  return skill.name === canonicalSlug || basename(skill.baseDir) === canonicalSlug
-}
-
-/**
- * 新旧默认 Skill 同时存在时，优先保留当前 slug 的副本，避免同一规则被重复注入。
- * 仅影响明确登记的历史默认 slug；其它同名用户 Skill 保留既有加载行为。
- */
-function dedupeRenamedDefaultSkills(skills: Skill[]): Skill[] {
-  const result: Skill[] = []
-  const indexes = new Map<string, number>()
-  for (const skill of skills) {
-    const canonicalSlug = canonicalRenamedDefaultSkillSlug(skill)
-    if (!canonicalSlug) {
-      result.push(skill)
-      continue
-    }
-    const existingIndex = indexes.get(canonicalSlug)
-    if (existingIndex === undefined) {
-      indexes.set(canonicalSlug, result.length)
-      result.push(skill)
-      continue
-    }
-    const existing = result[existingIndex]
-    if (!existing) {
-      indexes.set(canonicalSlug, result.length)
-      result.push(skill)
-      continue
-    }
-    if (isCanonicalDefaultSkillPath(skill, canonicalSlug) && !isCanonicalDefaultSkillPath(existing, canonicalSlug)) {
-      result[existingIndex] = skill
-    }
-  }
-  return result
-}
-
-export function createPromaSkillsOverride(additionalSkillPaths: string[] | undefined, skillSlugs?: string[]): (base: SkillLoadResult) => SkillLoadResult {
-  const allowedRoots = buildAllowedSkillRoots(additionalSkillPaths)
-  // 语义：undefined = 不裁剪（全量注入）；[] = 明确 0 个 skill（全部隐藏）；非空 = 白名单。
-  // 不能用 `skillSlugs ?? []` 再转 Set，否则丢失 undefined 与空数组的区分（空数组是合法的"全禁"表达）。
-  const normalizedSkillSlugs = normalizeDefaultSkillSlugs(skillSlugs)
-  const slugSet = normalizedSkillSlugs === undefined ? undefined : new Set(normalizedSkillSlugs)
-  return (base) => ({
-    skills: dedupeRenamedDefaultSkills(base.skills.filter((skill) =>
-      (isPromaSkillPath(skill.filePath, allowedRoots) || isPromaSkillPath(skill.baseDir, allowedRoots))
-      && matchesSkillSlug(skill, slugSet))),
-    diagnostics: base.diagnostics.filter((diagnostic) => isPromaSkillPath(diagnostic.path, allowedRoots)),
-  })
-}
-
-function stripSkillFrontmatter(content: string): string {
-  const normalized = content.replace(/^\uFEFF/, '')
-  const frontmatter = normalized.match(/^---\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)\s*(?:\r?\n|$)/)
-  return frontmatter ? normalized.slice(frontmatter[0].length) : content
-}
-
-function escapeXmlAttribute(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-}
-
-function skillCommandAliases(skill: Skill): string[] {
-  const aliases = [skill.name, basename(skill.baseDir), basename(dirname(skill.filePath))]
-  return aliases.filter((alias, index, arr) => Boolean(alias) && arr.indexOf(alias) === index)
-}
-
-function extractSkillCommandNames(prompt: string): string[] {
-  const names: string[] = []
-  const seen = new Set<string>()
-  for (const match of prompt.matchAll(SKILL_COMMAND_PATTERN)) {
-    const name = match[1]?.trim()
-    if (!name || seen.has(name)) continue
-    seen.add(name)
-    names.push(name)
-  }
-  return names
-}
-
-function buildSkillLookup(skills: Skill[]): Map<string, Skill> {
-  const lookup = new Map<string, Skill>()
-  for (const skill of skills) {
-    for (const alias of skillCommandAliases(skill)) {
-      if (!lookup.has(alias)) lookup.set(alias, skill)
-      const normalizedAlias = normalizeDefaultSkillSlug(alias)
-      if (!lookup.has(normalizedAlias)) lookup.set(normalizedAlias, skill)
-    }
-  }
-  return lookup
-}
-
-function formatSkillForPrompt(skill: Skill): string | undefined {
-  try {
-    const body = stripSkillFrontmatter(readFileSync(skill.filePath, 'utf-8')).trim()
-    return `<skill name="${escapeXmlAttribute(skill.name)}" location="${escapeXmlAttribute(skill.filePath)}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`
-  } catch (error) {
-    console.warn(`[Pi SDK] Skill 展开失败: ${skill.filePath}`, error)
-    return undefined
-  }
-}
-
-async function preparePromptWithPromaSkills(
-  resourceLoader: ResourceLoader,
-  prompt: string,
-  explicitSkillNames?: string[],
-): Promise<string> {
-  await resourceLoader.reload()
-
-  const requestedNames = (explicitSkillNames?.length ? explicitSkillNames : extractSkillCommandNames(prompt))
-    .map(normalizeDefaultSkillSlug)
-  if (requestedNames.length === 0) return prompt
-
-  const skillLookup = buildSkillLookup(resourceLoader.getSkills().skills)
-  const blocks: string[] = []
-  const injectedSkillNames = new Set<string>()
-
-  for (const requestedName of requestedNames) {
-    const skill = skillLookup.get(requestedName)
-    if (!skill || injectedSkillNames.has(skill.name)) continue
-    const block = formatSkillForPrompt(skill)
-    if (!block) continue
-    injectedSkillNames.add(skill.name)
-    blocks.push(block)
-  }
-
-  if (blocks.length === 0) return prompt
-  return `${blocks.join('\n\n')}\n\n${prompt}`
-}
-
-function realpathIfExists(path: string): string | undefined {
-  try {
-    return realpathSync.native(path)
-  } catch {
-    return undefined
-  }
-}
-
-function findNearestExistingPath(path: string): string | undefined {
-  let current = path
-  while (true) {
-    try {
-      lstatSync(current)
-      return current
-    } catch {
-      const parent = dirname(current)
-      if (parent === current) return undefined
-      current = parent
-    }
-  }
-}
-
-function resolveGuardedRealPath(path: string): string {
-  const resolved = resolve(path)
-  const exact = realpathIfExists(resolved)
-  if (exact) return exact
-
-  const nearestExisting = findNearestExistingPath(resolved)
-  if (!nearestExisting) return resolved
-
-  const nearestReal = realpathIfExists(nearestExisting)
-  if (!nearestReal) return resolved
-
-  const tail = relative(nearestExisting, resolved)
-  return tail ? resolve(nearestReal, tail) : nearestReal
 }
 
 interface ToolWrapOptions {
@@ -2220,6 +2003,20 @@ function createPromaBashToolOptions(
   }
 }
 
+function createStrictWriteOperations() {
+  return {
+    async writeFile(path: string, content: string): Promise<void> {
+      await writeFileAsync(path, content, 'utf-8')
+    },
+    async mkdir(dir: string): Promise<void> {
+      const info = await statAsync(dir).catch(() => undefined)
+      if (!info?.isDirectory()) {
+        throw new Error(`Write target parent directory does not exist: ${dir}. Create it explicitly before writing.`)
+      }
+    },
+  }
+}
+
 function buildBuiltinToolDefinitions(
   sdk: PiSdk,
   sessionId: string,
@@ -2229,12 +2026,16 @@ function buildBuiltinToolDefinitions(
   onToolExecutionResult?: PiAgentQueryOptions['onToolExecutionResult'],
 ): ToolDefinition[] {
   const powerShellTool = createWindowsPowerShellToolDefinition(sdk, cwd, runtimeEnv, {}, sessionId)
+  const writeTool = sdk.createWriteToolDefinition(cwd, { operations: createStrictWriteOperations() })
   const definitions = [
     sdk.createReadToolDefinition(cwd),
     sdk.createBashToolDefinition(cwd, createPromaBashToolOptions(sessionId, runtimeEnv, onToolExecutionResult)),
     ...(powerShellTool ? [powerShellTool] : []),
     sdk.createEditToolDefinition(cwd),
-    sdk.createWriteToolDefinition(cwd),
+    {
+      ...writeTool,
+      description: 'Write content to a file. Creates the file if it does not exist, overwrites if it does. The parent directory must already exist; Profer will not create it implicitly.',
+    },
     sdk.createGrepToolDefinition(cwd),
     sdk.createFindToolDefinition(cwd),
     sdk.createLsToolDefinition(cwd),
@@ -2314,6 +2115,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
   async *query(input: PiAgentQueryOptions): AsyncIterable<SDKMessage> {
     const active = createActivePiSession()
     this.activeSessions.set(input.sessionId, active)
+    input.onRuntimeRegistered?.()
     const queue = createAsyncQueue<SDKMessage>()
     const runtimeGuard = createAgentRuntimeGuard(input)
     active.runtimeGuard = runtimeGuard
@@ -2370,7 +2172,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       )
       let compactContextRequested = false
       let automaticCompactionContinuations = 0
-      const customTools = [
+      const proferTools = compactPiToolDefinitions([
         buildCurrentSessionCompactionTool(
           sdk,
           () => { compactContextRequested = true },
@@ -2385,6 +2187,9 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           input.onToolExecutionResult,
         ),
         ...buildPromaProductToolDefinitions(sdk, input.canUseTool),
+      ])
+      const customTools = input.tools?.length === 0 ? [] : [
+        ...proferTools,
         ...wrapCustomToolDefinitions(input.customTools, input.canUseTool),
       ]
 
@@ -2447,8 +2252,9 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         cwd,
         agentDir: input.piAgentDir,
         settingsManager,
-        additionalSkillPaths: input.additionalSkillPaths ?? [],
-        skillsOverride: createPromaSkillsOverride(input.additionalSkillPaths, input.skillSlugs),
+        // Skill 由 override 在目录 slug 门禁后加载，避免 SDK 预先读取禁用项并按 name 去重。
+        additionalSkillPaths: [],
+        skillsOverride: createPromaSkillsOverride(input.additionalSkillPaths, input.skillSlugs, sdk.loadSkillsFromDir),
         ...createProferManagedResourceLoaderOptions(),
         agentsFilesOverride: input.projectInstructionFiles && input.projectInstructionFiles.length > 0
           ? createProferProjectInstructionFilesOverride(input.projectInstructionFiles)
@@ -2475,6 +2281,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         model,
         thinkingLevel: input.thinkingLevel ?? 'off',
         noTools: 'builtin',
+        ...(input.tools !== undefined ? { tools: input.tools } : {}),
         customTools,
       })
       session.agent.toolExecution = 'sequential'
@@ -2569,7 +2376,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       // Pi 在 agent_end 之后可能才触发 overflow 自动压缩：在这些情况下延迟上报终态，
       // 等 compaction 生命周期到终态（compaction_end / agent_settled）再 settle。
       let pendingNativeOverflowRecovery = false
+      let pendingTerminalRetryError: { assistantMessage: AssistantMessage; sdkMessage: SDKMessage } | undefined
       let pendingTerminalResult: SDKMessage | undefined
+
+      const flushPendingTerminalRetryError = (): void => {
+        if (!pendingTerminalRetryError) return
+        runtimeGuard.recordMessage(pendingTerminalRetryError.assistantMessage)
+        queue.push(pendingTerminalRetryError.sdkMessage)
+        pendingTerminalRetryError = undefined
+      }
 
       // message_end 发生在 Pi 落盘前；保留对象身份，待 prompt 完成后从
       // SessionManager entries 精确取得 Pi entry ID，绝不按文本猜测。
@@ -2669,6 +2484,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 // 用户停止或插入新 prompt 时，当前 loop 的错误与 result 都不得泄漏到下一轮。
                 retryTerminalGate.settle(true)
                 pendingNativeOverflowRecovery = false
+                pendingTerminalRetryError = undefined
                 pendingTerminalResult = undefined
                 break
               }
@@ -2690,8 +2506,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 break
               }
               if (terminalRetryError) {
-                runtimeGuard.recordMessage(terminalRetryError.assistantMessage)
-                queue.push(terminalRetryError.sdkMessage)
+                pendingTerminalRetryError = terminalRetryError
               }
               // Pi can start auto-compaction after agent_end but before session.prompt()
               // resolves. Defer the terminal result until then, otherwise the orchestrator's
@@ -2706,9 +2521,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               )
               break
             }
+            case 'auto_retry_end': {
+              const outcome = getPiNativeRetryOutcome(event)
+              if (outcome) input.onNativeRetryOutcome?.(outcome)
+              if (outcome === 'exhausted') flushPendingTerminalRetryError()
+              for (const retry of mapPiNativeRetryEvent(event)) input.onRetry?.(retry)
+              break
+            }
             case 'auto_retry_start':
             case 'auto_retry_attempt_start':
-            case 'auto_retry_end':
               for (const retry of mapPiNativeRetryEvent(event)) input.onRetry?.(retry)
               break
             case 'summarization_retry_scheduled':
@@ -2754,8 +2575,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                   recovered || active.abortRequested || active.interrupting,
                 )
                 if (terminalRetryError) {
-                  runtimeGuard.recordMessage(terminalRetryError.assistantMessage)
-                  queue.push(terminalRetryError.sdkMessage)
+                  pendingTerminalRetryError = terminalRetryError
+                  flushPendingTerminalRetryError()
                 }
               }
               // 压缩结束：成功则发 compact_boundary 分界线（前端持久化显示「上下文已压缩」），
@@ -2792,10 +2613,11 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 pendingNativeOverflowRecovery = false
                 const terminalRetryError = retryTerminalGate.settle(active.abortRequested || active.interrupting)
                 if (terminalRetryError) {
-                  runtimeGuard.recordMessage(terminalRetryError.assistantMessage)
-                  queue.push(terminalRetryError.sdkMessage)
+                  pendingTerminalRetryError = terminalRetryError
+                  flushPendingTerminalRetryError()
                 }
               }
+              flushPendingTerminalRetryError()
               break
           }
         } catch (error) {
@@ -2853,7 +2675,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               continuationPrompt ?? appendOutputFormatInstruction(input.prompt, input.outputFormat),
               active,
               {
-                prompt: (prompt) => session.prompt(prompt, { source: 'rpc' }),
+                // 受管 Skill 已在 prepareInitialPrompt 处理，禁止 SDK 按文本再展开一次。
+                prompt: (prompt) => session.prompt(prompt, { source: 'rpc', expandPromptTemplates: false }),
                 prepareInitialPrompt: (prompt) => preparePromptWithPromaSkills(resourceLoader, prompt, input.skillMentions),
                 shouldStopBeforeNextTurn: () => runtimeGuard.shouldStopBeforeNextTurn(),
                 rejectPendingInterruptPrompts: (error) => rejectPendingInterruptPrompts(active, error),
@@ -3010,10 +2833,11 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const stopOverride = active.runtimeGuard.getLimitResultOverride()
       throw new Error(stopOverride?.errors[0] ?? 'Agent 已达到运行限制，无法继续追加消息')
     }
+    const queuedContent = preparePromptForPiSkillQueue(content)
     if (message.priority === 'now') {
-      await session.steer(content)
+      await session.steer(queuedContent)
     } else {
-      await session.followUp(content)
+      await session.followUp(queuedContent)
     }
     options?.onAccepted?.()
   }

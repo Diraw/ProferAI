@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Clock3, CornerDownLeft, GripVertical, Quote, Trash2, Undo2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Button } from '@profer/ui/primitives/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 import type { AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message-queue'
 

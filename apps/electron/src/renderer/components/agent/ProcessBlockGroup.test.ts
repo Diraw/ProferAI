@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { buildAssistantTurnRenderItems, buildProcessGroupToolNames } from './ProcessBlockGroup'
+import * as React from 'react'
+import { ProcessBlockGroup, buildAssistantTurnRenderItems, buildProcessGroupSummary, buildProcessGroupToolNames } from './ProcessBlockGroup'
+import { applyRenderWindow } from './render-window'
 import type { SDKContentBlock } from '@profer/shared'
 
 const tool = (id: string, name = 'Read'): SDKContentBlock => ({
@@ -250,5 +252,97 @@ describe('Agent 过程块折叠分组', () => {
     ])
 
     expect(toolNames).toEqual(['Grep', 'Read', 'Bash'])
+  })
+
+  test('given 只含思考的过程组 when 生成摘要 then 标为思考而非「消息」', () => {
+    expect(buildProcessGroupSummary([thinking()])).toBe('执行过程：1 段思考')
+    expect(buildProcessGroupSummary([thinking(), thinking('补充')])).toBe('执行过程：2 段思考')
+  })
+
+  test('given 思考、工具与中间说明混排 when 生成摘要 then 三类分别计数且顺序固定', () => {
+    expect(buildProcessGroupSummary([
+      thinking(),
+      tool('tool-1'),
+      text('中间说明'),
+      // Goal 内部状态工具不算普通工具过程（唯一被排除的工具名）。
+      tool('tool-2', 'update_goal'),
+    ])).toBe('执行过程：1 次工具调用，1 段思考，1 条消息')
+  })
+})
+
+describe('过程窗口子项身份', () => {
+  test('20→21→22 段窗口前移时 wrapper 保留块 key，手动折叠状态保持', () => {
+    // 受控调用真实组件，检查输出的 React element 身份和组件本地展开状态。
+    // 不执行布局/折叠动画 effect，不冒充浏览器 reconciliation 验收。
+    const internals = (React as unknown as {
+      __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED: {
+        ReactCurrentDispatcher: { current: unknown }
+      }
+    }).__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
+    const slots: unknown[] = []
+    let cursor = 0
+    const dispatcher = {
+      useState<T>(initial: T): [T, (action: T | ((previous: T) => T)) => void] {
+        const index = cursor++
+        if (!(index in slots)) slots[index] = initial
+        return [slots[index] as T, (action) => {
+          slots[index] = typeof action === 'function'
+            ? (action as (previous: T) => T)(slots[index] as T)
+            : action
+        }]
+      },
+      useRef<T>(initial: T): { current: T } {
+        const index = cursor++
+        if (!(index in slots)) slots[index] = { current: initial }
+        return slots[index] as { current: T }
+      },
+      useCallback<T>(callback: T): T { return callback },
+      useMemo<T>(create: () => T): T { return create() },
+      useEffect() {},
+    }
+    const render = (length: number) => {
+      const blocks = Array.from({ length }, (_, index) => tool(`tool-${index}`))
+      const window = applyRenderWindow(buildAssistantTurnRenderItems(blocks))
+      const group = window.items.find((item) => item.type === 'process-group')
+      if (!group || group.type !== 'process-group') throw new Error('缺少过程组')
+      const previous = internals.ReactCurrentDispatcher.current
+      internals.ReactCurrentDispatcher.current = dispatcher
+      cursor = 0
+      try {
+        return ProcessBlockGroup({
+          blocks: group.items.map((item) => item.block),
+          isStreaming: true,
+          keepExpandedAfterComplete: false,
+          children: [
+            window.foldedProcessItems.length > 0 && React.createElement('span', { key: 'folded' }),
+            group.items.map((item) => React.createElement('span', { key: item.index, 'data-block': item.index })),
+          ],
+        })
+      } finally { internals.ReactCurrentDispatcher.current = previous }
+    }
+    const wrappers = (node: React.ReactNode, keys = new Map<number, React.Key | null>()) => {
+      React.Children.forEach(node, (child) => {
+        if (!React.isValidElement<{ children?: React.ReactNode; 'data-block'?: number }>(child)) return
+        const nested = child.props.children
+        if (React.isValidElement<{ 'data-block'?: number }>(nested) && nested.props['data-block'] !== undefined) {
+          keys.set(nested.props['data-block'], child.key)
+        }
+        wrappers(nested, keys)
+      })
+      return keys
+    }
+    const first = wrappers(render(20))
+    const second = wrappers(render(21))
+    const third = wrappers(render(22))
+    for (let index = 2; index < 20; index++) {
+      expect(second.get(index)).toBe(first.get(index))
+      expect(third.get(index)).toBe(first.get(index))
+    }
+    const tree = render(22)
+    const button = React.Children.toArray(tree.props.children)[0] as React.ReactElement<{ onClick: () => void }>
+    button.props.onClick()
+    const collapsed = render(23)
+    const content = React.Children.toArray(collapsed.props.children)[1] as React.ReactElement<{ style: { opacity: number } }>
+    expect(content.props.style.opacity).toBe(0)
   })
 })

@@ -6,21 +6,20 @@
 
 import * as React from 'react'
 import { PluginSidebarEntries } from '@/components/plugins/PluginEntries'
-import { PanelLeftClose, Plus, Search, FolderOpen, LogIn, Archive, ArchiveRestore, ArrowLeft, Settings } from 'lucide-react'
+import { PanelLeftClose, Plus, Search, FolderOpen, Archive, ArchiveRestore, ArrowLeft, Settings } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
+import { Popover, PopoverTrigger, PopoverContent } from '@profer/ui/primitives/popover'
 import { ModeSwitcher } from '../ModeSwitcher'
 import { SidebarBalanceBar } from '@/components/app-shell/SidebarBalanceBar'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { SidebarWindowDragStrip, SIDEBAR_DRAG_STRIP_HEIGHT, AutomationSidebarEntry, SkillsSidebarEntry, renderWorkspaceSortIcon } from './navigation-items'
 import { ConversationItem, AgentSessionItem, RelatedChildSessionItem, AgentProjectGroupItem, PINNED_SESSION_MAX_HEIGHT, getSessionLeftAccent } from './session-items'
-import { WORKSPACE_SORT_LABEL } from './sidebar-utils'
+import { getOpenSessionEntries, WORKSPACE_SORT_LABEL } from './sidebar-utils'
 import { getRelatedSessionSummary, getSessionTreeStatus, treeContainsSessionId } from './session-tree'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { useCloseTab } from '@/hooks/useCloseTab'
 import type { SidebarModel } from './use-left-sidebar'
-import { TEAM_WORKSPACE_UI_ENABLED } from '@/lib/product-feature-flags'
 
 export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement {
   const {
@@ -47,6 +46,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     handleRequestDelete,
     handleRename,
     handleRegenerateConversationTitle,
+    regeneratingConversationTitleIds,
     handleTogglePin,
     handleToggleArchive,
     pinnedAgentSessionTrees,
@@ -58,7 +58,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     handleRequestMove,
     handleAgentRename,
     handleAgentRegenerateTitle,
-    handleMarkUnread,
+    handleToggleSessionUnread,
     regeneratingTitleIds,
     handleTogglePinAgent,
     handleToggleArchiveAgent,
@@ -66,9 +66,6 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     relativeTimeNow,
     workspaceSortMode,
     handleCycleWorkspaceSort,
-    authStatus,
-    accountCaps,
-    handleStartJoinWorkspace,
     handleStartCreateProject,
     creatingProject,
     setCreatingProject,
@@ -112,12 +109,10 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
   } = s
   const [sidebarSection, setSidebarSection] = React.useState<'pinned' | 'projects'>('projects')
   const { requestClose: requestCloseTab } = useCloseTab()
-  const openSessionTabs = React.useMemo(() => tabs.filter((tab) => {
-    if (mode === 'chat') return tab.type === 'chat'
-    if (mode !== 'agent' || tab.type !== 'agent') return false
-    const session = agentSessions.find((item) => item.id === tab.sessionId)
-    return !session?.parentSessionId
-  }), [agentSessions, mode, tabs])
+  const openSessionEntries = React.useMemo(
+    () => getOpenSessionEntries(mode, tabs, conversations, agentSessions),
+    [agentSessions, conversations, mode, tabs],
+  )
   return (
     <div className="relative h-full flex flex-col overflow-hidden">
       <SidebarWindowDragStrip
@@ -199,32 +194,36 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
       <div className="flex-none px-2 pt-2 pb-1 titlebar-no-drag">
         <div className="mb-1 flex items-center justify-between px-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-foreground/40">当前会话</span>
-          <span className="text-[10px] tabular-nums text-foreground/30">{openSessionTabs.length}</span>
+          <span className="text-[10px] tabular-nums text-foreground/30">{openSessionEntries.length}</span>
         </div>
-        <div className="sidebar-session-scroll -mr-2 flex max-h-[144px] flex-col gap-0.5 overflow-y-auto pr-2 scrollbar-thin">
-          {openSessionTabs.map((tab) => {
-            const conversation = tab.type === 'chat' ? conversations.find((item) => item.id === tab.sessionId) : null
-            const session = tab.type === 'agent' ? agentSessions.find((item) => item.id === tab.sessionId) : null
+        <div className="sidebar-session-scroll ml-4 -mr-2 flex max-h-[144px] flex-col gap-0.5 overflow-y-auto pr-2 scrollbar-thin">
+          {openSessionEntries.map((entry) => {
+            const { tab } = entry
             const active = tab.sessionId === activeSessionId
-            if (conversation) return (
-              <ConversationItem
-                key={tab.id}
-                conversation={conversation}
-                active={active}
-                streaming={streamingIds.has(conversation.id)}
-                showPinIcon={false}
-                hasDraft={conversationDraftMap.has(conversation.id)}
-                relativeTimeNow={relativeTimeNow}
-                onSelect={handleSelectConversation}
-                onRequestDelete={handleRequestDelete}
-                onRename={handleRename}
-                onRegenerateTitle={handleRegenerateConversationTitle}
-                onTogglePin={handleTogglePin}
-                onToggleArchive={handleToggleArchive}
-                onCloseTab={() => requestCloseTab(tab.id)}
-              />
-            )
-            if (session) return (
+            if (entry.type === 'chat') {
+              const { conversation } = entry
+              return (
+                <ConversationItem
+                  key={tab.id}
+                  conversation={conversation}
+                  active={active}
+                  streaming={streamingIds.has(conversation.id)}
+                  showPinIcon={false}
+                  hasDraft={conversationDraftMap.has(conversation.id)}
+                  relativeTimeNow={relativeTimeNow}
+                  onSelect={handleSelectConversation}
+                  onRequestDelete={handleRequestDelete}
+                  onRename={handleRename}
+                  onRegenerateTitle={handleRegenerateConversationTitle}
+                  regeneratingTitle={regeneratingConversationTitleIds.has(conversation.id)}
+                  onTogglePin={handleTogglePin}
+                  onToggleArchive={handleToggleArchive}
+                  onCloseTab={() => requestCloseTab(tab.id)}
+                />
+              )
+            }
+            const { session } = entry
+            return (
               <AgentSessionItem
                 key={tab.id}
                 session={session}
@@ -242,11 +241,10 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                 onRegenerateTitle={handleAgentRegenerateTitle}
                 onTogglePin={handleTogglePinAgent}
                 onToggleArchive={handleToggleArchiveAgent}
-                onMarkUnread={handleMarkUnread}
+                onMarkUnread={handleToggleSessionUnread}
                 onCloseTab={() => requestCloseTab(tab.id)}
               />
             )
-            return null
           })}
         </div>
       </div>
@@ -278,6 +276,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                         onRequestDelete={handleRequestDelete}
                         onRename={handleRename}
                         onRegenerateTitle={handleRegenerateConversationTitle}
+                        regeneratingTitle={regeneratingConversationTitleIds.has(conv.id)}
                         onTogglePin={handleTogglePin}
                         onToggleArchive={handleToggleArchive}
                       />
@@ -312,6 +311,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                       onRequestDelete={handleRequestDelete}
                       onRename={handleRename}
                       onRegenerateTitle={handleRegenerateConversationTitle}
+                      regeneratingTitle={regeneratingConversationTitleIds.has(conv.id)}
                       onTogglePin={handleTogglePin}
                       onToggleArchive={handleToggleArchive}
                     />
@@ -364,7 +364,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                             regeneratingTitle={regeneratingTitleIds.has(item.session.id)}
                             onTogglePin={handleTogglePinAgent}
                             onToggleArchive={handleToggleArchiveAgent}
-                            onMarkUnread={handleMarkUnread}
+                            onMarkUnread={handleToggleSessionUnread}
                           />
 
                           {childCount > 0 && expandedChildren && (
@@ -386,7 +386,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                                   regeneratingTitle={regeneratingTitleIds.has(childSession.id)}
                                   onTogglePin={handleTogglePinAgent}
                                   onToggleArchive={handleToggleArchiveAgent}
-                                  onMarkUnread={handleMarkUnread}
+                                  onMarkUnread={handleToggleSessionUnread}
                                 />
                               ))}
                             </div>
@@ -472,22 +472,6 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   当前{WORKSPACE_SORT_LABEL[workspaceSortMode]}排序，点击切换排序方式
                 </TooltipContent>
               </Tooltip>
-              {/* 团队版功能入口（登录且非免费档才展示） */}
-              {TEAM_WORKSPACE_UI_ENABLED && authStatus.isLoggedIn && accountCaps.membershipTier !== 'free' && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={handleStartJoinWorkspace}
-                      className="size-6 flex items-center justify-center rounded-md text-foreground/35 hover:bg-foreground/[0.06] hover:text-foreground/60 transition-colors titlebar-no-drag"
-                      aria-label="加入工作区"
-                    >
-                      <LogIn size={12} />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">加入团队工作区</TooltipContent>
-                </Tooltip>
-              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -562,7 +546,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   onTogglePin={handleTogglePinAgent}
                   onToggleArchive={handleToggleArchiveAgent}
                   onToggleRelatedParent={handleToggleRelatedParent}
-                  onMarkUnread={handleMarkUnread}
+                  onMarkUnread={handleToggleSessionUnread}
                   workspaceSwitchTs={workspaceSwitchTs}
                 />
               ))}
@@ -603,6 +587,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                         onRequestDelete={handleRequestDelete}
                         onRename={handleRename}
                         onRegenerateTitle={handleRegenerateConversationTitle}
+                        regeneratingTitle={regeneratingConversationTitleIds.has(conv.id)}
                         onTogglePin={handleTogglePin}
                         onToggleArchive={handleToggleArchive}
                       />
@@ -637,7 +622,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                         regeneratingTitle={regeneratingTitleIds.has(session.id)}
                         onTogglePin={handleTogglePinAgent}
                         onToggleArchive={handleToggleArchiveAgent}
-                        onMarkUnread={handleMarkUnread}
+                        onMarkUnread={handleToggleSessionUnread}
                       />
                     ))}
                   </div>

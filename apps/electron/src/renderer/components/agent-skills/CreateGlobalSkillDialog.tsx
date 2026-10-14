@@ -1,10 +1,10 @@
 import * as React from 'react'
 import { Plus } from 'lucide-react'
 import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
+import { Button } from '@profer/ui/primitives/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@profer/ui/primitives/dialog'
+import { Input } from '@profer/ui/primitives/input'
+import { Textarea } from '@profer/ui/primitives/textarea'
 
 interface Props {
   open: boolean

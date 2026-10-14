@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createPiRetryTerminalGate, mapPiNativeRetryEvent } from './pi-retry-control'
+import { createPiRetryTerminalGate, getPiNativeRetryOutcome, mapPiNativeRetryEvent } from './pi-retry-control'
 
 describe('mapPiNativeRetryEvent (SDK 0.84.3 映射)', () => {
   const ts = 1_000_000
@@ -46,6 +46,32 @@ describe('mapPiNativeRetryEvent (SDK 0.84.3 映射)', () => {
     if (out[0]?.status === 'attempt') {
       expect(out[0].attemptData.reason).toBe('重试中')
     }
+  })
+
+  test('auto_retry_end reports exhausted outcome to the orchestrator', () => {
+    expect(getPiNativeRetryOutcome({
+      type: 'auto_retry_end',
+      success: false,
+      outcome: 'exhausted',
+      attempt: 8,
+      maxAttempts: 8,
+      delayMs: 0,
+    })).toBe('exhausted')
+  })
+
+  test('auto_retry_end without outcome infers success or exhaustion', () => {
+    expect(getPiNativeRetryOutcome({
+      type: 'auto_retry_end', success: true, attempt: 1, maxAttempts: 8, delayMs: 0,
+    })).toBe('succeeded')
+    expect(getPiNativeRetryOutcome({
+      type: 'auto_retry_end', success: false, attempt: 8, maxAttempts: 8, delayMs: 0,
+    })).toBe('exhausted')
+  })
+
+  test('auto_retry_start has no terminal outcome', () => {
+    expect(getPiNativeRetryOutcome({
+      type: 'auto_retry_start', attempt: 1, maxAttempts: 8, delayMs: 1000,
+    })).toBeUndefined()
   })
 
   test('auto_retry_end success=true -> cleared', () => {

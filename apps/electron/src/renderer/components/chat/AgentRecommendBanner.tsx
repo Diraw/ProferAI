@@ -17,7 +17,7 @@ import * as React from 'react'
 import { useAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
 import { Sparkles, X, ArrowRight } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { pendingAgentRecommendationAtom } from '@/atoms/chat-atoms'
 import {
   agentChannelIdAtom,

@@ -2,7 +2,7 @@
  * 队列「轮结束」信号决策（纯函数，可单测）。
  *
  * 轮结束事件用版本号表示：每次 Agent 一轮运行结束（running 下降沿）turnVersion +1；
- * consumedVersion 记录已消费的版本，队列消息始终自动按 FIFO 发送。
+ * consumedVersion 记录已消费的版本；空闲队列可自行启动，不依赖组件捕获 running 下降沿。
  */
 
 export type AutoSendTurnDecision = 'send' | 'defer' | 'consume' | 'idle'
@@ -41,7 +41,9 @@ export interface AutoSendTurnState {
 export function evaluateAutoSendTurn(state: AutoSendTurnState): AutoSendTurnDecision {
   // 开关关闭时仍消费当前轮结束信号，避免之后重新开启时误用陈旧信号。
   if (!state.autoSendEnabled) return 'consume'
-  // 没有未消费的轮结束事件：避免仅因入队触发旧的轮结束信号。
+  // 空闲队列可能来自压缩后入队、切回会话或暂时阻塞恢复，不能只等新的轮结束信号。
+  if (shouldStartAutoSendFromIdle(state)) return 'send'
+  // 未处于可发送的空闲状态且没有新轮结束信号时，保持等待。
   if (state.consumedVersion >= state.turnVersion) return 'idle'
   // live 未清空：暂时等待（不消费，等下次 effect 重跑）。
   if (state.liveMessagesPending) return 'defer'

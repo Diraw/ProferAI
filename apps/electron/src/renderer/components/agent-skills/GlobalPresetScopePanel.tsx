@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Check } from 'lucide-react'
 import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { SettingsCard } from '@/components/settings/primitives'
 import type { AgentPreset, AgentWorkspace, PresetReference, PresetReferenceReport, PresetWorkspaceReference } from '@profer/shared'
 

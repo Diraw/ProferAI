@@ -28,6 +28,9 @@ function getDefaultSettings(): AppSettings {
     onboardingCompleted: false,
     environmentCheckSkipped: false,
     notificationsEnabled: true,
+    showCreditsInSidebar: true,
+    // 手动确认已读：默认关闭（关闭态行为与既有一致）
+    manualReadConfirmEnabled: false,
     feishuSessionMirror: { mode: 'off' },
     agentRuntime: DEFAULT_AGENT_RUNTIME,
     developerModeEnabled: false,
@@ -67,6 +70,9 @@ export function getSettings(): AppSettings {
       onboardingCompleted: data.onboardingCompleted ?? false,
       environmentCheckSkipped: data.environmentCheckSkipped ?? false,
       notificationsEnabled: data.notificationsEnabled ?? true,
+      showCreditsInSidebar: data.showCreditsInSidebar !== false,
+      // 旧 settings.json 无该键时归一为 false；只有字面 true 才视为开启
+      manualReadConfirmEnabled: data.manualReadConfirmEnabled === true,
       feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
       agentRuntime: normalizeAgentRuntime(data.agentRuntime),
       developerModeEnabled,

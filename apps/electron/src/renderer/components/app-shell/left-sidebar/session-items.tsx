@@ -12,35 +12,36 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, Cloud, FolderOpen, GripVertical, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, Sparkles, X,
+  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useShortcut } from '@/hooks/useShortcut'
 import { clearSessionReferenceDragState, setSessionReferenceDragData } from '@/lib/session-reference-drag'
+import { resolveSessionUnreadMenuItem } from '@/lib/session-unread-menu'
 import { interfaceVariantAtom } from '@/atoms/theme'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
 import {
   ContextMenu,
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
-} from '@/components/ui/context-menu'
+} from '@profer/ui/primitives/context-menu'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+} from '@profer/ui/primitives/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from '@profer/ui/primitives/popover'
 import {
   SessionMiniMapPopover,
   useSessionMiniMapHover,
   type SessionMiniMapType,
 } from '@/components/session-preview/SessionMiniMapPopover'
 import { browserStateMapAtom } from '@/atoms/browser-atoms'
-import { currentAgentSessionIdAtom, type SessionIndicatorStatus } from '@/atoms/agent-atoms'
+import { currentAgentSessionIdAtom, unviewedCompletedSessionIdsAtom, type SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import type { ConversationMeta, AgentSessionMeta, AgentWorkspace } from '@profer/shared'
 import { formatRelativeUpdatedAt, getRailInitial } from './sidebar-utils'
 import type { ShortcutRegistrationOptions } from '@/lib/shortcut-registry'
@@ -79,9 +80,9 @@ export const PINNED_SESSION_MAX_HEIGHT = PINNED_SESSION_VISIBLE_LIMIT * PINNED_S
 
 const RAIL_STATUS_CLASS: Record<SessionIndicatorStatus, string> = {
   idle: 'hidden',
-  running: 'border-blue-500 animate-pulse',
-  blocked: 'border-orange-500',
-  completed: 'border-emerald-500',
+  running: 'border-info animate-pulse',
+  blocked: 'border-warning',
+  completed: 'border-success',
 }
 
 export interface AgentProjectGroup {
@@ -433,6 +434,8 @@ interface ConversationItemProps {
   onToggleArchive: (id: string) => Promise<void>
   /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
   onRegenerateTitle?: (id: string) => Promise<void>
+  /** 标题正在重新生成 */
+  regeneratingTitle?: boolean
   /** 仅当前会话 Tab 区使用：关闭入口，不删除会话数据。 */
   onCloseTab?: () => void
 }
@@ -450,6 +453,7 @@ export const ConversationItem = React.memo(function ConversationItem({
   onTogglePin,
   onToggleArchive,
   onRegenerateTitle,
+  regeneratingTitle,
   onCloseTab,
 }: ConversationItemProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
@@ -519,9 +523,9 @@ export const ConversationItem = React.memo(function ConversationItem({
         重命名
       </MenuItem>
       {onRegenerateTitle && (
-        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => { void onRegenerateTitle(conversation.id) }}>
-          <Sparkles size={14} />
-          重新生成标题
+        <MenuItem disabled={regeneratingTitle} className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => { if (!regeneratingTitle) void onRegenerateTitle(conversation.id) }}>
+          {regeneratingTitle ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+          {regeneratingTitle ? '正在生成标题…' : '重新生成标题'}
         </MenuItem>
       )}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onToggleArchive(conversation.id)}>
@@ -582,7 +586,7 @@ export const ConversationItem = React.memo(function ConversationItem({
             <span
               className={cn(
                 'absolute inset-y-0 left-0 w-[3px] rounded-l-md pointer-events-none',
-                streaming ? 'bg-blue-500 animate-pulse' : 'bg-primary',
+                streaming ? 'bg-info animate-pulse' : 'bg-primary',
               )}
               aria-hidden="true"
             />
@@ -608,6 +612,12 @@ export const ConversationItem = React.memo(function ConversationItem({
                 {showPinIcon && (
                   <Pin size={11} className="flex-shrink-0 text-primary/60" />
                 )}
+                {regeneratingTitle ? (
+                  <>
+                    <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
+                    <span className="flex-shrink-0 text-[11px] text-info">正在生成标题…</span>
+                  </>
+                ) : null}
                 <span className="truncate">{conversation.title}</span>
                 {/* 草稿标记：输入框有未发送内容 */}
                 {hasDraft && (
@@ -657,22 +667,22 @@ export const ConversationItem = React.memo(function ConversationItem({
 /** 会话行左侧状态条的颜色 — 与 SessionIndicatorStatus 呼应 */
 type SessionLeftAccent = 'orange' | 'blue' | 'green'
 const SESSION_ACCENT_ROW_CLASS: Record<SessionLeftAccent, string> = {
-  orange: 'bg-orange-500/[0.08] text-foreground font-medium',
+  orange: 'bg-warning/[0.08] text-foreground font-medium',
   blue: 'text-foreground font-medium hover:bg-foreground/[0.03]',
   green: 'text-foreground font-medium hover:bg-foreground/[0.03]',
 }
 
 const SESSION_ACCENT_INDICATOR_CLASS: Record<SessionLeftAccent, string> = {
-  orange: 'bg-orange-500',
-  blue: 'bg-blue-500',
-  green: 'bg-green-500',
+  orange: 'bg-warning',
+  blue: 'bg-info',
+  green: 'bg-success',
 }
 
 const DELEGATION_STATUS_ICON_CLASS: Record<SessionIndicatorStatus, string> = {
   idle: 'text-foreground/40',
-  running: 'text-blue-500',
-  blocked: 'text-orange-500',
-  completed: 'text-green-500',
+  running: 'text-info',
+  blocked: 'text-warning',
+  completed: 'text-success',
 }
 
 export function getSessionLeftAccent(status: SessionIndicatorStatus): SessionLeftAccent | undefined {
@@ -707,7 +717,8 @@ interface AgentSessionItemProps {
   onRename: (id: string, newTitle: string) => Promise<void>
   onTogglePin: (id: string) => Promise<void>
   onToggleArchive: (id: string) => Promise<void>
-  onMarkUnread?: (id: string) => void
+  /** 未读状态切换：`nextUnread` 为目标状态，由菜单项按「用户能看到的未读状态」取反得到。 */
+  onMarkUnread?: (id: string, nextUnread: boolean) => void
   onRegenerateTitle?: (id: string) => Promise<void>
   regeneratingTitle?: boolean
   /** 仅当前会话 Tab 区使用：关闭入口，不删除会话数据。 */
@@ -738,6 +749,9 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
 }: AgentSessionItemProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
+  // 该会话在渲染层未读集合里吗（关闭态＝绿标/角标的判据；开启态＝持久化字段派生）。
+  // 菜单文案/图标与绿标必须同源，因此这里与 `session.completedButUnconfirmed` 取并集。
+  const unviewedSessionIds = useAtomValue(unviewedCompletedSessionIdsAtom)
   // 该会话是否有活动浏览器会话/标签（即使面板被用户收起也保留显示，便于从侧边栏识别哪个会话正在用浏览器）
   const browserStateMap = useAtomValue(browserStateMapAtom)
   const hasBrowser = browserStateMap.has(session.id)
@@ -787,6 +801,18 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
 
   const canMove = indicatorStatus === 'idle' || indicatorStatus === 'completed'
 
+  // 未读切换项：判据是「用户能看到的未读状态」——持久化字段
+  // `completedButUnconfirmed` ∪ 渲染层未读集合（关闭态下绿标看的就是内存集合，只判持久化字段
+  // 会出现「绿标亮着、菜单却写「标记未读」且点不掉」）。
+  // 刻意不用 `indicatorStatus`（该投影优先级为 blocked > running > completed，会漏掉
+  // 「运行中 / 等待权限且未读」的会话）；显示条件只有 onMarkUnread 是否存在，因此运行中 /
+  // blocked / 已归档行同样可切换。
+  const unreadMenu = resolveSessionUnreadMenuItem({
+    completedButUnconfirmed: session.completedButUnconfirmed,
+    memoryUnread: unviewedSessionIds.has(session.id),
+    hasToggleHandler: onMarkUnread !== undefined,
+  })
+
   const menuItems = (
     MenuItem: typeof ContextMenuItem | typeof DropdownMenuItem,
     MenuSeparator: typeof ContextMenuSeparator | typeof DropdownMenuSeparator,
@@ -802,10 +828,10 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
           迁移到其他项目
         </MenuItem>
       )}
-      {canMove && onMarkUnread && (
-        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onMarkUnread(session.id)}>
-          <Mail size={14} />
-          标记未读
+      {unreadMenu.show && (
+        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onMarkUnread?.(session.id, unreadMenu.nextUnread)}>
+          {unreadMenu.icon === 'mail-open' ? <MailOpen size={14} /> : <Mail size={14} />}
+          {unreadMenu.label}
         </MenuItem>
       )}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => startEdit()}>
@@ -813,9 +839,9 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
         重命名
       </MenuItem>
       {onRegenerateTitle && (
-        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => { void onRegenerateTitle(session.id) }}>
-          <Sparkles size={14} />
-          重新生成标题
+        <MenuItem disabled={regeneratingTitle} className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => { if (!regeneratingTitle) void onRegenerateTitle(session.id) }}>
+          {regeneratingTitle ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+          {regeneratingTitle ? '正在生成标题…' : '重新生成标题'}
         </MenuItem>
       )}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onToggleArchive(session.id)}>
@@ -923,7 +949,10 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 ) : null}
                 {/* 该会话有活动浏览器会话/标签：在会话行上标识，便于从侧边栏识别哪个会话在用浏览器 */}
                 {regeneratingTitle ? (
-                  <Loader2 size={11} className="flex-shrink-0 text-foreground/40 animate-spin" aria-label="正在重新生成标题" />
+                  <>
+                    <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
+                    <span className="flex-shrink-0 text-[11px] text-info">正在生成标题…</span>
+                  </>
                 ) : hasBrowser ? (
                   <Globe size={11} className="flex-shrink-0 text-foreground/40" aria-label="该会话正在使用浏览器" />
                 ) : null}
@@ -1015,8 +1044,8 @@ interface RelatedChildSessionItemProps {
   onRename: (id: string, newTitle: string) => Promise<void>
   onTogglePin: (id: string) => Promise<void>
   onToggleArchive: (id: string) => Promise<void>
-  /** 标记会话为「未读」（恢复绿色完成标记） */
-  onMarkUnread?: (id: string) => void
+  /** 未读状态切换（`nextUnread` 为目标状态）。 */
+  onMarkUnread?: (id: string, nextUnread: boolean) => void
   regeneratingTitle?: boolean
   /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
   onRegenerateTitle?: (id: string) => Promise<void>
@@ -1100,8 +1129,8 @@ interface AgentProjectGroupItemProps {
   onTogglePin: (id: string) => Promise<void>
   onToggleArchive: (id: string) => Promise<void>
   onToggleRelatedParent: (id: string) => void
-  /** 标记会话为「未读」（恢复绿色完成标记） */
-  onMarkUnread?: (id: string) => void
+  /** 未读状态切换（`nextUnread` 为目标状态）。 */
+  onMarkUnread?: (id: string, nextUnread: boolean) => void
   /** 手动重新生成标题（用前几轮有效消息重命名并重新锁定） */
   onRegenerateTitle?: (id: string) => Promise<void>
   /** 工作区最近一次切换的时间戳，用于短暂高亮 */
@@ -1149,11 +1178,8 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   const isCurrent = group.workspace.id === currentWorkspaceId
   /** 最近 1.2 秒内切换到此工作区时，短暂高亮 */
   const justSwitchedTo = isCurrent && workspaceSwitchTs > 0 && Date.now() - workspaceSwitchTs < 1200
-  const isTeamWorkspace = group.workspace.type === 'team'
   const renderWorkspaceIcon = (size: number, className: string) =>
-    isTeamWorkspace
-      ? <Cloud size={size} className={className} />
-      : <FolderOpen size={size} className={className} />
+    <FolderOpen size={size} className={className} />
 
   const [renamingWorkspace, setRenamingWorkspace] = React.useState(false)
   const [workspaceEditName, setWorkspaceEditName] = React.useState('')

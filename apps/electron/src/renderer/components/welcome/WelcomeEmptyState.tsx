@@ -15,7 +15,8 @@ import { cn } from '@/lib/utils'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { appModeAtom, type AppMode } from '@/atoms/app-mode'
 import { themeStyleAtom } from '@/atoms/theme'
-import { currentAgentWorkspaceIdAtom, agentWorkspacesAtom } from '@/atoms/agent-atoms'
+import { currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
+
 import { getRandomTip, getPlatform, type Tip } from '@/lib/tips'
 import { UsageHeatmap } from './UsageHeatmap'
 
@@ -38,15 +39,8 @@ export function WelcomeEmptyState(): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
   const [mode, setMode] = useAtom(appModeAtom)
   const themeStyle = useAtomValue(themeStyleAtom)
-  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
-  const workspaces = useAtomValue(agentWorkspacesAtom)
+  const showHeatmap = mode === 'agent'
 
-  // 是否在 Agent 模式下的普通工作区（非团队）
-  const currentWorkspace = React.useMemo(
-    () => workspaces.find((w) => w.id === currentWorkspaceId) ?? null,
-    [workspaces, currentWorkspaceId],
-  )
-  const showHeatmap = mode === 'agent' && currentWorkspace?.type !== 'team'
 
   // 稳定的随机 Tip（组件挂载时选一条）
   const [tip] = React.useState<Tip>(() => getRandomTip(getPlatform()))
@@ -65,7 +59,7 @@ export function WelcomeEmptyState(): React.ReactElement {
   }, [mode, setMode])
 
   return (
-    <div className="welcome-empty-state flex h-full translate-y-5 flex-col items-center justify-center gap-6 px-4">
+    <div className="welcome-empty-state flex h-full translate-y-[90px] flex-col items-center justify-center gap-6 px-4 [@media(max-height:820px)]:translate-y-0 [@media(max-height:700px)]:gap-4">
       {/* 问候语 */}
       <h1 className="text-[26px] font-semibold tracking-tight text-foreground">
         {displayName}，{greeting}
@@ -108,8 +102,12 @@ export function WelcomeEmptyState(): React.ReactElement {
         })}
       </div>
 
-      {/* 编码活跃热力图（仅 Agent 模式 + 普通工作区） */}
-      {showHeatmap && <UsageHeatmap />}
+      {/* 编码活跃热力图（仅 Agent 模式 + 普通工作区；窗口过矮时隐藏避免与输入框重叠） */}
+      {showHeatmap && (
+        <div className="[@media(max-height:640px)]:hidden">
+          <UsageHeatmap />
+        </div>
+      )}
     </div>
   )
 }

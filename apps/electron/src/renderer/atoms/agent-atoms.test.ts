@@ -24,7 +24,23 @@ describe('applyAgentEvent retry recovery', () => {
     expect(applyAgentEvent(state(), event).retrying).toBeUndefined()
   })
 
-  test('retry_failed 的失败历史不会被完整文本清除', () => {
+  test('retry_failed 只记录失败，不提前结束运行态', () => {
+    const event: AgentEvent = {
+      type: 'retry_failed',
+      finalAttempt: {
+        attempt: 8,
+        timestamp: Date.now(),
+        reason: '服务暂时不可用',
+        errorMessage: '服务暂时不可用',
+        delaySeconds: 0,
+      },
+    }
+    const next = applyAgentEvent(state(), event)
+    expect(next.running).toBe(true)
+    expect(next.retrying?.failed).toBe(true)
+  })
+
+  test('失败历史不会被完整文本清除', () => {
     const failed = {
       currentAttempt: 8,
       maxAttempts: 8,

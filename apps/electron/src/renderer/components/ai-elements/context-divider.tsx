@@ -5,7 +5,7 @@
  * 移植自 profer-frontend 的 ai-elements/context-divider.tsx。
  */
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { cn } from '@/lib/utils'
 import { X } from 'lucide-react'
 import type { ComponentProps } from 'react'

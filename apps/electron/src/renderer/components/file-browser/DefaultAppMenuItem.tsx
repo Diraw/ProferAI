@@ -6,7 +6,7 @@
  */
 
 import * as React from 'react'
-import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
+import { DropdownMenuItem } from '@profer/ui/primitives/dropdown-menu'
 import { useDefaultAppForFile } from '@/hooks/useDefaultAppForFile'
 
 interface DefaultAppMenuItemProps {

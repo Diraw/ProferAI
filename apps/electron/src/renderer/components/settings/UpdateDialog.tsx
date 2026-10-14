@@ -21,7 +21,7 @@ import {
   AlertDialogFooter,
   AlertDialogCancel,
   AlertDialogAction,
-} from '@/components/ui/alert-dialog'
+} from '@profer/ui/primitives/alert-dialog'
 import { updateStatusAtom } from '@/atoms/updater'
 
 export function UpdateDialog(): React.ReactElement | null {

@@ -8,18 +8,18 @@
 
 import { useState } from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from '@/components/ui/popover'
-import { Switch } from '@/components/ui/switch'
+} from '@profer/ui/primitives/popover'
+import { Switch } from '@profer/ui/primitives/switch'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from '@/components/ui/tooltip'
+} from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 import { AgentComposerToolTrigger } from '@/components/ai-elements/composer/ComposerTool'
 import { Wrench, Brain, Globe, Settings, ImagePlus } from 'lucide-react'

@@ -12,7 +12,7 @@ import {
   DropdownMenuContent,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+} from '@profer/ui/primitives/dropdown-menu'
 import {
   promptConfigAtom,
   defaultPromptIdAtom,

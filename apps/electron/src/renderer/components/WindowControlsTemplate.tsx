@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { WindowControls } from '@/components/WindowControls'
-import { detectIsWindows } from '@/lib/platform'
+import { detectIsWindows } from '@profer/ui'
 import {
   selectActiveWindowControlsHost,
   type WindowControlsHostRegistration,

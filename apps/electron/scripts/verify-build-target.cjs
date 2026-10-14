@@ -12,12 +12,14 @@ if (!['oss', 'commercial'].includes(expectedTarget)) {
 }
 
 const bundle = readFileSync(resolve(bundlePath), 'utf8')
-const ossLiteral = 'false ? "oss" : "oss"'
-const commercialLiteral = 'false ? "oss" : "commercial"'
+// build:main 使用 --minify-whitespace --minify-identifiers（不启用 --minify-syntax，
+// 避免 esbuild 折叠三元表达式导致下面的字面量消失），匹配时对空白不敏感。
+const ossLiteral = /false\s*\?\s*"oss"\s*:\s*"oss"/
+const commercialLiteral = /false\s*\?\s*"oss"\s*:\s*"commercial"/
 const updateFeed = 'https://updates.profer.cn/'
 
-const hasOssTarget = bundle.includes(ossLiteral)
-const hasCommercialTarget = bundle.includes(commercialLiteral)
+const hasOssTarget = ossLiteral.test(bundle)
+const hasCommercialTarget = commercialLiteral.test(bundle)
 const hasUpdateFeed = bundle.includes(updateFeed)
 
 if (expectedTarget === 'oss') {

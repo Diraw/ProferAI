@@ -2,8 +2,8 @@ import * as React from 'react'
 import type { BrowserStartPageState, BrowserViewState } from '@profer/shared'
 import { ArrowLeft, ArrowRight, Check, Copy, Globe2, Languages, LoaderCircle, Plus, RefreshCw, ShieldAlert, Square, Star, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { Button } from '@profer/ui/primitives/button'
+import { Input } from '@profer/ui/primitives/input'
 import { cn } from '@/lib/utils'
 import {
   AlertDialog,
@@ -13,9 +13,9 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { detectIsWindows } from '@/lib/platform'
+} from '@profer/ui/primitives/alert-dialog'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
+import { detectIsWindows } from '@profer/ui'
 import { BROWSER_RISK_DISCLAIMER_VERSION } from '@/types/settings'
 import { BrowserViewport } from './BrowserViewport'
 import { BrowserStartPage } from './BrowserStartPage'

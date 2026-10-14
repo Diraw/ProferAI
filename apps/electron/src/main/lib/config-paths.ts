@@ -10,6 +10,7 @@ import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync, renam
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { RENAMED_DEFAULT_SKILLS } from './default-skill-slugs'
+import { readSkillVersion } from './skill-manifest'
 import { resolveDevVitePort } from './dev-instance'
 
 /** Vite 开发服务器端口（避开旧 Proma 的 5173），可由隔离开发实例覆盖。 */
@@ -383,6 +384,27 @@ export function getPiCheckpointsDir(): string {
 }
 
 /**
+ * 某个 Agent 会话的可视化记录存储根（纯路径，不创建目录）。
+ *
+ * 刻意放在配置目录而不是会话工作区：可视化记录是会话产物，属于不可回退数据。
+ * 若落在会话工作区（曾经的 `.context/visualizations/`），文件检查点会把基线之后新增的
+ * 记录当成“本轮新增文件”，一次回退就会把残留历史引用着的记录删掉。
+ * 放在配置目录后，回退、工作区清理、fork 复制和 Agent 自己的文件工具都不会再碰它。
+ *
+ * 目录由存储层在首次发布可视化时才创建，避免列目录/建工具上下文就凭空多出空目录。
+ *
+ * @param sessionId 会话 ID（仅允许 [A-Za-z0-9_-]，防止路径逃逸）
+ * @returns ~/.profer/agent-visualizations/{sessionId}/
+ */
+export function agentSessionVisualizationsDir(sessionId: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+    throw new Error(`可视化存储会话 ID 非法: ${sessionId}`)
+  }
+
+  return join(getConfigDir(), 'agent-visualizations', sessionId)
+}
+
+/**
  * 获取 Agent 工作区索引文件路径
  *
  * @returns ~/.profer/agent-workspaces.json
@@ -612,32 +634,13 @@ export function getBundledCliPath(): string | undefined {
 }
 
 /**
- * 从 SKILL.md 的 YAML frontmatter 中解析 version 字段
+ * 解析 Skill 版本：模块清单（SKILL.json）优先，其次 SKILL.md frontmatter。
  *
- * 无 version 字段时返回 '0.0.0'（确保旧 Skill 会被更新）。
+ * 无版本时返回 '0.0.0'（确保旧 Skill 会被更新）。优先级统一由 skill-manifest 决定，
+ * 调用方不要自己再解 frontmatter。
  */
 export function parseSkillVersion(skillDir: string): string {
-  const skillMdPath = join(skillDir, 'SKILL.md')
-  if (!existsSync(skillMdPath)) return '0.0.0'
-
-  try {
-    let content = readFileSync(skillMdPath, 'utf-8')
-    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1)
-    const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/)
-    if (!fmMatch?.[1]) return '0.0.0'
-
-    for (const line of fmMatch[1].split('\n')) {
-      const colonIdx = line.indexOf(':')
-      if (colonIdx === -1) continue
-      const key = line.slice(0, colonIdx).trim()
-      const value = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, '')
-      if (key === 'version' && value) return value
-    }
-  } catch {
-    // 解析失败视为最低版本
-  }
-
-  return '0.0.0'
+  return readSkillVersion(skillDir)
 }
 
 /** 比较两个 semver 版本字符串

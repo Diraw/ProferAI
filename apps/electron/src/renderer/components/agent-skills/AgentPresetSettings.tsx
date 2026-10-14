@@ -21,17 +21,17 @@ import {
   X,
   ShieldCheck,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
+import { Button } from "@profer/ui/primitives/button";
+import { Input } from "@profer/ui/primitives/input";
+import { Textarea } from "@profer/ui/primitives/textarea";
+import { Switch } from "@profer/ui/primitives/switch";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@profer/ui/primitives/select";
 import {
   Dialog,
   DialogContent,
@@ -39,7 +39,7 @@ import {
   DialogTitle,
   DialogDescription,
   DialogFooter,
-} from "@/components/ui/dialog";
+} from "@profer/ui/primitives/dialog";
 import {
   SettingsSection,
   SettingsCard,
@@ -51,9 +51,9 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from "@/components/ui/popover";
+} from "@profer/ui/primitives/popover";
 import { GlobalPresetScopePanel } from "./GlobalPresetScopePanel";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmDialog } from "@profer/ui/primitives/confirm-dialog";
 import type {
   AgentWorkspace,
   PresetReference,

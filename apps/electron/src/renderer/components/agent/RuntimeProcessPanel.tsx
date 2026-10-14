@@ -22,7 +22,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+} from '@profer/ui/primitives/alert-dialog'
 import { sdkBackgroundTasksAtomFamily } from '@/atoms/agent-atoms'
 import type { SessionProcessInfo, SDKBackgroundTaskSummary } from '@profer/shared'
 

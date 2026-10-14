@@ -19,7 +19,7 @@ import {
 } from '@/atoms/chat-atoms'
 import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
 import { sidebarViewModeAtom } from '@/atoms/sidebar-atoms'
-import { refreshCreditsInto } from '@/hooks/useCreditsLoader'
+import { refreshCreditsInto } from '@/domains/credits/credits-state'
 import type { ConversationStreamState } from '@/atoms/chat-atoms'
 import type {
   StreamChunkEvent,

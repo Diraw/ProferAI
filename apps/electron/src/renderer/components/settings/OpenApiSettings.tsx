@@ -9,12 +9,12 @@
 import * as React from 'react'
 import { toast } from 'sonner'
 import { Plus, Copy, Pencil, Trash2, ChevronDown, KeyRound, Check } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
+import { Button } from '@profer/ui/primitives/button'
+import { Input } from '@profer/ui/primitives/input'
+import { Switch } from '@profer/ui/primitives/switch'
 import {
   Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
-} from '@/components/ui/dialog'
+} from '@profer/ui/primitives/dialog'
 import { SettingsSection } from './primitives'
 
 interface ApiKey {

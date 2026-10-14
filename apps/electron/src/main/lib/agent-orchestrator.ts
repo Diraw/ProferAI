@@ -52,6 +52,7 @@ import {
   createEffectiveAgentPresetPolicy,
   withLoadedMcpServerNames,
   isEffectiveAgentPresetMcpServerAllowed,
+  isChannelEnabledForRuntime,
 } from '@profer/shared'
 import type { PermissionRequest, ProferPermissionMode, AskUserRequest, ExitPlanModeRequest, EffectiveAgentPresetPolicy } from '@profer/shared'
 import { AgentEventBus } from './agent-event-bus'
@@ -63,13 +64,11 @@ import {
   canSelfConfig,
   persistCodexOAuthCredentials,
   resolveCodexOAuthCredentials,
-  persistXaiOAuthCredentials,
 } from './channel-manager'
 import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
-import { resolveRuntimeCredentials } from './agent-runtime-credentials'
+import { buildPiRuntimeCredentialOptions, resolveRuntimeCredentials } from './agent-runtime-credentials'
 import { injectAutomationMcpServer } from './automation-agent-tools'
 import { injectMemoryArchiveMcpServer } from './memory-archive-agent-tools'
-import { injectTeamMemoryMcpServer } from './team-memory-agent-tools'
 import { injectTaskGraphMcpServer } from './task-graph-agent-tools'
 import { injectAgentPresetMcpServer } from './agent-preset-tools'
 import {
@@ -98,7 +97,7 @@ import type { SDKUserMessage } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { generateCodexTitle } from './adapters/pi-codex-title-generator'
-import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, createFallbackTitle, createWindowFallbackTitle, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle } from './title-generation'
+import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle } from './title-generation'
 import { isCommercialBuild } from './build-target'
 import { isOfficialManagedChannel } from './official-channel'
 import {
@@ -109,9 +108,11 @@ import {
   getAgentSessionSDKMessages,
   isAgentSessionForking,
   truncateSDKMessages,
+  resetClaudeSession,
   resolveUserUuidFromSDK,
   rewindFilesFromSnapshot,
   rewindPiSession,
+  resetPiSession,
   collectForeignCheckpointPaths,
 } from './agent-session-manager'
 import { normalizeAgentEndReason } from './agent-end-reason'
@@ -123,18 +124,21 @@ import {
   getWorkspaceMemoryArchivePath,
   ensurePluginManifest,
 } from './agent-workspace-manager'
-import { getAgentWorkspacePath, getAgentSessionWorkspacePath, getPiCheckpointsDir, getSdkConfigDir, getBundledCliPath } from './config-paths'
-import { getRuntimeSkillsPath, prepareRuntimeSkills } from './global-skill-manager'
-import { normalizeDefaultSkillSlug } from './default-skill-slugs'
+import { getAgentWorkspacePath, getAgentSessionWorkspacePath, agentSessionVisualizationsDir, getPiCheckpointsDir, getSdkConfigDir, getBundledCliPath } from './config-paths'
+import { prepareRuntimeSkills } from './global-skill-manager'
+import { buildSkillRoutingNotice, routeSkillsForTask, type SkillRoutingResult, type SkillRoutingSnapshot } from './skill-routing'
+import { buildSkillRuntimeOptions, prepareAgentSkillRouting } from './skill-runtime-routing'
+import { captureSkillToolInventory } from './skill-tool-inventory'
 import { getRuntimeStatus } from './runtime-init'
 import { shouldStartPiHarness } from './pi-harness/feature-gate'
 import { pauseActivePiHarnessRun, settlePiHarnessRun, startPiHarnessRun } from './pi-harness/orchestrator-bridge'
 import type { CommandExecutionResult } from './command-execution'
 import { createCommandExecutionLedger } from './pi-execution-ledger'
 import { getSettings } from './settings-service'
-import { buildSystemPrompt, buildDynamicContext } from './agent-prompt-builder'
-import { resolveAgentRuntimeSystemPrompt, resolveAgentSystemPromptPolicy } from './agent-system-prompt-policy'
-import { buildPiTaskPrompt } from './pi-task-prompt'
+import { buildDynamicContext } from './agent-prompt-context'
+import { selectAgentPromptMode, type AgentPromptMode } from './agent-prompt-mode'
+import { assembleAgentSystemPrompt } from './agent-prompt-assembly'
+import { resolveAgentSystemPromptPolicy } from './agent-system-prompt-policy'
 import { injectPlanningMcpServer } from './planning-agent-tools'
 import { ensurePresetSystemReady, getAgentPresetByReference, presetReferenceForId } from './agent-preset-manager'
 import { permissionService } from './agent-permission-service'
@@ -143,7 +147,7 @@ import { askUserService } from './agent-ask-user-service'
 import { exitPlanService, type ExitPlanPermissionResult } from './agent-exit-plan-service'
 import { applyAgentModelRoutingToEnv, resolveAgentModelRouting } from './agent-model-routing'
 
-import { validateToolInput } from './agent-tool-input-validator'
+import { validateToolInput, validateToolPathPlatform, validateWriteTargetParent } from './agent-tool-input-validator'
 import { estimateTokenCount, WRITE_CONTENT_TOKEN_THRESHOLD } from './agent-tool-token-estimator'
 
 // 已提取的工具模块
@@ -179,7 +183,8 @@ import { getOrCreateShellSnapshot } from './shell-snapshot'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 import type { PiRetryUpdate } from './adapters/pi-retry-control'
 import { buildPiBuiltinTools } from './adapters/pi-builtin-tools'
-import { buildPiMcpTools } from './adapters/pi-mcp-tools'
+import { compactPiToolDefinitions } from './pi-tool-definition-compaction'
+import { buildPiMcpTools, getMcpPolicyToolName } from './adapters/pi-mcp-tools'
 import { injectClaudeBrowserMcpServer } from './claude-browser-tools'
 import { injectClaudeClipboardMcpServer } from './claude-clipboard-tools'
 import { evaluatePptCapability } from './ppt-capability-gate'
@@ -187,12 +192,12 @@ import { injectAgentImageOutputMcpServer } from './agent-image-output-tools'
 import { injectAgentGptImageMcpServer, isAgentGptImageAvailable } from './agent-gpt-image-tools'
 import { injectAgentSkinMcpServer } from './agent-skin-tools'
 import { injectAgentPreviewMcpServer } from './agent-preview-tools'
+import { injectVisualizationMcpServer } from './agent-visualization-tools'
 import { agentFilePreviewSessionManager } from './agent-file-preview-session'
 import { injectPptDeliveryMcpServer } from './ppt-delivery-agent-tools'
 import { browserController } from './browser-controller'
 import {
   applySdkCredentials,
-  buildPiSkillMentionOptions,
   AgentRunAlreadyActiveError,
   isBrowserToolName,
   isPartialSDKMessage,
@@ -236,6 +241,8 @@ export interface SessionCallbacks {
   ) => void
   /** 发送标题更新 */
   onTitleUpdated: (title: string) => void
+  /** 已获得本轮运行权；并发拒绝不会调用。 */
+  onRunOwned?: () => void
   /** 用户消息已持久化，外部入口可据此通知前端切到实时会话 */
   onRunStarted?: (opts: { startedAt: number }) => void | Promise<void>
 }
@@ -288,6 +295,9 @@ export class AgentOrchestrator {
   /** sessionId → 本轮不可复用的运行令牌；直到 owner finally 才释放。 */
   private activeSessions = new Map<string, string>()
 
+  /** 每个会话至多一个 Goal owner；用于拒绝迟到的停止和清理。 */
+  private goalRunOwners = new Map<string, string>()
+
   /** 队列消息本地记录（sessionId → UUID 集合，用于防重） */
   private queuedMessageUuids = new Map<string, Set<string>>()
 
@@ -305,6 +315,14 @@ export class AgentOrchestrator {
 
   /** 删除期间禁止同一会话从 UI、队列或 headless 路径重新进入。 */
   private deletingSessions = new Set<string>()
+  /** Goal 内部 turn 不写入普通会话 transcript。 */
+  private nonPersistingGoalSessions = new Set<string>()
+
+  /** 运行期间的装配模式，确保插队任务不会沿用无工具的问候上下文。 */
+  private activePromptModes = new Map<string, AgentPromptMode>()
+  /** 队列复用当前 run 的 Skill 快照；初始化失败 resolve(undefined)，不得悬挂或放宽策略。 */
+  private activeSkillRoutings = new Map<string, Promise<SkillRoutingSnapshot | undefined>>()
+  private activeRuntimeRegistrations = new Map<string, Promise<boolean>>()
 
   constructor(adapter: AgentProviderAdapter, eventBus: AgentEventBus) {
     this.adapter = adapter
@@ -500,10 +518,6 @@ export class AgentOrchestrator {
     const titlePrompt = contextMessages && contextMessages.length > 0
       ? buildWindowTitlePrompt(contextMessages)
       : buildTitlePrompt(userMessage)
-    // 无法调用标题模型时的本地兜底：窗口路径取最早一条有效来源的首行。
-    const localFallbackTitle = contextMessages && contextMessages.length > 0
-      ? createWindowFallbackTitle(contextMessages)
-      : createFallbackTitle(userMessage)
     console.log('[Agent 标题生成] 开始生成标题:', {
       channelId,
       modelId,
@@ -521,12 +535,11 @@ export class AgentOrchestrator {
 
       if (channel.provider === 'xai') {
         // xAI subscription uses Pi's provider-specific OAuth transport; title generation's
-        // generic channel adapter only understands API keys, so retain a local deterministic title.
-        return localFallbackTitle
+        // generic channel adapter only understands API keys.
+        return null
       }
 
       if (channel.provider === 'openai-codex') {
-        const fallbackTitle = localFallbackTitle
         try {
           const [credentials, proxyUrl] = await Promise.all([resolveCodexOAuthCredentials(channelId), getEffectiveProxyUrl()])
           const generatedTitle = await generateCodexTitle({
@@ -541,11 +554,11 @@ export class AgentOrchestrator {
             console.log(`[Agent 标题生成] ChatGPT OAuth 语义标题生成成功: "${title}"`)
             return title
           }
-          console.warn('[Agent 标题生成] ChatGPT OAuth 返回空标题，使用本地兜底')
+          console.warn('[Agent 标题生成] ChatGPT OAuth 返回空标题')
         } catch (error) {
-          console.warn('[Agent 标题生成] ChatGPT OAuth 语义标题生成失败，使用本地兜底:', error)
+          console.warn('[Agent 标题生成] ChatGPT OAuth 语义标题生成失败:', error)
         }
-        return fallbackTitle
+        return null
       }
 
       let apiKey: string
@@ -620,7 +633,6 @@ export class AgentOrchestrator {
       if (anchorId && anchorIndex < 0) {
         console.warn('[Agent 编排] 探索分支命名未找到分叉锚点，改为仅用本次消息命名')
       } else {
-        // 找到锚点时只取分叉之后的用户消息。
         const startIndex = anchorId ? anchorIndex + 1 : 0
         for (let index = startIndex; index < groups.length; index++) {
           const group = groups[index]!
@@ -630,30 +642,30 @@ export class AgentOrchestrator {
           texts.push(extractUserText(userMessage) ?? '')
         }
       }
+      // 兼容只有 user 消息已落盘、assistant 尚未成功写入的首轮失败场景。
+      if (texts.length === 0) {
+        texts = messages
+          .filter((message): message is SDKUserMessage => message.type === 'user' && isUserInputMessage(message as SDKUserMessage))
+          .map((message) => extractUserText(message) ?? '')
+      }
     } catch (error) {
       console.warn('[Agent 编排] 读取会话转录用于命名失败，改为仅用本次消息:', error)
       texts = []
     }
-    // 兜底追加本次消息：转录可能尚未落盘（或消息正文被截断），
-    // 重复时由 collectTitleSources 按归一化文本去重。
     if (fallbackMessage) texts.push(fallbackMessage)
-    return collectTitleSources(texts)
+    const sources = collectTitleSources(texts)
+    console.log('[Agent 编排] 标题来源收集完成:', { sessionId, sourceCount: sources.length })
+    return sources
   }
 
   /**
-   * 自动命名窗口（Agent 链路）。
-   *
-   * 规则与 Chat 链路一致（见 title-generation.ts）：
-   * - 只在未定稿且当前标题不是「用户手动起的」时才插手；
-   * - 只由寒暄/命令构成的轮次不命名，等真正有内容的轮次；
-   * - 累计到 TITLE_LOCK_MIN_SOURCES 条有效来源即定稿锁定，否则下一轮继续精修；
-   * - 模型调用次数上限 TITLE_REFINE_MAX_ATTEMPTS，用尽后停止自动改名。
+   * 自动命名：首条有效用户消息触发；寒暄/命令跳过；生成成功或本地兜底后立即定稿。
    */
   private async autoGenerateTitle(sessionId: string, userMessage: string, channelId: string, modelId: string, callbacks: SessionCallbacks): Promise<void> {
-    try {
-      const meta = getAgentSessionMeta(sessionId)
-      if (!meta) return
+    const meta = getAgentSessionMeta(sessionId)
+    if (!meta) return
 
+    try {
       const isExplorationFirstNaming = Boolean(
         meta.explorationParentSessionId && !meta.explorationTitleInitializedAt,
       )
@@ -725,19 +737,16 @@ export class AgentOrchestrator {
   }
 
   /**
-   * 手动「重新生成标题」：绕过定稿锁定，用当前会话前几轮有效消息重新命名并重新锁定。
-   *
-   * 与自动窗口的区别是不受 attempts 限制（用户主动要求就允许重试一次），
-   * 且不消耗/不依赖历史尝试次数。
+   * 手动「重新生成标题」：绕过定稿锁定，用当前会话的有效用户消息重新命名并重新锁定。
    */
   async regenerateTitle(sessionId: string, channelId: string, modelId: string): Promise<string | null> {
     const meta = getAgentSessionMeta(sessionId)
     if (!meta) return null
+    const requestRevision = meta.revision ?? 0
 
     const sources = this.collectSessionTitleSources(sessionId, meta, '')
     if (sources.length === 0) {
-      console.log('[Agent 编排] 重新生成标题：没有有效来源')
-      return null
+      throw new Error('重新生成标题失败：当前会话没有可用于生成标题的有效用户消息')
     }
 
     const title = await this.generateTitle({
@@ -746,10 +755,14 @@ export class AgentOrchestrator {
       modelId,
       contextMessages: sources,
     })
-    if (!title) return null
+    if (!title) {
+      throw new Error('重新生成标题失败：标题模型没有返回可用结果')
+    }
 
     const latestMeta = getAgentSessionMeta(sessionId)
-    if (!latestMeta) return null
+    if (!latestMeta || (latestMeta.revision ?? 0) !== requestRevision) {
+      throw new Error('重新生成标题失败：生成期间会话状态已变化，请重试')
+    }
     updateAgentSessionMeta(sessionId, {
       title,
       titleAutoGeneratedAt: Date.now(),
@@ -805,6 +818,14 @@ export class AgentOrchestrator {
     retryReason: string,
   ): string {
     console.log(`[Agent 编排] ${logMessage}`)
+    if (queryOptions.isolatedRuntimeSession) {
+      // Goal runtime 的 resume 关系只属于 Goal 状态；恢复时不能清除普通 Agent 会话 metadata，
+      // 也不能把普通 transcript 作为新 Goal 的上下文来源。
+      queryOptions.resumeSessionId = undefined
+      queryOptions.resumeSessionAt = undefined
+      queryOptions.prompt = contextualMessage
+      return retryReason
+    }
     // 先持久化当前已累积的消息，确保 JSONL 文件包含最新内容
     this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
     accumulatedMessages.length = 0
@@ -840,7 +861,21 @@ export class AgentOrchestrator {
    * 只持久化 assistant、user、result 和需要长期可见的 system 消息
    * （跳过 tool_progress、compacting 等临时消息）。
    */
+  /** 用户点名的 Skill 没加载时落盘一条系统提示并推给界面；失败只记日志，不影响本轮运行。 */
+  private persistSkillRoutingNotice(sessionId: string, routed: SkillRoutingResult): void {
+    const notice = buildSkillRoutingNotice(routed)
+    if (!notice) return
+    const message = { type: 'system', subtype: 'skill_routing_notice', message: notice, _createdAt: Date.now() } as unknown as SDKMessage
+    try {
+      appendSDKMessages(sessionId, [message])
+      this.eventBus.emit(sessionId, { kind: 'sdk_message', message })
+    } catch (error) {
+      console.warn(`[Skill 路由] 未加载提示写入失败: sessionId=${sessionId}`, error)
+    }
+  }
+
   private persistSDKMessages(sessionId: string, accumulatedMessages: SDKMessage[], durationMs?: number): void {
+    if (this.nonPersistingGoalSessions.has(sessionId)) return
     if (accumulatedMessages.length === 0) return
 
     const toPersist = accumulatedMessages
@@ -905,6 +940,7 @@ export class AgentOrchestrator {
       mentionedSessionIds,
       automationContext,
     } = input
+    const goalIsolated = input.isolatedRuntimeSession === true
     const runtimeUserMessage = input.internalPrompt ?? userMessage
     let { channelId, modelId } = input
     // Pi/Claude 的错误结构和可恢复语义不同；Router 必须按本次请求 runtime 提供 helper。
@@ -940,7 +976,8 @@ export class AgentOrchestrator {
       // 因 startedAt 不匹配而丢弃终态。交给调用入口作为普通 IPC 拒绝处理。
       throw new AgentRunAlreadyActiveError(stopping)
     }
-    input = routePluginModel(`agent:${sessionId}`, input, agentRuntime)
+    if (input.goalRunId) this.goalRunOwners.set(sessionId, input.goalRunId)
+    if (goalIsolated) this.nonPersistingGoalSessions.add(sessionId)
     ;({ channelId, modelId } = input)
     let resolveCompletion!: () => void
     const completion = new Promise<void>((resolve) => {
@@ -951,6 +988,11 @@ export class AgentOrchestrator {
       promise: completion,
       resolve: resolveCompletion,
     })
+    callbacks.onRunOwned?.()
+    let resolveSkillRouting!: (snapshot: SkillRoutingSnapshot | undefined) => void
+    this.activeSkillRoutings.set(sessionId, new Promise(resolve => { resolveSkillRouting = resolve }))
+    let resolveRuntimeRegistered!: (ready: boolean) => void
+    this.activeRuntimeRegistrations.set(sessionId, new Promise(resolve => { resolveRuntimeRegistered = resolve }))
     const releaseActiveRun = (): boolean => releaseActiveSession(this.activeSessions, sessionId, runGeneration)
     type CompleteOptions = {
       stoppedByUser?: boolean
@@ -974,6 +1016,8 @@ export class AgentOrchestrator {
 
     try {
     // 0.5 清除上一轮中断标记
+      input = routePluginModel(`agent:${sessionId}`, input, agentRuntime)
+      ;({ channelId, modelId } = input)
       try {
         updateAgentSessionMeta(sessionId, { stoppedByUser: false })
       } catch {
@@ -1073,6 +1117,17 @@ export class AgentOrchestrator {
       return
     }
 
+    if (!isChannelEnabledForRuntime(channel, agentRuntime)) {
+      reportPreflightError({
+        code: 'invalid_request',
+        title: '渠道未启用当前 Agent 内核',
+        message: '请在渠道设置中启用当前内核，或重新选择可用渠道。',
+        actions: [{ key: 's', label: '打开渠道设置', action: 'open_channel_settings' }],
+        canRetry: false,
+      })
+      return
+    }
+
     console.info('[Agent 编排] 请求路由:', {
       sessionId,
       requestSource: 'agent-message',
@@ -1081,7 +1136,7 @@ export class AgentOrchestrator {
       provider: channel.provider,
     })
 
-    const credentialResult = await resolveRuntimeCredentials(channel)
+    const credentialResult = await resolveRuntimeCredentials(channel, agentRuntime)
     if (!credentialResult.ok) {
       if (credentialResult.code === 'token_expired') {
         reportPreflightError({
@@ -1186,7 +1241,8 @@ export class AgentOrchestrator {
 
     // 4. 读取已有的 SDK session ID（用于 resume）
     const sessionMeta = getAgentSessionMeta(sessionId)
-    let existingSdkSessionId = sessionMeta?.sdkSessionId
+    // Goal 只使用自己的 runtime session；普通会话的 SDK session 不得作为 resume 来源。
+    let existingSdkSessionId = input.isolatedRuntimeSession ? input.runtimeSessionId : sessionMeta?.sdkSessionId
 
     // 4.1 检测回退后的 resume 截断点（快照回退功能）
     let rewindResumeAt: string | undefined
@@ -1202,13 +1258,13 @@ export class AgentOrchestrator {
     // 6. 状态初始化
     const accumulatedMessages: SDKMessage[] = []
     let resolvedModel = modelId || DEFAULT_MODEL_ID
-    let titleGenerationStarted = false
     let agentCwd: string | undefined
     let workspaceSlug: string | undefined
     let workspace: import('@profer/shared').AgentWorkspace | undefined
 
       // 8. Claude runtime 才需要验证其 bundled CLI；Pi 是 in-process runtime。
-      const sdk = await import('@anthropic-ai/claude-agent-sdk')
+      const skillToolInventory = captureSkillToolInventory(await import('@anthropic-ai/claude-agent-sdk'))
+      const sdk = skillToolInventory.sdk
       const cliPath = agentRuntime === 'claude' ? resolveSDKCliPath() : undefined
 
       if (agentRuntime === 'claude' && (!cliPath || !existsSync(cliPath))) {
@@ -1300,6 +1356,12 @@ export class AgentOrchestrator {
         }
       }
 
+      // Pi/Claude 都要求 Write 不能隐式创建父目录；产品约定的计划目录在这里显式准备。
+      if (workspaceSlug) {
+        const planDir = join(agentCwd, '.context', 'plan')
+        if (!existsSync(planDir)) mkdirSync(planDir, { recursive: true })
+      }
+
       // 9.6 直接信任已保存的 sdkSessionId，跳过 listSessions 预验证
       // 原因：listSessions({ dir }) 基于 cwd 路径哈希查找，但 session 级别的 cwd
       // （如 ~/.proma/agent-workspaces/workspace-xxx/sessionId）与 SDK 内部存储的路径哈希可能不匹配，
@@ -1358,6 +1420,19 @@ export class AgentOrchestrator {
             ?? false,
         },
       )
+      const userBrowserContext = browserController.getUserContext(sessionId)
+      const promptMode = selectAgentPromptMode({
+        message: runtimeUserMessage,
+        hasRuntimeSession: !!existingSdkSessionId,
+        hasHistory: !existingSdkSessionId && getAgentSessionSDKMessages(sessionId).length > 1,
+        hasBrowserContext: !!userBrowserContext,
+        hasAttachedResources: !!sessionMeta?.attachedDirectories?.length || !!sessionMeta?.attachedFiles?.length,
+        hasPresetInstructions: !!sessionPreset.promptSections?.length,
+        permissionMode: presetPolicy.permissionMode,
+        request: input,
+      })
+      this.activePromptModes.set(sessionId, promptMode)
+
       const disabledToolGroups = new Set(presetPolicy.disabledToolGroups)
       const disabledTools = presetPolicy.disabledTools ? [...presetPolicy.disabledTools] : undefined
       // Claude 原生工具不经过 in-process MCP，必须通过 SDK disallowedTools 同步硬禁用。
@@ -1368,77 +1443,75 @@ export class AgentOrchestrator {
         ...(disabledTools ?? []),
       ].filter((name) => name === 'WebSearch' || name === 'WebFetch')
         .filter((name, index, names) => names.indexOf(name) === index)
-      const mcpServers = this.buildMcpServers(workspaceSlug, presetPolicy.allowedMcpServerNames ? [...presetPolicy.allowedMcpServerNames] : undefined)
+      const mcpServers = promptMode === 'light' ? {} : this.buildMcpServers(workspaceSlug, presetPolicy.allowedMcpServerNames ? [...presetPolicy.allowedMcpServerNames] : undefined)
       // 先建立运行策略快照，再执行异步 MCP 注入，避免初始化期间的队列消息失去预设过滤。
       this.activePresetPolicies.set(sessionId, withLoadedMcpServerNames(presetPolicy, Object.keys(mcpServers)))
-      if (!disabledToolGroups.has('automation')) {
-        await injectAutomationMcpServer(
-          sdk,
-          mcpServers,
-          {
-          sessionId,
-          channelId,
-          modelId,
-          workspaceId,
-          triggeredBy: input.triggeredBy as 'user' | 'automation' | undefined,
-          },
-          disabledTools,
-        )
-      }
-      if (!disabledToolGroups.has('memory')) {
-        await injectMemoryArchiveMcpServer(
-          sdk,
-          mcpServers,
-          {
-          memoryArchivePath: workspaceSlug ? getWorkspaceMemoryArchivePath(workspaceSlug) : undefined,
-          workspaceSlug,
-          },
-          disabledTools,
-        )
-        if (workspace?.type === 'team') {
-          await injectTeamMemoryMcpServer(sdk, mcpServers, { workspaceId }, disabledTools)
+      if (promptMode === 'standard') {
+        if (!disabledToolGroups.has('automation')) {
+          await injectAutomationMcpServer(
+            sdk,
+            mcpServers,
+            {
+            sessionId,
+            channelId,
+            modelId,
+            workspaceId,
+            triggeredBy: input.triggeredBy as 'user' | 'automation' | undefined,
+            },
+            disabledTools,
+          )
         }
-      }
-      if (!disabledToolGroups.has('collaboration')) {
-        await injectAgentCollaborationMcpServer(
-          sdk,
-          mcpServers,
-          {
+        if (!disabledToolGroups.has('memory')) {
+          await injectMemoryArchiveMcpServer(
+            sdk,
+            mcpServers,
+            {
+            memoryArchivePath: workspaceSlug ? getWorkspaceMemoryArchivePath(workspaceSlug) : undefined,
+            workspaceSlug,
+            },
+            disabledTools,
+          )
+        }
+        if (!disabledToolGroups.has('collaboration')) {
+          await injectAgentCollaborationMcpServer(
+            sdk,
+            mcpServers,
+            {
+            sessionId,
+            channelId,
+            modelId,
+            workspaceId,
+            permissionMode: input.permissionModeOverride,
+            triggeredBy: input.triggeredBy,
+            },
+            disabledTools,
+          )
+        }
+        if (!disabledToolGroups.has('task-graph')) {
+          await injectTaskGraphMcpServer(sdk, mcpServers, { sessionId }, disabledTools)
+        }
+        if (agentRuntime === 'claude' && input.reportGoalResult) {
+          await injectGoalMcpServer(sdk, mcpServers, {
+            iteration: input.goalIteration ?? 0,
+            report: input.reportGoalResult,
+          })
+        }
+        await injectAgentPresetMcpServer(sdk, mcpServers, {
           sessionId,
-          channelId,
-          modelId,
-          workspaceId,
-          permissionMode: input.permissionModeOverride,
-          triggeredBy: input.triggeredBy,
-          },
-          disabledTools,
-        )
-      }
-      if (!disabledToolGroups.has('task-graph')) {
-        await injectTaskGraphMcpServer(sdk, mcpServers, { sessionId }, disabledTools)
-      }
-      if (agentRuntime === 'claude' && input.reportGoalResult) {
-        await injectGoalMcpServer(sdk, mcpServers, {
-          iteration: input.goalIteration ?? 0,
-          report: input.reportGoalResult,
+          workspaceSlug,
+          source: presetOperationSource,
+          allowedOperations: allowedPresetOperations,
+          currentPresetReference,
+          userMessage,
+          pendingChange: userConfirmedPresetChange ? pendingPresetChange : undefined,
         })
-      }
-      await injectAgentPresetMcpServer(sdk, mcpServers, {
-        sessionId,
-        workspaceSlug,
-        source: presetOperationSource,
-        allowedOperations: allowedPresetOperations,
-        currentPresetReference,
-        userMessage,
-        pendingChange: userConfirmedPresetChange ? pendingPresetChange : undefined,
-      })
-      if (agentRuntime === 'claude' && !disabledToolGroups.has('automation')) {
-        await injectPlanningMcpServer(sdk, mcpServers, {
-          sessionId,
-          workspaceId,
-          isTeamWorkspace: workspace?.type === 'team',
-          disabledTools,
-        })
+        if (agentRuntime === 'claude' && !disabledToolGroups.has('automation')) {
+          await injectPlanningMcpServer(sdk, mcpServers, {
+            sessionId,
+            workspaceId,
+            disabledTools,
+          })
+        }
       }
       // 本地图片输出只在受工作区授权的会话注册；没有 workspace 的 cwd 是 homedir，不能默认授权整个用户目录。
       const attachedPreviewRoots = collectAttachedDirectories({
@@ -1460,82 +1533,98 @@ export class AgentOrchestrator {
           event: { type: 'image_generation_updated', sessionId, record },
         })
       }
-      if (agentRuntime === 'claude' && !disabledToolGroups.has('preview')) {
-        await injectAgentPreviewMcpServer(sdk, mcpServers, {
-          sessionId,
-          agentCwd: workspaceSlug ? agentCwd : '',
-          allowedRoots: previewAllowedRoots,
-          onRequest: (event) => agentFilePreviewSessionManager.waitUntilReady(event, (previewEvent) => {
-            this.eventBus.emit(sessionId, { kind: 'profer_event', event: previewEvent })
-          }),
-          onInspectRequest: (request) => agentFilePreviewSessionManager.inspect(request, (previewEvent) => {
-            this.eventBus.emit(sessionId, { kind: 'profer_event', event: previewEvent })
-          }),
-        }, disabledTools)
+      let planModeEntered = presetPolicy.permissionMode === 'plan'
+      const assertCanPresentVisualization = (): void => {
+        if (this.stoppedBySessions.has(sessionId) || this.activeSessions.get(sessionId) !== runGeneration) throw new Error('本轮已取消，不能公布可视化')
+        if (planModeEntered || (this.sessionPermissionModes.get(sessionId) ?? presetPolicy.permissionMode) === 'plan') throw new Error('计划模式不能公布可视化；请先完成计划审批')
       }
-      if (agentCwd && imageOutputAllowedRoots.length > 0 && !disabledToolGroups.has('image')) {
-        await injectAgentImageOutputMcpServer(sdk, mcpServers, {
-          agentCwd,
-          allowedRoots: imageOutputAllowedRoots,
-        }, disabledTools)
-        if (agentRuntime === 'claude' && isAgentGptImageAvailable()) {
-          await injectAgentGptImageMcpServer(sdk, mcpServers, {
+      const emitVisualizationUpdate = (record: import('@profer/shared').VisualizationRecord): void => {
+        this.eventBus.emit(sessionId, { kind: 'profer_event', event: { type: 'visualization_updated', sessionId, record } })
+      }
+      if (promptMode === 'standard') {
+        if (agentRuntime === 'claude' && workspaceSlug && agentCwd && !disabledToolGroups.has('preview')) {
+          await injectVisualizationMcpServer(sdk, mcpServers, {
+            sessionId, agentCwd, storageDir: agentSessionVisualizationsDir(sessionId), allowedRoots: previewAllowedRoots, onUpdate: emitVisualizationUpdate, assertCanPresent: assertCanPresentVisualization,
+          }, disabledTools)
+        }
+        if (agentRuntime === 'claude' && !disabledToolGroups.has('preview')) {
+          await injectAgentPreviewMcpServer(sdk, mcpServers, {
             sessionId,
-            agentCwd,
-            allowedRoots: imageOutputAllowedRoots,
-            onGenerationUpdate: emitImageGenerationUpdate,
+            agentCwd: workspaceSlug ? agentCwd : '',
+            allowedRoots: previewAllowedRoots,
+            onRequest: (event) => agentFilePreviewSessionManager.waitUntilReady(event, (previewEvent) => {
+              this.eventBus.emit(sessionId, { kind: 'profer_event', event: previewEvent })
+            }),
+            onInspectRequest: (request) => agentFilePreviewSessionManager.inspect(request, (previewEvent) => {
+              this.eventBus.emit(sessionId, { kind: 'profer_event', event: previewEvent })
+            }),
           }, disabledTools)
         }
-        if (agentRuntime === 'claude') {
-          await injectAgentSkinMcpServer(sdk, mcpServers, {
+        if (agentCwd && imageOutputAllowedRoots.length > 0 && !disabledToolGroups.has('image')) {
+          await injectAgentImageOutputMcpServer(sdk, mcpServers, {
             agentCwd,
             allowedRoots: imageOutputAllowedRoots,
-            workspaceSlug,
           }, disabledTools)
+          if (agentRuntime === 'claude' && isAgentGptImageAvailable()) {
+            await injectAgentGptImageMcpServer(sdk, mcpServers, {
+              sessionId,
+              agentCwd,
+              allowedRoots: imageOutputAllowedRoots,
+              onGenerationUpdate: emitImageGenerationUpdate,
+            }, disabledTools)
+          }
+          if (agentRuntime === 'claude') {
+            await injectAgentSkinMcpServer(sdk, mcpServers, {
+              agentCwd,
+              allowedRoots: imageOutputAllowedRoots,
+              workspaceSlug,
+            }, disabledTools)
+          }
         }
-      }
-      if (pptCapabilityActive) {
-        await injectPptDeliveryMcpServer(sdk, mcpServers, disabledTools)
+        if (pptCapabilityActive) {
+          await injectPptDeliveryMcpServer(sdk, mcpServers, disabledTools)
+        }
+
+        // Claude 通过 in-process MCP 使用与 Pi 相同的受管浏览器 controller；Pi 在后续分支注册 customTools。
+        if (agentRuntime === 'claude' && !disabledToolGroups.has('clipboard')) {
+          await injectClaudeClipboardMcpServer(sdk, mcpServers, disabledTools)
+        }
+        if (agentRuntime === 'claude' && !disabledToolGroups.has('browser')) {
+          await injectClaudeBrowserMcpServer(sdk, mcpServers, {
+            sessionId,
+            workspaceId,
+            agentCwd,
+            allowedRoots: [
+              ...new Set(
+                [
+              workspaceId ? agentCwd : undefined,
+                  ...collectAttachedDirectories({
+                    extraDirs: additionalDirectories,
+                    sessionMeta,
+                    workspaceSlug,
+                  }),
+                  ...collectProductArtifactDirectories(),
+                ].filter((root): root is string => typeof root === 'string' && root.length > 0),
+              ),
+            ],
+            executionSource: input.triggeredBy ?? 'user',
+            disabledTools,
+          })
+        }
+
       }
 
-      // Claude 通过 in-process MCP 使用与 Pi 相同的受管浏览器 controller；Pi 在后续分支注册 customTools。
-      if (agentRuntime === 'claude' && !disabledToolGroups.has('clipboard')) {
-        await injectClaudeClipboardMcpServer(sdk, mcpServers, disabledTools)
-      }
-      if (agentRuntime === 'claude' && !disabledToolGroups.has('browser')) {
-        await injectClaudeBrowserMcpServer(sdk, mcpServers, {
-          sessionId,
-          workspaceId,
-          agentCwd,
-          allowedRoots: [
-            ...new Set(
-              [
-            workspaceId ? agentCwd : undefined,
-                ...collectAttachedDirectories({
-                  extraDirs: additionalDirectories,
-                  sessionMeta,
-                  workspaceSlug,
-                }),
-                ...collectProductArtifactDirectories(),
-              ].filter((root): root is string => typeof root === 'string' && root.length > 0),
-            ),
-          ],
-          executionSource: input.triggeredBy ?? 'user',
-          disabledTools,
-        })
-      }
-
-      const pluginTools = await buildPluginAgentTools(sdk, mcpServers, (server, tool) =>
+      const pluginTools = promptMode === 'light' ? [] : await buildPluginAgentTools(sdk, mcpServers, (server, tool) =>
         isEffectiveAgentPresetMcpServerAllowed(presetPolicy, server)
         && !disabledTools?.includes(tool)
         && !disabledTools?.includes(`mcp__${server}__${tool}`),
       )
 
       // 合并外部注入的自定义 MCP 服务器（如飞书群聊工具），同样受当前预设白名单约束。
-      if (customMcpServers) {
+      if (promptMode === 'standard' && customMcpServers) {
         const customEntries = Object.entries(customMcpServers)
           .filter(([name]) => isEffectiveAgentPresetMcpServerAllowed(presetPolicy, name))
-          // 外部 MCP 不得覆盖 Profer 已注册的内置 MCP（如 automation/planning/team-memory）。
+          // 外部 MCP 不得覆盖 Profer 已注册的内置 MCP（如 automation/planning）。
           .filter(([name]) => !Object.prototype.hasOwnProperty.call(mcpServers, name))
         Object.assign(mcpServers, Object.fromEntries(customEntries))
         const rejectedCount = Object.keys(customMcpServers).length - customEntries.length
@@ -1551,14 +1640,14 @@ export class AgentOrchestrator {
       }
 
       // 11. 构建动态上下文和最终 prompt
-      const dynamicCtx = buildDynamicContext({
+      const dynamicCtx = promptMode === 'light' ? '' : buildDynamicContext({
         workspaceName: workspace?.name,
         workspaceSlug,
         agentCwd,
         mcpServerNames: Object.keys(mcpServers),
         disabledToolGroups: [...disabledToolGroups].filter((group): group is import('@profer/shared').AgentPresetToolGroup => AGENT_PRESET_CAPABILITY_GROUPS.some((item) => item.id === group)),
         disabledTools,
-        userBrowserContext: browserController.getUserContext(sessionId),
+        userBrowserContext,
       })
 
       // 11.5 注入 mention 引用指令（Skill/MCP/会话）— 仅引用当前预设实际可用的能力。
@@ -1568,18 +1657,10 @@ export class AgentOrchestrator {
         enrichedMessage = `${referencedSessionsBlock}\n\n${enrichedMessage}`
         console.log(`[Agent 编排] 注入 referenced_sessions: ${mentionedSessionIds?.length ?? 0} sessions`)
       }
-      const allowedSkillSlugs = presetPolicy.allowedSkillSlugs?.map(normalizeDefaultSkillSlug)
-      const allowedMentionedSkills = mentionedSkills?.filter((slug) =>
-        allowedSkillSlugs === undefined || allowedSkillSlugs.includes(normalizeDefaultSkillSlug(slug)),
-      ) ?? []
       const allowedMentionedMcpServers = mentionedMcpServers?.filter((name) =>
         Object.prototype.hasOwnProperty.call(mcpServers, name),
       ) ?? []
       const toolLines: string[] = []
-      for (const slug of allowedMentionedSkills) {
-        const qualifiedName = workspaceSlug ? `profer-workspace-${workspaceSlug}:${slug}` : slug
-        toolLines.push(`- Skill: ${qualifiedName}（请立即调用此 Skill）`)
-      }
       for (const name of allowedMentionedMcpServers) {
         toolLines.push(`- MCP 服务器: ${name}（请使用此 MCP 服务器的工具来完成任务）`)
       }
@@ -1588,16 +1669,16 @@ export class AgentOrchestrator {
         console.log(`[Agent 编排] 注入 mentioned_tools: ${toolLines.length} 条（原始 ${mentionedSkills?.length ?? 0} skills, ${mentionedMcpServers?.length ?? 0} MCP）`)
       }
 
-      const contextualMessage = `${dynamicCtx}
-
-${enrichedMessage}`
+      let contextualMessage = [dynamicCtx, enrichedMessage].filter(Boolean).join('\n\n')
 
       const isCompactCommand = runtimeUserMessage.trim() === '/compact'
       let finalPrompt = isCompactCommand
         ? '/compact'
-        : existingSdkSessionId
+        : promptMode === 'light' || existingSdkSessionId
           ? contextualMessage
-          : buildContextPrompt(sessionId, contextualMessage, { agentCwd })
+          : goalIsolated
+            ? contextualMessage
+            : buildContextPrompt(sessionId, contextualMessage, { agentCwd })
 
       if (existingSdkSessionId) {
         console.log(`[Agent 编排] 使用 resume 模式，SDK session ID: ${existingSdkSessionId}`)
@@ -1613,7 +1694,7 @@ ${enrichedMessage}`
       // Harness 默认启用；设置 PROFER_PI_HARNESS=0 可按进程关闭。初始化失败不能阻断普通 Agent turn。
       // Stop 可能发生在前面的异步 preflight 期间，此时不能再晚建 scope，
       // 否则 finally 会把用户主动停止的 Turn 误记为 completed。
-      if (shouldStartPiHarness(agentRuntime)) {
+      if (promptMode === 'standard' && shouldStartPiHarness(agentRuntime)) {
         if (this.stoppedBySessions.has(sessionId)) {
           harnessStopped = true
           console.log(`[Pi Harness] 检测到 scope 初始化前已停止，跳过本轮 scope (${sessionId})`)
@@ -1650,7 +1731,7 @@ ${enrichedMessage}`
       // Claude SDK 原生接收 mcpServers；Pi 必须将同一配置连接后转换为 customTools。
       // 在这里复用已完成的 Profer MCP 注入和过滤流程，避免两套配置来源漂移。
       const piCustomTools =
-        agentRuntime === 'pi'
+        agentRuntime === 'pi' && promptMode === 'standard'
         ? await (async () => {
             const piSdk = await import('@earendil-works/pi-coding-agent')
             const builtin = await buildPiBuiltinTools(piSdk, {
@@ -1659,10 +1740,12 @@ ${enrichedMessage}`
               modelId,
               agentRuntime,
               workspaceId,
-              isTeamWorkspace: workspace?.type === 'team',
               workspaceSlug,
               agentCwd,
               allowedRoots: browserAllowedRoots,
+              visualizationStorageDir: workspaceSlug && agentCwd ? agentSessionVisualizationsDir(sessionId) : undefined,
+              onVisualizationUpdate: emitVisualizationUpdate,
+              assertCanPresentVisualization,
               onPreviewRequest: (event) => agentFilePreviewSessionManager.waitUntilReady(event, (previewEvent) => {
                 this.eventBus.emit(sessionId, { kind: 'profer_event', event: previewEvent })
               }),
@@ -1681,8 +1764,8 @@ ${enrichedMessage}`
               disabledTools,
               pptCapabilityActive,
             })
-            const mcpTools = await buildPiMcpTools(mcpServers)
-            return [...builtin.tools, ...mcpTools, ...pluginTools]
+            const mcpTools = await buildPiMcpTools(mcpServers, presetPolicy)
+            return [...compactPiToolDefinitions(builtin.tools, { allowBuiltinMcpNames: true }), ...mcpTools, ...pluginTools]
           })()
         : undefined
       // 注册到 Map，支持运行中动态切换
@@ -1792,9 +1875,7 @@ ${enrichedMessage}`
         'RemoteTrigger',
       ])
 
-      /** Plan 模式是否已被 Agent 进入（初始 plan 模式时天然为 true，其他模式需 EnterPlanMode 触发） */
-      let planModeEntered = initialPermissionMode === 'plan'
-
+      // 计划状态供工具公布守卫和权限审批共同读取，避免进入计划后只更新 UI。
       const syncPlanModeFromToolUse = (toolName: string): void => {
         if (toolName === 'EnterPlanMode') {
           planModeEntered = true
@@ -1819,6 +1900,20 @@ ${enrichedMessage}`
         if (validationFailure) {
           console.warn(`[Agent 工具验证] 参数缺失: tool=${toolName}, mode=${currentMode}`)
           return validationFailure
+        }
+
+        const writeParentFailure = validateWriteTargetParent(input, agentCwd, toolName)
+        if (writeParentFailure) {
+          console.warn(`[Agent 工具验证] Write 父目录不存在: tool=${toolName}, path=${String(input.file_path ?? input.path)}`)
+          return writeParentFailure
+        }
+
+        // 非 Windows 平台上的 Windows 绝对路径会被 node:path 当成相对路径拼进会话目录，
+        // 产生误导性的「文件不存在」。在共享边界直接纠正，两套 runtime 同享。
+        const platformPathFailure = validateToolPathPlatform(toolName, input)
+        if (platformPathFailure) {
+          console.warn(`[Agent 工具验证] 平台路径不匹配: tool=${toolName}, path=${String(input.file_path ?? input.path)}`)
+          return platformPathFailure
         }
 
         // ── Write 大文件 token 截断防护 ──
@@ -1967,9 +2062,30 @@ ${enrichedMessage}`
         sessionMeta,
         workspaceSlug,
       })
-      const runtimeSkills = workspaceSlug ? prepareRuntimeSkills(workspaceSlug) : undefined
-      const projectCandidates = detectAttachedDirectoryProjects(allAdditionalDirectories)
-      const attachedDirectoriesPrompt = buildPiAdditionalDirectoriesPrompt(allAdditionalDirectories, projectCandidates)
+      const runtimeSkills = promptMode === 'standard' && workspaceSlug ? prepareRuntimeSkills(workspaceSlug) : undefined
+      // 快照与工具清单必须基于同一份冻结策略，否则依赖检查与预设过滤会各按一份规则判断。
+      const skillRoutingPolicy = this.activePresetPolicies.get(sessionId) ?? presetPolicy
+      const skillRouting = await prepareAgentSkillRouting({
+        projection: runtimeSkills,
+        policy: skillRoutingPolicy,
+        toolNames: agentRuntime === 'pi'
+          ? ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', ...(piCustomTools?.map(getMcpPolicyToolName) ?? [])]
+          : await skillToolInventory.getToolNames(mcpServers, skillRoutingPolicy),
+      })
+      resolveSkillRouting(skillRouting.snapshot)
+      const routedSkills: SkillRoutingResult = promptMode === 'light'
+        ? { prompt: '', selected: [], recommended: [], hints: [], diagnostics: [] }
+        : routeSkillsForTask(skillRouting.snapshot, { userMessage, mentionedSkills })
+      // 不污染用户持久化文本；仅本轮与 recovery prompt 携带已审查的路由结果。
+      if (!isCompactCommand && routedSkills.prompt) {
+        finalPrompt = `${routedSkills.prompt}\n\n${finalPrompt}`
+        contextualMessage = `${routedSkills.prompt}\n\n${contextualMessage}`
+      }
+      if (!isCompactCommand && !input.suppressUserMessagePersistence) this.persistSkillRoutingNotice(sessionId, routedSkills)
+      console.log('[Skill 路由]', JSON.stringify({ sessionId, allowed: skillRouting.snapshot.allowedSlugs, blocked: skillRouting.snapshot.skills.filter(skill => skill.blocked).map(skill => ({ slug: skill.slug, code: skill.blocked })), selected: routedSkills.selected, hints: routedSkills.hints, diagnostics: routedSkills.diagnostics }))
+      const skillRuntimeOptions = buildSkillRuntimeOptions(skillRouting, promptMode === 'light' ? 'pi' : agentRuntime)
+      const projectCandidates = promptMode === 'light' ? [] : detectAttachedDirectoryProjects(allAdditionalDirectories)
+      const attachedDirectoriesPrompt = promptMode === 'light' ? '' : buildPiAdditionalDirectoriesPrompt(allAdditionalDirectories, projectCandidates)
       const runtimeStatus = getRuntimeStatus()
       const shellPreference = getSettings().agentShellPreference
       const piShellSnapshot = agentRuntime === 'pi'
@@ -2000,46 +2116,47 @@ ${enrichedMessage}`
         ? piRuntimeEnv.shellPath
         : process.env.SHELL
           ?? (process.platform === 'win32' ? undefined : process.platform === 'darwin' ? '/bin/zsh' : '/bin/sh')
-      const baseSystemPrompt = buildSystemPrompt({
-        workspaceName: workspace?.name,
-        workspaceSlug,
-        sessionId,
-        permissionMode: initialPermissionMode,
-        presetName: presetPolicy.preset.name,
-        epistemicMode: promptPolicy.epistemicMode,
-        allowedPresetOperations,
-        // 方案 3：工具组禁用同步隐藏提示词段落，自动映射来自 shared 唯一事实表
-        // （task-graph→task-graph、memory→memory、collaboration→subagents、automation→automation）
-        suppressSections: [...presetPolicy.suppressPromptSections],
-        claudeAvailable,
-        deepSeekSubagentModel: modelRouting.subagentModel,
-        isPiRuntime: agentRuntime === 'pi',
-        isTeamWorkspace: workspace?.type === 'team',
-        teamMemoryAvailable: workspace?.type === 'team' && !disabledToolGroups.has('memory'),
-        disabledToolGroups: [...disabledToolGroups].filter((group): group is import('@profer/shared').AgentPresetToolGroup => AGENT_PRESET_CAPABILITY_GROUPS.some((item) => item.id === group)),
-        disabledTools: disabledTools ? [...disabledTools] : undefined,
-        pptCapabilityActive: presetPolicy.pptCapabilityActive,
-        platform: process.platform,
-        shellPath: promptShellPath,
-        agentCwd,
-        projectCandidates,
-        })
-      // Pi 没有 Claude preset；普通任务只携带核心规则，低频 SOP 按任务与实际工具恢复。
-      // 必须先压缩纯基础 Prompt，再追加附加目录和 preset 自定义段，避免标题截取误删后置上下文。
-      const compressedSystemPrompt = agentRuntime === 'pi'
-        ? buildPiTaskPrompt({
-            basePrompt: baseSystemPrompt,
-            userMessage: runtimeUserMessage,
-            toolNames: piCustomTools?.map((tool) => tool.name) ?? [],
-            forceAutomation: input.triggeredBy === 'automation',
-            pptCapabilityActive,
-          })
-        : baseSystemPrompt
-      const systemPromptAppend = compressedSystemPrompt +
-        attachedDirectoriesPrompt +
-        (presetPolicy.preset.promptSections?.length ? `\n\n${presetPolicy.preset.promptSections.join('\n\n')}` : '') +
-        (automationContext ? `\n\n## 定时任务执行上下文\n\n${automationContext}` : '')
-      const piSystemPrompt = systemPromptAppend
+      const promptAssembly = assembleAgentSystemPrompt({
+        mode: promptMode,
+        runtime: agentRuntime,
+        policy: promptPolicy,
+        context: {
+          workspaceName: workspace?.name,
+          workspaceSlug,
+          sessionId,
+          permissionMode: initialPermissionMode,
+          presetName: presetPolicy.preset.name,
+          epistemicMode: promptPolicy.epistemicMode,
+          allowedPresetOperations,
+          // 方案 3：工具组禁用同步隐藏提示词段落，自动映射来自 shared 唯一事实表
+          // （task-graph→task-graph、memory→memory、collaboration→subagents、automation→automation）
+          suppressSections: [...presetPolicy.suppressPromptSections],
+          claudeAvailable,
+          deepSeekSubagentModel: modelRouting.subagentModel,
+          isPiRuntime: agentRuntime === 'pi',
+          disabledToolGroups: [...disabledToolGroups].filter((group): group is import('@profer/shared').AgentPresetToolGroup => AGENT_PRESET_CAPABILITY_GROUPS.some((item) => item.id === group)),
+          disabledTools: disabledTools ? [...disabledTools] : undefined,
+          pptCapabilityActive: presetPolicy.pptCapabilityActive,
+          platform: process.platform,
+          shellPath: promptShellPath,
+          agentCwd,
+          projectCandidates,
+        },
+        userMessage: runtimeUserMessage,
+        toolNames: piCustomTools?.map((tool) => tool.name) ?? [],
+        forceAutomation: input.triggeredBy === 'automation',
+        skillCatalog: skillRuntimeOptions.skillCatalogPrompt,
+        attachedDirectories: attachedDirectoriesPrompt,
+        customSections: presetPolicy.preset.promptSections,
+        automationContext,
+      })
+      console.log('[Agent 提示词]', JSON.stringify({
+        sessionId, mode: promptMode, chars: promptAssembly.chars,
+        permissionMode: presetPolicy.permissionMode, hasRuntimeSession: !!existingSdkSessionId,
+        hasBrowserContext: !!userBrowserContext,
+        hasAttachedResources: !!sessionMeta?.attachedDirectories?.length || !!sessionMeta?.attachedFiles?.length || !!input.additionalDirectories?.length,
+        hasPresetInstructions: !!sessionPreset.promptSections?.length,
+      }))
       // Pi 没有 Claude 的 file-history-snapshot；在每轮开始前保存工作区基线。
       // 编排层在该轮落盘后把基线绑定到 assistant entry，回退时由 session manager 恢复。
       // 基线存放在配置目录而非会话 cwd 内：它每轮一份全量副本，放进用户工作台会污染体积、
@@ -2062,8 +2179,11 @@ ${enrichedMessage}`
       const sdkAllowedTools = sdkPermissionModeForProferMode(initialPermissionMode) === 'auto'
         ? { allowedTools: autoAllowedTools }
         : {}
+      const piNativeRetryState = { exhausted: false }
       const queryOptions: AgentQueryInput & Record<string, unknown> = {
         sessionId,
+        onRuntimeRegistered: () => resolveRuntimeRegistered(true),
+        ...(promptMode === 'light' ? { tools: [] } : {}),
         agentRuntime,
         prompt: finalPrompt,
         // Pi must receive the channel model unchanged: Claude's `[1m]` suffix is not a provider model ID.
@@ -2071,14 +2191,7 @@ ${enrichedMessage}`
         cwd: agentCwd,
         ...(agentRuntime === 'claude' && { sdkCliPath: cliPath, env: sdkEnv }),
         ...(agentRuntime === 'pi' && {
-          apiKey: runtimeCredentials.apiKey,
-          baseUrl: runtimeCredentials.baseUrl,
-          provider: channel.provider,
-          ...(runtimeCredentials.xaiCredentialMode && { xaiCredentialMode: runtimeCredentials.xaiCredentialMode }),
-          ...(runtimeCredentials.xaiOAuthCredentials && {
-            xaiOAuthCredentials: runtimeCredentials.xaiOAuthCredentials,
-            onXaiOAuthCredentialsRefreshed: (credentials: import('@profer/shared').XaiOAuthCredentials) => persistXaiOAuthCredentials(channelId, credentials),
-          }),
+          ...buildPiRuntimeCredentialOptions(channelId, runtimeCredentials),
           channelId,
           channelName: channel.name,
           // Pi 不做 SDK 侧 beta 協商，只用 1M 偏好决定注册的上下文窗口（影响压缩阈值与用量环）。
@@ -2104,15 +2217,9 @@ ${enrichedMessage}`
             },
             channel.provider,
           ),
-          deepSeekV4ThinkingEnabled: appSettings.agentThinking?.type !== 'disabled',
-          ...(runtimeSkills && {
-            additionalSkillPaths: [getRuntimeSkillsPath(runtimeSkills)],
-          }),
-          ...(presetPolicy.allowedSkillSlugs !== undefined && {
-            skillSlugs: [...presetPolicy.allowedSkillSlugs],
-          }),
-          // 用户显式 /skill: 引用：Pi adapter 会把对应 Skill 正文内联进本轮 prompt。
-          ...buildPiSkillMentionOptions(allowedMentionedSkills),
+          additionalSkillPaths: skillRuntimeOptions.additionalSkillPaths,
+          skillSlugs: skillRuntimeOptions.skillSlugs,
+          skillMentions: skillRuntimeOptions.skillMentions,
           ...(piCustomTools && { customTools: piCustomTools }),
           ...(sessionMeta?.codexFastMode && { codexFastMode: true }),
           ...(userMessage.trim() === '/compact' && { compactRequest: true }),
@@ -2131,27 +2238,18 @@ ${enrichedMessage}`
         ...(disabledClaudeTools.length > 0 && { disallowedTools: disabledClaudeTools }),
         // 默认继续使用 claude_code preset；开发者开启开放认识论后改用 Profer 完整自管 prompt，
         // 避免上游本地 preset 稀释该姿态。模型服务端更高优先级规则不受此设置影响。
-        systemPrompt: resolveAgentRuntimeSystemPrompt(
-          agentRuntime,
-          promptPolicy,
-          agentRuntime === 'pi' ? piSystemPrompt : systemPromptAppend,
-        ),
+        systemPrompt: promptAssembly.systemPrompt,
         resumeSessionId: existingSdkSessionId,
+        onRuntimeMessage: input.onRuntimeMessage,
+        ...(input.isolatedRuntimeSession && {
+          isolatedRuntimeSession: true,
+          onRuntimeSessionId: input.onRuntimeSessionId,
+        }),
         // 回退后 resume：从指定消息处继续（SDK 在同一 JSONL 内创建分支）
         ...(rewindResumeAt && { resumeSessionAt: rewindResumeAt }),
         ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
-        ...(runtimeSkills && {
-          plugins: [
-            {
-              type: 'local' as const,
-              path: runtimeSkills.path,
-            },
-          ],
-        }),
-        // 预设 Skill 白名单（Claude SDK 原生 skills 过滤：未列出的 skill 对模型隐藏且 Skill 工具拒绝；[] = 0 skill）
-        ...(presetPolicy.allowedSkillSlugs !== undefined && {
-          skills: [...presetPolicy.allowedSkillSlugs],
-        }),
+        plugins: skillRuntimeOptions.plugins,
+        skills: skillRuntimeOptions.skills,
         // 合并附加目录：用户当次输入 + 会话级 + 工作区级（详见 collectAttachedDirectories）
         ...(allAdditionalDirectories.length > 0 && {
           additionalDirectories: allAdditionalDirectories,
@@ -2189,7 +2287,10 @@ ${enrichedMessage}`
           // 视为替换，此时旧 entry bindings 属于另一棵 Pi tree，必须原子替换而非合并。
           const artifactReplaced = !!piSessionFile && latestSessionMeta?.piSessionFile !== piSessionFile
           capturedSdkSessionId = sdkSessionId
-          if (isNewSessionId || artifactReplaced) {
+          if (input.isolatedRuntimeSession && isNewSessionId) {
+            input.onRuntimeSessionId?.(sdkSessionId, piSessionFile)
+          }
+          if (!input.isolatedRuntimeSession && (isNewSessionId || artifactReplaced)) {
             try {
               updateAgentSessionMeta(sessionId, {
                 sdkSessionId,
@@ -2200,15 +2301,6 @@ ${enrichedMessage}`
             } catch (err) {
               console.error(`[Agent 编排] 保存 SDK session_id 失败:`, err)
             }
-          }
-
-          // SDK 初始化完成后立即触发标题生成，使多会话并发时用户能快速区分
-          // goal 等机器注入的 prompt 不作为命名来源，改用调用方提供的干净文本（如 goal 本身）
-          if (!titleGenerationStarted) {
-            titleGenerationStarted = true
-            this.autoGenerateTitle(sessionId, input.titleSourceText ?? userMessage, channelId, resolvedModel, callbacks).catch((err) =>
-              console.error('[Agent 编排] 标题生成未捕获异常:', err),
-            )
           }
         },
         onModelResolved: (model: string) => {
@@ -2285,6 +2377,9 @@ ${enrichedMessage}`
             event: { type: 'retry', ...normalizedRetry },
           })
         },
+        onNativeRetryOutcome: (outcome: import('./adapters/pi-retry-control').PiNativeRetryOutcome) => {
+          piNativeRetryState.exhausted = outcome === 'exhausted'
+        },
       }
 
       console.log(`[Agent 编排] 开始通过 Adapter 遍历事件流...`)
@@ -2304,6 +2399,7 @@ ${enrichedMessage}`
       /** 前 N 次自动重试静默执行，不向 UI 发送事件，减少网络瞬断时的界面噪音 */
       const RETRY_VISIBILITY_THRESHOLD = 0
       const canAutoRetry = (attempt: number, ...errorMessages: Array<string | undefined>): boolean => {
+        if (piNativeRetryState.exhausted) return false
         retryMaxAttempts = Math.min(retryMaxAttempts, getMaxAutoRetries(channel.provider, ...errorMessages))
         return attempt <= retryMaxAttempts && retryDelayElapsedMs < MAX_AUTO_RETRY_WAIT_MS
       }
@@ -2348,7 +2444,7 @@ ${enrichedMessage}`
         }
         const nextChannel = getChannelById(channelId)
         const nextCredentials = nextChannel
-          ? await resolveRuntimeCredentials(nextChannel)
+          ? await resolveRuntimeCredentials(nextChannel, agentRuntime)
           : { ok: false as const, code: 'token_expired' as const }
         if (!nextCredentials.ok) return false
 
@@ -2356,8 +2452,7 @@ ${enrichedMessage}`
         sdkEnv = await this.buildSdkEnv(runtimeCredentials)
         if (agentRuntime === 'claude') queryOptions.env = sdkEnv
         if (agentRuntime === 'pi') {
-          queryOptions.apiKey = runtimeCredentials.apiKey
-          queryOptions.baseUrl = runtimeCredentials.baseUrl
+          Object.assign(queryOptions, buildPiRuntimeCredentialOptions(channelId, runtimeCredentials))
         }
         console.warn('[Agent 编排] 模型数据面失败，已切换到 Relay 重试')
         return true
@@ -2370,7 +2465,20 @@ ${enrichedMessage}`
 
       const queryStartedAt = Date.now()
 
+      const stoppedBeforeQuery = this.consumeStoppedByUser(sessionId)
+      if (stoppedBeforeQuery) {
+        completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: true, startedAt: streamStartedAt })
+        return
+      }
       for (let attempt = 1; attempt <= MAX_AUTO_RETRIES + 1; attempt++) {
+        if (this.stoppedBySessions.has(sessionId) || this.activeSessions.get(sessionId) !== runGeneration) {
+          const wasStoppedByUser = this.consumeStoppedByUser(sessionId)
+          completeRun(getAgentSessionMessages(sessionId), {
+            stoppedByUser: wasStoppedByUser,
+            startedAt: streamStartedAt,
+          })
+          return
+        }
         // 非首次尝试：等待 + 发送重试事件到 UI
         if (attempt > 1) {
           if (skipNextRetryDelay) {
@@ -2447,6 +2555,7 @@ ${enrichedMessage}`
         let stopResolved = false
 
         try {
+          piNativeRetryState.exhausted = false
           // 获取异步迭代器（手动 .next() 以支持 Promise.race 中断）
           const queryIterable = this.adapter.query(queryOptions)
           const queryIterator = queryIterable[Symbol.asyncIterator]()
@@ -2978,6 +3087,8 @@ ${enrichedMessage}`
               }
             }
 
+            // 调用方可观察完整 runtime 消息；普通 Goal 使用当前会话上下文并正常持久化。
+            input.onRuntimeMessage?.(msg)
             // 累积 assistant 和 user 消息用于持久化
             // - 跳过 replay 消息，避免 resume 时重复写入
             // - 对 user 消息，仅累积含 tool_result 的（初始用户消息已在步骤 5 手动持久化）
@@ -3019,6 +3130,7 @@ ${enrichedMessage}`
 
             // Turn 结束时：持久化累积消息（正常情况下已由 checkpoint 清空；保留兜底语义）。
             if (msg.type === 'result') {
+              piHarnessScope?.observeResult(msg)
               capturedResultSubtype = (msg as { subtype?: string }).subtype
               // SDK 的 SDKResultError 在 errors[] 中携带真实错误原因（error_during_execution 等场景），
               // 捕获后透传到前端展示具体错误。
@@ -3095,6 +3207,11 @@ ${enrichedMessage}`
           }
 
           const wasStoppedByUser = this.consumeStoppedByUser(sessionId)
+          if (input.goalRunId && wasStoppedByUser) {
+            callbacks.onError('Goal 运行已停止')
+            completeRun(getAgentSessionMessages(sessionId), { stoppedByUser: true, startedAt: streamStartedAt })
+            return
+          }
 
           // 正常完成 — 如果之前有重试，发送 retry_cleared
           if (!wasStoppedByUser && retryAttemptsScheduled > 0) {
@@ -3108,6 +3225,16 @@ ${enrichedMessage}`
 
           // 15. 持久化 assistant 消息
           this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
+
+          if (!wasStoppedByUser && !capturedResultErrors?.length) {
+            await this.autoGenerateTitle(
+              sessionId,
+              input.titleSourceText ?? userMessage,
+              channelId,
+              resolvedModel,
+              callbacks,
+            )
+          }
 
           try {
             updateAgentSessionMeta(sessionId, wasStoppedByUser ? { stoppedByUser: true } : {})
@@ -3416,6 +3543,15 @@ ${enrichedMessage}`
       // 只在 generation 匹配时才清理，防止旧流的 finally 误删新流的注册
       // 只有仍持有本 generation 的 finally 能释放并清理 session scoped state。
       if (releaseActiveRun()) {
+        if (input.goalRunId && this.goalRunOwners.get(sessionId) === input.goalRunId) {
+          this.goalRunOwners.delete(sessionId)
+        }
+        this.nonPersistingGoalSessions.delete(sessionId)
+        resolveSkillRouting(undefined)
+        resolveRuntimeRegistered(false)
+        this.activeRuntimeRegistrations.delete(sessionId)
+        this.activeSkillRoutings.delete(sessionId)
+        this.activePromptModes.delete(sessionId)
         this.activePresetPolicies.delete(sessionId)
         this.sessionPermissionModes.delete(sessionId)
         this.queuedMessageUuids.delete(sessionId)
@@ -3431,6 +3567,7 @@ ${enrichedMessage}`
         // ownership 已释放，renderer 此时收到 STREAM_COMPLETE 后可安全开始下一轮。
         // 若 Stop 发生在 query/setup 尚未进入统一终态处理前，清掉残留标记，
         // 防止下一轮被误判为“启动前已停止”。
+        const stoppedDuringRun = this.stoppedBySessions.has(sessionId)
         this.stoppedBySessions.delete(sessionId)
         if (pendingTerminalCompletion) {
           const completion = pendingTerminalCompletion
@@ -3438,7 +3575,8 @@ ${enrichedMessage}`
           // 后台任务续轮（backgroundTasksPending 的 idleComplete）走 onComplete 直达、不经此路径，
           // 因此不写 meta、不追加记录、不透传 endReason ——「假结束」不误判。
           const opts: CompleteOptions = completion.opts ?? {}
-          const stopped = opts.stoppedByUser === true
+          const stopped = opts.stoppedByUser === true || stoppedDuringRun
+          if (stopped) opts.stoppedByUser = true
           const hasError = runEndedWithError
           const rawSubtype = opts.resultSubtype
           // D3 防御：干净结束（无 subtype、无错误、未停止）视为 success，避免被误判为 unknown/中断
@@ -3557,6 +3695,18 @@ ${enrichedMessage}`
     console.log(`[Agent 编排] 已请求中止会话: ${sessionId}`)
   }
 
+  /** Goal runId 归属检查；不带 runId 时只检查是否存在 Goal owner。 */
+  isGoalRunActive(sessionId: string, runId?: string): boolean {
+    const owner = this.goalRunOwners.get(sessionId)
+    return owner !== undefined && this.activeSessions.has(sessionId) && (runId === undefined || owner === runId)
+  }
+
+  /** 只停止匹配 runId 的 Goal owner，并等待 owner finally 释放运行锁。 */
+  async stopGoalRunAndWait(sessionId: string, runId: string, timeoutMs = 15_000): Promise<void> {
+    if (!this.isGoalRunActive(sessionId, runId)) return
+    await this.stopAndWait(sessionId, timeoutMs)
+  }
+
   /** 检查指定会话是否正在处理或停止中。 */
   isActive(sessionId: string): boolean {
     return this.activeSessions.has(sessionId)
@@ -3598,8 +3748,9 @@ ${enrichedMessage}`
    *
    * 文件恢复通过解析 SDK JSONL 中的快照完成，无需运行中的 Query。
    * 文件恢复失败时仍然截断对话（优雅降级）。
+   * 省略 `assistantMessageUuid` 时清空整段对话（见 `resetClaudeSession`）。
    */
-  async rewindSession(sessionId: string, assistantMessageUuid: string): Promise<RewindSessionResult> {
+  async rewindSession(sessionId: string, assistantMessageUuid?: string): Promise<RewindSessionResult> {
     // 0. 阻止运行中会话回退（JSONL 并发写入会损坏文件）
     if (this.activeSessions.has(sessionId)) {
       throw new Error('会话正在运行中，请停止后再回退')
@@ -3613,11 +3764,17 @@ ${enrichedMessage}`
     // Pi 使用自己的 session artifact + entry binding，不依赖 Claude SDK session ID。
     // 旧会话若尚未生成映射，会在 rewindPiSession 内返回可操作的恢复提示。
     if (isPiSession) {
-      return rewindPiSession(sessionId, assistantMessageUuid, sessionMeta)
+      return assistantMessageUuid
+        ? rewindPiSession(sessionId, assistantMessageUuid, sessionMeta)
+        : resetPiSession(sessionId, sessionMeta)
     }
-    if (!sessionMeta.sdkSessionId) {
-      throw new Error('Claude 会话没有 SDK session ID，无法回退；请先继续一次对话生成可恢复的 SDK 会话')
+    // 没有锚点（首轮就失败）：清空整段对话，回到会话起点
+    if (!assistantMessageUuid) {
+      return resetClaudeSession(sessionId, sessionMeta)
     }
+    // sdkSessionId 只影响「文件恢复」和「resume 截断点」：对话截断本身只看 Profer JSONL。
+    // 所以缺失时降级为「只截断对话」而不是直接拒绝（例如 session-not-found 恢复过它的会话）。
+    const sdkSessionId = sessionMeta.sdkSessionId
     // 0.5 从 SDK session JSONL 解析对应的 user message UUID（rewindFiles 需要）
     let projectDir: string | undefined
     let workspaceSlug: string | undefined
@@ -3628,7 +3785,9 @@ ${enrichedMessage}`
         projectDir = getAgentSessionWorkspacePath(ws.slug, sessionMeta.id)
       }
     }
-    const userMessageUuid = resolveUserUuidFromSDK(sessionMeta.sdkSessionId, assistantMessageUuid, projectDir, sessionMeta.forkSourceSdkSessionId)
+    const userMessageUuid = sdkSessionId
+      ? resolveUserUuidFromSDK(sdkSessionId, assistantMessageUuid, projectDir, sessionMeta.forkSourceSdkSessionId)
+      : undefined
     console.log(
       `[Agent 编排] 回退: 解析 user uuid=${userMessageUuid || '未找到'} (assistant uuid=${assistantMessageUuid}, forkSource=${sessionMeta.forkSourceSdkSessionId ?? 'none'})`,
     )
@@ -3643,7 +3802,11 @@ ${enrichedMessage}`
           deletions?: number
         }
       | undefined
-    if (userMessageUuid === '__LAST_TURN__') {
+    if (!sdkSessionId) {
+      // 没有 SDK session 就没有 file-history-snapshot，只能降级；对话仍按下方完整截断
+      console.log(`[Agent 编排] 回退: 会话没有 SDK session ID，跳过文件恢复`)
+      fileRewindResult = { canRewind: false, error: '会话没有 SDK session ID，文件未回退' }
+    } else if (userMessageUuid === '__LAST_TURN__') {
       // 最后一个 turn：当前文件系统已是该 turn 完成后的状态，无需回退文件
       console.log(`[Agent 编排] 回退: 最后一个 turn，跳过文件恢复`)
       fileRewindResult = { canRewind: true, filesChanged: [] }
@@ -3662,7 +3825,7 @@ ${enrichedMessage}`
           `[Agent 编排] 回退: 直接从 snapshot 恢复文件 (cwd=${cwd}, forkSource=${sessionMeta.forkSourceSdkSessionId ?? 'none'}, attachedDirs=${rewindAttachedDirs.length})`,
         )
         fileRewindResult = rewindFilesFromSnapshot(
-          sessionMeta.sdkSessionId,
+          sdkSessionId,
           userMessageUuid,
           cwd,
           projectDir,
@@ -3685,9 +3848,11 @@ ${enrichedMessage}`
     // 2. 截断 Profer JSONL
     const kept = truncateSDKMessages(sessionId, assistantMessageUuid)
 
-    // 3. 记录 resumeAtMessageUuid，下次发消息时 SDK 从此点继续
+    // 3. 记录 resumeAtMessageUuid，下次发消息时 SDK 从此点继续。
+    //    没有 sdkSessionId 时不存在可 resume 的 SDK 会话（清掉残留值），
+    //    下一轮会作为新 SDK 会话按已截断的 Profer 历史回填上下文。
     updateAgentSessionMeta(sessionId, {
-      resumeAtMessageUuid: assistantMessageUuid,
+      resumeAtMessageUuid: sdkSessionId ? assistantMessageUuid : undefined,
     })
 
     console.log(`[Agent 编排] 回退完成: sessionId=${sessionId}, 保留 ${kept.length} 条消息, 文件恢复=${fileRewindResult?.canRewind ?? '跳过'}`)
@@ -3759,7 +3924,23 @@ ${enrichedMessage}`
     const workspaceSlug = workspaceId ? getAgentWorkspace(workspaceId)?.slug : undefined
     // 运行中的 Agent 收到队列消息时也必须看到用户刚刚主动打开的页面。
     // 未打开浏览器时保持既有消息形态，避免给每条插队消息重复注入无关环境块。
+    const [skillSnapshot, runtimeRegistered] = await Promise.all([
+      this.activeSkillRoutings.get(sessionId), this.activeRuntimeRegistrations.get(sessionId),
+    ])
+    if (!skillSnapshot || !runtimeRegistered || this.activeSessions.get(sessionId) !== queueRunId || this.stoppedBySessions.has(sessionId)) {
+      uuids.delete(uuid)
+      throw new Error('当前 Skill 能力快照未就绪或所属运行已结束，请在下一轮重试')
+    }
     const activePolicy = this.activePresetPolicies.get(sessionId)
+    if (this.activePromptModes.get(sessionId) === 'light'
+      && selectAgentPromptMode({
+        message: rawText ?? text, hasRuntimeSession: false,
+        permissionMode: activePolicy?.permissionMode ?? 'auto',
+        request: { mentionedSkills, mentionedMcpServers, mentionedSessionIds },
+      }) === 'standard') {
+      uuids.delete(uuid)
+      throw new Error('当前简短对话即将结束；请在回复结束后发送任务，以加载完整的任务上下文。')
+    }
     const userBrowserContext = browserController.getUserContext(sessionId)
     let enrichedText = userBrowserContext
       ? `${buildDynamicContext({ userBrowserContext, mcpServerNames: activePolicy?.loadedMcpServerNames ? [...activePolicy.loadedMcpServerNames] : undefined, disabledToolGroups: activePolicy ? [...activePolicy.disabledToolGroups] : undefined, disabledTools: activePolicy?.disabledTools })}\n\n${text}`
@@ -3768,17 +3949,13 @@ ${enrichedMessage}`
     if (referencedSessionsBlock) {
       enrichedText = `${referencedSessionsBlock}\n\n${enrichedText}`
     }
-    const allowedMentionedSkills = mentionedSkills?.filter((slug) =>
-      activePolicy?.allowedSkillSlugs === undefined || activePolicy.allowedSkillSlugs.map(normalizeDefaultSkillSlug).includes(normalizeDefaultSkillSlug(slug)),
-    ) ?? []
+    const routedSkills = routeSkillsForTask(skillSnapshot, { userMessage: rawText ?? text, mentionedSkills })
+    if (routedSkills.prompt) enrichedText = `${routedSkills.prompt}\n\n${enrichedText}`
+    console.log('[Skill 路由 队列]', JSON.stringify({ sessionId, selected: routedSkills.selected, hints: routedSkills.hints, diagnostics: routedSkills.diagnostics }))
     const allowedMentionedMcpServers = mentionedMcpServers?.filter((name) =>
       activePolicy?.loadedMcpServerNames?.includes(name) === true,
     ) ?? []
     const toolLines: string[] = []
-    for (const slug of allowedMentionedSkills) {
-      const qualifiedName = workspaceSlug ? `profer-workspace-${workspaceSlug}:${slug}` : slug
-      toolLines.push(`- Skill: ${qualifiedName}（请立即调用此 Skill）`)
-    }
     for (const name of allowedMentionedMcpServers) {
       toolLines.push(`- MCP 服务器: ${name}（请使用此 MCP 服务器的工具来完成任务）`)
     }
@@ -3810,8 +3987,8 @@ ${enrichedMessage}`
 
       await this.adapter.sendQueuedMessage(sessionId, sdkMessage, {
         interrupt: opts?.interrupt,
-        // 队列消息复用同一轮已按预设 policy 过滤的 skill mentions，保持与主轮一致的正文展开能力。
-        ...buildPiSkillMentionOptions(allowedMentionedSkills),
+        // 已按冻结快照处理引用/推荐，禁止 adapter 再扫描 enrichedText 中的历史示例。
+        skillMentions: [],
       })
       // 消息已注入 Agent 会话（Pi interrupt 路径 reservation 已消费）。
       // 即使 run 在 await 期间已停止/被替换，本条消息仍必须持久化到同一会话文件，
@@ -3838,6 +4015,8 @@ ${enrichedMessage}`
         // 注入已成功，uuid 必须保留（幂等短路），否则重试会重复注入；JSONL 缺口由会话文件后续 append 兜底。
         console.error(`[Agent 编排] 已注入消息持久化失败 (uuid=${uuid}, sessionId=${sessionId}):`, persistError)
       }
+      // 提示必须排在用户消息之后落盘，否则重载后会显示在它前面。
+      this.persistSkillRoutingNotice(sessionId, routedSkills)
     } catch (error) {
       // 仅当注入本身失败（sendQueuedMessage reject，消息未被 Agent 接收）时释放 uuid 允许重试
       uuids.delete(uuid)

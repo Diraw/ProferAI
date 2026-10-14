@@ -9,7 +9,7 @@ import { useAtomValue, useSetAtom } from 'jotai'
 import { FileDiff, FolderOpen, FolderTree, PanelRightClose } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { interfaceVariantAtom } from '@/atoms/theme'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
 import { agentDiffUnseenChangesAtom, currentAgentSessionIdAtom, type AgentSidePanelTab } from '@/atoms/agent-atoms'
 
 type DiffPanelTab = AgentSidePanelTab

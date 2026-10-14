@@ -8,38 +8,8 @@ import type { AgentRuntime } from './agent-provider'
 
 // ===== Agent 工作区 =====
 
-/** 工作区类型 */
-export type WorkspaceType = 'personal' | 'team'
-
-/** 用户在团队工作区中的角色 */
-export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer'
-
-/** 工作区可见性 */
-export type WorkspaceVisibility = 'private' | 'team' | 'public'
-
-/** 团队工作区品牌定制 */
-export interface WorkspaceBrand {
-  /** 工作区图标（emoji 或 data URL） */
-  icon?: string
-  /** 品牌色（HSL 格式，如 "220 15% 30%"） */
-  primaryColor?: string
-  /** 品牌 Logo URL */
-  logoUrl?: string
-  /** 自定义应用名称（替换 "Profer"） */
-  appName?: string
-  /** 自定义 CSS 注入 */
-  customCss?: string
-}
-
-/** 团队成员摘要（仅缓存展示用） */
-export interface WorkspaceMemberSummary {
-  userId: string
-  displayName: string
-  avatar: string
-  role: WorkspaceRole
-  joinedAt: number
-  isOnline?: boolean
-}
+/** Agent 工作区类型；团队工作区已下线，新建工作区仅为个人。 */
+export type WorkspaceType = 'personal'
 
 /** Agent 工作区 */
 export interface AgentWorkspace {
@@ -54,7 +24,7 @@ export interface AgentWorkspace {
   /** 更新时间戳 */
   updatedAt: number
 
-  /** 工作区类型（个人/团队） */
+  /** 工作区类型 */
   type?: WorkspaceType
 
   // 本地收纳（个人工作区归档，与会话归档同构）
@@ -71,28 +41,9 @@ export interface AgentWorkspace {
   restoredAt?: number
   /** 冷静期到期时间（仅 deleted 状态下有意义） */
   expiresAt?: number
-
-  // 团队工作区专属字段（type === 'team' 时有效）
-  /** 团队 ID */
-  teamId?: string
-  /** 当前用户在此工作区的角色 */
-  role?: WorkspaceRole
-  /** 工作区可见性 */
-  visibility?: WorkspaceVisibility
-  /** 最后同步时间戳 */
-  lastSyncedAt?: number
-  /** 待同步变更数 */
-  pendingSyncCount?: number
-  /** 工作区品牌配置 */
-  brand?: WorkspaceBrand
-  /** 团队成员摘要 */
-  memberSummary?: WorkspaceMemberSummary[]
 }
 
-// ===== SDK 新增类型声明（0.2.52 ~ 0.2.63） =====
-
-/**
- * 思考模式配置
+/** 思考模式配置
  *
  * 控制 Claude 的推理/思考行为：
  * - adaptive: Claude 自行决定何时以及思考多少（Opus 4.6+ 默认）
@@ -669,8 +620,9 @@ export type ProferEvent =
   | { type: 'context_window'; contextWindow: number }
   | { type: 'permission_mode_changed'; mode: ProferPermissionMode }
   | { type: 'image_generation_updated'; sessionId: string; record: AgentImageGenerationCard }
+  | { type: 'visualization_updated'; sessionId: string; record: import('./visualization').VisualizationRecord }
   | { type: 'title_updated'; title: string }
-  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; parentSessionId?: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; session?: AgentSessionMeta }
+  | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; parentSessionId?: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; session?: AgentSessionMeta; initiator?: AgentRunInitiator }
   | { type: 'delegation_session_updated'; session: AgentSessionMeta }
   // 跨端会话元数据同步：Pocket 远程命令修改会话后立即通知桌面与其他 Pocket 客户端。
   | { type: 'session_updated'; session: AgentSessionMeta }
@@ -690,7 +642,47 @@ export type ProferEvent =
   | { type: 'preview_inspection_requested'; request: import('./agent-preview').AgentFilePreviewInspectRequest }
 
 /** 外部入口触发 Agent 运行的来源 */
-export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'bridge' | 'delegation' | 'automation'
+export type AgentExternalRunSource = 'feishu' | 'dingtalk' | 'wechat' | 'bridge' | 'delegation' | 'automation' | 'goal'
+
+/**
+ * 规范化的「这一轮 run 由谁发起」信号（单一定义，主进程与渲染层共用）。
+ *
+ * 只服务一个产品口径：会话未读的产生与清除。
+ * - `'user'`：桌面用户直接发送（IPC `SEND_MESSAGE`）或 Pocket 用户发送新消息；启动时清未读。
+ * - `'delegation'`：委派子会话 / 父会话自动续跑（按会话 `delegationDepth` 判定是否产生未读）。
+ * - 其余来源完成时照常产生未读，但**不清**既有未读。
+ */
+export type AgentRunInitiator = 'user' | 'automation' | 'external' | 'goal' | 'delegation'
+
+/**
+ * 解析一次 run 的发起者；在 run 启动处解析一次，run 内不变。
+ *
+ * 优先级（先看有没有 headless source：只要走了 headless，就不是桌面用户直接发送）：
+ * 1. `headlessSource`：`delegation → delegation`；`automation → automation`；
+ *    `feishu | dingtalk | wechat | bridge → external`；
+ * 2. 否则按 `triggeredBy`：`automation → automation`；`delegation → delegation`；
+ *    `goal → goal`；`user | undefined → user`。
+ *
+ * 需要把 headless 运行标成「用户发起」（Pocket `send_message`）或标成非用户发起
+ * （渲染层队列自动续跑）时，用 `AgentSendInput.initiator` 显式覆盖，不改这里的映射规则。
+ *
+ * fail-safe：调用方必须保证「headless 但没有显式 source」时按 `'external'` 处理
+ * （见 `runAgentHeadless` 的 `?? 'external'` 兜底），绝不默认成 `'user'`。
+ */
+export function resolveRunInitiator(
+  triggeredBy: AgentSendInput['triggeredBy'],
+  headlessSource?: AgentExternalRunSource,
+): AgentRunInitiator {
+  if (headlessSource) {
+    if (headlessSource === 'delegation') return 'delegation'
+    if (headlessSource === 'automation') return 'automation'
+    return 'external'
+  }
+  if (triggeredBy === 'automation') return 'automation'
+  if (triggeredBy === 'delegation') return 'delegation'
+  if (triggeredBy === 'goal') return 'goal'
+  return 'user'
+}
 
 /** 可失效并重新拉取的目录类型（Pocket 收到失效通知后按 catalog 重新拉取列表）。 */
 export type AgentCatalogKind = 'channels' | 'presets' | 'workspace_capabilities' | 'workspaces'
@@ -1181,7 +1173,7 @@ export interface SkillConflict {
 }
 
 /** 技能存储域 */
-export type SkillDomain = 'local' | 'workspace-team' | 'global'
+export type SkillDomain = 'local' | 'global'
 
 /** 技能发布状态 */
 export type SkillPublishState = 'draft' | 'pending-review' | 'published' | 'deprecated'
@@ -1270,12 +1262,49 @@ export interface WorkspaceCapabilities {
 
 // ===== Goal 长时自主执行 =====
 
-export type AgentGoalStatus = 'active' | 'paused' | 'completed' | 'blocked' | 'failed' | 'stopped'
+export type AgentGoalStatus = 'active' | 'paused' | 'completed' | 'blocked' | 'failed' | 'stopped' | 'stopping' | 'budget_limited'
+
+export type AgentGoalReasonCode =
+  | 'created'
+  | 'resumed'
+  | 'user_pause'
+  | 'user_stop'
+  | 'app_restart'
+  | 'blocked'
+  | 'failed'
+  | 'completed'
+  | 'budget_limited'
+  | 'cleared'
+  | 'superseded'
+  | 'user_interrupt'
+  | 'retry_exhausted'
+  | 'run_error'
+  | 'unknown'
+
+export type AgentGoalLifecycleTarget = AgentGoalStatus | 'cleared'
+
+export interface AgentGoalLifecycleEvent {
+  id: string
+  goalId: string
+  sessionId: string
+  from: AgentGoalStatus | null
+  to: AgentGoalLifecycleTarget
+  reason: AgentGoalReasonCode
+  detail?: string
+  revision: number
+  at: number
+  runId?: string
+}
 
 export interface AgentGoalLimits {
-  maxIterations: number
+  /** 可选轮次上限；未设置表示不限。 */
+  maxIterations?: number
+  /** 连续无进展轮次上限（空回复 / 工具全部失败 / 运行失败）。 */
   maxConsecutiveFailures: number
-  maxDurationMs: number
+  /** 可选净运行时长上限；未设置表示不限，只在轮次边界检查。 */
+  maxDurationMs?: number
+  /** 可选 token 预算；在 runtime 用量记账边界核对。 */
+  maxTokens?: number
 }
 
 /**
@@ -1297,6 +1326,8 @@ export interface AgentGoalIterationRecord {
   startedAt: number
   finishedAt: number
   status: AgentGoalIterationResult['status']
+  outcome?: AgentGoalIterationResult['outcome']
+  error?: string
   summary: string
   evidence: string[]
   usage?: AgentGoalUsage
@@ -1318,17 +1349,43 @@ export interface AgentGoalState {
   startedAt: number
   updatedAt: number
   limits: AgentGoalLimits
+  /** 会话内单调增长的版本，用于拒绝迟到事件。 */
+  revision?: number
+  /** 当前执行 owner；停止超时后也保留，直到 runtime 返回。 */
+  activeRunId?: string
+  /** 累计净执行时长，不包含暂停/等待空闲时间。 */
+  elapsedMs?: number
   /** 目标契约；纯文本目标（无 @verify/@constraint/@stop 标记）时为空 */
   contract?: AgentGoalContract
   /** 迭代历史，最多保留最近若干条（见 GOAL_HISTORY_LIMIT） */
   history?: AgentGoalIterationRecord[]
+  /** 旧版独立 runtime ID，仅兼容历史文件；同会话 Goal 沿用正常上下文。 */
+  runtimeSessionId?: string
+  /** 旧版独立 runtime 文件，仅兼容历史状态。 */
+  runtimeSessionFile?: string
   /** Goal 累计 token 用量；没有 runtime usage 时保持为空 */
   usage?: AgentGoalUsage
   /** Goal 受阻时自动创建/更新的规划中心 Todo ID */
   blockedTodoId?: string
   lastSummary?: string
   lastEvidence?: string[]
+  /** Goal 生命周期审计轨迹，最多保留最近若干条。 */
+  lifecycle?: AgentGoalLifecycleEvent[]
+  /** 结构化停止/暂停原因；stopReason 保留用于兼容旧数据和展示。 */
+  reasonCode?: AgentGoalReasonCode
+  reasonDetail?: string
   stopReason?: string
+  /** 可重试错误的自动重试进度；成功一轮或离开 active 后清空。 */
+  retry?: AgentGoalRetryState
+  /** Goal 仍为 active 但暂不运行的原因（如计划模式下等待切换）。 */
+  waiting?: 'plan_mode'
+}
+
+export interface AgentGoalRetryState {
+  /** 已安排的第几次重试（1 起） */
+  attempt: number
+  nextAt: number
+  error: string
 }
 
 export type AgentGoalCommand =
@@ -1341,6 +1398,10 @@ export interface AgentGoalIterationResult {
   status: 'continue' | 'complete' | 'blocked'
   summary: string
   evidence: string[]
+  outcome?: 'success' | 'failed' | 'stopped' | 'deferred'
+  error?: string
+  /** 运行级错误分类：retryable 退避重试，fatal 直接暂停；两者都不计入无进展次数。 */
+  errorKind?: 'retryable' | 'fatal'
   /** 本轮模型 usage（由 runtime result/assistant message 归一化） */
   usage?: AgentGoalUsage
 }
@@ -1348,7 +1409,8 @@ export interface AgentGoalIterationResult {
 export type AgentGoalContinuation =
   | { action: 'continue'; consecutiveFailures: number }
   | { action: 'complete'; consecutiveFailures: number }
-  | { action: 'blocked' | 'failed' | 'limit_reached'; consecutiveFailures: number; reason: string }
+  | { action: 'blocked' | 'failed' | 'limit_reached' | 'stopped'; consecutiveFailures: number; reason: string }
+  | { action: 'deferred'; consecutiveFailures: number }
 
 // ===== Agent 发送输入 =====
 
@@ -1392,6 +1454,13 @@ export interface AgentSendInput {
   goalIteration?: number
   /** 标题来源覆盖文本：goal 等机器注入的 prompt 不应用作自动命名来源。 */
   titleSourceText?: string
+  /**
+   * 规范化运行发起者，用于覆盖 `resolveRunInitiator(triggeredBy, source)` 的推断结果。
+   * 只在这两种情况下设置：
+   * - Pocket `send_message`：`source` 恒为 `'bridge'`，但语义上是用户自己发送 → `'user'`；
+   * - 渲染层队列自动续跑：复用用户发送链路，但不是用户发起 → `'automation'`（不清未读）。
+   */
+  initiator?: AgentRunInitiator
   /** 前端预生成的消息 UUID（透传到持久化消息，用于队列乐观气泡与消息重载按 uuid 合并去重） */
   uuid?: string
   /** Goal 内部 prompt：传给 runtime，但不作为普通用户消息持久化。 */
@@ -1400,6 +1469,21 @@ export interface AgentSendInput {
   suppressUserMessagePersistence?: boolean
   /** Goal 专用结构化结果回调；由内置 update_goal 工具调用，不写入普通对话。 */
   reportGoalResult?: (result: import('@profer/shared').AgentGoalIterationResult) => void
+  /** Goal turn 是否使用独立的 runtime session，不得复用普通会话 SDK 上下文。 */
+  isolatedRuntimeSession?: boolean
+  /** Goal 当前运行 ID；用于把停止和结果绑定到具体 owner。 */
+  goalRunId?: string
+  /** 普通 run 结束时回传结构化结果；busy 拒绝不会调用。 */
+  onRunOutcome?: (outcome: {
+    status: 'completed' | 'failed' | 'stopped'
+    error?: string
+  }) => void
+  /** Goal 独立 runtime 要恢复的 SDK/Pi session ID。 */
+  runtimeSessionId?: string
+  /** Goal 独立 runtime 已创建/恢复后的 session ID 回调，不更新普通会话元数据。 */
+  onRuntimeSessionId?: (sdkSessionId: string, sessionFile?: string) => void
+  /** Goal runtime 当前轮消息回调，不写入普通会话 transcript。 */
+  onRuntimeMessage?: (message: import('@profer/shared').SDKMessage) => void
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
   automationContext?: string
   /** Main-process one-shot ticket for a user-confirmed Pi Harness candidate. Not renderer-generated. */
@@ -1501,8 +1585,13 @@ export interface ForkSessionInput {
 export interface RewindSessionInput {
   /** Profer 会话 ID */
   sessionId: string
-  /** 回退到哪条 assistant message（inclusive，截断该消息之后的一切） */
-  assistantMessageUuid: string
+  /**
+   * 回退到哪条 assistant message（inclusive，截断该消息之后的一切）。
+   *
+   * 省略时表示**清空整个对话**（重置到会话起点）：用于首轮就失败、没有可保留锚点的场景。
+   * 清空会同时重置运行时会话（Claude 丢弃 sdkSessionId、Pi 截断到 header），使下一轮从头开始。
+   */
+  assistantMessageUuid?: string
 }
 
 /** 快照回退结果 */
@@ -1624,6 +1713,11 @@ export interface AgentStreamCompletePayload {
   endReason?: AgentEndReason
   /** 结束原因的可读短文案（AGENT_END_REASON_LABELS 之一），供 chip / toast 展示 */
   endReasonLabel?: string
+  /**
+   * 本轮 run 的规范化发起者（主进程在产生终态时写入）。
+   * 渲染层不得自行推断；缺失 / 未知值一律按「不清未读」处理。
+   */
+  initiator?: AgentRunInitiator
 }
 
 /** 更新会话中断说明状态输入：state 非 null 置位（点击记录行），null 清除（消费/移除 chip） */
@@ -1936,6 +2030,34 @@ export interface PermissionResponse {
   alwaysAllow: boolean
 }
 
+// ===== 消息导航索引（跨进程传输） =====
+
+/**
+ * 导航索引条目 —— 「消息导航」面板的一行。
+ *
+ * `id`（消息 uuid）与渲染层 data-message-id 同源，可直接当滚动锚点；磁盘上确实无 uuid 的
+ * 分组（interruption_record、部分旧格式输入）为 null，渲染层用 matchKey 在本已加载的 DOM 里
+ * 找回对应节点，而不是点了没反应。
+ */
+export interface AgentNavigationIndexEntry {
+  /** 滚动锚点 id（消息 uuid）；无 uuid 时为 null，需用 matchKey 回退 */
+  id: string | null
+  role: 'user' | 'assistant' | 'status'
+  /** 单行预览（<=200 字） */
+  preview: string
+  /** assistant 回合的模型 id（用于取模型图标） */
+  model?: string
+  /** 无 uuid 时的稳定匹配键：`${role}:${subtype}:${createdAt}` */
+  matchKey: string
+}
+
+/** 会话导航索引载荷：全会话的一轮一行，不随渲染窗口/折叠变化。 */
+export interface AgentNavigationIndexPayload {
+  entries: AgentNavigationIndexEntry[]
+  /** 全会话轮次总数（= entries.length） */
+  total: number
+}
+
 // ===== IPC 通道常量 =====
 
 /**
@@ -1953,6 +2075,8 @@ export const AGENT_IPC_CHANNELS = {
   ENSURE_PROJECT_DRAFT_SESSION: 'agent:ensure-project-draft-session',
   /** 获取会话 SDKMessage（Phase 4 新格式） */
   GET_SDK_MESSAGES: 'agent:get-sdk-messages',
+  /** 获取会话「消息导航」的全量轮次索引（一轮一行，覆盖整个会话；只读） */
+  GET_NAVIGATION_INDEX: 'agent:get-navigation-index',
   /** 列出当前会话已持久化的图片生成独立时间线卡片 */
   LIST_IMAGE_GENERATIONS: 'agent:list-image-generations',
   /** 仅按 generation ID 重试失败的图片生成；参数在主进程重建 */
@@ -2035,6 +2159,10 @@ export const AGENT_IPC_CHANNELS = {
   START_GOAL: 'agent:goal-start',
   /** 获取当前会话 Goal */
   GET_GOAL: 'agent:goal-get',
+  /** 修改非运行状态的目标、契约或预算 */
+  UPDATE_GOAL: 'agent:goal-update',
+  /** 获取会话归档 Goal 历史 */
+  GET_GOAL_HISTORY: 'agent:goal-history',
   /** 列出全部会话的 Goal（启动时水合渲染层状态） */
   LIST_GOALS: 'agent:goal-list',
   /** 暂停当前 Goal */
@@ -2133,6 +2261,10 @@ export const AGENT_IPC_CHANNELS = {
   READ_SKILL_CONTENT: 'agent:read-skill-content',
   /** 写入 SKILL.md 全文内容 */
   WRITE_SKILL_CONTENT: 'agent:write-skill-content',
+  /** 读取 Skill 路由卡片（SKILL.json）：触发词、依赖、策略、来源 */
+  READ_SKILL_CARD: 'agent:read-skill-card',
+  /** 合并写入 Skill 路由卡片（补丁语义：null / 空值 = 删除字段） */
+  WRITE_SKILL_CARD: 'agent:write-skill-card',
   /** 列出 Skill 目录下的子文件树（不含 SKILL.md） */
   LIST_SKILL_FILES: 'agent:list-skill-files',
   /** 读取 Skill 目录下的子文件内容 */
@@ -2361,47 +2493,7 @@ export const AUTH_IPC_CHANNELS = {
   VERIFY_REGISTRATION_OTP: 'auth:verify-registration-otp',
 } as const
 
-/** 同步 IPC 通道 */
-export const SYNC_IPC_CHANNELS = {
-  GET_STATUS: 'sync:get-status',
-  TRIGGER_SYNC: 'sync:trigger-sync',
-  GET_PENDING_CHANGES: 'sync:get-pending-changes',
-  DISCARD_PENDING_CHANGES: 'sync:discard-pending-changes',
-  /** 同步状态变更推送（主进程 → 渲染进程） */
-  STATUS_CHANGED: 'sync:status-changed',
-} as const
 
-/** 团队管理 IPC 通道 */
-export const TEAM_IPC_CHANNELS = {
-  LIST_WORKSPACES: 'team:list-workspaces',
-  CREATE_WORKSPACE: 'team:create-workspace',
-  DELETE_WORKSPACE: 'team:delete-workspace',
-  GET_MEMBERS: 'team:get-members',
-  CREATE_INVITATION: 'team:create-invitation',
-  LIST_INVITATIONS: 'team:list-invitations',
-  CANCEL_INVITATION: 'team:cancel-invitation',
-  GET_STATS: 'team:get-stats',
-  VERIFY_INVITATION: 'team:verify-invitation',
-  ACCEPT_INVITATION: 'team:accept-invitation',
-  DECLINE_INVITATION: 'team:decline-invitation',
-  UPDATE_MEMBER_ROLE: 'team:update-member-role',
-  REMOVE_MEMBER: 'team:remove-member',
-  APPLY_BRANDING: 'team:apply-branding',
-  GET_BRANDING: 'team:get-branding',
-  SET_WORKSPACE_BRAND: 'team:set-workspace-brand',
-  LEAVE_WORKSPACE: 'team:leave-workspace',
-  TRANSFER_OWNERSHIP: 'team:transfer-ownership',
-  RESTORE_WORKSPACE: 'team:restore-workspace',
-} as const
-
-/** 技能市场 IPC 通道 */
-export const SKILL_MARKETPLACE_IPC_CHANNELS = {
-  PUBLISH: 'skill:publish',
-  UNPUBLISH: 'skill:unpublish',
-  LIST_TEAM_SKILLS: 'skill:list-team-skills',
-  INSTALL_TEAM_SKILL: 'skill:install-team-skill',
-  CHECK_FOR_UPDATES: 'skill:check-for-updates',
-} as const
 
 /** 全局 Skill 体系 IPC 通道；旧 master 通道保留兼容。 */
 export const GLOBAL_SKILL_IPC_CHANNELS = {
@@ -2432,103 +2524,8 @@ export const SKILL_MASTER_IPC_CHANNELS = {
   DETECT_CONFLICT: 'skill-master:detect-conflict',
 } as const
 
-/** 文件同步 IPC 通道（废弃，保留向后兼容） */
-export const FILE_SYNC_IPC_CHANNELS = {
-  GET_FILE_MANIFEST: 'file-sync:get-manifest',
-  DOWNLOAD_FILE: 'file-sync:download-file',
-  GET_FILE_STATUS: 'file-sync:get-file-status',
-  RESOLVE_CONFLICT: 'file-sync:resolve-conflict',
-} as const
 
-/** 团队文件操作 IPC 通道（用户主动上传/下载） */
-export const TEAM_FILE_IPC_CHANNELS = {
-  UPLOAD: 'team-file:upload',
-  DOWNLOAD: 'team-file:download',
-  DELETE: 'team-file:delete',
-  GET_MANIFEST: 'team-file:get-manifest',
-  CREATE_DIRECTORY: 'team-file:create-directory',
-  MOVE: 'team-file:move',
-  RENAME: 'team-file:rename',
-  SEARCH: 'team-file:search',
-  GET_METADATA: 'team-file:get-metadata',
-  PATCH_METADATA: 'team-file:patch-metadata',
-  GET_TAGS: 'team-file:get-tags',
-  GET_STATUSES: 'team-file:get-statuses',
-  SET_PREFERENCE: 'team-file:set-preference',
-  GET_ACTIVITIES: 'team-file:get-activities',
-  LIST_TRASH: 'team-file:list-trash',
-  RESTORE_TRASH: 'team-file:restore-trash',
-  PURGE_TRASH: 'team-file:purge-trash',
-} as const
 
-/** 团队共享知识记忆文档。个人工作区记忆不使用此类型。 */
-export interface TeamMemoryDocument {
-  id: string
-  path: string
-  title: string
-  content: string
-  version: number
-  createdBy: string
-  updatedBy: string
-  createdAt: number
-  updatedAt: number
-  archivedAt?: number
-}
-
-export interface TeamMemoryRevision {
-  id: string
-  version: number
-  changeSummary: string
-  editedBy: string
-  editedAt: number
-}
-
-export interface TeamMemoryApiResult<T> {
-  ok: boolean
-  status?: number
-  data?: T
-  error?: string
-  conflict?: { code: 'TEAM_MEMORY_VERSION_CONFLICT'; current: TeamMemoryDocument }
-}
-
-/** 团队共享知识记忆 IPC 通道。 */
-export const TEAM_MEMORY_IPC_CHANNELS = {
-  LIST: 'team-memory:list',
-  READ: 'team-memory:read',
-  CREATE: 'team-memory:create',
-  UPDATE: 'team-memory:update',
-  LIST_REVISIONS: 'team-memory:list-revisions',
-  ARCHIVE: 'team-memory:archive',
-  UNARCHIVE: 'team-memory:unarchive',
-} as const
-
-/** 团队文件回收站中的一项（仅 Owner/Admin 的治理界面使用）。 */
-export interface TeamTrashEntry {
-  id: string
-  fileId: string
-  originalPath: string
-  deletedBy: string | null
-  deletedAt: number
-  expiresAt: number
-}
-
-/** 团队文件 HTTP/IPC 代理的标准结果。 */
-export interface TeamFileApiResult<T> {
-  ok: boolean
-  status?: number
-  data?: T
-  error?: string
-}
-
-/** SSE 实时事件推送 IPC 通道 */
-export const SSE_IPC_CHANNELS = {
-  /** 主进程 → 渲染进程：SSE 事件推送 */
-  EVENT: 'sse:event',
-  /** 主进程 → 渲染进程：连接状态变更 */
-  CONNECTION_CHANGED: 'sse:connection-changed',
-} as const
-
-/** 团队服务器配置 */
 export interface TeamServerConfig {
   id: string
   name: string
@@ -2537,30 +2534,10 @@ export interface TeamServerConfig {
   syncEndpoint: string
   provider: 'self-hosted' | 'proma-cloud'
   enabled: boolean
-  lastHealthCheck?: {
-    ok: boolean
-    checkedAt: number
-    error?: string
-  }
+  lastHealthCheck?: { ok: boolean; checkedAt: number; error?: string }
 }
 
-/** 工作区邀请 */
-export interface WorkspaceInvitation {
-  id: string
-  workspaceId: string
-  workspaceName: string
-  inviterId: string
-  inviterName: string
-  inviteeEmail: string
-  role: WorkspaceRole
-  token: string
-  status: 'pending' | 'accepted' | 'declined' | 'expired' | 'cancelled'
-  createdAt: number
-  expiresAt: number
-  acceptedAt?: number
-}
-
-/** 记忆双链 [[...]] 解析结果 */
+/** 认证服务 IPC 共用服务器配置；团队工作区数据不再由客户端消费。 */
 export interface MemoryWikilinkTarget {
   relativePath: string
   kind: 'archive' | 'auto'

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   inspectPreview,
@@ -122,5 +123,35 @@ describe('preview inspection service', () => {
     const result = await inspectPreview({ filePath: 'code.ts' }, { agentCwd: root, allowedRoots: [] }, dependencies)
     expect('error' in result && result.error.code).toBe('file_changed_during_inspection')
     expect('error' in result && result.error.retryable).toBe(true)
+  })
+
+  test('echoes the full requested path when the model writes a wrong attachment path', async () => {
+    const { root } = await fixture()
+    // 复现现场：模型把会话 ID 与任务 ID 混拼出的不存在目录，且文件名在会话目录内也不存在。
+    const mistyped = join(dirname(root), 'profer-preview-mistyped-4974-b7e1', 'screenshot-42.png')
+    const result = await inspectPreview({ filePath: mistyped }, { agentCwd: root, allowedRoots: [] })
+    expect('error' in result && result.error.code).toBe('file_not_found')
+    // 必须回显完整路径，否则模型无从发现自己写错了目录。
+    expect('error' in result && result.error.message).toContain(mistyped)
+  })
+
+  test('corrects a mistyped attachment path to the unique same-name file in the session directory', async () => {
+    const { root } = await fixture()
+    const mistyped = join(dirname(root), 'profer-preview-mistyped-4974-b7e1', 'note.md')
+    const result = await inspectPreview({ filePath: mistyped, mode: 'content' }, { agentCwd: root, allowedRoots: [] })
+    expect('file' in result).toBe(true)
+    if ('file' in result) {
+      expect(result.file.name).toBe('note.md')
+      expect(result.content?.text).toContain('Hello')
+      expect(result.warnings?.join('\n')).toContain(mistyped)
+      expect(result.warnings?.join('\n')).toContain(join(root, 'note.md'))
+    }
+  })
+
+  test('does not correct across directories when no same-name file exists in the session directory', async () => {
+    const { root, outside } = await fixture()
+    // outside/secret.txt 存在但不在 agentCwd 内；不能靠 basename 兜底跨目录读到它。
+    const result = await inspectPreview({ filePath: join(dirname(root), 'nowhere-4974', 'secret.txt') }, { agentCwd: root, allowedRoots: [] })
+    expect('error' in result && result.error.code).toBe('file_not_found')
   })
 })

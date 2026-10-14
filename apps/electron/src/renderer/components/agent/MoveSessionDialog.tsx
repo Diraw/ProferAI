@@ -11,16 +11,16 @@ import {
   DialogTitle,
   DialogDescription,
   DialogFooter,
-} from '@/components/ui/dialog'
+} from '@profer/ui/primitives/dialog'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select'
+} from '@profer/ui/primitives/select'
 import { AlertTriangle } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { useAtom } from 'jotai'
 import { sdkBackgroundTasksAtomFamily } from '@/atoms/agent-atoms'
 import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'

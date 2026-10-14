@@ -10,8 +10,8 @@
 import * as React from 'react'
 import { X, Paperclip } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { ImageLightbox } from '@/components/ui/image-lightbox'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
+import { ImageLightbox } from '@profer/ui/primitives/image-lightbox'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
 
 interface AttachmentPreviewItemProps {
   /** 原始文件名 */

@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useAtomValue } from 'jotai'
 import { AutomationFormView } from '@/components/automation/AutomationFormView'
 import { automationFormAtom } from '@/atoms/automation-atoms'
-import { TooltipProvider } from '@/components/ui/tooltip'
+import { TooltipProvider } from '@profer/ui/primitives/tooltip'
 import { PlanningView } from './PlanningView'
 
 /** 独立窗口模式：复用规划中心，不挂载聊天与 Agent 工作区。 */

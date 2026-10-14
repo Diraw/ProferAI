@@ -61,6 +61,9 @@ jobs:
       - name: Typecheck workspace
         run: bun run typecheck
 
+      - name: Check package boundaries
+        run: bun run check:boundaries
+
       - name: Verify built-in skin surface contract
         run: bun --cwd apps/electron run check:skin-contract
 

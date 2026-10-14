@@ -14,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-} from '@/components/ui/dialog'
+} from '@profer/ui/primitives/dialog'
 import { cn } from '@/lib/utils'
 import {
   migrationImportDialogOpenAtom,

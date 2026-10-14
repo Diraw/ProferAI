@@ -21,8 +21,8 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '../ui/select'
-import { Button } from '../ui/button'
+} from '@profer/ui/primitives/select'
+import { Button } from '@profer/ui/primitives/button'
 import { cn } from '@/lib/utils'
 
 interface StorageCategory {

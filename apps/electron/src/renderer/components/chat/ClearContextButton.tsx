@@ -5,12 +5,12 @@
  * 移植自 profer-frontend 的 chat-view/clear-context-button.tsx。
  */
 
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from '@/components/ui/tooltip'
+} from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 import { AgentComposerToolTrigger } from '@/components/ai-elements/composer/ComposerTool'
 import { Eraser } from 'lucide-react'

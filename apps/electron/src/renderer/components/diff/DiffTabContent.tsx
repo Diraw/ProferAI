@@ -7,36 +7,30 @@
 
 import * as React from 'react'
 import { ChevronRight, Code2, Copy, Check, Eye, List, Pencil, RefreshCw, Save, X, FileQuestion } from 'lucide-react'
-import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import DOMPurify from 'dompurify'
 import { File as PierreFile } from '@pierre/diffs/react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
-import { agentDiffViewModeAtom, agentDiffRefreshVersionAtom, agentSessionsAtom, agentSDKMessagesCacheAtom, liveMessagesMapAtom } from '@/atoms/agent-atoms'
-import { openExplorationBranchTab } from '@/lib/exploration-tab'
+import { agentDiffViewModeAtom, agentDiffRefreshVersionAtom } from '@/atoms/agent-atoms'
 import { resolvedThemeAtom } from '@/atoms/theme'
-import { quotedSelectionMapAtom } from '@/atoms/preview-atoms'
 import { markdownTocOpenAtom } from '@/atoms/markdown-toc'
 import { useShortcut } from '@/hooks/useShortcut'
-import { usePreviewQuotedSelection } from '@/hooks/usePreviewQuotedSelection'
 import { initShortcutRegistry } from '@/lib/shortcut-registry'
 import { getFileBaseName } from '@/lib/file-utils'
-import { useSmoothZoom } from '@/hooks/useSmoothZoom'
+import { useSmoothZoom } from '@profer/ui'
 import { DiffView } from './DiffView'
 import { MarkdownRichEditor } from './MarkdownRichEditor'
 import { getPreviewCandidateBasePaths, isAbsoluteFilePath } from './preview-open-path'
 import { PreviewFindBar } from './PreviewFindBar'
 import { PreviewDirectoryView } from './PreviewDirectoryView'
 import { MarkdownToc } from './MarkdownToc'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { PIERRE_FILE_CSS } from '@/components/agent/tool-result-renderers/pierre-styles'
 import { OfficePreview } from '@/components/file-browser/office-preview/OfficePreview'
 import { OfvPreview } from '@/components/file-browser/ofv-preview/OfvPreview'
 import { EDITABLE_TEXT_EXTS, IMAGE_PREVIEW_EXTS, UNSUPPORTED_EXTS } from '@/lib/preview-extension-sets'
 import { isOfvBackedPath } from '@/lib/ofv-extensions'
-import { SelectionActionPopover } from '@/components/selection/SelectionActionPopover'
-import type { PreviewSelectionSnapshot } from '@/hooks/usePreviewQuotedSelection'
-import { resolveLatestExplorationSourceMessageId } from '@/lib/exploration-session'
 
 const MD_EXTS = new Set(['.md', '.markdown'])
 const HTML_EXTS = new Set(['.html', '.htm'])
@@ -281,11 +275,6 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
   // 因此 Shiki 恒用深色主题，避免浅色主题下代码块文字变黑。
   const MD_SHIKI_THEME = 'github-dark' as const
   const [tocOpen, setTocOpen] = useAtom(markdownTocOpenAtom)
-  const sessions = useAtomValue(agentSessionsAtom)
-  const store = useStore()
-  const setAgentSessions = useSetAtom(agentSessionsAtom)
-  const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
-  const [previewSelection, setPreviewSelection] = React.useState<PreviewSelectionSnapshot | null>(null)
 
   const ext = getExtension(filePath)
   const isMarkdown = previewOnly && MD_EXTS.has(ext)
@@ -334,67 +323,6 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
     () => JSON.stringify({ filePath, previewContentVersion, newLength: newContent.length }),
     [filePath, previewContentVersion, newContent.length],
   )
-
-  // ===== 选中文本引用（Quoted Selection）=====
-
-  usePreviewQuotedSelection({
-    containerRef: scrollContainerRef,
-    sessionId,
-    filePath,
-    onSelectionChange: setPreviewSelection,
-    enabled: Boolean(previewOnly),
-  })
-
-  const handleOpenExplorationFromPreview = React.useCallback(async (): Promise<void> => {
-    if (!previewSelection) return
-    const sourceSession = sessions.find((item) => item.id === sessionId)
-    if (!sourceSession || sourceSession.agentRuntime !== 'pi') {
-      toast.info('文件探索目前仅支持 Pi Agent 会话')
-      return
-    }
-
-    const cachedMessages = store.get(agentSDKMessagesCacheAtom).get(sessionId) ?? []
-    const liveMessages = store.get(liveMessagesMapAtom).get(sessionId) ?? []
-    const resolvedSourceMessageId = resolveLatestExplorationSourceMessageId(
-      [...cachedMessages, ...liveMessages],
-      sourceSession.piEntryBindings,
-    )
-    if (!resolvedSourceMessageId) {
-      toast.info('当前文件预览没有可用的 Pi 探索节点，请先完成一轮 Agent 对话')
-      return
-    }
-
-    try {
-      const branch = await window.electronAPI.forkAgentSession({
-        sessionId,
-        upToMessageUuid: resolvedSourceMessageId,
-        explorationSourceLabel: `文件 · ${getFileBaseName(filePath)}`,
-      })
-      const quotedSelection = {
-        text: previewSelection.text,
-        filePath,
-        sourceType: 'file' as const,
-        sourceLabel: getFileBaseName(filePath),
-        capturedAt: Date.now(),
-      }
-      setAgentSessions((previous) => previous.some((item) => item.id === branch.id) ? previous : [branch, ...previous])
-      // 预览 hook 已把选区写入父会话；创建探索后将它迁移到分支，避免主线残留重复引用。
-      setQuotedSelectionMap((previous) => {
-        const next = new Map(previous)
-        next.delete(sessionId)
-        next.set(branch.id, quotedSelection)
-        return next
-      })
-      // 分支成为父会话上下文内的顶栏 Tab：激活分支，并自动与父会话并排（焦点在分支）。
-      openExplorationBranchTab(store, sessionId, { sessionId: branch.id, title: branch.title || '探索分支' }, { autoGroup: true })
-      setPreviewSelection(null)
-      window.getSelection()?.removeAllRanges()
-      toast.success('已从文件预览创建探索分支', { description: '当前选区已带入分支。' })
-    } catch (error) {
-      console.error('[DiffTabContent] 从文件预览创建探索分支失败:', error)
-      toast.error('创建探索分支失败', { description: error instanceof Error ? error.message : undefined })
-    }
-  }, [filePath, previewSelection, sessionId, sessions, setAgentSessions, setQuotedSelectionMap, store])
 
   const fileAccess = React.useMemo(() => ({
     sessionId,
@@ -1376,21 +1304,6 @@ export function DiffTabContent({ filePath, dirPath, sessionId, gitRoot, previewO
             <DiffView oldContent={oldContent} newContent={newContent} filePath={filePath} viewMode={viewMode} />
           )}
         </div>
-        {previewSelection && (
-          <SelectionActionPopover
-            x={previewSelection.rect ? previewSelection.rect.left + previewSelection.rect.width / 2 : 160}
-            y={previewSelection.rect?.bottom ?? 80}
-            direction="down"
-            onAddToAgent={() => {
-              setPreviewSelection(null)
-              window.getSelection()?.removeAllRanges()
-              toast.success('已添加到 Agent 引用')
-            }}
-            {...(sessions.find((item) => item.id === sessionId)?.agentRuntime === 'pi'
-              ? { onOpenExplorationBranch: handleOpenExplorationFromPreview }
-              : {})}
-          />
-        )}
       </div>
     </div>
   )

@@ -12,12 +12,12 @@ import {
   ArrowDownToLine,
   Upload,
 } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
+import { Switch } from "@profer/ui/primitives/switch";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "@/components/ui/tooltip";
+} from "@profer/ui/primitives/tooltip";
 import { cn } from "@/lib/utils";
 import type { SkillMeta } from "@profer/shared";
 
@@ -83,6 +83,11 @@ export function SkillCard({
             <span className="truncate text-sm font-medium text-foreground">
               {skill.name}
             </span>
+            {!skill.enabled && (
+              <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                已禁用
+              </span>
+            )}
             {skill.version && (
               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
                 v{skill.version}

@@ -23,7 +23,7 @@ import { Columns2, Ungroup, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import { SESSION_STATUS_DOT_CLASS, SESSION_STATUS_LABEL } from '@/lib/session-status-visual'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import type { TabGroupSide } from '@/atoms/tab-group-atoms'
 
 export interface TabGroupItemProps {

@@ -10,7 +10,7 @@ import { useSetAtom } from 'jotai'
 import { Search, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FileTypeIcon } from './FileTypeIcon'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { fileBrowserAutoRevealAtom } from '@/atoms/agent-atoms'
 import type { FileIndexEntry } from '@profer/shared'
 

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ArrowLeft, Sparkles } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@profer/ui/primitives/button";
 
 interface SkillDetailHeaderProps {
   title: string;

@@ -166,11 +166,6 @@ export const AGENT_PRESET_CAPABILITY_GROUPS = [
     id: 'memory', label: '长期记忆', hint: 'Auto Memory 与 memory-archive', suppressPromptSection: 'memory',
     tools: [
       capabilityTool('search_memory', '搜索个人记忆', '检索工作区长期记忆索引'),
-      capabilityTool('list_team_memories', '列出团队记忆', '列出当前团队共享记忆'),
-      capabilityTool('read_team_memory', '读取团队记忆', '读取一条团队共享记忆'),
-      capabilityTool('search_team_memories', '搜索团队记忆', '检索团队共享记忆'),
-      capabilityTool('create_team_memory', '创建团队记忆', '写入一条团队共享记忆', 'write'),
-      capabilityTool('update_team_memory', '更新团队记忆', '修改一条团队共享记忆', 'write'),
     ],
   }),
   capabilityGroup({
@@ -245,6 +240,8 @@ export const AGENT_PRESET_CAPABILITY_GROUPS = [
       capabilityTool('inspect_preview', '检查文件预览', '读取授权文件的内容或视觉预览'),
       capabilityTool('open_file_preview', '打开正式预览', '在用户可见 viewer 中打开文件', 'external'),
       capabilityTool('inspect_file_preview', '检查页级预览', '读取用户可见 viewer 的页级结果'),
+      capabilityTool('present_visualization', '会话内可视化', '保存并在会话内呈现交互式可视结果', 'write'),
+      capabilityTool('inspect_visualization', '读取可视化', '读取当前会话的可视化修订与对象'),
     ],
   }),
   capabilityGroup({

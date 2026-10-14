@@ -8,9 +8,9 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { X, FolderOpen, ExternalLink, ChevronRight, MoreHorizontal, FolderSearch, Pencil, FolderInput, Info, FolderHeart, MessageSquarePlus, Trash2, GitMerge, GitFork, Split } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { toast } from 'sonner'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,7 +20,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+} from '@profer/ui/primitives/alert-dialog'
 import { WindowControlsHost } from '@/components/WindowControlsTemplate'
 import {
   DropdownMenu,
@@ -28,7 +28,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+} from '@profer/ui/primitives/dropdown-menu'
 import { cn } from '@/lib/utils'
 import { markdownToHtml } from '@/lib/markdown-rich-text'
 import { interfaceVariantAtom } from '@/atoms/theme'
@@ -62,7 +62,7 @@ import {
 } from '@/atoms/agent-atoms'
 import { previewFileMapAtom } from '@/atoms/preview-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import { detectIsWindows } from '@/lib/platform'
+import { detectIsWindows } from '@profer/ui'
 import { getFileBaseName, getFileParentPath, getLastPathSegments } from '@/lib/file-utils'
 import type { FileEntry, AgentPendingFile, AgentSessionMeta, SDKMessage } from '@profer/shared'
 import { AgentView } from './AgentView'
@@ -201,8 +201,6 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId)
   const workspaceSlug = currentWorkspace?.slug
-  const isTeamWorkspace = currentWorkspace?.type === 'team'
-  const teamWorkspaceId = isTeamWorkspace ? (currentWorkspaceId ?? undefined) : undefined
 
   // 附加目录列表（会话级）
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
@@ -805,7 +803,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
                       {hasWorkspaceAttachedItems && (
                         <div className="text-[11px] font-medium text-muted-foreground mb-1 px-3 pt-2">工作文件（存储于该工作区目录）</div>
                       )}
-                      <FileBrowser rootPath={workspaceFilesPath!} hideToolbar embedded hideEmpty={hasWorkspaceAttachedItems} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} workspaceId={teamWorkspaceId} workspaceSlug={workspaceSlug as string | undefined} />
+                      <FileBrowser rootPath={workspaceFilesPath!} hideToolbar embedded hideEmpty={hasWorkspaceAttachedItems} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} />
                     </>
                   )}
                   <FileDropZone

@@ -10,79 +10,10 @@
  */
 import * as React from 'react'
 import { useSetAtom, useStore } from 'jotai'
-import {
-  creditsBalanceAtom,
-  creditsLifetimeConsumedAtom,
-  creditsLoadingAtom,
-  creditsBalancePackageAtom,
-  creditsBalanceReferralAtom,
-  creditsBalancePurchasedAtom,
-  creditCycleSummaryAtom,
-  membershipTierAtom,
-  isVipAtom,
-  multiplierAtom,
-  inviteCodeAtom,
-  subscriptionAtom,
-} from '@/atoms/credits-atoms'
+import { creditsLoadingAtom, refreshCreditsInto } from '@/domains/credits/credits-state'
 
-/** jotai store（useStore() / createStore() 的返回类型） */
-type JotaiStore = ReturnType<typeof useStore>
-
-/** 拉取一次余额并写入指定 store。供组件外（如全局错误监听）调用。 */
-function clearCreditsState(store: JotaiStore): void {
-  store.set(creditsBalanceAtom, null)
-  store.set(creditsLifetimeConsumedAtom, 0)
-  store.set(creditsBalancePackageAtom, 0)
-  store.set(creditsBalanceReferralAtom, 0)
-  store.set(creditsBalancePurchasedAtom, 0)
-  store.set(creditCycleSummaryAtom, null)
-  store.set(membershipTierAtom, 'free')
-  store.set(isVipAtom, false)
-  store.set(multiplierAtom, 1.0)
-  store.set(inviteCodeAtom, null)
-  store.set(subscriptionAtom, null)
-}
-
-export async function refreshCreditsInto(store: JotaiStore): Promise<void> {
-  try {
-    const commercial = await window.electronAPI.getCommercialMode().catch(() => false)
-    if (!commercial) {
-      clearCreditsState(store)
-      return
-    }
-    const auth = await window.electronAPI.auth.getTeamAuth()
-    if (!auth) {
-      clearCreditsState(store)
-      return
-    }
-    const resp = await fetch(`${auth.baseUrl}/v1/account/credits`, {
-      headers: { Authorization: `Bearer ${auth.token}` },
-    })
-    if (!resp.ok) {
-      // 认证已失效时不能保留上一个账号的余额或订阅状态；普通服务异常仍保留旧快照。
-      if (resp.status === 401 || resp.status === 403) clearCreditsState(store)
-      return
-    }
-    const d = await resp.json()
-    // 当前用户本地账本余额：balance 可能为 null（非代管或查询失败）
-    store.set(creditsBalanceAtom, d.balance ?? null)
-    store.set(creditsLifetimeConsumedAtom, d.lifetimeConsumed ?? 0)
-    // 积分分账 + 会员
-    store.set(creditsBalancePackageAtom, d.balancePackage ?? 0)
-    store.set(creditsBalanceReferralAtom, d.balanceReferral ?? 0)
-    store.set(creditsBalancePurchasedAtom, d.balancePurchased ?? 0)
-    // 服务端灰度或旧版本未返回时保持 null，界面会明确提示同步中，不能倒退到历史累计分母。
-    store.set(creditCycleSummaryAtom, d.cycleSummary ?? null)
-    store.set(membershipTierAtom, d.membershipTier ?? 'free')
-    store.set(isVipAtom, !!d.isVip)
-    store.set(multiplierAtom, d.multiplier ?? 1.0)
-    store.set(inviteCodeAtom, d.inviteCode ?? null)
-    // 订阅状态：服务端明确返回 null 时必须清除旧账号/已过期订阅的陈旧卡片。
-    store.set(subscriptionAtom, d.subscription ?? null)
-  } catch {
-    /* 静默：余额拉取失败不打扰用户 */
-  }
-}
+// 保留历史导出路径，组件外的调用方可直接使用领域状态入口。
+export { refreshCreditsInto } from '@/domains/credits/credits-state'
 
 /**
  * 在组件中加载并定时刷新余额。
@@ -104,8 +35,14 @@ export function useCreditsLoader(pollMs = 60_000): { reload: () => Promise<void>
   React.useEffect(() => {
     void reload()
     if (pollMs <= 0) return
+
     const timer = setInterval(() => { void reload() }, pollMs)
-    return () => clearInterval(timer)
+    const handleOnline = (): void => { void reload() }
+    window.addEventListener('online', handleOnline)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('online', handleOnline)
+    }
   }, [reload, pollMs])
 
   return { reload }

@@ -4,7 +4,7 @@
 
 import * as React from 'react'
 import { Check, Clipboard, Loader2, Mic, Square, X } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import type { VoiceDictationCommitResult, VoiceDictationSettings, VoiceDictationStateEvent, VoiceDictationTranscriptEvent } from '../../../types'
 import { CHUNK_BYTES, concatAudioBuffers, floatTo16BitPcm, splitChunk } from './voice-audio-utils'
 import { mergeVoiceDictationTranscript } from './voice-transcript-merge'

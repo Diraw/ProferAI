@@ -33,6 +33,7 @@ import { spawn as spawnChild, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { win32 } from 'node:path'
 import { BackgroundTaskManager } from '../background-task-manager'
+import { validateWriteTargetParent } from '../agent-tool-input-validator'
 
 /** SDK Query 对象类型（从动态导入中推断） */
 type SDKQuery = ReturnType<typeof import('@anthropic-ai/claude-agent-sdk').query>
@@ -138,8 +139,12 @@ export interface ClaudeAgentQueryOptions extends AgentQueryInput {
     input: Record<string, unknown>,
     options: CanUseToolOptions,
   ) => Promise<PermissionResult>
+  /** 本轮工具装载；空数组表示纯对话，不改变预设权限。 */
+  tools?: string[]
   /** 只读工具白名单 */
   allowedTools?: string[]
+  /** SDK Skill 白名单；undefined 表示不覆盖 SDK 默认行为，空数组表示显式禁用 */
+  skills?: string[]
   /** 系统提示词（字符串为自定义提示词，对象为 claude_code preset） */
   systemPrompt: string | { type: 'preset'; preset: 'claude_code'; append?: string }
   /** SDK session ID（用于 resume） */
@@ -901,6 +906,7 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
 
     // 创建/复用 Query 就绪状态（可能在 sendQueuedMessage 已提前创建）
     ensureSessionReady(options.sessionId)
+    options.onRuntimeRegistered?.()
 
     // 后台任务等待态：本轮结束时若仍有 background_tasks/session_crons 在飞行，
     // 保持消息通道开启（不 close），让 SDK 子进程存活、在任务完成时自动 yield
@@ -951,7 +957,9 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
 
         // 条件字段
         ...(options.canUseTool && { canUseTool: options.canUseTool }),
+        ...(options.tools !== undefined && { tools: [...options.tools] }),
         ...(options.allowedTools && { allowedTools: options.allowedTools }),
+        ...(options.skills !== undefined && { skills: [...options.skills] }),
         ...(options.resumeSessionId ? { resume: options.resumeSessionId } : {}),
         ...(options.resumeSessionAt && { resumeSessionAt: options.resumeSessionAt }),
         ...(options.mcpServers && Object.keys(options.mcpServers).length > 0 && {
@@ -987,6 +995,31 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
         // 在 result 消息发到 host 之前完成，故 result 处理时 backgroundTasksPending 已是最新。
         // 仅观察、绝不返回 decision:'block'（那会强制模型继续输出）。
         hooks: {
+          PreToolUse: [{
+            hooks: [async (input: unknown) => {
+              const hookInput = input as { tool_name?: unknown; tool_input?: unknown }
+              if (hookInput.tool_name !== 'Write' || !hookInput.tool_input || typeof hookInput.tool_input !== 'object') {
+                return { continue: true }
+              }
+              const failure = validateWriteTargetParent(
+                hookInput.tool_input as Record<string, unknown>,
+                options.cwd,
+                'Write',
+              )
+              return failure
+                ? {
+                    continue: false,
+                    decision: 'block',
+                    reason: failure.message,
+                    hookSpecificOutput: {
+                      hookEventName: 'PreToolUse',
+                      permissionDecision: 'deny',
+                      permissionDecisionReason: failure.message,
+                    },
+                  }
+                : { continue: true }
+            }],
+          }],
           Stop: [{
             hooks: [async (input: unknown) => {
               const bt = (input as { background_tasks?: unknown[] }).background_tasks

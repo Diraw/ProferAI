@@ -7,7 +7,7 @@
 
 import * as React from 'react'
 import { cn } from '@/lib/utils'
-import { Separator } from '@/components/ui/separator'
+import { Separator } from '@profer/ui/primitives/separator'
 import { CARD_CLASS, DIVIDER_CLASS } from './SettingsUIConstants'
 
 interface SettingsCardProps {

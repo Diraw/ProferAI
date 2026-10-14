@@ -24,3 +24,11 @@ export function selectablePresetMatchesReference(
       && getSelectablePresetScope(preset) === reference.presetScope,
   )
 }
+
+/**
+ * 当前工作区可供选择的预设：明确停用（enabledInWorkspace === false）的项不进入任何选择菜单。
+ * 所有选择入口（会话预设、自动任务预设）都应经由这里过滤，避免各自判定而漏掉停用项。
+ */
+export function selectableAgentPresets(presets: readonly AgentPreset[]): AgentPreset[] {
+  return presets.filter((preset) => preset.enabledInWorkspace !== false)
+}

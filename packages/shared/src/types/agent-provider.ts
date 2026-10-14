@@ -77,6 +77,16 @@ export interface AgentQueryInput {
   model?: string
   /** 要使用的 Agent runtime；持久化缺省值由调用方归一化为 Claude。 */
   agentRuntime?: AgentRuntime
+  /** Goal runtime 是否与普通 Agent transcript / session 隔离。 */
+  isolatedRuntimeSession?: boolean
+  /** Goal runtime 要恢复的 SDK/Pi session ID。 */
+  runtimeSessionId?: string
+  /** Goal runtime 创建或恢复后的 session ID 回调。 */
+  onRuntimeSessionId?: (sdkSessionId: string, sessionFile?: string) => void
+  /** Goal runtime 当前轮消息回调，不写入普通会话 transcript。 */
+  onRuntimeMessage?: (message: SDKMessage) => void
+  /** 本轮 runtime 路由已注册；队列仍由底层 adapter 等待自身 ready。 */
+  onRuntimeRegistered?: () => void
   /** Agent 工作目录 */
   cwd?: string
   /** 中止信号 */

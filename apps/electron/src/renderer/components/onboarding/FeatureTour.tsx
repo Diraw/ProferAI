@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { IntroFluidBackground } from './IntroFluidBackground'
 
 interface FeatureSlide {

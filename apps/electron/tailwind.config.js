@@ -1,15 +1,22 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: 'class',
-  content: [
-    './src/renderer/**/*.{js,ts,jsx,tsx}',
-    // 排除构建期生成的 vendored 静态资源：public/vendor/ooxml 由 scripts/build-ooxml.mjs
-    // 每次 dev/build 启动时清空重写，内容是第三方 OOXML 解析器与 .d.ts（约 6.3MB），
-    // 既不参与模块图也不含 Tailwind 类名。
-    // 若不排除，Tailwind 首次扫描会白解析这 6.3MB：冷启动 CSS 变换从 ~1.7s 涨到 ~8.8s，
-    // 而 Vite dev server 是单线程，所有模块请求都被这个变换阻塞，首屏因此延迟十几秒。
-    '!./src/renderer/public/**',
-  ],
+  content: {
+    // 路径相对配置文件解析，避免从仓库根目录或其他 cwd 构建时漏扫。
+    relative: true,
+    files: [
+      './src/renderer/**/*.{js,ts,jsx,tsx}',
+      // @profer/ui 的基元/组件源码也参与类名扫描（source-as-entry，无构建产物），
+      // 否则 animate-in、data-[state] 等仅基元使用的类不会生成 CSS。
+      '../../packages/ui/src/**/*.{js,ts,jsx,tsx}',
+      // 排除构建期生成的 vendored 静态资源：public/vendor/ooxml 由 scripts/build-ooxml.mjs
+      // 每次 dev/build 启动时清空重写，内容是第三方 OOXML 解析器与 .d.ts（约 6.3MB），
+      // 既不参与模块图也不含 Tailwind 类名。
+      // 若不排除，Tailwind 首次扫描会白解析这 6.3MB：冷启动 CSS 变换从 ~1.7s 涨到 ~8.8s，
+      // 而 Vite dev server 是单线程，所有模块请求都被这个变换阻塞，首屏因此延迟十几秒。
+      '!./src/renderer/public/**',
+    ],
+  },
   // LEGACY theme-* 类：applyThemeToDOM 自 2026-09-11 起不再拼接 theme-${style}
   // （无 IPC 的 tablet 入口已退役）；列表保留以兼容仍可能带 theme-* 类的 DOM。
   safelist: [
@@ -174,6 +181,10 @@ export default {
         'in': 'slide-in-from-top 0.3s ease-out',
         'out': 'slide-out-to-right 0.2s ease-in',
         'preview-slide-out': 'preview-slide-out 0.25s ease-out forwards',
+      },
+      transitionTimingFunction: {
+        // 展开/收起类微动效：快速起步、缓收尾，到位那一帧不硬停。
+        'out-quint': 'cubic-bezier(0.22, 1, 0.36, 1)',
       },
     },
   },

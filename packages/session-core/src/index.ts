@@ -9,6 +9,13 @@
  * 仅供 Node 侧（proma CLI / 主进程）使用，避免 Vite 把 node:fs 打进渲染层 bundle。
  */
 
+// 会话索引（agent-sessions.json）格式归一：主进程与 CLI 共用的唯一真源
+export {
+  normalizeSessionIndexData,
+  type SessionIndexData,
+  type NormalizedSessionIndex,
+} from './index-normalize'
+
 // 解析与格式归一（纯函数，无文件 IO）
 export {
   readSessionMessagesFromString,
@@ -19,6 +26,7 @@ export {
 export {
   groupIntoTurns,
   countTurns,
+  buildNavigationEntries,
   getGroupPreview,
   extractUserText,
   extractMeta,
@@ -27,6 +35,7 @@ export {
   type MessageGroup,
   type AssistantTurn,
   type MessageMeta,
+  type NavigationEntry,
 } from './group'
 
 // <think> 标签归一

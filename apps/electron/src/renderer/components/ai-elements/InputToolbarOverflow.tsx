@@ -16,13 +16,13 @@
 
 import * as React from 'react'
 import { MoreHorizontal } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Button } from '@profer/ui/primitives/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@profer/ui/primitives/popover'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from '@/components/ui/tooltip'
+} from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 
 export type ToolbarItemPlacement = 'toolbar' | 'overflow'

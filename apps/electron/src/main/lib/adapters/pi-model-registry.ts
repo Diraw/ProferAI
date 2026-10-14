@@ -20,8 +20,10 @@ import {
   resolveReasoningCapability,
   resolveReasoningProfile,
   type ReasoningCapability,
+  resolveProviderNativeProtocol,
+  isLocalOllamaBaseUrl,
 } from '@profer/shared'
-import { getProferUserAgent, isAnthropicShapedEndpoint, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
+import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
 import type { Api, KnownProvider, Model } from '@earendil-works/pi-ai/compat'
 import type { PiAgentQueryOptions } from './pi-agent-adapter'
 import { refreshXaiOAuthCredentialsSerial, rememberXaiOAuthCredentials } from '../xai-oauth-credentials'
@@ -81,9 +83,9 @@ const CODEX_MODEL_PATCHES: PiCatalogModelPatch[] = [
   {
     id: GPT_6_ASTRA_MODEL_ID,
     name: 'GPT-6 Astra',
-    api: 'openai-responses',
-    provider: 'openai',
-    baseUrl: 'https://api.openai.com/v1',
+    api: 'openai-codex-responses',
+    provider: 'openai-codex',
+    baseUrl: CODEX_BASE_URL,
     reasoning: true,
     thinkingLevelMap: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
     input: ['text', 'image'],
@@ -205,20 +207,7 @@ function compilePiReasoningCapabilities(api: Api, modelId: string | undefined): 
   }
 }
 
-function isLocalOllamaBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false
-  try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase()
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
-  } catch {
-    return false
-  }
-}
 
-/** 商业代管 relay 的 Base：协议由服务端路由决定，不能按端点形态推断。 */
-function isRelayProxyBaseUrl(baseUrl: string): boolean {
-  return baseUrl.trim().replace(/\/+$/, '').endsWith('/v1/proxy')
-}
 
 /**
  * 解析 Pi 请求使用的协议。
@@ -231,30 +220,11 @@ function isRelayProxyBaseUrl(baseUrl: string): boolean {
  * 例外：商业代管 relay（`…/v1/proxy`）由服务端路由决定协议，保持 provider 判定。
  */
 export function normalizePiApi(provider: ProviderType, baseUrl?: string): Api {
-  if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) return 'openai-completions'
-  if (
-    provider === 'deepseek'
-    && baseUrl?.trim()
-    && !isRelayProxyBaseUrl(baseUrl)
-    && !isAnthropicShapedEndpoint(baseUrl)
-  ) {
-    return 'openai-completions'
-  }
-  switch (provider) {
-    case 'openai':
-    case 'opencode-go-openai':
-    case 'zhipu':
-    case 'doubao':
-    case 'qwen':
-    case 'custom':
-      return 'openai-completions'
-    case 'openai-responses':
-      return 'openai-responses'
-    case 'google':
-      return 'google-generative-ai'
-    default:
-      return 'anthropic-messages'
-  }
+  // 协议判定整体收口到 shared 的 resolveProviderNativeProtocol（单一事实源）：
+  // 静态归属来自能力描述符，deepseek/ollama 的端点形态嗅探也在那里完成。
+  // DeepSeek 第三方网关若误判为 Anthropic，Agent 会发送 `/v1/messages` 而完全不可用，
+  // 而 Chat 走 OpenAI 适配器却正常——协议必须跟随配置的端点，而不是写死 provider。
+  return resolveProviderNativeProtocol(provider, baseUrl)
 }
 
 function candidatePiProviders(provider: ProviderType): KnownProvider[] {
@@ -332,10 +302,12 @@ async function findPiCatalogModel(provider: ProviderType, modelId: string): Prom
  *
  * 由 IPC 桥接给 renderer，无能力返回 undefined（renderer 回退完整七档或隐藏菜单）。
  */
-export async function resolvePiReasoningCapability(provider: ProviderType, modelId: string | undefined): Promise<ReasoningCapability | undefined> {
+export async function resolvePiReasoningCapability(provider: ProviderType, modelId: string | undefined, baseUrl?: string): Promise<ReasoningCapability | undefined> {
   if (!modelId) return undefined
 
-  const transport = inferReasoningTransport(provider)
+  // 传入 baseUrl 让 deepseek/ollama 这类端点形态可变的渠道拿到与运行时
+  // 一致的协议判定；否则菜单显示的档位可能在实际注入时被跳过。
+  const transport = inferReasoningTransport(provider, baseUrl)
   if (transport === 'other') return undefined
 
   const profile = resolveReasoningProfile({ modelId, transport })
@@ -457,8 +429,10 @@ function applyModel1MContextPreferenceToModel(
 
 function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType): string | undefined {
   if (!baseUrl) return undefined
+  assertSdkBaseUrlSupportsRouting(baseUrl)
   if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) {
-    return `${baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`
+    const normalized = normalizeOpenAIBaseUrlForSdk(baseUrl)
+    return /\/v1$/i.test(normalized) ? normalized : `${normalized}/v1`
   }
   const api = normalizePiApi(provider, baseUrl)
   if (api === 'anthropic-messages') {
@@ -470,7 +444,7 @@ function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType)
   }
   // DeepSeek 走 OpenAI 兼容端点时，若用户填了完整 `/chat/completions`，
   // 需先还原成协议根地址，避免 Pi 重复拼接。
-  if (provider === 'custom' || provider === 'openai-responses' || provider === 'deepseek') {
+  if (api === 'openai-completions' || api === 'openai-responses') {
     return normalizeOpenAIBaseUrlForSdk(baseUrl)
   }
   return baseUrl.trim().replace(/\/$/, '')
@@ -539,7 +513,9 @@ function mergeCodexModels(models: readonly PiCatalogModel[]): PiCatalogModel[] {
       merged.push(patch)
     }
   }
-  return merged
+  // Codex OAuth 只可交给 Codex 协议，不能把 token 注入公共 OpenAI API。
+  return merged.filter((model) => model.provider === 'openai-codex'
+    && model.api === 'openai-codex-responses' && model.baseUrl === CODEX_BASE_URL)
 }
 
 function isCompleteCatalogModel(model: PiCatalogModelPatch): model is PiCatalogModel {
@@ -549,6 +525,17 @@ function isCompleteCatalogModel(model: PiCatalogModelPatch): model is PiCatalogM
 export async function getCodexCatalogModels(): Promise<PiCatalogModel[]> {
   const { getModels } = await loadPiAiCompat()
   return mergeCodexModels(getModels('openai-codex'))
+}
+
+/** 明确选择仅接受当前 Codex catalog，未指定时才使用目录默认模型。 */
+function selectCodexModel(models: readonly PiCatalogModel[], modelId: string | undefined): PiCatalogModel {
+  const model = modelId === undefined ? models[0] : findCatalogModelById(models, modelId)
+  if (!model) {
+    throw new Error(modelId === undefined
+      ? '未找到可用的 ChatGPT (Codex) 模型，请升级 Pi 运行时'
+      : `所选 ChatGPT (Codex) 模型不在当前目录中，请重新读取 Codex 模型目录并选择模型。可用 ID：${models.map((item) => item.id).join('、')}`)
+  }
+  return model
 }
 
 /**
@@ -569,14 +556,7 @@ async function buildCodexModelWithRuntimeKey(sdk: PiSdk, input: PiAgentQueryOpti
 
   const resolvedModelId = stripAgentSdkContextSuffix(input.model)
   const codexModels = await getCodexCatalogModels()
-  const model =
-    (resolvedModelId ? modelRuntime.getModel('openai-codex', resolvedModelId) : undefined) ??
-    (resolvedModelId ? findCatalogModelById(codexModels, resolvedModelId) : undefined) ??
-    // 指定模型缺失时回退到首个内置 codex 模型，避免因模型 ID 漂移直接失败。
-    modelRuntime.getModels('openai-codex')[0]
-  if (!model) {
-    throw new Error('未找到可用的 ChatGPT (Codex) 模型，请确认已登录并升级 Pi 运行时')
-  }
+  const model = selectCodexModel(codexModels, resolvedModelId)
   return { modelRuntime, model: applyModel1MContextPreferenceToModel(applyVerifiedGpt56ContextWindow(model), input.context1m) }
 }
 
@@ -738,14 +718,7 @@ export async function buildCodexModel(sdk: PiSdk, input: CodexModelInput) {
 
   const resolvedModelId = stripAgentSdkContextSuffix(input.model)
   const codexModels = await getCodexCatalogModels()
-  const model =
-    (resolvedModelId ? modelRuntime.getModel('openai-codex', resolvedModelId) : undefined) ??
-    (resolvedModelId ? findCatalogModelById(codexModels, resolvedModelId) : undefined) ??
-    // 指定模型缺失时回退到首个内置 codex 模型，避免因模型 ID 漂移直接失败。
-    modelRuntime.getModels('openai-codex')[0]
-  if (!model) {
-    throw new Error('未找到可用的 ChatGPT (Codex) 模型，请确认已登录并升级 Pi 运行时')
-  }
+  const model = selectCodexModel(codexModels, resolvedModelId)
   return { modelRuntime, model: applyModel1MContextPreferenceToModel(applyVerifiedGpt56ContextWindow(model), input.context1m) }
 }
 

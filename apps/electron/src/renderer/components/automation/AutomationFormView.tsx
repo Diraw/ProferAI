@@ -9,22 +9,23 @@
  */
 
 import * as React from 'react'
+import * as automationApi from '@/domains/automation/automation-api'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { toast } from 'sonner'
 import { AlertTriangle, ArrowLeft, Bell, Check, Clock, Loader2, Pencil, Play, Settings, X } from 'lucide-react'
-import { detectIsWindows } from '@/lib/platform'
+import { detectIsWindows } from '@profer/ui'
 import { cn } from '@/lib/utils'
-import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
+import { Label } from '@profer/ui/primitives/label'
+import { Switch } from '@profer/ui/primitives/switch'
 import {
   Select,
   SelectTrigger,
   SelectValue,
   SelectContent,
   SelectItem,
-} from '@/components/ui/select'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+} from '@profer/ui/primitives/select'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
+import { Popover, PopoverTrigger, PopoverContent } from '@profer/ui/primitives/popover'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import {
   automationFormAtom,
@@ -43,14 +44,18 @@ import { useOpenSession } from '@/hooks/useOpenSession'
 import { MarkdownRichEditor } from '@/components/diff/MarkdownRichEditor'
 import type {
   AutomationFeishuNotificationTarget,
-  AutomationNotificationTarget,
   AutomationRun,
-  CreateAutomationInput,
   FeishuChatBinding,
-  UpdateAutomationInput,
 } from '@profer/shared'
 import type { AgentPreset, AgentRuntime } from '@profer/shared'
 import { DEFAULT_PRESET_ID } from '@profer/shared'
+import { selectableAgentPresets } from '@/components/agent/preset-selector-utils'
+
+import {
+  canPersistDraft, isReadyToRun, listMissingFields, getDraftSignature,
+  draftToCreateInput, draftToUpdateInput, getFeishuTarget,
+  getFeishuBindingValue, formatFeishuBinding, createFeishuTarget,
+} from '@/domains/automation/automation-form-utils'
 
 const NO_FEISHU_BINDING = '__none__'
 /** 预设选择器「跟随工作区默认」的哨兵值（Radix Select 不允许空字符串 value） */
@@ -65,117 +70,6 @@ function formatRunStatus(status: AutomationRun['status']): string {
   if (status === 'success') return '完成'
   if (status === 'error') return '失败'
   return '跳过'
-}
-
-function canPersistDraft(draft: AutomationDraft): boolean {
-  // 草稿保存门槛：只要有任务名和任务描述就保存为草稿（缺 channelId / workspaceId 会被强制不启用）
-  return !!(draft.name.trim() && draft.prompt.trim())
-}
-
-/** 任务是否具备运行 / 启用所需的最小完整度（模型 + 工作区） */
-function isReadyToRun(draft: AutomationDraft): boolean {
-  return canPersistDraft(draft) && !!draft.channelId && !!draft.workspaceId
-}
-
-/** 列出当前还缺哪些必填项（用于"运行一次" Tooltip 与关闭时的 toast 提示） */
-function listMissingFields(draft: AutomationDraft): string[] {
-  const missing: string[] = []
-  if (!draft.name.trim()) missing.push('任务名称')
-  if (!draft.prompt.trim()) missing.push('任务描述')
-  if (!draft.channelId) missing.push('模型')
-  if (!draft.workspaceId) missing.push('工作区')
-  return missing
-}
-
-function getDraftSignature(draft: AutomationDraft): string {
-  return JSON.stringify({
-    id: draft.id ?? '',
-    name: draft.name.trim(),
-    prompt: draft.prompt.trim(),
-    scheduleType: draft.scheduleType,
-    intervalMinutes: draft.intervalMinutes,
-    timeOfDay: draft.timeOfDay,
-    dayOfWeek: draft.dayOfWeek,
-    dayOfMonth: draft.dayOfMonth,
-    channelId: draft.channelId,
-    modelId: draft.modelId ?? '',
-    agentRuntime: draft.agentRuntime,
-    workspaceId: draft.workspaceId ?? '',
-    permissionMode: draft.permissionMode,
-    presetId: draft.presetId ?? '',
-    sessionMode: draft.sessionMode,
-    notificationTargets: draft.notificationTargets ?? [],
-    active: draft.active,
-  })
-}
-
-function draftToCreateInput(draft: AutomationDraft): CreateAutomationInput {
-  return {
-    name: draft.name.trim(),
-    prompt: draft.prompt.trim(),
-    scheduleType: draft.scheduleType,
-    intervalMinutes: draft.intervalMinutes,
-    timeOfDay: draft.timeOfDay,
-    dayOfWeek: draft.dayOfWeek,
-    dayOfMonth: draft.dayOfMonth,
-    channelId: draft.channelId,
-    modelId: draft.modelId,
-    agentRuntime: draft.agentRuntime,
-    workspaceId: draft.workspaceId,
-    permissionMode: draft.permissionMode,
-    presetId: draft.presetId,
-    sessionMode: draft.sessionMode,
-    notificationTargets: draft.notificationTargets,
-    sourceSessionId: draft.sourceSessionId,
-    active: draft.active,
-  }
-}
-
-function draftToUpdateInput(draft: AutomationDraft): UpdateAutomationInput {
-  return {
-    id: draft.id ?? '',
-    name: draft.name.trim(),
-    prompt: draft.prompt.trim(),
-    scheduleType: draft.scheduleType,
-    intervalMinutes: draft.intervalMinutes,
-    timeOfDay: draft.timeOfDay,
-    dayOfWeek: draft.dayOfWeek,
-    dayOfMonth: draft.dayOfMonth,
-    channelId: draft.channelId,
-    modelId: draft.modelId,
-    agentRuntime: draft.agentRuntime,
-    workspaceId: draft.workspaceId ?? '',
-    permissionMode: draft.permissionMode,
-    presetId: draft.presetId ?? '',
-    sessionMode: draft.sessionMode,
-    notificationTargets: draft.notificationTargets ?? [],
-    active: draft.active,
-  }
-}
-
-function getFeishuTarget(targets?: AutomationNotificationTarget[]): AutomationFeishuNotificationTarget | undefined {
-  return targets?.find((target): target is AutomationFeishuNotificationTarget => target.type === 'feishu')
-}
-
-function getFeishuBindingValue(binding: FeishuChatBinding): string {
-  return `${binding.botId}::${binding.chatId}`
-}
-
-function formatFeishuBinding(binding: FeishuChatBinding): string {
-  const name = binding.chatType === 'group'
-    ? binding.groupName || '未命名群聊'
-    : '飞书单聊'
-  return `${name} · ${binding.botId.slice(0, 8)}`
-}
-
-function createFeishuTarget(binding: FeishuChatBinding): AutomationFeishuNotificationTarget {
-  return {
-    type: 'feishu',
-    enabled: true,
-    trigger: 'always',
-    botId: binding.botId,
-    chatId: binding.chatId,
-  }
 }
 
 function AutomationPromptEmptyGuide(): React.ReactElement {
@@ -278,6 +172,8 @@ export function AutomationFormView(): React.ReactElement | null {
   const [runningNow, setRunningNow] = React.useState(false)
   const [feishuBindings, setFeishuBindings] = React.useState<FeishuChatBinding[]>([])
   const [presets, setPresets] = React.useState<AgentPreset[]>([])
+  // 停用的预设不能出现在选择菜单中（与会话预设选择器同一规则）
+  const selectablePresets = React.useMemo(() => selectableAgentPresets(presets), [presets])
   const [defaultPresetId, setDefaultPresetId] = React.useState<string>(DEFAULT_PRESET_ID)
   const presetRequestIdRef = React.useRef(0)
   const [saveStatus, setSaveStatus] = React.useState<SaveStatus>('idle')
@@ -321,7 +217,7 @@ export function AutomationFormView(): React.ReactElement | null {
 
   React.useEffect(() => {
     if (!formState.open) return
-    window.electronAPI.listFeishuBindings()
+    automationApi.listFeishuBindings()
       .then(setFeishuBindings)
       .catch((err: unknown) => {
         console.error('[定时任务] 获取飞书绑定失败:', err)
@@ -333,7 +229,7 @@ export function AutomationFormView(): React.ReactElement | null {
     if (!formState.open) return
     const requestId = ++presetRequestIdRef.current
     const workspaceSlug = workspaces.find((ws) => ws.id === form?.workspaceId)?.slug
-    window.electronAPI.listAgentPresets(workspaceSlug)
+    automationApi.listAgentPresets(workspaceSlug)
       .then((list) => {
         if (requestId === presetRequestIdRef.current) setPresets(list)
       })
@@ -342,7 +238,7 @@ export function AutomationFormView(): React.ReactElement | null {
         console.error('[定时任务] 获取工作区预设失败:', err)
         setPresets([])
       })
-    window.electronAPI.getDefaultAgentPreset(workspaceSlug)
+    automationApi.getDefaultAgentPreset(workspaceSlug)
       .then((presetId) => {
         if (requestId === presetRequestIdRef.current) setDefaultPresetId(presetId)
       })
@@ -366,7 +262,7 @@ export function AutomationFormView(): React.ReactElement | null {
   }, [])
 
   const refreshAutomations = React.useCallback(async () => {
-    const list = await window.electronAPI.listAutomations()
+    const list = await automationApi.listAutomations()
     setAutomations(list)
     return list
   }, [setAutomations])
@@ -395,7 +291,7 @@ export function AutomationFormView(): React.ReactElement | null {
       try {
         if (isMountedRef.current) setSaveStatus('saving')
         if (draftToSave.id) {
-          const updated = await window.electronAPI.updateAutomation(draftToUpdateInput(draftToSave))
+          const updated = await automationApi.updateAutomation(draftToUpdateInput(draftToSave))
           if (!updated) throw new Error('定时任务不存在')
           lastSavedSignatureRef.current = signature
           setAutomations((prev) => prev.map((a) => (a.id === updated.id ? updated : a)))
@@ -406,7 +302,7 @@ export function AutomationFormView(): React.ReactElement | null {
           }
           return updated.id
         } else {
-          const created = await window.electronAPI.createAutomation(draftToCreateInput(draftToSave))
+          const created = await automationApi.createAutomation(draftToCreateInput(draftToSave))
           const createdDraft = automationToDraft(created)
           lastSavedSignatureRef.current = getDraftSignature(createdDraft)
           setAutomations((prev) => [created, ...prev.filter((a) => a.id !== created.id)])
@@ -523,9 +419,9 @@ export function AutomationFormView(): React.ReactElement | null {
     try {
       const automationId = await persistDraft(latest)
       if (!automationId) throw new Error('任务尚未创建')
-      await window.electronAPI.runAutomationNow(automationId)
+      await automationApi.runAutomationNow(automationId)
       await refreshAutomations()
-      const sessions = await window.electronAPI.listAgentSessions()
+      const sessions = await automationApi.listAgentSessions()
       setAgentSessions(sessions)
     } catch (err) {
       console.error('[定时任务] 立即运行失败:', err)
@@ -545,7 +441,7 @@ export function AutomationFormView(): React.ReactElement | null {
     let session = agentSessions.find((s) => s.id === run.sessionId)
     if (!session) {
       // 运行历史会话可能已归档：拉全量（含归档）查找
-      const sessions = await window.electronAPI.listAgentSessions(true)
+      const sessions = await automationApi.listAgentSessions(true)
       setAgentSessions(sessions)
       session = sessions.find((s) => s.id === run.sessionId)
     }
@@ -1135,9 +1031,9 @@ export function AutomationFormView(): React.ReactElement | null {
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={PRESET_FOLLOW_DEFAULT}>
-                  跟随工作区默认（{presets.find((p) => p.id === defaultPresetId)?.name ?? '标准'}）
+                  跟随工作区默认（{selectablePresets.find((p) => p.id === defaultPresetId)?.name ?? '标准'}）
                 </SelectItem>
-                {presets.map((preset) => (
+                {selectablePresets.map((preset) => (
                   <SelectItem key={preset.id} value={preset.id}>
                     {preset.name}{preset.isBuiltin ? '（内置）' : ''}
                   </SelectItem>

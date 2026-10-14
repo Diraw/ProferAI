@@ -8,13 +8,14 @@
  * 同时验证：不在工作区 skill 根目录内的 skill 一律过滤（路径守卫不变）。
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Skill } from '@earendil-works/pi-coding-agent'
-import { createPromaSkillsOverride } from './pi-agent-adapter'
+import { createPromaSkillsOverride, preparePromptWithPromaSkills } from './pi-agent-adapter'
 
 let skillsRoot: string
+let realSkillsRoot: string
 let alpha: Skill
 let beta: Skill
 let outside: Skill
@@ -47,14 +48,22 @@ beforeAll(() => {
   mkdirSync(join(skillsRoot, 'beta'), { recursive: true })
   mkdirSync(join(skillsRoot, 'proma-coach'), { recursive: true })
   mkdirSync(join(skillsRoot, 'profer-coach'), { recursive: true })
+  realSkillsRoot = mkdtempSync(join(tmpdir(), 'profer-real-skill-loader-'))
+  for (const slug of ['same-a', 'same-b', 'ambiguous', 'ambiguous-copy']) {
+    mkdirSync(join(realSkillsRoot, slug), { recursive: true })
+  }
+  writeFileSync(join(realSkillsRoot, 'same-a', 'SKILL.md'), '---\nname: shared\ndescription: same a\n---\nA')
+  writeFileSync(join(realSkillsRoot, 'same-b', 'SKILL.md'), '---\nname: shared\ndescription: same b\n---\nB')
+  writeFileSync(join(realSkillsRoot, 'ambiguous', 'SKILL.md'), '---\nname: alias\ndescription: ambiguous\n---\nA')
+  writeFileSync(join(realSkillsRoot, 'ambiguous-copy', 'SKILL.md'), '---\nname: alias\ndescription: ambiguous copy\n---\nB')
   alpha = makeSkill('alpha', skillsRoot)
   beta = makeSkill('beta', skillsRoot)
-  // 根目录之外的 skill：即使白名单命中也被路径守卫过滤
   outside = { ...makeSkill('outside', join(tmpdir(), 'profer-skill-outside-root')), name: 'alpha' }
 })
 
 afterAll(() => {
   rmSync(skillsRoot, { recursive: true, force: true })
+  rmSync(realSkillsRoot, { recursive: true, force: true })
 })
 
 describe('createPromaSkillsOverride skillSlugs 语义', () => {
@@ -85,8 +94,99 @@ describe('createPromaSkillsOverride skillSlugs 语义', () => {
   test('历史 Coach 白名单解析为新 slug，且新旧目录并存时只注入新副本', () => {
     const legacyCoach = makeSkill('proma-coach', skillsRoot)
     const currentCoach = makeSkill('profer-coach', skillsRoot)
-    const override = createPromaSkillsOverride([skillsRoot], ['proma-coach'])
-    const result = override(makeBase([legacyCoach, currentCoach]))
-    expect(result.skills.map((s) => s.name)).toEqual(['profer-coach'])
+    expect(createPromaSkillsOverride([skillsRoot], ['proma-coach'])(makeBase([legacyCoach, currentCoach]))
+      .skills.map((skill) => skill.name)).toEqual(['profer-coach'])
+  })
+
+  test('synthetic fixture 的 name 不能扩宽规范目录白名单', () => {
+    const namedAlpha = { ...beta, name: 'alpha' }
+    expect(createPromaSkillsOverride([skillsRoot], ['alpha'])(makeBase([namedAlpha])).skills).toEqual([])
+  })
+})
+
+async function makeLoader(slugs?: string[], sdkLoadsRoot = true) {
+  const { DefaultResourceLoader, SettingsManager, loadSkillsFromDir } = await import('@earendil-works/pi-coding-agent')
+  return new DefaultResourceLoader({
+    cwd: realSkillsRoot,
+    agentDir: join(realSkillsRoot, '.agent'),
+    settingsManager: SettingsManager.inMemory(),
+    noExtensions: true, noSkills: true, noContextFiles: true,
+    noPromptTemplates: true, noThemes: true, appendSystemPrompt: [],
+    additionalSkillPaths: sdkLoadsRoot
+      ? ['same-a', 'same-b', 'ambiguous', 'ambiguous-copy'].map((slug) => join(realSkillsRoot, slug))
+      : [],
+    skillsOverride: createPromaSkillsOverride([realSkillsRoot], slugs, loadSkillsFromDir),
+  })
+}
+
+describe('真实 DefaultResourceLoader Skill 门禁', () => {
+  test('SDK 基线按 name 吞掉后加载目录，受管 override 恢复仅允许项', async () => {
+    const { DefaultResourceLoader, SettingsManager } = await import('@earendil-works/pi-coding-agent')
+    const raw = new DefaultResourceLoader({
+      cwd: realSkillsRoot, agentDir: join(realSkillsRoot, '.agent'),
+      settingsManager: SettingsManager.inMemory(), noExtensions: true, noSkills: true,
+      noContextFiles: true, noThemes: true, noPromptTemplates: true, appendSystemPrompt: [],
+      additionalSkillPaths: ['same-a', 'same-b'].map((slug) => join(realSkillsRoot, slug)),
+    })
+    await raw.reload()
+    expect(raw.getSkills().skills.map((skill) => skill.name)).toEqual(['shared'])
+    expect(raw.getSkills().skills[0]?.filePath).toBe(join(realSkillsRoot, 'same-a', 'SKILL.md'))
+    expect(raw.getSkills().diagnostics.some((item) => item.type === 'collision')).toBe(true)
+    const filtered = await makeLoader(['same-b'])
+    await filtered.reload()
+    expect(filtered.getSkills().skills.map((skill) => skill.name)).toEqual(['same-b'])
+  })
+
+  test('同 name 的允许目录从 SDK 去重结果恢复', async () => {
+    const loader = await makeLoader(['same-b'])
+    await loader.reload()
+    expect(loader.getSkills().skills.map((skill) => skill.name)).toEqual(['same-b'])
+    expect(loader.getSkills().skills[0]?.filePath).toBe(join(realpathSync(realSkillsRoot), 'same-b', 'SKILL.md'))
+    expect(JSON.stringify(loader.getSkills())).not.toContain('same a')
+    expect(JSON.stringify(loader.getSkills().diagnostics)).not.toContain('same-a')
+  })
+
+  test('全量加载时目录 slug 唯一，同 name 的两个目录都保留', async () => {
+    const loader = await makeLoader()
+    await loader.reload()
+    expect(loader.getSkills().skills.map((skill) => skill.name).sort())
+      .toEqual(['ambiguous', 'ambiguous-copy', 'same-a', 'same-b'])
+  })
+
+  test('受管 adapter 仅 override 加载根目录，也保留真实 SDK loader 行为', async () => {
+    const loader = await makeLoader(['same-b'], false)
+    await loader.reload()
+    expect(loader.getSkills().skills.map((skill) => skill.name)).toEqual(['same-b'])
+  })
+
+  test('SDK name alias 歧义时关闭，并输出无路径诊断', async () => {
+    const loader = await makeLoader(['alias'])
+    await loader.reload()
+    expect(loader.getSkills().skills).toEqual([])
+    expect(loader.getSkills().diagnostics.length).toBeGreaterThan(0)
+    expect(JSON.stringify(loader.getSkills().diagnostics)).not.toContain(realSkillsRoot)
+  })
+
+  test('显式空引用不从 enriched prompt 扫描，undefined 保持旧扫描', async () => {
+    const loader = await makeLoader(['same-b'])
+    const prompt = '历史模板里有 /skill:same-b，当前用户只说你好'
+    expect(await preparePromptWithPromaSkills(loader, prompt, [])).toBe(prompt)
+    expect(await preparePromptWithPromaSkills(loader, prompt)).toContain('<skill name="same-b"')
+  })
+
+  test('同 label 显式展开两个 canonical slug，不按 name 吞掉其一', async () => {
+    const loader = await makeLoader(['same-a', 'same-b'])
+    const prompt = await preparePromptWithPromaSkills(loader, '你好', ['same-a', 'same-b'])
+    expect(prompt).toContain('<skill name="same-a"')
+    expect(prompt).toContain('<skill name="same-b"')
+  })
+
+  test('歧义与不存在引用返回安全诊断，普通任务仍保留', async () => {
+    const loader = await makeLoader()
+    const prompt = await preparePromptWithPromaSkills(loader, '继续任务', ['alias', 'missing'])
+    expect(prompt).toContain('Skill 引用')
+    expect(prompt).toContain('继续任务')
+    expect(prompt).not.toContain(realSkillsRoot)
+    expect(prompt).not.toContain('<skill name=')
   })
 })

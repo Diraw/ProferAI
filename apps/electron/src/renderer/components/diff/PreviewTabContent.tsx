@@ -9,7 +9,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import { FolderOpen } from 'lucide-react'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { toast } from 'sonner'
 import {
   agentSessionPathMapAtom,

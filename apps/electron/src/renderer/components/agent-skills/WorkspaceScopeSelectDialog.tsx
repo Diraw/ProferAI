@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Check, ArrowLeft, Trash2, Save } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Button } from '@profer/ui/primitives/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@profer/ui/primitives/dialog'
 import type { AgentWorkspace } from '@profer/shared'
 
 interface Props {

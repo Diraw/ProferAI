@@ -52,6 +52,9 @@ jobs:
       - name: Typecheck workspace
         run: bun run typecheck
 
+      - name: Check package boundaries
+        run: bun run check:boundaries
+
       - name: Run cross-platform packaging tests
         # 全量测试集合包含 Windows PowerShell 专用测试，以及仍按裸路径字符串比较
         # macOS /private/var 别名的测试；它们不应阻断 macOS 包构建。
@@ -60,6 +63,8 @@ jobs:
           bun test --isolate --max-concurrency=1 --timeout 30000
           apps/electron/scripts/package-closure.test.ts
           apps/electron/scripts/build-cli-runtime.test.ts
+          apps/electron/scripts/ui-workspace-contract.test.ts
+          packages/ui/src/markdown-preview.test.tsx
           packages/session-core/src/session-core.test.ts
           packages/project-core/src/project-core.test.ts
 

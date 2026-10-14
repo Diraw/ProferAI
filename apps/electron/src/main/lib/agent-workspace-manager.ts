@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, cpSync, rmSync, mkdirSync, statSync, renameSync, openSync, readSync, closeSync, realpathSync } from 'node:fs'
 import { writeJsonFileAtomic, readJsonFileSafe } from './safe-file'
 import { randomUUID } from 'node:crypto'
-import { listGlobalSkills, setGlobalSkillEnabled, copySkillDirectorySafely, createUserGlobalSkill } from './global-skill-manager'
+import { listGlobalSkills, setGlobalSkillEnabled, copySkillDirectorySafely, createUserGlobalSkill, LEDGER_FILENAMES } from './global-skill-manager'
 import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path'
 import {
   getAgentWorkspacesIndexPath,
@@ -23,9 +23,11 @@ import {
 } from './config-paths'
 import { findAllGitRoots, normalizeGitRoot } from './git-diff-service'
 import { assertSafeSkillSegment, canonicalSkillSegmentKey } from './skill-path-security'
+import { readSkillManifest, writeSkillManifest } from './skill-manifest'
+import { diagnoseSkill } from './skill-doctor'
 import { deleteAgentSessionsByWorkspace } from './agent-session-manager'
 import { listAgentPresets, createAgentPreset } from './agent-preset-manager'
-import type { AgentWorkspace, WorkspaceMcpConfig, SkillMeta, SkillImportSource, WorkspaceSkillSource, OtherWorkspaceSkillsGroup, OtherWorkspacePresetsGroup, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary, WorkspaceType } from '@profer/shared'
+import type { AgentWorkspace, WorkspaceMcpConfig, SkillMeta, SkillImportSource, WorkspaceSkillSource, OtherWorkspaceSkillsGroup, OtherWorkspacePresetsGroup, WorkspaceSkillCardState, SkillManifestPatch, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary } from '@profer/shared'
 import type { AgentPreset } from '@profer/shared'
 
 interface AgentWorkspacesIndex {
@@ -189,7 +191,7 @@ export function getAgentWorkspace(id: string): AgentWorkspace | undefined {
 
 export function createAgentWorkspace(
   name: string,
-  opts?: { type?: WorkspaceType },
+  opts?: { type?: 'personal' },
 ): AgentWorkspace {
   const index = readIndex()
 
@@ -232,8 +234,7 @@ export function createAgentWorkspace(
   index.workspaces.unshift(workspace)
   writeIndex(index)
 
-  const typeLabel = workspace.type === 'team' ? '团队' : '个人'
-  console.log(`[Agent 工作区] 已创建${typeLabel}工作区: ${name} (slug: ${slug})`)
+  console.log(`[Agent 工作区] 已创建个人工作区: ${name} (slug: ${slug})`)
   return workspace
 }
 
@@ -842,7 +843,8 @@ export function importSkillFromWorkspace(
   }
   const targetPath = join(targetSkillsDir, actualSkillSlug)
 
-  copySkillDirectorySafely(sourcePath, targetPath)
+  // 库账本不属于技能本体，跨工作区导入时一并剥掉。
+  copySkillDirectorySafely(sourcePath, targetPath, { exclude: LEDGER_FILENAMES })
 
   // 写入来源元数据
   const sourceWorkspace = listAgentWorkspaces().find((w) => w.slug === sourceSlug)
@@ -906,7 +908,7 @@ export function updateSkillFromSource(
   const parentDir = join(targetPath, '..')
   const tmpPath = join(parentDir, `.${actualSkillSlug}.updating`)
   try {
-    copySkillDirectorySafely(sourcePath, tmpPath)
+    copySkillDirectorySafely(sourcePath, tmpPath, { exclude: LEDGER_FILENAMES })
   } catch (err) {
     // 复制失败时清理临时目录，保留原目录不变
     if (existsSync(tmpPath)) rmSync(tmpPath, { recursive: true, force: true })
@@ -1004,6 +1006,38 @@ export function writeWorkspaceSkillContent(workspaceSlug: string, skillSlug: str
   if (!dir) throw new Error(`Skill 不存在: ${workspaceSlug}/${skillSlug}`)
   writeFileSync(join(dir, 'SKILL.md'), content, 'utf-8')
   console.log(`[Agent 工作区] 已更新 SKILL.md: ${workspaceSlug}/${skillSlug}`)
+}
+
+// ===== Skill 路由卡片（SKILL.json）=====
+
+function workspaceSkillDirOrThrow(workspaceSlug: string, skillSlug: string): string {
+  assertSafeSkillSegment(workspaceSlug, 'workspaceSlug')
+  const dir = resolveSkillDir(workspaceSlug, skillSlug)
+  if (!dir) throw new Error(`Skill 不存在: ${workspaceSlug}/${skillSlug}`)
+  return dir
+}
+
+function cardState(dir: string, skillSlug: string, removed: boolean): WorkspaceSkillCardState {
+  const read = readSkillManifest(dir)
+  return {
+    present: removed ? false : read.present,
+    ...(read.manifest ? { manifest: read.manifest } : {}),
+    issues: read.issues,
+    doctor: diagnoseSkill({ dir, slug: skillSlug }).filter(issue => issue.severity !== 'info'),
+  }
+}
+
+export function readWorkspaceSkillCard(workspaceSlug: string, skillSlug: string): WorkspaceSkillCardState {
+  return cardState(workspaceSkillDirOrThrow(workspaceSlug, skillSlug), skillSlug, false)
+}
+
+/**
+ * 合并写入卡片；校验不过就报错不落盘（错误信息直接可展示给用户）。
+ * 写成空内容时删除卡片，回到无卡片回退路径。
+ */
+export function writeWorkspaceSkillCard(workspaceSlug: string, skillSlug: string, patch: SkillManifestPatch): WorkspaceSkillCardState {
+  const dir = workspaceSkillDirOrThrow(workspaceSlug, skillSlug)
+  return cardState(dir, skillSlug, writeSkillManifest(dir, patch).removed)
 }
 
 // ===== Profer 工作区资料与记忆管理 =====
@@ -1582,58 +1616,12 @@ function isNewerVersion(a: string, b: string): boolean {
   return false
 }
 
-// ===== 团队工作区同步 =====
-
-/** 将远程团队工作区合并到本地索引，侧边栏即可展示 */
-export function syncTeamWorkspacesToIndex(teamWorkspaces: AgentWorkspace[]): void {
-  // 远端请求失败时调用方不得传空数组。空数组只代表服务端成功确认用户没有团队，
-  // 否则会把仍可访问的团队条目当成“已被踢出”删除，且 UI 没有恢复入口。
-  if (!Array.isArray(teamWorkspaces)) throw new Error('团队工作区同步数据非法')
-  const index = readIndex()
-  let changed = false
-  const serverIds = new Set(teamWorkspaces.map((w) => w.id))
-
-  // 清理：移除本地索引中已不在服务端列表里的团队工作区（被踢出/删除）
-  const before = index.workspaces.length
-  index.workspaces = index.workspaces.filter((w) => {
-    if (w.type === 'team' && !serverIds.has(w.id)) {
-      console.log(`[Agent 工作区] 移除已无权访问的团队工作区: ${w.name} (${w.id})`)
-      changed = true
-      return false
-    }
-    return true
-  })
-
-  for (const tw of teamWorkspaces) {
-    const existing = index.workspaces.find((w) => w.id === tw.id)
-    if (!existing) {
-      // 新建团队工作区到本地索引
-      index.workspaces.unshift({
-        ...tw,
-        type: 'team',
-      })
-      getAgentWorkspacePath(tw.slug)
-      ensurePluginManifest(tw.slug, tw.name)
-      changed = true
-    } else if (existing.type !== 'team') {
-      existing.type = 'team'
-      changed = true
-    }
-  }
-
-  if (changed) {
-    writeIndex(index)
-    const removed = before - index.workspaces.length
-    console.log(`[Agent 工作区] 已同步 ${teamWorkspaces.length} 个团队工作区到本地索引${removed > 0 ? `，移除 ${removed} 个` : ''}`)
-  }
-}
-
 // ===== 工作区类型筛选 =====
 
-/** 列出指定类型的工作区 */
-export function listWorkspacesByType(type: WorkspaceType): AgentWorkspace[] {
+/** 列出个人工作区 */
+export function listWorkspacesByType(type: 'personal'): AgentWorkspace[] {
   const index = readIndex()
-  return index.workspaces.filter((w) => w.type === type && !w.isDeleted)
+  return index.workspaces.filter((w) => (w.type ?? 'personal') === type && !w.isDeleted)
 }
 
 // ===== 工作区配置管理 =====

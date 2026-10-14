@@ -36,7 +36,48 @@ mock.module('electron', () => ({
 
 const { buildSystemPrompt, buildDynamicContext } = await import('./agent-prompt-builder')
 const { buildPiTaskPrompt } = await import('./pi-task-prompt')
+const { assembleAgentSystemPrompt } = await import('./agent-prompt-assembly')
 const { getConfigDirName } = await import('./config-paths')
+
+describe('模块化提示词装配', () => {
+  const context = {
+    workspaceName: 'Demo', workspaceSlug: 'demo', sessionId: 'hello',
+    permissionMode: 'auto' as const, isPiRuntime: true, presetName: '标准',
+    platform: 'darwin' as const, shellPath: '/bin/bash', agentCwd: '/demo/session',
+  }
+  const input = {
+    runtime: 'pi' as const, policy: { epistemicMode: 'open' as const, useClaudeCodePreset: false },
+    context: { ...context, epistemicMode: 'open' as const }, userMessage: '你好', toolNames: [],
+    skillCatalog: '<skill_catalog>CATALOG</skill_catalog>',
+    attachedDirectories: '<attached_directories>DIRECTORIES</attached_directories>',
+  }
+  test('轻量装配不会重新加回目录和工作区模块；标准模式仍完整', () => {
+    const light = assembleAgentSystemPrompt({ ...input, mode: 'light' })
+    const standard = assembleAgentSystemPrompt({ ...input, mode: 'standard' })
+    expect(light.text).not.toContain('CATALOG')
+    expect(light.text).not.toContain('DIRECTORIES')
+    expect(light.text).not.toContain('workspace-profile.md')
+    expect(light.systemPrompt).toBe(light.text)
+    expect(standard.text).toContain('CATALOG')
+    expect(standard.text).toContain('DIRECTORIES')
+    expect(standard.text).toContain('workspace-profile.md')
+    expect(light.chars).toBe(light.text.length)
+    expect(light.chars).toBeLessThan(standard.chars / 5)
+    expect(standard.chars).toBeLessThan(6500)
+    console.log(`[Prompt 字符对照] standard=${standard.chars}, light=${light.chars}`)
+  })
+  test('自定义预设段不被轻量化吞掉，Claude 轻量不追加 claude_code', () => {
+    const light = assembleAgentSystemPrompt({ ...input, runtime: 'claude', mode: 'light',
+      policy: { epistemicMode: 'grounded', useClaudeCodePreset: true }, customSections: ['CUSTOM_PRESET'],
+    })
+    expect(light.text).toContain('CUSTOM_PRESET')
+    expect(light.systemPrompt).toBe(light.text)
+    const standard = assembleAgentSystemPrompt({ ...input, runtime: 'claude', mode: 'standard',
+      policy: { epistemicMode: 'grounded', useClaudeCodePreset: true },
+    })
+    expect(standard.systemPrompt).toMatchObject({ type: 'preset', preset: 'claude_code' })
+  })
+})
 
 describe('buildSystemPrompt', () => {
   test('默认使用求实姿态并保留不可变执行底线', () => {
@@ -165,7 +206,9 @@ describe('buildSystemPrompt', () => {
     const workspaceRoot = join(homedir(), configDirName, 'agent-workspaces', slug)
     const workspaceProfile = join(workspaceRoot, 'workspace-profile.md')
     expect(prompt).toContain(`**Profer 工作区资料**: ${workspaceProfile}`)
-    expect(prompt).toContain(`③ Profer 工作区资料（\`${workspaceProfile}\``)
+    expect(prompt).toContain('再读工作区资料（缺失才读旧版）、Memory 索引和相关 Skill')
+    // 绝对路径只在工作区段声明，恢复指引引用该段，不再每处重复长路径。
+    expect(prompt.split(workspaceProfile)).toHaveLength(2)
     expect(prompt).toContain('旧版 Profer 工作区资料（仅兼容读取）')
     expect(prompt).toContain('项目中的 `AGENTS.md` / `CLAUDE.md` 属于用户资产')
     expect(prompt).toContain('不要读取当前 cwd 下不存在的相对路径 `CLAUDE.md`')
@@ -216,8 +259,8 @@ describe('buildSystemPrompt', () => {
     expect(piPrompt).toContain('mcp__task-graph__proma_task_create')
     expect(piPrompt).toContain('mcp__agent-presets__preset_list')
     expect(piPrompt).not.toContain('mcp__agent-presets__preset_create')
-    expect(piPrompt).not.toContain('用 `proma_task_create` 创建子任务')
-    expect(claudePrompt).toContain('用 `proma_task_create` 创建子任务')
+    expect(piPrompt).not.toContain('用 `proma_task_create` 创建节点')
+    expect(claudePrompt).toContain('用 `proma_task_create` 创建节点')
     expect(claudePrompt).toContain('写入口只在当前用户消息明确要求对应操作时按轮注册')
     expect(claudePrompt).toContain('更新和设为默认先返回影响摘要，只有用户下一条消息明确确认后才提交')
     expect(claudePrompt).not.toContain('mcp__agent-presets__preset_create')
@@ -392,11 +435,10 @@ describe('buildSystemPrompt', () => {
     expect(withoutAutomation).toContain('`generate_image`')
     expect(withoutAutomation).toContain('不要尝试用代码、ASCII art 等伪造图片')
     expect(withoutAutomation).toContain('文件相对当前会话 cwd 的路径')
-    expect(withoutAutomation).toContain('皮肤壁纸')
-    expect(withoutAutomation).toContain('单张 assets 图片不得超过 4 MB')
+    expect(withoutAutomation).toContain('profer-theme-authoring')
     expect(withoutAutomation).not.toContain('10. **PPT 视觉交付门禁**')
     expect(withoutAutomation).toContain('send_local_image')
-    expect(withoutAutomation).toContain('自动把校验后的图片附加到当前回复')
+    expect(withoutAutomation).toContain('Profer 自动附加图片')
     expect(withoutAutomation).not.toContain('PROMA_IMAGE_ATTACHMENT')
     expect(withoutAutomation).toContain('6. **自检习惯**')
   })
@@ -450,18 +492,15 @@ describe('buildSystemPrompt', () => {
     expect(webAndPpt).not.toContain('7. **定时任务**')
   })
 
-  test('禁用 memory 时团队工作区不再注入团队记忆提示词', () => {
+  test('禁用 memory 时不注入已删除的团队记忆提示词', () => {
     const prompt = buildSystemPrompt({
-      workspaceName: 'Team',
-      workspaceSlug: 'team-ws',
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-ws',
       sessionId: 'session-123',
       permissionMode: 'auto',
-      isTeamWorkspace: true,
-      teamMemoryAvailable: false,
       isPiRuntime: true,
     })
-    expect(prompt).not.toContain('## 团队共享知识记忆')
-    expect(prompt).not.toContain('mcp__team-memory__list_team_memories')
+    expect(prompt).not.toContain('团队共享知识记忆')
   })
 
   test('单工具裁剪时 Prompt 不描述已关闭的具体入口，但保留同组可用能力', () => {
@@ -669,29 +708,16 @@ describe('buildSystemPrompt', () => {
     expect(none).not.toContain('MCP 服务器:')
   })
 
-  test('团队记忆工具名按 runtime 适配（Pi 前缀 / Claude 裸名）', () => {
-    const piPrompt = buildSystemPrompt({
-      workspaceName: 'Team',
-      workspaceSlug: 'team-ws',
+  test('已删除的团队记忆工具名不再注入 Prompt', () => {
+    const prompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-ws',
       sessionId: 'session-123',
       permissionMode: 'auto',
       isPiRuntime: true,
-      isTeamWorkspace: true,
     })
-    expect(piPrompt).toContain('mcp__team-memory__list_team_memories')
-    expect(piPrompt).toContain('mcp__team-memory__read_team_memory')
-    expect(piPrompt).not.toContain('`list_team_memories`')
-
-    const claudePrompt = buildSystemPrompt({
-      workspaceName: 'Team',
-      workspaceSlug: 'team-ws',
-      sessionId: 'session-123',
-      permissionMode: 'auto',
-      isPiRuntime: false,
-      isTeamWorkspace: true,
-    })
-    expect(claudePrompt).toContain('`list_team_memories`')
-    expect(claudePrompt).not.toContain('mcp__team-memory__list_team_memories')
+    expect(prompt).not.toContain('团队共享知识记忆')
+    expect(prompt).not.toContain('`list_team_memories`')
   })
 })
 
@@ -704,14 +730,13 @@ describe('buildSystemPrompt 皮肤创建指引', () => {
     agentCwd: '/tmp/profer-cwd',
   }
 
-  test('create_skin 可用时给出固定皮肤目录，并要求不要全盘扫描', () => {
+  test('create_skin 可用时路由到 profer-theme-authoring skill，并要求不要全盘扫描', () => {
     const prompt = buildSystemPrompt(base)
-    const userSkinDir = `~/${getConfigDirName()}/skins/`
     expect(prompt).toContain('10. **创建 Profer 皮肤**')
-    expect(prompt).toContain(userSkinDir)
+    expect(prompt).toContain('`profer-theme-authoring` skill')
     expect(prompt).toContain('installedPath')
     // 措辞必须涵盖 Windows 侧的递归搜索命令，而不只是 macOS/Linux 的 find/ls
-    expect(prompt).toContain('不要用递归或全盘文件搜索去定位皮肤目录')
+    expect(prompt).toContain('不要用 find')
     expect(prompt).toContain('Get-ChildItem -Recurse')
     // create_skin 已内置安装校验，不应再要求模型手工做文件系统二次校验
     expect(prompt).not.toContain('并执行一次皮肤导入/刷新或等价静态校验')

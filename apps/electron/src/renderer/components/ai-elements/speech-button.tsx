@@ -9,12 +9,12 @@ import { useAtomValue, useSetAtom } from 'jotai'
 import { MicIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from '@/components/ui/tooltip'
+} from '@profer/ui/primitives/tooltip'
 import { AgentComposerToolTrigger } from '@/components/ai-elements/composer/ComposerTool'
 import {
   voiceDictationEnabledAtom,

@@ -11,13 +11,13 @@ import { Split } from 'lucide-react'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { openExplorationBranchTab } from '@/lib/exploration-tab'
 import { getDefaultStore } from 'jotai'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+} from '@profer/ui/primitives/dropdown-menu'
 
 interface AgentHeaderProps {
   sessionId: string

@@ -29,23 +29,21 @@ import {
   handleSkinsChanged,
 } from './atoms/theme'
 import {
-  agentChannelIdAtom,
-  agentModelIdAtom,
-  agentChannelIdsAtom,
-  agentRuntimeAtom,
   agentWorkspacesAtom,
   currentAgentWorkspaceIdAtom,
   currentAgentSessionIdAtom,
   workspaceCapabilitiesVersionAtom,
   workspaceFilesVersionAtom,
-  agentThinkingAtom,
-  agentEffortAtom,
-  agentMaxBudgetUsdAtom,
-  agentMaxTurnsAtom,
-  agentSettingsReadyAtom,
   dockBadgeCountAtom,
   unviewedCompletedSessionIdsAtom,
+  agentSessionsAtom,
+  memoryUnviewedCompletedSessionIdsAtom,
 } from './atoms/agent-atoms'
+import {
+  manualReadConfirmEnabledAtom,
+  initializeAgentUnreadSettings,
+} from './atoms/agent-unread-settings'
+import { planUnreadSeedOnInit } from './lib/agent-unread-gate'
 import { updateStatusAtom, initializeUpdater } from './atoms/updater'
 import { automationsAtom } from './atoms/automation-atoms'
 import {
@@ -58,6 +56,7 @@ import {
 } from './atoms/notifications'
 import {
   stickyUserMessageEnabledAtom,
+  showCreditsInSidebarAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
   composerCompactModeAtom,
@@ -98,10 +97,17 @@ import type { TabItem } from './atoms/tab-atoms'
 import { chatToolsAtom } from './atoms/chat-tool-atoms'
 import { feishuBotStatesAtom } from './atoms/feishu-atoms'
 import { dingtalkBotStatesAtom } from './atoms/dingtalk-atoms'
-import { currentConversationIdAtom, channelsAtom, channelsLoadedAtom, selectedModelAtom } from './atoms/chat-atoms'
+import { currentConversationIdAtom } from './atoms/chat-atoms'
+import { initializeAgentSettings } from './lib/agent-settings-initialization'
 import { appModeAtom } from './atoms/app-mode'
 import type { FeishuBotBridgeState, FeishuBridgeState, DingTalkBotBridgeState, DingTalkBridgeState } from '@profer/shared'
-import { Toaster } from './components/ui/sonner'
+import { Toaster } from '@profer/ui'
+
+/** 桌面壳 Toaster：把皮肤系统解析出的主题注入通用基元（基元本身已不含 jotai 依赖） */
+function ProferToaster(props: Omit<React.ComponentProps<typeof Toaster>, 'theme'>) {
+  const theme = useAtomValue(resolvedThemeAtom)
+  return <Toaster theme={theme} {...props} />
+}
 import { toast } from 'sonner'
 import { diffCapabilities, isVisibleAgentSession } from '@profer/shared'
 import type { WorkspaceCapabilities } from '@profer/shared'
@@ -116,15 +122,6 @@ import { htmlToMarkdown, markdownToHtml } from './lib/markdown-rich-text'
 import './styles/globals.css'
 import './styles/skin-base.css'
 import 'katex/dist/katex.min.css'
-
-function hasEnabledModel(
-  channels: Awaited<ReturnType<typeof window.electronAPI.listChannels>>,
-  selection: { channelId: string; modelId: string } | null,
-): boolean {
-  if (!selection) return false
-  const channel = channels.find((c) => c.id === selection.channelId)
-  return !!channel?.enabled && !!channel.models.find((m) => m.id === selection.modelId && m.enabled)
-}
 
 // ===== 窗口类型检测 =====
 const isQuickTaskWindow = new URLSearchParams(window.location.search).get('window') === 'quick-task'
@@ -206,22 +203,8 @@ function ThemeInitializer(): null {
  * 从主进程加载 Agent 渠道/模型设置并写入 atoms。
  */
 function AgentSettingsInitializer(): null {
-  const setAgentChannelId = useSetAtom(agentChannelIdAtom)
-  const setAgentModelId = useSetAtom(agentModelIdAtom)
-  const setAgentChannelIds = useSetAtom(agentChannelIdsAtom)
-  const setAgentRuntime = useSetAtom(agentRuntimeAtom)
-  const setAgentWorkspaces = useSetAtom(agentWorkspacesAtom)
-  const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
   const bumpCapabilities = useSetAtom(workspaceCapabilitiesVersionAtom)
   const bumpFiles = useSetAtom(workspaceFilesVersionAtom)
-  const setThinking = useSetAtom(agentThinkingAtom)
-  const setEffort = useSetAtom(agentEffortAtom)
-  const setMaxBudget = useSetAtom(agentMaxBudgetUsdAtom)
-  const setMaxTurns = useSetAtom(agentMaxTurnsAtom)
-
-  const setAgentSettingsReady = useSetAtom(agentSettingsReadyAtom)
-  const setChannels = useSetAtom(channelsAtom)
-  const setChannelsLoaded = useSetAtom(channelsLoadedAtom)
   const store = useStore()
 
   // 读取当前工作区信息（用于能力变化 diff）
@@ -233,103 +216,11 @@ function AgentSettingsInitializer(): null {
   // 初次加载标记 — 应用启动或切换工作区时不显示 toast
   const suppressToastRef = useRef(true)
 
-  useEffect(() => {
-    // 并行加载渠道列表和设置，确保两者都就绪后再验证渠道有效性
-    Promise.all([
-      window.electronAPI.listChannels(),
-      window.electronAPI.getSettings(),
-    ]).then(([channels, settings]) => {
-      // 缓存渠道列表
-      setChannels(channels)
-      setChannelsLoaded(true)
-
-      const channelIds = new Set(channels.map((c) => c.id))
-
-      // 验证 Chat 模式的全局默认模型（localStorage 持久化的可能指向已删除渠道）
-      const chatModel = store.get(selectedModelAtom)
-      if (chatModel && !hasEnabledModel(channels, chatModel)) {
-        console.warn('[AgentSettings] Chat selectedModel 指向已删除、停用或无效的模型配置，清除')
-        store.set(selectedModelAtom, null)
-      }
-
-      // 验证并加载 Agent 渠道/模型
-      if (settings.agentChannelId && channelIds.has(settings.agentChannelId)) {
-        setAgentChannelId(settings.agentChannelId)
-      } else if (settings.agentChannelId && !channelIds.has(settings.agentChannelId)) {
-        // 渠道已删除，清除无效设置
-        console.warn('[AgentSettings] agentChannelId 指向已删除的渠道，清除')
-        window.electronAPI.updateSettings({ agentChannelId: undefined, agentModelId: undefined }).catch(console.error)
-      }
-      if (settings.agentModelId && (!settings.agentChannelId || channelIds.has(settings.agentChannelId))) {
-        setAgentModelId(settings.agentModelId)
-      }
-      setAgentRuntime(settings.agentRuntime ?? 'claude')
-
-      // 加载 Agent 启用渠道列表，过滤已删除的渠道
-      if (settings.agentChannelIds && settings.agentChannelIds.length > 0) {
-        const validIds = settings.agentChannelIds.filter((id) => channelIds.has(id))
-        setAgentChannelIds(validIds)
-        // 如果有渠道被清理，持久化更新后的列表
-        if (validIds.length !== settings.agentChannelIds.length) {
-          console.warn('[AgentSettings] 清理了已删除的 agentChannelIds')
-          window.electronAPI.updateSettings({ agentChannelIds: validIds }).catch(console.error)
-        }
-      } else if (settings.agentChannelId && channelIds.has(settings.agentChannelId)) {
-        // 迁移：旧版本只有 agentChannelId，自动转为数组
-        const migrated = [settings.agentChannelId]
-        setAgentChannelIds(migrated)
-        window.electronAPI.updateSettings({ agentChannelIds: migrated }).catch(console.error)
-      }
-
-      // 兜底：agentChannelId 存在但不在 agentChannelIds 白名单中，自动修复不一致
-      if (settings.agentChannelId && channelIds.has(settings.agentChannelId)) {
-        const currentIds = settings.agentChannelIds?.filter((id) => channelIds.has(id)) ?? []
-        if (!currentIds.includes(settings.agentChannelId)) {
-          const fixedIds = [...currentIds, settings.agentChannelId]
-          setAgentChannelIds(fixedIds)
-          window.electronAPI.updateSettings({ agentChannelIds: fixedIds }).catch(console.error)
-        }
-      }
-
-      if (settings.agentThinking) {
-        setThinking(settings.agentThinking)
-      }
-      if (settings.agentEffort) {
-        setEffort(settings.agentEffort)
-      }
-      if (settings.agentMaxBudgetUsd != null) {
-        setMaxBudget(settings.agentMaxBudgetUsd)
-      }
-      if (settings.agentMaxTurns != null) {
-        setMaxTurns(settings.agentMaxTurns)
-      }
-
-      // 加载工作区列表并恢复上次选中的工作区
-      window.electronAPI.listAgentWorkspaces().then((workspaces) => {
-        setAgentWorkspaces(workspaces)
-        const visibleWorkspaces = getVisibleAgentWorkspaces(workspaces)
-        const savedWorkspace = settings.agentWorkspaceId
-          ? workspaces.find((workspace) => workspace.id === settings.agentWorkspaceId)
-          : undefined
-        const nextWorkspaceId = savedWorkspace && isAgentWorkspaceVisible(savedWorkspace)
-          ? savedWorkspace.id
-          : visibleWorkspaces[0]?.id ?? null
-        setCurrentWorkspaceId(nextWorkspaceId)
-
-        // 旧版本可能把团队工作区记在了默认 Agent 工作区设置里；隐藏入口时回落到个人项目。
-        if (settings.agentWorkspaceId && settings.agentWorkspaceId !== nextWorkspaceId) {
-          window.electronAPI.updateSettings({ agentWorkspaceId: nextWorkspaceId ?? undefined }).catch(console.error)
-        }
-        setAgentSettingsReady(true)
-      }).catch((err) => {
-        console.error(err)
-        setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
-      })
-    }).catch((err) => {
-      console.error(err)
-      setAgentSettingsReady(true) // 即使出错也标记就绪，避免永远阻塞
-    })
-  }, [setAgentChannelId, setAgentModelId, setAgentChannelIds, setAgentRuntime, setAgentWorkspaces, setCurrentWorkspaceId, setThinking, setEffort, setMaxBudget, setMaxTurns, setChannels, setChannelsLoaded, setAgentSettingsReady])
+  useEffect(() => initializeAgentSettings(store, {
+    getSettings: window.electronAPI.getSettings,
+    listWorkspaces: window.electronAPI.listAgentWorkspaces,
+    onFailure: (error) => console.error('[AgentSettings] 启动设置加载失败:', error),
+  }), [store])
 
   // 工作区切换时重置能力缓存，预加载基线
   useEffect(() => {
@@ -433,40 +324,37 @@ function PlanningInitializer(): null {
   const setTodoGroups = useSetAtom(todoPlanningGroupsAtom)
   const setCalendarGroups = useSetAtom(calendarPlanningGroupsAtom)
   const setTags = useSetAtom(planningTagsAtom)
-  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
-  const workspaces = useAtomValue(agentWorkspacesAtom)
-  const isTeamWorkspace = workspaces.find((workspace) => workspace.id === currentWorkspaceId)?.type === 'team'
 
   useEffect(() => {
     let disposed = false
     const latestRequest = { todos: 0, calendarEvents: 0, todoGroups: 0, calendarGroups: 0, tags: 0 }
     const loadTodos = (): void => {
       const requestId = ++latestRequest.todos
-      void window.electronAPI.listTodos(isTeamWorkspace && currentWorkspaceId ? { workspaceId: currentWorkspaceId } : undefined).then((todos) => {
+      void window.electronAPI.listTodos().then((todos) => {
         if (!disposed && requestId === latestRequest.todos) setTodos(todos)
       }).catch((error: unknown) => console.error('[任务/日程] 加载 Todo 失败:', error))
     }
     const loadCalendarEvents = (): void => {
       const requestId = ++latestRequest.calendarEvents
-      void window.electronAPI.listCalendarEvents(isTeamWorkspace && currentWorkspaceId ? { workspaceId: currentWorkspaceId } : undefined).then((events) => {
+      void window.electronAPI.listCalendarEvents().then((events) => {
         if (!disposed && requestId === latestRequest.calendarEvents) setCalendarEvents(events)
       }).catch((error: unknown) => console.error('[任务/日程] 加载日程失败:', error))
     }
     const loadTodoGroups = (): void => {
       const requestId = ++latestRequest.todoGroups
-      void window.electronAPI.listPlanningGroups('todo', isTeamWorkspace ? currentWorkspaceId ?? undefined : undefined).then((groups) => {
+      void window.electronAPI.listPlanningGroups('todo').then((groups) => {
         if (!disposed && requestId === latestRequest.todoGroups) setTodoGroups(groups)
       }).catch((error: unknown) => console.error('[任务/日程] 加载 Todo 分组失败:', error))
     }
     const loadCalendarGroups = (): void => {
       const requestId = ++latestRequest.calendarGroups
-      void window.electronAPI.listPlanningGroups('calendar', isTeamWorkspace ? currentWorkspaceId ?? undefined : undefined).then((groups) => {
+      void window.electronAPI.listPlanningGroups('calendar').then((groups) => {
         if (!disposed && requestId === latestRequest.calendarGroups) setCalendarGroups(groups)
       }).catch((error: unknown) => console.error('[任务/日程] 加载日程分组失败:', error))
     }
     const loadTags = (): void => {
       const requestId = ++latestRequest.tags
-      void window.electronAPI.listPlanningTags(isTeamWorkspace ? currentWorkspaceId ?? undefined : undefined).then((tags) => {
+      void window.electronAPI.listPlanningTags().then((tags) => {
         if (!disposed && requestId === latestRequest.tags) setTags(tags)
       }).catch((error: unknown) => console.error('[任务/日程] 加载标签失败:', error))
     }
@@ -479,20 +367,9 @@ function PlanningInitializer(): null {
       if (includes('tags')) loadTags()
     }
     load()
-    // TeamWorkspaceView normally负责连接 SSE；规划中心改走 MainArea 后仍需显式建立连接。
-    if (isTeamWorkspace && currentWorkspaceId) {
-      void window.electronAPI.sse.connect(currentWorkspaceId).catch((error) => console.error('[团队规划] SSE 连接失败:', error))
-    }
     const unsubscribe = window.electronAPI.onPlanningChanged((change) => load(change.resources))
-    // 团队规划的远端改动从 Team Server SSE 到达；仅刷新当前团队工作区，
-    // 本地规划仍沿用主进程 planning:changed 广播。
-    const unsubscribeSse = window.electronAPI.sse.onEvent((workspaceId, event) => {
-      if (!isTeamWorkspace || workspaceId !== currentWorkspaceId || event.type !== 'planning_changed') return
-      const data = event.data as { resources?: string[] }
-      load(data.resources)
-    })
-    return () => { disposed = true; unsubscribe(); unsubscribeSse() }
-  }, [currentWorkspaceId, isTeamWorkspace, setCalendarEvents, setCalendarGroups, setTags, setTodoGroups, setTodos])
+    return () => { disposed = true; unsubscribe() }
+  }, [setCalendarEvents, setCalendarGroups, setTags, setTodoGroups, setTodos])
 
   return null
 }
@@ -527,6 +404,45 @@ function NotificationsInitializer(): null {
     initializeNotifications(setEnabled, setSoundEnabled, setSounds, setCustomSounds)
     initDesktopNotificationListener()
   }, [setEnabled, setSoundEnabled, setSounds, setCustomSounds])
+
+  return null
+}
+
+/**
+ * 「手动确认已读」开关初始化组件（设置 → 使用偏好）
+ *
+ * 两件事：
+ * 1. 从主进程加载开关（默认 false），写入 `manualReadConfirmEnabledAtom`，渲染层判据随之就位；
+ * 2. 关闭态下补一次**安全回填**：把持久化未读（`completedButUnconfirmed`）补进内存集合。
+ *    与 `use-left-sidebar` 拉列表后的启动恢复同源且幂等，保证设置尚未加载完的窗口内也不丢未读。
+ *    开启态不需要（读就是持久化字段的派生）。
+ */
+function AgentUnreadSettingsInitializer(): null {
+  const store = useStore()
+  const setEnabled = useSetAtom(manualReadConfirmEnabledAtom)
+
+  useEffect(() => {
+    let cancelled = false
+    void initializeAgentUnreadSettings(setEnabled).then((enabled) => {
+      if (cancelled || enabled) return
+      const persistedUnreadIds = store.get(agentSessionsAtom)
+        .filter((session) => session.completedButUnconfirmed)
+        .map((session) => session.id)
+      if (persistedUnreadIds.length === 0) return
+      const seedIds = planUnreadSeedOnInit({
+        memoryUnreadIds: [...store.get(memoryUnviewedCompletedSessionIdsAtom)],
+        persistedUnreadIds,
+      })
+      if (seedIds.length === 0) return
+      // 直写内存集合：开启态不复存在，这里就是关闭态的事实源。
+      store.set(memoryUnviewedCompletedSessionIdsAtom, (prev) => {
+        const next = new Set(prev)
+        for (const id of seedIds) next.add(id)
+        return next
+      })
+    })
+    return () => { cancelled = true }
+  }, [store, setEnabled])
 
   return null
 }
@@ -578,6 +494,7 @@ function DockBadgeInitializer(): null {
  * 从主进程加载 UI 偏好设置（悬浮置顶条等）。
  */
 function UiPreferencesInitializer(): null {
+  const setShowCreditsInSidebar = useSetAtom(showCreditsInSidebarAtom)
   const setStickyUserMessageEnabled = useSetAtom(stickyUserMessageEnabledAtom)
   const setLongTextPasteAsAttachmentEnabled = useSetAtom(longTextPasteAsAttachmentEnabledAtom)
   const setRichTextRenderingEnabled = useSetAtom(richTextRenderingEnabledAtom)
@@ -585,12 +502,13 @@ function UiPreferencesInitializer(): null {
 
   useEffect(() => {
     initializeUiPreferences(
+      setShowCreditsInSidebar,
       setStickyUserMessageEnabled,
       setLongTextPasteAsAttachmentEnabled,
       setRichTextRenderingEnabled,
       setComposerCompactMode
     )
-  }, [setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode])
+  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode])
 
   return null
 }
@@ -1171,7 +1089,7 @@ if (isQuickTaskWindow) {
       <React.StrictMode>
         <ThemeInitializer />
         <VoiceDictationApp />
-        <Toaster position="top-right" offset={96} />
+        <ProferToaster position="top-right" offset={96} />
       </React.StrictMode>
     )
   })
@@ -1183,7 +1101,7 @@ if (isQuickTaskWindow) {
         <MarkdownFontSizeInitializer />
         <UiScaleInitializer />
         <DetachedPreviewApp />
-        <Toaster position="top-right" offset={96} />
+        <ProferToaster position="top-right" offset={96} />
       </React.StrictMode>
     )
   })
@@ -1198,7 +1116,7 @@ if (isQuickTaskWindow) {
         <ThemeInitializer />
         <PlanningInitializer />
         <PlanningWindowApp />
-        <Toaster position="top-right" offset={96} />
+        <ProferToaster position="top-right" offset={96} />
       </React.StrictMode>
     )
   })
@@ -1209,6 +1127,7 @@ if (isQuickTaskWindow) {
       <ThemeInitializer />
       <AgentSettingsInitializer />
       <NotificationsInitializer />
+      <AgentUnreadSettingsInitializer />
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
       <MarkdownFontSizeInitializer />
@@ -1230,7 +1149,7 @@ if (isQuickTaskWindow) {
       <TabSwitcher />
       <App />
       <UpdateDialog />
-      <Toaster position="top-right" offset={96} />
+      <ProferToaster position="top-right" offset={96} />
     </React.StrictMode>
   )
 }

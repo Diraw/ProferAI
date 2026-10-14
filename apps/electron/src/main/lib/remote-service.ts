@@ -33,7 +33,9 @@ import { app, BrowserWindow } from 'electron'
 
 import { AGENT_IPC_CHANNELS, isChannelEnabledForRuntime, type AgentSessionMeta } from '@profer/shared'
 import { agentEventBus, runAgentHeadless, stopAgent, isAgentSessionActive, listActiveAgentRuntimeContexts, updateAgentPermissionMode, queueAgentMessage, beginAgentSessionDeletion, endAgentSessionDeletion, stopAgentAndWait, rewindAgentSession, regenerateAgentTitle } from './agent-service'
-import { publishAgentSessionProjection, updateAgentSessionUiMeta } from './agent-session-ui-projection-publisher'
+import { publishAgentSessionProjection, setAgentSessionUnread, updateAgentSessionUiMeta } from './agent-session-ui-projection-publisher'
+import { buildArchiveToggleUpdates } from './agent-unread-policy'
+import { getAgentUnreadPolicyMode } from './agent-unread-mode'
 import { getUserProfile } from './user-profile-service'
 import {
   listAgentSessions,
@@ -53,6 +55,7 @@ import {
 } from './agent-session-manager'
 import { getAgentSessionsDir, getConfigDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
 import { getSettings } from './settings-service'
+import { projectAgentPayloadForPocket, projectSdkMessageForPocket } from './pocket-agent-projection'
 import {
   listAgentWorkspaces,
   createAgentWorkspace,
@@ -96,7 +99,7 @@ import {
   updateContextDividers,
   searchConversationMessages,
 } from './conversation-manager'
-import { sendMessage, stopGeneration, generateTitle } from './chat-service'
+import { sendMessage, stopGeneration, generateTitle, autoTitleConversation, regenerateConversationTitle } from './chat-service'
 import { saveAttachment, readAttachmentAsBase64, deleteAttachment } from './attachment-service'
 import { chatEventBus } from './chat-stream-bus'
 import { resolveAndReadFile, readFileAsDataUrl } from './file-preview-service'
@@ -190,7 +193,7 @@ function isPartialSdkPayload(payload: unknown): boolean {
 
 /** 真正把一条 agent_event 帧广播给所有已连接移动端客户端。 */
 function broadcastAgentFrame(sessionId: string, payload: import('@profer/shared').AgentStreamPayload): void {
-  const record = remoteAgentEventLog.append(sessionId, payload)
+  const record = remoteAgentEventLog.append(sessionId, projectAgentPayloadForPocket(payload))
   const frame = JSON.stringify({
     kind: 'agent_event',
     eventId: record.eventId,
@@ -883,14 +886,20 @@ export async function handleRemoteCommand(
         parsed.before !== undefined ||
         parsed.targetMessages !== undefined
       if (!wantsPaged) {
-        // 返回原始 SDKMessage 数组，供桌面式 AgentMessages 渲染（与持久化格式一致）
-        return { ok: true, data: messages }
+        // Pocket 只接收正文、工具名称和必要 usage，不接收思考正文、工具入参或工具结果。
+        return { ok: true, data: messages.map(projectSdkMessageForPocket) }
       }
       const page = paginateSDKMessages(messages, {
         before: typeof parsed.before === 'number' ? parsed.before : undefined,
         targetMessages: typeof parsed.targetMessages === 'number' ? parsed.targetMessages : undefined,
       })
-      return { ok: true, data: page }
+      return {
+        ok: true,
+        data: {
+          ...page,
+          messages: page.messages.map(projectSdkMessageForPocket),
+        },
+      }
     }
 
     case 'session_detail': {
@@ -917,15 +926,15 @@ export async function handleRemoteCommand(
     }
 
     // 查询某 Pi 模型可用的推理档位能力（Pocket 思考档位菜单与服务端同源，避免两端快照漂移）。
-    // 入参只接受 provider / modelId：档位由主进程的 pi-model-registry 级联解析
-    // （reasoning-profile 纯函数 + pi-ai 目录），渲染端拿不到该目录，因此不能本地推导。
+    // baseUrl 可选，旧版 Pocket 不传时仍按 provider 的静态默认协议处理。
     case 'get_pi_reasoning_capability': {
       const provider = typeof parsed.provider === 'string' ? parsed.provider : ''
       const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : undefined
+      const baseUrl = typeof parsed.baseUrl === 'string' ? parsed.baseUrl : undefined
       if (!provider) return { ok: false, error: '缺少 provider' }
       // resolvePiReasoningCapability 是异步的（需读 pi-ai 目录），必须 await，
       // 否则 data 会变成 Promise 而被 JSON 序列化成 {}。
-      return { ok: true, data: await resolvePiReasoningCapability(provider as import('@profer/shared').ProviderType, modelId) }
+      return { ok: true, data: await resolvePiReasoningCapability(provider as import('@profer/shared').ProviderType, modelId, baseUrl) }
     }
 
     // 工作区文件检索（Pocket `@` 引用）：桌面端由 renderer 提交 rootPath/additionalPaths
@@ -1130,7 +1139,7 @@ export async function handleRemoteCommand(
       const sessionId = parsed.sessionId as string
       const title = typeof parsed.title === 'string' ? parsed.title.trim() : ''
       if (!sessionId || !title) return { ok: false, error: '缺少 sessionId 或 title' }
-      const meta = updateAgentSessionUiMeta(sessionId, { title })
+      const meta = updateAgentSessionUiMeta(sessionId, { title, titleLockedAt: Date.now() })
       return { ok: true, data: buildSessionItem(meta) }
     }
 
@@ -1163,7 +1172,8 @@ export async function handleRemoteCommand(
       if (!sessionId) return { ok: false, error: '缺少 sessionId' }
       const meta = getAgentSessionMeta(sessionId)
       if (!meta) return { ok: false, error: '会话不存在' }
-      const updated = updateAgentSessionUiMeta(sessionId, { completedButUnconfirmed: true })
+      // 与侧边栏「标记未读」同一语义，统一走唯一写入口。
+      const updated = setAgentSessionUnread(sessionId, true) ?? meta
       return { ok: true, data: buildSessionItem(updated) }
     }
 
@@ -1172,7 +1182,14 @@ export async function handleRemoteCommand(
       if (!sessionId) return { ok: false, error: '缺少 sessionId' }
       const meta = getAgentSessionMeta(sessionId)
       if (!meta) return { ok: false, error: '会话不存在' }
-      const updated = updateAgentSessionUiMeta(sessionId, { completedButUnconfirmed: false })
+      // 开启态下「已读」只能由用户显式确认触发（桌面按钮 / 显式标记）。
+      // Pocket 关闭标签页时会自动调本命令，那是导航副作用而不是用户意图，必须 no-op，
+      // 否则手机上一划就把桌面未读吃掉且无处恢复（requirements §3.2-5）。
+      // 关闭态保持原行为：无条件清（现状回归）。
+      if (getAgentUnreadPolicyMode() === 'manual' && parsed.explicit !== true) {
+        return { ok: true, data: buildSessionItem(meta) }
+      }
+      const updated = setAgentSessionUnread(sessionId, false) ?? meta
       return { ok: true, data: buildSessionItem(updated) }
     }
 
@@ -1247,7 +1264,14 @@ export async function handleRemoteCommand(
       // 这里暂存并并入 completion 的 resultErrors，让 Pocket 能看到真实错误文案（而非只有「执行出错」）。
       let runErrorMessage: string | null = null
       void runAgentHeadless(
-        { sessionId, userMessage, channelId, modelId, workspaceId, startedAt, ...(uuid ? { uuid } : {}) },
+        {
+          sessionId, userMessage, channelId, modelId, workspaceId, startedAt,
+          // Pocket 是用户在自己手机上发的新消息：显式标为用户发起（清未读），
+          // 不能靠 `source: 'bridge'` 反推 —— 按 resolveRunInitiator 的优先级，headless source
+          // 会把它解析成 'external'，导致用户自己的新一轮不清未读。
+          initiator: 'user',
+          ...(uuid ? { uuid } : {}),
+        },
         {
           source: 'bridge',
           onError: (error) => {
@@ -1320,11 +1344,13 @@ export async function handleRemoteCommand(
       }
     }
 
-    // 快照回退：同一会话内回退到指定点（恢复文件 + 截断对话；对齐桌面 REWIND_SESSION IPC）
+    // 快照回退 / 清空对话（同一会话内回退到指定点；无 assistantMessageUuid 时清空整段对话）
     case 'rewind_session': {
       const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : ''
-      const assistantMessageUuid = typeof parsed.assistantMessageUuid === 'string' ? parsed.assistantMessageUuid : ''
-      if (!sessionId || !assistantMessageUuid) return { ok: false, error: '缺少 sessionId 或 assistantMessageUuid' }
+      const assistantMessageUuid = typeof parsed.assistantMessageUuid === 'string' && parsed.assistantMessageUuid
+        ? parsed.assistantMessageUuid
+        : undefined
+      if (!sessionId) return { ok: false, error: '缺少 sessionId' }
       try {
         const result = await rewindAgentSession(sessionId, assistantMessageUuid)
         return { ok: true, data: result }
@@ -1347,16 +1373,18 @@ export async function handleRemoteCommand(
       return { ok: true, data: buildSessionItem(updated) }
     }
 
-    // 归档/取消归档（对齐桌面 TOGGLE_ARCHIVE：归档时自动取消置顶）
+    // 归档/取消归档（对齐桌面 TOGGLE_ARCHIVE）：归档时自动取消置顶；开启态下归档视作已读，一并清未读。
     case 'toggle_session_archive': {
       const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : ''
       if (!sessionId) return { ok: false, error: '缺少 sessionId' }
       const current = listAgentSessions(true).find((s) => s.id === sessionId)
       if (!current) return { ok: false, error: `Agent 会话不存在: ${sessionId}` }
-      const newArchived = !current.archived
-      const updates: { archived: boolean; pinned?: boolean } = { archived: newArchived }
-      if (newArchived && current.pinned) updates.pinned = false
-      const updated = updateAgentSessionUiMeta(sessionId, updates)
+      // 与桌面 TOGGLE_ARCHIVE 共用同一纯函数，保证「归档＝已读」口径不分端（移动端归档清未读属开启态策略，保留）。
+      const updated = updateAgentSessionUiMeta(sessionId, buildArchiveToggleUpdates({
+        archived: current.archived ?? false,
+        pinned: current.pinned ?? false,
+        completedButUnconfirmed: current.completedButUnconfirmed ?? false,
+      }, getAgentUnreadPolicyMode()))
       return { ok: true, data: buildSessionItem(updated) }
     }
 
@@ -1478,7 +1506,21 @@ export async function handleRemoteCommand(
       const title = typeof parsed.title === 'string' ? parsed.title.trim() : ''
       if (!id || !title) return { ok: false, error: '缺少 conversationId 或 title' }
       if (!listConversations(true).some((c) => c.id === id)) return { ok: false, error: '对话不存在' }
-      return { ok: true, data: updateConversationMeta(id, { title }) }
+      return { ok: true, data: updateConversationMeta(id, { title, titleLockedAt: Date.now() }) }
+    }
+
+    case 'regenerate_conversation_title': {
+      const conversationId = typeof parsed.conversationId === 'string' ? parsed.conversationId : ''
+      if (!conversationId) return { ok: false, error: '缺少 conversationId' }
+      const meta = listConversations(true).find((conversation) => conversation.id === conversationId)
+      if (!meta) return { ok: false, error: '对话不存在' }
+      const channelId = typeof parsed.channelId === 'string' ? parsed.channelId : meta.channelId
+      const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : meta.modelId
+      if (!channelId || !modelId) return { ok: false, error: '重新生成标题失败：当前对话没有可用模型' }
+      const updated = await regenerateConversationTitle(conversationId, channelId, modelId)
+      return updated
+        ? { ok: true, data: updated }
+        : { ok: false, error: '重新生成标题失败：当前对话没有有效消息或模型不可用' }
     }
 
     case 'update_conversation_model': {
@@ -1644,6 +1686,15 @@ export async function handleRemoteCommand(
       if (!conversationId || !dividers) return { ok: false, error: '缺少 conversationId 或 dividers' }
       if (!listConversations(true).some((c) => c.id === conversationId)) return { ok: false, error: '对话不存在' }
       return { ok: true, data: updateContextDividers(conversationId, dividers) }
+    }
+
+    case 'chat_auto_title': {
+      const conversationId = typeof parsed.conversationId === 'string' ? parsed.conversationId : ''
+      const channelId = typeof parsed.channelId === 'string' ? parsed.channelId : ''
+      const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : ''
+      if (!conversationId || !channelId || !modelId) return { ok: false, error: '缺少 conversationId / channelId / modelId' }
+      const updated = await autoTitleConversation({ conversationId, channelId, modelId })
+      return { ok: true, data: updated }
     }
 
     case 'chat_generate_title': {

@@ -11,7 +11,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog'
+} from '@profer/ui/primitives/dialog'
 import { EnvironmentCheckPanel } from './EnvironmentCheckPanel'
 
 interface EnvironmentCheckDialogProps {

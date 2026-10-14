@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetTitle } from "@profer/ui/primitives/sheet";
 
 interface SkillDetailSheetFrameProps {
   open: boolean;

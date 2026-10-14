@@ -45,6 +45,25 @@ function createAdapter(calls: string[], errorPrefix = '', capabilities?: Partial
 }
 
 describe('RuntimeRoutingAgentAdapter', () => {
+  for (const runtime of ['claude', 'pi'] as const) {
+    test(`Skill 快照先就绪、${runtime} query 后启动时，注册回调释放队列且只路由本轮`, async () => {
+      const calls: string[] = []
+      const router = new RuntimeRoutingAgentAdapter({ [runtime]: createAdapter(calls) })
+      let ready!: () => void
+      const registered = new Promise<void>(resolve => { ready = resolve })
+      const iterator = router.query({ sessionId: 'setup', prompt: 'hi', agentRuntime: runtime, onRuntimeRegistered: ready })[Symbol.asyncIterator]()
+      const queued = registered.then(() => router.sendQueuedMessage('setup', {
+        type: 'user', uuid: 'q', session_id: 'setup', parent_tool_use_id: null,
+        message: { role: 'user', content: 'next /skill:pdf' },
+      }, { skillMentions: [] }))
+      expect(calls).toEqual([])
+      await iterator.next()
+      await queued
+      expect(calls).toEqual(['query:setup', 'queue:setup:false'])
+      await iterator.return?.()
+      router.dispose()
+    })
+  }
   test('Given only a Claude adapter When a Claude session runs Then routes stop to the same adapter', async () => {
     const calls: string[] = []
     const router = new RuntimeRoutingAgentAdapter({ claude: createAdapter(calls) })

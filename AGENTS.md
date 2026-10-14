@@ -18,7 +18,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 Profer 是一个集成通用 AI Agent 的下一代人工智能软件，采用 Electron 桌面应用架构。脱胎于开源项目 Proma (github.com/ErlichLiu/Proma)，经深度改造而来。
 
-> **改名记录**：2026-06-21 从 Proma 改名为 Profer。代码包名 `@proma/*` 保持不变。
+> **改名记录**：2026-06-21 从 Proma 改名为 Profer。应用名/数据目录/GitHub 仓库均已更名。代码包名 `@proma/*` 保持不变。
 
 ## Monorepo 结构
 
@@ -55,6 +55,11 @@ proma-v2/
 - **关键功能**：Provider 适配器注册表、代码高亮（Shiki）
 - **依赖**：`@proma/shared`、`shiki`
 - **Peer 依赖**：`@anthropic-ai/claude-agent-sdk`、`@anthropic-ai/sdk`、`@modelcontextprotocol/sdk`
+
+#### @proma/session-core (v0.1.0)
+- **职责**：headless 核心——读取、分组、搜索、渲染 Proma Agent 会话。Electron 应用、proma CLI 和未来查询界面的单一事实来源
+- **导出模块**：`./index`（`group`、`outline`、`read`、`search`、`select`、`transcript`、`render-markdown`、`thinking-tags`、`tokens`）、`./node`（文件系统读取 + session 列表）
+- **依赖**：`@proma/shared`
 
 #### @proma/ui (v0.1.9)
 - **关键组件**：共享 React UI 组件库
@@ -99,7 +104,7 @@ bun test
 
 # 打包分发（按目标平台执行）
 cd apps/electron
-bun run dist:fast     # 当前宿主架构快速打包
+bun run dist:fast     # 当前宿主架构快速打包（本机 macOS 可用于 arm64 验收）
 bun run dist:mac      # macOS 当前架构验收包
 bun run dist:win      # Windows x64 发布/验收包（必须在 Windows 构建主机执行）
 # Windows 专属的 PowerShell/注册表 PATH/打包校验只在 Windows 主机执行；不要在 macOS shell 中执行 Windows 命令
@@ -179,25 +184,28 @@ bun run generate:icons    # 生成应用图标
 
 | 服务 | 职责 |
 |------|------|
-| `agent-orchestrator.ts` | Agent 核心编排层（71KB）：并发守卫、渠道查找、环境变量构建、SDK 路径解析、消息持久化、事件流处理、错误处理、自动标题生成 |
-| `agent-session-manager.ts` | Agent 会话管理：SDK 消息持久化、会话元数据 CRUD、JSONL 存储 |
-| `agent-prompt-builder.ts` | Agent 系统提示词构建（18KB）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
+| `agent-orchestrator.ts` | Agent 核心编排层（193KB）：并发守卫、渠道查找、环境变量构建、SDK 路径解析、消息持久化、事件流处理、错误处理、自动标题生成 |
+| `agent-collaboration-tools.ts` | Agent 协作委派工具（64KB）：10 个 MCP 工具（delegate_agent / delegate_agents / wait_for_delegations / list_delegations / get_delegation_results / stop_delegation / stop_delegations / answer_delegation_question / continue_delegation / list_available_agent_models），子会话创建、等待、管理和恢复 |
+| `adapters/claude-agent-adapter.ts` | Claude Agent SDK 适配器（56KB）：实现 AgentProviderAdapter 接口，长生命周期消息通道，支持 streamInput 持久化、工具权限注入、thinking signature 错误处理 |
+| `adapters/pi-agent-adapter.ts` | Pi Agent SDK 适配器（117KB）：Pi 运行时消息通道、内置产品工具注册、AskUserQuestion 闭环 |
+| `agent-session-manager.ts` | Agent 会话管理（119KB）：SDK 消息持久化、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
+| `agent-prompt-builder.ts` | Agent 系统提示词构建（24KB）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
+| `agent-service.ts` | Agent headless 运行服务（39KB）：无界面 Agent 运行、协作子会话执行 |
+| `agent-headless-runner-registry.ts` | Headless runner 注册表：管理协作委派的 Agent 运行实例生命周期 |
+| `agent-model-selection.ts` | 协作委派模型选择验证：确保委派子会话使用已启用的合法模型 |
 | `agent-permission-service.ts` | Agent 权限管理：工具权限检查、权限模式管理 |
 | `agent-ask-user-service.ts` | Agent 用户交互：AskUser 请求处理 |
 | `agent-exit-plan-service.ts` | Agent 退出计划服务 |
-| `agent-workspace-manager.ts` | 工作区管理（16KB）：MCP Server 配置、Skills 配置、工作区 CRUD |
-| `team-manager.ts` / `team-file-service.ts` | 团队工作区与团队文件：远程 CRUD、邀请成员、文件上传 / 下载 / 删除 / 移动、本地缓存 |
-| `chat-service.ts` | Chat 流式调用编排（20KB）：Provider 适配器集成、消息持久化、AbortController |
-| `conversation-manager.ts` | 对话管理：对话 CRUD、JSONL 消息存储（parentId-tree）、置顶、上下文分割、活跃分支 activePath、forkBranchAt 分叉 |
-| `channel-manager.ts` | 渠道管理（16KB）：渠道 CRUD、API Key AES-256-GCM 加密（safeStorage）、连接测试、模型获取 |
+| `agent-workspace-manager.ts` | 工作区管理（68KB）：MCP Server 配置、Skills 配置、工作区 CRUD |
+| `chat-service.ts` | Chat 流式调用编排（38KB）：Provider 适配器集成、消息持久化、AbortController |
+| `conversation-manager.ts` | 对话管理（37KB）：对话 CRUD、JSONL 消息存储（parentId-tree）、置顶、上下文分割、活跃分支 activePath、forkBranchAt 分叉 |
+| `channel-manager.ts` | 渠道管理（82KB）：渠道 CRUD、API Key AES-256-GCM 加密（safeStorage）、连接测试、模型获取 |
 
 #### 集成服务
 
 | 服务 | 职责 |
 |------|------|
-| `feishu-bridge.ts` | 飞书集成（68KB）：消息同步、任务通知、OAuth 认证 |
-| `memory-service.ts` | 记忆管理：跨会话记忆存储与检索 |
-| `memos-client.ts` | Memos 客户端：笔记服务集成 |
+| `feishu-bridge.ts` | 飞书集成（91KB）：消息同步、任务通知、OAuth 认证 |
 
 #### 工具与文件
 
@@ -252,21 +260,33 @@ bun run generate:icons    # 生成应用图标
 |-----------|-----------|
 | `chat-atoms.ts` | 对话列表、当前消息、流式状态（Map 结构支持多对话并行）、模型选择、上下文设置、并排模式、思考模式、待上传附件 |
 | `agent-atoms.ts` | Agent 会话列表、当前会话、流式状态（`AgentStreamState`）、工作区选择、渠道选择、权限/AskUser 请求队列（按 sessionId Map） |
-| `active-view.ts` | 主面板视图切换（'conversations' / 'settings'） |
-| `app-mode.ts` | 应用模式（Chat / Agent） |
+| `active-view.ts` | 主面板视图切换（'conversations' / 'automations' / 'agent-skills'） |
+| `app-mode.ts` | 应用模式（'chat' / 'agent' / 'scratch'） |
 | `settings-tab.ts` | 设置面板当前标签页 |
+| `automation-atoms.ts` | 定时任务状态（automationsAtom、automationFormAtom） |
+| `credits-atoms.ts` | 积分余额和用量统计 |
 | `theme.ts` | 主题模式（light / dark / system） |
 | `user-profile.ts` | 用户档案（姓名 + 头像） |
 | `updater.ts` | 自动更新状态（检查/下载/安装），优雅降级（updater 不可用时保持 idle） |
 
 ### 渲染进程组件架构（`renderer/components/`）
 
-- **`app-shell/`**：三面板布局（LeftSidebar | NavigatorPanel | MainContentPanel），侧边栏含模式切换、置顶对话、日期分组列表、流式指示器
+- **`app-shell/`**：三面板布局（LeftSidebar | NavigatorPanel | MainContentPanel），侧边栏含模式切换、置顶对话、日期分组列表、流式指示器、余额显示、委派子会话树形折叠
 - **`chat/`**：聊天核心 — ChatView（消息加载/流式订阅）、ChatHeader（模型选择/上下文设置）、ChatInput（Tiptap 富文本编辑器）、ChatMessages（消息列表/自动滚动）、ParallelChatMessages（并排模式）
-- **`agent/`**：Agent 模式 — AgentView（纯展示 + 交互，IPC 监听已提升到全局）、AgentHeader（渠道/模型选择）、AgentMessages（消息列表 + 工具活动）、ToolActivityItem（工具调用展示）、WorkspaceSelector（工作区切换）、PermissionBanner/AskUserBanner（权限/问答请求 UI）
-- **`settings/`**：设置面板 — GeneralSettings（用户档案）、AppearanceSettings（主题）、ChannelSettings（渠道管理）、ChannelForm（Provider 配置）、AgentSettings（Agent 渠道/工作区/MCP）、McpServerForm（MCP 服务器配置）、AboutSettings（版本/更新）、FeishuSettings（飞书集成）；含 `primitives/` 可复用表单组件
+- **`agent/`**：Agent 模式 — AgentView（160KB，纯展示 + 交互，IPC 监听已提升到全局）、AgentHeader（渠道/模型选择）、AgentMessages（消息列表 + 工具活动）、SDKMessageRenderer（78KB，SDK 消息渲染，含协作工具 UI）、SidePanel（67KB，右侧面板）、PermissionBanner/AskUserBanner（权限/问答请求 UI）、MentionList（@ 提及文件/工作区）、ProcessBlockGroup（工具调用分组展示）、TaskProgressCard（任务进度卡片）；工作区切换器已随工作区模型收敛移除
+- **`agent-skills/`**：Agent 技能全屏管理视图 — AgentSkillsView（35KB，Skills + MCP 管理）、SkillCard/SkillDetailSheet/McpCard/McpDetailSheet、ImportSkillDialog、useAgentSkillsData
+- **`settings/`**：设置面板（30+ 个组件） — GeneralSettings、AppearanceSettings（含经典/现代风格切换）、ChannelSettings/ChannelForm、AgentSettings、McpServerForm、AboutSettings、FeishuSettings、DingTalkSettings、WeChatSettings、PromptSettings、ToolSettings、MemorySettings、ShortcutSettings、VoiceInputSettings、ProxySettings、MigrationSettings、StorageSettings、CreditsSettings（积分与用量）、BrandManager（Logo/品牌定制）、BotHubSettings/BotDefaultSettings、UpdateDialog、ReleaseNotesViewer；含 `primitives/` 可复用表单组件（团队工作区设置页已随团队运行时移除）
 - **`file-browser/`**：文件浏览器 — FileBrowser（工作区文件树浏览）
+- **`diff/`**：Diff 与 Markdown 编辑器 — DiffView/DiffTabContent（55KB，并排 diff 展示）、PreviewPanel/PreviewTabContent（Markdown 预览）、MarkdownRichEditor/MarkdownEditorToolbar（富文本编辑）、MarkdownToc（目录导航）、PreviewFindBar（预览内搜索）、WorktreeSelector
 - **`ai-elements/`**：AI 展示组件 — Markdown 渲染、代码块、Mermaid 图、推理折叠、上下文分割线、富文本输入
+- **`automation/`**：定时任务 UI — AutomationsListView（12KB，任务列表）、AutomationFormView（45KB，任务编辑表单）
+- **`auth/`**：认证 — LoginDialog、JoinWorkspaceDialog
+- **`scratch-pad/`**：草稿本 — ScratchPadView（14KB）
+- **`quick-task/`**：快速任务窗口 — QuickTaskApp（17KB）
+- **`onboarding/`**：新手引导 — OnboardingView
+- **`tutorial/`**：教程横幅 — TutorialBanner
+- **`welcome/`**：欢迎页 — WelcomeView、WelcomeEmptyState
+- **`session-preview/`**：会话预览 — SessionMiniMapPopover
 - **`ui/`**：Radix UI 组件（现代化设计，CSS 变量主题）
 
 ### 全局 Hooks（`renderer/hooks/`）
@@ -315,7 +335,40 @@ bun run generate:icons    # 生成应用图标
 - JSON 配置 + JSONL 追加日志，无本地数据库，文件可移植
 - Agent 工作区按 slug 隔离，每个会话独立目录
 - MCP 配置和 Skills 按工作区管理
-- 团队文件以服务器清单为唯一数据源，本地 `workspace-files/` 仅作为预览、打开和 Agent 解读的按需缓存
+
+> **2026-10-11 变更**：团队工作区运行时已移除，团队文件同步与 `workspace-files/` 缓存语义不再适用。
+
+## 团队服务器
+
+> 🔴 **团队服务器已迁移至独立私有 git 仓库**（原 `server/`），不再随本公开仓库发布。公开仓库中**没有** `server/` 目录。
+>
+> 在公开仓库中：不要提交、讨论 server 源码结构、服务器 IP、部署路径、凭据等敏感信息。server 开发/发布请在私有仓库中操作。
+
+## 默认 Skills（`apps/electron/default-skills/`）
+
+应用启动时 semver 比较自动同步到 `~/.profer/default-skills/` 和各工作区。共 19 个：
+
+| Skill | 用途 |
+|-------|------|
+| `automation` | Profer 内嵌定时任务 Skill |
+| `brainstorming` | 创意工作前需求探索和设计 |
+| `docx` | Word 文档创建/读取/编辑 |
+| `executing-plans` | 带审查检查点的实现计划执行 |
+| `find-skills` | 发现和安装 Skills |
+| `guizang-ppt-skill` | 横向翻页网页 PPT 生成 |
+| `in-app-browser` | 应用内受管浏览器操作 |
+| `lark-delivery` | 飞书交付 |
+| `pdf` | PDF 文档处理 |
+| `pptx` | PowerPoint 演示文稿 |
+| `present-visualization` | 会话内可视化（图表/结构/对比） |
+| `profer-coach` | Profer 使用顾问，优化工作流 |
+| `profer-theme-authoring` | 主题/皮肤创作 |
+| `session-cleaner` | 会话 JSONL 清洗为 Markdown |
+| `skill-creator` | Skill 创建/编辑/评估 |
+| `tool-builder` | 自定义 HTTP 工具管理 |
+| `user-sense` | 用户感知/偏好推断 |
+| `writing-plans` | 多步骤任务实施计划 |
+| `xlsx` | 电子表格处理 |
 
 ## 构建工具
 
@@ -345,10 +398,10 @@ bun run generate:icons    # 生成应用图标
 - `agent-orchestrator.ts` 中 `resolveSDKCliPath()` 解析到 SDK 主包入口后，沿 `..` 到 `@anthropic-ai/` 同级目录，再拼 `claude-agent-sdk-${platform}-${arch}/{claude|claude.exe}` 得到 binary 路径
 
 **跨平台打包限制：**
-- optionalDependencies 的平台子包由包管理器按 `os`/`cpu` 字段筛选：Apple Silicon runner 只会装 darwin-arm64，不会装 darwin-x64（cpu 不匹配）
-- 因此当前 CI（macos-latest + windows-latest）**不支持在单个 macOS runner 上同时打 arm64 + x64 DMG**
-- 若要发布 darwin-x64 版本，需要在 macos-13（x64 runner）单独跑一次构建
-- Windows runner 默认 x64，打 win32-x64 正常
+- 正式稳定发布默认仍只发布 Windows x64；Linux 正式签名发布暂未接入。
+- macOS 具备 `macos-14` Apple Silicon (`darwin-arm64`) 的手动验收 workflow：`.github/workflows/macos-package.yml`。它只跑便携测试、typecheck、Mac 构建与包验证，并上传 Actions Artifact；不自动创建 Release。
+- macOS 当前仅支持无签名、无公证的 arm64 验收包。只有用户明确要求时，才可将该 Artifact 作为测试版资产加入 GitHub Pre-release；不能把它当作正式稳定 Mac 发布。
+- macOS 正式签名/公证发布仍未接入。Apple Silicon runner 不会构建 darwin-x64；Intel 需要 x64 runner 单独构建。
 
 **不使用 extraResources 放 binary 的原因：**
 - `extraResources` 会将文件复制到 `Contents/Resources/` 目录，路径与 node_modules 解析不一致
@@ -392,9 +445,38 @@ bun run generate:icons    # 生成应用图标
 
 修改任何 `default-skills/<skill>/` 内容时，**必须同步递增该 Skill `SKILL.md` frontmatter 的 `version` 字段**（patch +1）。
 
-**为什么**：`seedDefaultSkills()` 与 `upgradeDefaultSkillsInWorkspaces()` 通过 semver 比较决定是否将 bundle 中的 Skill 同步到老用户的 `~/.profer/default-skills/` 与各工作区。**version 不变 = 老用户拿不到新内容**。
+**为什么**：`seedDefaultSkills()` 通过 semver 比较决定是否将 bundle 中的 Skill 同步到老用户的 `~/.profer/default-skills/`（全局元 skill 库）。**version 不变 = `seedDefaultSkills` 不会用新版覆盖全局库**。
 
-**早期实现曾用"无条件 cpSync"绕开这个约束**，但每次启动同步 4MB+ 文件会阻塞主进程导致启动卡顿，已恢复为 semver 比较（见 `config-paths.ts:seedDefaultSkills`、`agent-workspace-manager.ts:upgradeDefaultSkillsInWorkspaces`）。
+> 2026-08-14 起，`upgradeDefaultSkillsInWorkspaces()` 语义已收窄：**只做「缺失即注入」**，不再对已存在的工作区 skill 做基于 version 的全量覆盖。工作区已装 skill 的更新改由「全局元 Skill → 手动同步」机制掌控（见下）。
+
+### 全局元 Skill（master）与工作区同步
+
+- **全局元 Skill 库** = `~/.profer/default-skills/{slug}/`，是唯一编辑源，用户可编辑、有版本历史、可回退。
+- 历史快照：`~/.profer/default-skills-history/{slug}/v{n}/`（v1 为出厂基线/首次保存），版本索引 `index.json`。
+- 保存即 bump：`skill-master-manager.ts:saveMasterSkill` 自动把 frontmatter `version` patch+1 并落盘一条快照；`rollbackMasterSkill` 回退并保留一条新回退记录。
+- **工作区同步**：`syncMasterSkillToWorkspace` 手动把元 skill 覆盖到选定个人工作区 `skills/{slug}`，写 `.source.json`（`sourceKind:'master'` + baseline 内容哈希）。
+- **冲突检测**：基于内容哈希（`detectSkillConflict`），工作区副本相对上次同步基线被改过即视为冲突；非强制同步会拒绝覆盖，由 UI 让用户选择「覆盖/跳过」。
+- UI 入口：Agent 技能视图「元 Skill」tab（编辑/版本回退/同步到工作区），`MasterSkillsTab.tsx` / `MasterSkillDetailSheet.tsx` / `SyncMasterSkillDialog.tsx`。
+- 团队市场与跨工作区导入逻辑不受影响；master 同步只作用于个人工作区本地 skills。
+
+**早期实现曾用"无条件 cpSync"绕开 seed 约束**，但每次启动同步 4MB+ 文件会阻塞主进程导致启动卡顿，已恢复为 semver 比较（见 `config-paths.ts:seedDefaultSkills`）。
+
+### 发版流程（本地唯一发布者，2026-08-18 起）
+
+正式 Windows 发版由本地 `scripts/push-release.cjs` 单独完成：构建一次签名 Windows x64 安装包、上传国内更新源、推送源码/tag、创建或补齐 GitHub Release。`release.yml` 改为仅手动触发的构建验证，绝不因 tag 自动构建或写入 GitHub Release，避免双重构建和两个发布者竞争同一 Release。
+
+macOS arm64 目前走独立的手动验收流程：先运行 `.github/workflows/macos-package.yml`，成功后可在用户明确确认的前提下，把同一 Actions Artifact 中的 DMG/ZIP 作为测试资产加入对应 GitHub Pre-release。它不进入 Windows 国内更新源。无签名 Windows 测试包若需同步国内源，也只能走明确确认的临时测试流程，不能调用正式 `push-release.cjs`，不能伪造 `latest.yml.sig`：
+
+```bash
+# 1) 先提交 package.json、CHANGELOG.json 和本次客户端代码；工作树必须干净
+# 2) 本地构建一次并发布两个通道（GitHub 登录或 GITHUB_TOKEN 需有效）
+node scripts/push-release.cjs X.Y.Z
+# 脚本不 rebase、不强推 tag；远端 main 或同名 tag 不一致会明确失败。
+```
+
+> 注意：tag 与 package.json/CHANGELOG 首条版本必须一致。GitHub API 503 时脚本会有限重试，并在每次上传后按资产名、大小与 `uploaded` 状态收敛验证。
+
+两个构建目标编译时注入 `__PROFER_BUILD_TARGET__`（`oss` / `commercial`），互不串扰。
 
 **新增 Skill 不需要先注入 default-skills 目录的旧版本**——`upgradeDefaultSkillsInWorkspaces` 会通过"目标缺失即注入"路径让所有老工作区自动获得。
 
@@ -553,7 +635,7 @@ React UI 更新
 - 新增 `agent-retry-utils.test.ts`、`agent-directory-utils.test.ts`、`server/src/utils.test.js`（37 用例）
 
 ### 部署
-- 服务器：`ecs-user@47.109.108.57:~/proma-team-server/`，端口 3456，nginx 反代 `/proma/` → `:3456`
+- 团队服务器部署详情已随 server 迁移至本地私有仓库 `server-private.git`，公开仓库不再记录服务器地址与路径。
 
 ## 后续计划
 
@@ -566,7 +648,7 @@ React UI 更新
 - 文件搜索功能
 
 ### 中优先级
-- PC 客户端自动更新（electron-updater）
+- ~~PC 客户端自动更新（electron-updater）~~ ✅ 已完成（v0.12.27+，双渠道：国内服务器 + GitHub）
 - 邀请过期自动清理（定时任务）
 - 拖动稳定性优化
 - feishu-bridge 继续拆分（command-handlers、chat-history）

@@ -9,19 +9,19 @@
  */
 import * as React from 'react'
 import { Send, CheckCircle2, AlertCircle, Loader2, MessageSquareText } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
+import { Button } from '@profer/ui/primitives/button'
+import { Textarea } from '@profer/ui/primitives/textarea'
+import { Input } from '@profer/ui/primitives/input'
+import { Label } from '@profer/ui/primitives/label'
 import { SettingsSection, SettingsCard } from './primitives'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Alert, AlertDescription } from '@profer/ui/primitives/alert'
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '@/components/ui/select'
+} from '@profer/ui/primitives/select'
 
 const CATEGORIES: { value: string; label: string }[] = [
   { value: 'general', label: '💬 通用反馈' },

@@ -1,7 +1,7 @@
 import * as React from 'react'
-import { Button } from '@/components/ui/button'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Button } from '@profer/ui/primitives/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@profer/ui/primitives/popover'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 
 /**

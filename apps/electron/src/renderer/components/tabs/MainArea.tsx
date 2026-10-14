@@ -23,7 +23,6 @@ import { AutomationFormView } from '@/components/automation/AutomationFormView'
 import { PlanningView } from '@/components/planning/PlanningView'
 import { AgentSkillsView } from '@/components/agent-skills/AgentSkillsView'
 import { automationFormAtom } from '@/atoms/automation-atoms'
-import { agentSidePanelOpenAtom } from '@/atoms/agent-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { appModeAtom } from '@/atoms/app-mode'
 import { cn } from '@/lib/utils'
@@ -53,6 +52,9 @@ import {
 
 export function MainArea(): React.ReactElement {
   const tabs = useAtomValue(tabsAtom)
+  // 浏览器订阅只随会话变化；标签排序/标题更新不能重新触发状态恢复。
+  const tabsRef = React.useRef(tabs)
+  tabsRef.current = tabs
   const activeTabId = useAtomValue(activeTabIdAtom)
   const setActiveTabId = useSetAtom(activeTabIdAtom)
   const activeTab = useAtomValue(activeTabAtom)
@@ -67,8 +69,6 @@ export function MainArea(): React.ReactElement {
   // 主区域仍长期保留旧会话；昂贵子树应自行优化，不能以旧会话内容作为过渡态。
   const contentTabId = resolveContentTabId(tabs, activeTabId)
 
-  const [agentSidePanelOpen, setAgentSidePanelOpen] = useAtom(agentSidePanelOpenAtom)
-
   // ===== 受管浏览器（Tab 化）=====
   const setBrowserStateMap = useSetAtom(browserStateMapAtom)
   const browserDismissed = useAtomValue(browserPanelDismissedSessionIdsAtom)
@@ -82,7 +82,7 @@ export function MainArea(): React.ReactElement {
     : null
   currentBrowserSessionIdRef.current = browserSessionId
 
-  const publishBrowserState = React.useCallback((state: BrowserViewState, options?: { autoOpen?: boolean }) => {
+  const publishBrowserState = React.useCallback((state: BrowserViewState, options?: { autoOpen?: boolean; autoGroup?: boolean }) => {
     // 同步浏览器内容状态（tabs/url/标题/trace 等）。状态可以保留在后台会话，
     // 但后台会话的状态推送不能改变当前会话的浏览器 Tab。
     setBrowserStateMap((previous) => { const next = new Map(previous); next.set(state.sessionId, state); return next })
@@ -90,15 +90,15 @@ export function MainArea(): React.ReactElement {
     // 仅用于恢复工具栏状态，不能把旧会话的浏览器 Tab 重新唤起。
     if (state.sessionId !== currentBrowserSessionIdRef.current) return
     const dismissed = browserDismissed.has(state.sessionId)
-    const hasBrowserTabs = tabs.some((tab) => isBrowserTab(tab) && tab.sessionId === state.sessionId)
+    const hasBrowserTabs = tabsRef.current.some((tab) => isBrowserTab(tab) && tab.sessionId === state.sessionId)
     // 已手动收掉且没有遗留页 Tab：不重建；仍有页 Tab 则继续同步（页面可能被 Agent 关掉）
     if (dismissed && !hasBrowserTabs) return
     const autoOpen = options?.autoOpen !== false && !dismissed
     // 只读动作推送且没有既有页 Tab：不创建（保持安静）
     if (!hasBrowserTabs && !autoOpen) return
     // Tab 化：按页 reconcile；autoOpen 时自动与对话组合并排（对话左、浏览器右，不打断对话）。
-    openBrowserTabFromPush(state, { autoGroup: autoOpen })
-  }, [browserDismissed, setBrowserStateMap, tabs])
+    openBrowserTabFromPush(state, { autoGroup: autoOpen && options?.autoGroup !== false })
+  }, [browserDismissed, setBrowserStateMap])
 
   /**
    * 订阅实时状态推送。
@@ -145,8 +145,8 @@ export function MainArea(): React.ReactElement {
     void getState(browserSessionId)
       .then((state) => {
         if (!cancelled && state) {
-          // 切回会话时重新拉起已有浏览器 Tab；用户明确关闭过的会话仍保持关闭。
-          publishBrowserState(state, { autoOpen: !browserDismissed.has(browserSessionId) })
+          // 切回会话只恢复浏览器标签，保留用户的组合/解散选择。
+          publishBrowserState(state, { autoOpen: !browserDismissed.has(browserSessionId), autoGroup: false })
         }
       })
       // 后台会话及已删除会话会被主进程拒绝或返回空状态；无需打断当前界面。
@@ -154,12 +154,8 @@ export function MainArea(): React.ReactElement {
     return () => { cancelled = true }
   }, [browserDismissed, browserSessionId, publishBrowserState])
 
-  // 组合视图已经明确占用主区两栏；右侧文件面板不能以"展开意图"留在后台，
-  // 否则解散组合或切回会话时会把三栏状态再次拉回来。
-  React.useEffect(() => {
-    if (!tabGroup) return
-    if (agentSidePanelOpen) setAgentSidePanelOpen(false)
-  }, [agentSidePanelOpen, setAgentSidePanelOpen, tabGroup])
+  // 文件面板可见性由 usePanelAutoLayout 按主区栏数和窗口宽度统一计算；
+  // 组合视图不能回写用户的展开意图，否则会与顶栏打开动作冲突。
 
   // ===== 组合 tab（两个标签左右并排）=====
   // 组合是一个叠加态：两个成员标签仍在 tabsAtom 里，只是顶栏渲染时折叠成一个条目。
@@ -336,6 +332,7 @@ export function MainArea(): React.ReactElement {
               >
                 {/* 左栏：组合激活时是组内左成员，否则是当前标签 */}
                 <div
+                  data-group-drop-left-pane="true"
                   className="flex flex-col min-w-0 h-full relative"
                   style={{ flex: '1 1 auto' }}
                   onPointerDownCapture={() => focusGroupSide('left')}
@@ -370,6 +367,7 @@ export function MainArea(): React.ReactElement {
                       aria-label="调整组合内两栏宽度"
                     />
                     <div
+                      data-group-drop-right-pane="true"
                       className="flex flex-col min-w-0 h-full relative"
                       style={rightPaneStyle}
                       onPointerDownCapture={() => focusGroupSide('right')}

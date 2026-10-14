@@ -5,7 +5,7 @@
  */
 
 import * as React from 'react'
-import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet'
+import { Sheet, SheetContent, SheetTitle } from '@profer/ui/primitives/sheet'
 import { ShieldCheck } from 'lucide-react'
 import { McpServerForm } from '@/components/settings/McpServerForm'
 import type { McpServerEntry } from '@profer/shared'

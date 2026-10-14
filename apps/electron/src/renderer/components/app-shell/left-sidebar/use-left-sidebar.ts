@@ -94,7 +94,7 @@ import { useOpenSession } from '@/hooks/useOpenSession'
 import { useShortcut } from '@/hooks/useShortcut'
 import { openExplorationBranchTab } from '@/lib/exploration-tab'
 import { useSyncActiveTabSideEffects } from '@/hooks/useSyncActiveTabSideEffects'
-import { detectIsMac } from '@/lib/platform'
+import { detectIsMac } from '@profer/ui'
 import { navigationController } from '@/lib/navigation-controller'
 import type { NavigationAction } from '@/lib/navigation-actions'
 import {
@@ -105,6 +105,8 @@ import {
 } from '@/lib/agent-session-list'
 import type { AgentSessionMeta, AgentWorkspace, WorkspaceCapabilities } from '@profer/shared'
 import { getVisibleAgentWorkspaces } from '@/lib/product-feature-flags'
+import { applySessionUnreadToMemoryIds, getSessionCompletionStateEntry } from '@/lib/session-unread-menu'
+import { noteExplicitUnreadRead } from '@/lib/agent-unread-transition'
 
 import {
   groupByDate,
@@ -259,8 +261,6 @@ export function useLeftSidebar() {
   const [newProjectName, setNewProjectName] = React.useState('')
   const newProjectInputRef = React.useRef<HTMLInputElement>(null)
   const projectSelectionRequestRef = React.useRef(0)
-  const [showJoinDialog, setShowJoinDialog] = React.useState(false)
-  const [inviteCode, setInviteCode] = React.useState('')
   const [relativeTimeNow, setRelativeTimeNow] = React.useState(() => Date.now())
   const [userProfile, setUserProfile] = useAtom(userProfileAtom)
   const selectedModel = useAtomValue(selectedModelAtom)
@@ -640,15 +640,7 @@ export function useLeftSidebar() {
     return () => window.removeEventListener('focus', handleFocus)
   }, [refreshSidebarLists])
 
-  // 监听团队工作区同步事件，登录/注册成功后自动刷新侧边栏
-  React.useEffect(() => {
-    const unsub = window.electronAPI.team.onWorkspacesSynced(() => {
-      window.electronAPI.listAgentWorkspaces().then(setWorkspacesStable).catch(console.error)
-    })
-    return unsub
-  }, [setWorkspacesStable])
-
-  // 监听工作区列表变更（创建/删除/重命名/重排、移动端远程创建）：主进程广播后刷新侧边栏，
+  // 监听工作区列表变更（创建/删除/重命名/重排、远程创建）：主进程广播后刷新侧边栏，
   // 否则运行中的桌面端一直用启动时的工作区快照，新工作区的会话会被归入默认工作区
   React.useEffect(() => {
     const unsub = window.electronAPI.onAgentWorkspacesChanged(() => {
@@ -658,7 +650,7 @@ export function useLeftSidebar() {
   }, [setWorkspacesStable])
 
   // authStatus 变化时刷新工作区（登录/登出）
-  // 仅立即刷新一次，不再 500ms 二次刷新——syncTeamWorkspacesToIndex 在 IPC 端已保证原子写入
+  // 仅立即刷新一次，避免重复请求
   React.useEffect(() => {
     window.electronAPI.listAgentWorkspaces().then(setWorkspacesStable).catch(console.error)
   }, [authStatus.isLoggedIn, setWorkspacesStable])
@@ -773,8 +765,15 @@ export function useLeftSidebar() {
     }
   }, [setConversations, setTabs])
 
+  /** 正在重新生成 Chat 标题的会话 ID */
+  const [regeneratingConversationTitleIds, setRegeneratingConversationTitleIds] = React.useState<Set<string>>(new Set())
+
   /** 手动重新生成对话标题（用激活分支前几轮有效消息重命名） */
   const handleRegenerateConversationTitle = React.useCallback(async (id: string): Promise<void> => {
+    if (regeneratingConversationTitleIds.has(id)) return
+    setRegeneratingConversationTitleIds((prev) => new Set(prev).add(id))
+    const loadingToastId = `regenerate-title:${id}`
+    toast.loading('正在生成标题…', { id: loadingToastId, duration: Infinity })
     try {
       // 侧边栏不在会话内部，模型选择以 composer 的 per-conversation 状态为准；
       // 取不到时主进程会回退到对话元数据上记录的上次选择。
@@ -793,9 +792,16 @@ export function useLeftSidebar() {
       toast.success(`标题已更新：${updated.title}`)
     } catch (error) {
       console.error('[侧边栏] 重新生成对话标题失败:', error)
-      toast.error('重新生成标题失败')
+      toast.error(error instanceof Error ? error.message : '重新生成标题失败')
+    } finally {
+      toast.dismiss(loadingToastId)
+      setRegeneratingConversationTitleIds((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
-  }, [setConversations, setTabs, store])
+  }, [regeneratingConversationTitleIds, setConversations, setTabs, store])
 
   /** 切换对话置顶状态 */
   const handleTogglePin = React.useCallback(async (id: string): Promise<void> => {
@@ -1285,32 +1291,6 @@ export function useLeftSidebar() {
     setProjectDropIndicator(null)
   }, [])
 
-  /** 打开加入工作区对话框 */
-  const handleStartJoinWorkspace = React.useCallback((): void => {
-    setInviteCode('')
-    setShowJoinDialog(true)
-  }, [])
-
-  /** 通过邀请码加入团队工作区 */
-  const handleJoinWorkspace = React.useCallback(async (): Promise<void> => {
-    const code = inviteCode.trim()
-    if (!code) {
-      toast.error('请输入邀请码')
-      return
-    }
-    try {
-      const workspace = await window.electronAPI.team.acceptInvitation(code)
-      toast.success(`已加入工作区「${workspace.name}」`)
-      setShowJoinDialog(false)
-      // 刷新工作区列表
-      const workspaces = await window.electronAPI.listAgentWorkspaces()
-      setWorkspaces(workspaces)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '加入失败'
-      toast.error(msg)
-    }
-  }, [inviteCode, setWorkspaces])
-
   /** 开始创建新项目 */
   const handleStartCreateProject = React.useCallback((): void => {
     setCreatingProject(true)
@@ -1381,19 +1361,29 @@ export function useLeftSidebar() {
     })
   }, [agentSessions, openSession, setActiveView, setUnviewedCompleted, store])
 
-  /** 标记 Agent 会话为「未读」：持久化 completedButUnconfirmed + 立即恢复绿标 + 同步列表数据 */
-  const handleMarkUnread = React.useCallback((id: string): void => {
-    window.electronAPI.setAgentCompletionState(id)
+  /**
+   * 切换 Agent 会话的未读状态（侧边栏菜单按状态切换）。
+   *
+   * 目标状态由调用点按渲染时的 `session.completedButUnconfirmed` 取反后传入，避免 handler
+   * 读到可能已过期的状态。两个方向都收敛在主进程唯一写入口 `setAgentSessionUnread`：
+   * 标记未读 → `SET_COMPLETION_STATE`，标记已读 → `CLEAR_COMPLETION_STATE`；不新增 IPC。
+   *
+   * 同时双向维护渲染层内存集合：关闭态下内存集合仍是**显示权威**，只靠 IPC 返回的 projection
+   * 会让绿标晚一帧；开启态下这两行写入会被模式感知 atom 的守卫静默丢弃（刻意设计），
+   * 事实源仍只有主进程持久化字段。
+   */
+  const handleToggleSessionUnread = React.useCallback((id: string, nextUnread: boolean): void => {
+    // 显式「标记已读」：撤销「补写持久化未读未确认」的保护，避免陈旧内存副本在切回关闭态时复活。
+    if (!nextUnread) noteExplicitUnreadRead(id)
+    const request = getSessionCompletionStateEntry(nextUnread) === 'setAgentCompletionState'
+      ? window.electronAPI.setAgentCompletionState(id)
+      : window.electronAPI.clearAgentCompletionState(id)
+    request
       .then((meta) => {
         setAgentSessions((prev) => upsertAgentSession(prev, meta))
       })
       .catch(console.error)
-    setUnviewedCompleted((prev) => {
-      if (prev.has(id)) return prev
-      const next = new Set(prev)
-      next.add(id)
-      return next
-    })
+    setUnviewedCompleted((prev: Set<string>) => applySessionUnreadToMemoryIds(prev, id, nextUnread))
   }, [setAgentSessions, setUnviewedCompleted])
 
   /** 重命名工作区（项目）名称 */
@@ -1408,9 +1398,9 @@ export function useLeftSidebar() {
     }
   }, [setWorkspaces])
 
-  /** 已收纳的个人工作区（团队工作区由 TEAM_WORKSPACE_UI_ENABLED 另行控制，不进此列表） */
+  /** 已收纳的个人工作区 */
   const archivedWorkspaces = React.useMemo(
-    () => workspaces.filter((workspace) => workspace.archived && workspace.type !== 'team'),
+    () => workspaces.filter((workspace) => workspace.archived),
     [workspaces],
   )
 
@@ -1476,7 +1466,10 @@ export function useLeftSidebar() {
 
   /** 手动重新生成 Agent 会话标题（用会话前几轮有效消息重命名） */
   const handleAgentRegenerateTitle = React.useCallback(async (id: string): Promise<void> => {
+    if (regeneratingTitleIds.has(id)) return
     setRegeneratingTitleIds((prev) => new Set(prev).add(id))
+    const loadingToastId = `regenerate-title:${id}`
+    toast.loading('正在生成标题…', { id: loadingToastId, duration: Infinity })
     try {
       const updated = await window.electronAPI.regenerateAgentSessionTitle(id)
       if (!updated) {
@@ -1488,8 +1481,9 @@ export function useLeftSidebar() {
       toast.success(`标题已更新：${updated.title}`)
     } catch (error) {
       console.error('[侧边栏] 重新生成 Agent 会话标题失败:', error)
-      toast.error('重新生成标题失败')
+      toast.error(error instanceof Error ? error.message : '重新生成标题失败')
     } finally {
+      toast.dismiss(loadingToastId)
       setRegeneratingTitleIds((prev) => {
         const next = new Set(prev)
         next.delete(id)
@@ -1885,6 +1879,7 @@ export function useLeftSidebar() {
     handleRequestDelete,
     handleRename,
     handleRegenerateConversationTitle,
+    regeneratingConversationTitleIds,
     handleTogglePin,
     handleToggleArchive,
 
@@ -1905,7 +1900,7 @@ export function useLeftSidebar() {
     handleSelectAgentSession,
     handleAgentRename,
     handleAgentRegenerateTitle,
-    handleMarkUnread,
+    handleToggleSessionUnread,
     regeneratingTitleIds,
     handleTogglePinAgent,
     handleToggleArchiveAgent,
@@ -1939,8 +1934,6 @@ export function useLeftSidebar() {
     handleProjectDragEnd,
     dragProjectId,
     projectDropIndicator,
-    handleStartJoinWorkspace,
-    handleJoinWorkspace,
     handleStartCreateProject,
     handleCreateProject,
     handleCreateProjectKeyDown,
@@ -1958,10 +1951,6 @@ export function useLeftSidebar() {
     newProjectName,
     setNewProjectName,
     newProjectInputRef,
-    showJoinDialog,
-    setShowJoinDialog,
-    inviteCode,
-    setInviteCode,
 
     // 删除 dialogs 状态
     pendingDeleteId,

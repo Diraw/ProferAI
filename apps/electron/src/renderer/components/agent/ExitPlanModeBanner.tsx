@@ -20,7 +20,7 @@ import {
   Send,
   FileText,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { allPendingExitPlanRequestsAtom } from '@/atoms/agent-atoms'
 import { isEditableTarget } from '@/lib/navigation-controller'
 import type { ExitPlanModeAction, ExitPlanAllowedPrompt } from '@profer/shared'

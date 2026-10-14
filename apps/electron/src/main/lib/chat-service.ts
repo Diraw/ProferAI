@@ -15,9 +15,9 @@ import { routePluginModel } from './plugins/plugin-routing'
 
 import { randomUUID } from 'node:crypto'
 import type { WebContents } from 'electron'
-import { CHAT_IPC_CHANNELS, resolveXaiCredentialMode } from '@profer/shared'
+import { CHAT_IPC_CHANNELS, isChannelEnabledForChat, resolveXaiCredentialMode } from '@profer/shared'
 import { pushChatStream } from './chat-stream-bus'
-import type { ChatSendInput, ChatMessage, ConversationMeta, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
+import type { Channel, ChatSendInput, ChatMessage, ConversationMeta, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
 import {
   getAdapter,
   streamSSE,
@@ -70,6 +70,12 @@ const ANTHROPIC_PROXY_PROVIDERS = new Set([
   'xiaomi-token-plan',
   'zhipu-coding',
 ])
+
+/** 标题和故障重试仍使用原绑定，禁止回落到其它模型。 */
+function isChatModelAvailable(channel: Channel, modelId: string): boolean {
+  return isChannelEnabledForChat(channel)
+    && channel.models.some((model) => model.id === modelId && model.enabled)
+}
 
 function isInvalidRelayTokenError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
@@ -251,11 +257,13 @@ export async function sendMessage(
     })
     return
   }
-  if (!channel.enabled) {
+  if (!isChannelEnabledForChat(channel)) {
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
       runId,
-      error: '当前渠道已停用，请重新选择可用模型',
+      error: channel.enabled
+        ? '当前渠道仅支持 Pi Agent，不能用于 Chat，请重新选择可用模型'
+        : '当前渠道已停用，请重新选择可用模型',
     })
     return
   }
@@ -420,7 +428,8 @@ export async function sendMessage(
             console.warn('[聊天服务] 直连失败后的 Relay 渠道同步失败:', syncError)
           }
           const fallbackChannel = listChannels().find((candidate) => candidate.id === channelId)
-          if (!fallbackChannel || fallbackChannel.directDataPlane === true) throw error
+          if (!fallbackChannel || fallbackChannel.directDataPlane === true
+            || !isChatModelAvailable(fallbackChannel, modelId)) throw error
           const fallbackApiKey = decryptApiKey(channelId)
           const fallbackAdapter = getAdapter(fallbackChannel.provider)
           const fallbackRequest = fallbackAdapter.buildStreamRequest({
@@ -440,6 +449,8 @@ export async function sendMessage(
           return streamSSE({ request: fallbackRequest, adapter: fallbackAdapter, signal: controller.signal, fetchFn, onEvent: handleStreamEvent })
         }
 
+        const currentChannel = listChannels().find((candidate) => candidate.id === channelId)
+        if (!currentChannel || !isChatModelAvailable(currentChannel, modelId)) throw error
         proxyBaseUrl = `${recovered.baseUrl}${ANTHROPIC_PROXY_PROVIDERS.has(channel.provider) ? '/v1/proxy/messages' : '/v1/proxy/chat'}`
         apiKey = recovered.proxyToken || recovered.token
         request.url = proxyBaseUrl
@@ -742,6 +753,14 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
   const { userMessage, channelId, modelId, contextMessages } = input
   console.log('[标题生成] 开始生成标题:', { channelId, modelId, sourceCount: contextMessages?.length ?? 1, userMessage: userMessage.slice(0, 50) })
 
+  // 即使是本地短标题，也先确认原绑定仍是启用且可用于 Chat 的模型。
+  const channels = listChannels()
+  const channel = channels.find((candidate) => candidate.id === channelId)
+  if (!channel || !isChatModelAvailable(channel, modelId)) {
+    console.warn('[标题生成] 渠道或模型不可用于 Chat:', { channelId, modelId })
+    return null
+  }
+
   // 短消息直接使用原文作为标题，避免 AI 幻觉。
   // 窗口路径（contextMessages）已经在收集阶段过滤过信息量，不再走这条短路。
   const trimmedMessage = userMessage.trim()
@@ -754,14 +773,6 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
   const titlePrompt = contextMessages && contextMessages.length > 0
     ? buildWindowTitlePrompt(contextMessages)
     : buildTitlePrompt(userMessage)
-
-  // 查找渠道
-  const channels = listChannels()
-  const channel = channels.find((c) => c.id === channelId)
-  if (!channel) {
-    console.warn('[标题生成] 渠道不存在:', channelId)
-    return null
-  }
 
   try {
     const storedSecret = decryptApiKey(channelId)
@@ -781,7 +792,10 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     && channel.directDataPlane !== true
 
   if (shouldUseCommercialProxy) {
-    const auth = await getTeamAuthWithRefresh()
+    const auth = await getTeamAuthWithRefresh().catch((error) => {
+      console.warn('[标题生成] 获取团队认证失败:', error)
+      return null
+    })
     if (!auth) {
       console.warn('[标题生成] 团队账号登录已过期，跳过 AI 标题生成')
       return null
@@ -857,15 +871,8 @@ function collectConversationTitleSources(conversationId: string): string[] {
 }
 
 /**
- * 自动命名窗口（Chat 链路）：流结束后按前几轮有效用户消息生成/精修标题。
- *
- * 规则与 Agent 链路一致（见 title-generation.ts）：
- * - 已定稿（titleLockedAt）或标题是用户手动起的 → 直接退出；
- * - 全是寒暄/命令的轮次不命名，也不消耗调用次数，等真正有内容的轮次；
- * - 累计到 TITLE_LOCK_MIN_SOURCES 条有效来源即定稿锁定，否则下一轮继续精修；
- * - 模型调用次数上限 TITLE_REFINE_MAX_ATTEMPTS，用尽后停止自动改名。
- *
- * @returns 本轮实际写入标题后的对话元数据；未改名时返回 null（含「只是把锁定写回磁盘」的情形）。
+ * 自动命名：流结束后使用首条有效用户消息生成标题；寒暄/命令不触发。
+ * 标题写入后立即定稿，失败时由 generateTitle 返回本地兜底。
  */
 export async function autoTitleConversation(input: AutoTitleConversationInput): Promise<ConversationMeta | null> {
   const { conversationId, channelId, modelId } = input
@@ -918,7 +925,7 @@ export async function autoTitleConversation(input: AutoTitleConversationInput): 
       contextMessages: sources,
     })
     if (!title) {
-      // 生成失败也算一次尝试；保留并发请求已经预占的更大次数。
+      // 只有来源为空时才无法写入标题；正常有效来源的 provider 失败会在 generateTitle 内本地兜底。
       persistReservedAttempt()
       return null
     }
@@ -943,9 +950,7 @@ export async function autoTitleConversation(input: AutoTitleConversationInput): 
 }
 
 /**
- * 手动「重新生成标题」：绕过定稿锁定，用当前激活分支上前几轮有效消息重新命名并重新锁定。
- *
- * 用户主动要求就允许重试，不受 TITLE_REFINE_MAX_ATTEMPTS 限制。
+ * 手动「重新生成标题」：绕过定稿锁定，用当前激活分支上的有效用户消息重新命名并重新锁定。
  */
 export async function regenerateConversationTitle(
   conversationId: string,
@@ -954,17 +959,16 @@ export async function regenerateConversationTitle(
 ): Promise<ConversationMeta | null> {
   const meta = getConversationMeta(conversationId)
   if (!meta) return null
+  const requestUpdatedAt = meta.updatedAt
   const resolvedChannelId = channelId || meta.channelId
   const resolvedModelId = modelId || meta.modelId
   if (!resolvedChannelId || !resolvedModelId) {
-    console.warn('[聊天服务] 重新生成标题缺少可用渠道/模型:', { conversationId })
-    return null
+    throw new Error('重新生成标题失败：当前对话没有可用渠道或模型')
   }
 
   const sources = collectConversationTitleSources(conversationId)
   if (sources.length === 0) {
-    console.log('[聊天服务] 重新生成标题：没有有效来源')
-    return null
+    throw new Error('重新生成标题失败：当前对话没有可用于生成标题的有效用户消息')
   }
 
   const title = await generateTitle({
@@ -973,10 +977,12 @@ export async function regenerateConversationTitle(
     modelId: resolvedModelId,
     contextMessages: sources,
   })
-  if (!title) return null
+  if (!title) throw new Error('重新生成标题失败：标题模型没有返回可用结果')
 
   const latest = getConversationMeta(conversationId)
-  if (!latest) return null
+  if (!latest || latest.updatedAt !== requestUpdatedAt) {
+    throw new Error('重新生成标题失败：生成期间对话状态已变化，请重试')
+  }
   return updateConversationMeta(conversationId, {
     title,
     titleAutoGeneratedAt: Date.now(),

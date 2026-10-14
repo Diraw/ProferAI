@@ -24,7 +24,7 @@ import {
   DropdownMenuPortal,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-} from '@/components/ui/dropdown-menu'
+} from '@profer/ui/primitives/dropdown-menu'
 import { lowlight } from '@/lib/lowlight'
 import { htmlToMarkdown, markdownToHtml } from '@/lib/markdown-rich-text'
 import {

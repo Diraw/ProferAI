@@ -46,6 +46,10 @@ files:
   # 排除 build:resources 脚本拷到 dist/resources 的副本（electron-builder 已通过
   # buildResources 从 resources/ 直接使用 icon/plist，避免产物里重复打包一份）
   - "!dist/resources/**"
+  # 排除 plugin 冒烟测试产物（仅 test:plugins 系列脚本本地构建使用，合计约 39MB，
+  # 不随安装包分发；否则本地跑过测试再打包含把它们带进 app.asar）
+  - "!dist/plugin-smoke/**"
+  - "!dist/plugin-rpc-smoke/**"
   - package.json
   # Claude 与 Pi runtime 都作为主进程 external。打包前 sync:runtime-deps 会将
   # 依赖闭包同步到 appDir 下的 node_modules，避免 Bun workspace hoist 后丢失。
@@ -60,7 +64,9 @@ files:
   - "!node_modules/@esbuild/**"
   - "!node_modules/@earendil-works/*/examples/**"
   - "!node_modules/@earendil-works/*/docs/**"
-  - "!node_modules/@earendil-works/**/*.map"
+  # 排除全部 source map（合计约 36MB，大头是 pdfjs-dist 约 19MB）；
+  # 安装包内运行时不会读取 map，线上调试也用不到 asar 内的 map
+  - "!node_modules/**/*.map"
   # 排除 workspace 包的 symlink（代码已被 esbuild/Vite 打包到 dist/ 中）
   - "!node_modules/@proma/**"
 
@@ -74,7 +80,7 @@ extraResources:
   # 教程文件（教程查看器 + 欢迎对话使用）
   - from: ../../tutorial/tutorial-v2.md
     to: tutorial.md
-  # Proma 品牌 Logo 素材（品牌素材下载功能使用）
+  # Profer 品牌 Logo 素材与菜单栏托盘图标（品牌素材下载、应用图标变体使用）
   - from: resources/profer-logos
     to: profer-logos
     filter:
@@ -124,6 +130,7 @@ mac:
     - resources/bin/profer
   extendInfo:
     NSMicrophoneUsageDescription: "Profer 需要访问麦克风，用于将你的语音实时转写为文本。"
+    NSAppleEventsUsageDescription: "Profer 需要通过系统事件将你确认的文本粘贴到当前应用的光标位置。"
   target:
     - target: dmg
       arch:

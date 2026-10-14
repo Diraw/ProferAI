@@ -19,7 +19,7 @@ import { MermaidBlock } from '@profer/ui'
 import type { HighlightTokensResult } from '@profer/core'
 import type { FileAccessOptions } from '@profer/shared'
 import { extractCodeText } from '../../lib/markdown-rich-text'
-import { shouldRenderMermaidCodeBlock } from '../../lib/mermaid-detection'
+import { shouldRenderMermaidCodeBlock } from '@profer/ui'
 
 type FileAccessRef = { current: FileAccessOptions | undefined }
 /** 传 null 表示当前编辑器无会话/文件上下文（如 ScratchPad），跳过路径解析。 */

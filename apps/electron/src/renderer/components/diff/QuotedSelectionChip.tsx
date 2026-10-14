@@ -11,7 +11,7 @@ import * as React from 'react'
 import { X, Quote, Info } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getFileBaseName } from '@/lib/file-utils'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import type { AgentInterruptionTone } from '@/atoms/preview-atoms'
 
 interface QuotedSelectionChipProps {

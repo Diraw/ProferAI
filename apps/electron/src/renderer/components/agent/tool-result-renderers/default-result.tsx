@@ -6,7 +6,7 @@
 
 import * as React from 'react'
 import { Download } from 'lucide-react'
-import { ImageLightbox } from '@/components/ui/image-lightbox'
+import { ImageLightbox } from '@profer/ui/primitives/image-lightbox'
 import { CollapsibleResult } from './collapsible-result'
 import { parseAgentImageAttachmentMarkers, type ParsedAgentImageAttachment } from '../image-attachment-marker'
 

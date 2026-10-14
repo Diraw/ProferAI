@@ -4,9 +4,9 @@
  * 当 fenced code block 没有显式语言标识时，用于猜测最可能的语言。
  * 使用 highlight.js 按需注册的常用语言做 highlightAuto，置信度门槛 5。
  *
- * Mermaid 不在此处识别 —— 调用方应先用 `apps/electron/.../mermaid-detection.ts`
- * 中的 `shouldRenderMermaidCodeBlock` 判断，未命中再调用本函数检测其他语言。
- * 这样避免与 mermaid-detection 维护两份 mermaid 关键字列表。
+ * Mermaid 不在此处识别 —— 调用方应先用 `@profer/ui` 的
+ * `shouldRenderMermaidCodeBlock`（单一真源，见 packages/ui/src/mermaid-detection.ts）
+ * 判断，未命中再调用本函数检测其他语言。
  *
  * 仅在 language 为空字符串时调用。识别失败回退到 'text'。
  */

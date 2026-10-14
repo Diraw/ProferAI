@@ -1,4 +1,92 @@
-import type { AgentGoalCommand, AgentGoalContract } from '../types/agent'
+import type { AgentGoalCommand, AgentGoalContract, AgentGoalLimits, AgentGoalState } from '../types/agent'
+
+export interface GoalLimitsInput {
+  maxIterations: string
+  maxDurationMinutes: string
+  maxConsecutiveFailures: string
+  maxTokens: string
+}
+
+/** 预算修改补丁：null 表示清除该项预算（不限）。 */
+export type AgentGoalLimitsPatch = {
+  [K in keyof AgentGoalLimits]?: K extends 'maxConsecutiveFailures' ? number : number | null
+}
+
+/** 表单预算采用严格十进制；轮次、时长、token 留空均表示不限，非法值拒绝而不是静默当作不限。 */
+export function parseGoalLimitsInput(input: GoalLimitsInput): AgentGoalLimitsPatch {
+  const positiveInteger = (value: string, label: string): number => {
+    const text = value.trim()
+    const number = Number(text)
+    if (!/^\d+$/.test(text) || !Number.isSafeInteger(number) || number <= 0) {
+      throw new Error(`${label}必须是正整数`)
+    }
+    return number
+  }
+  const optionalInteger = (value: string, label: string): number | null => value.trim() ? positiveInteger(value, label) : null
+  const minutes = input.maxDurationMinutes.trim()
+  let maxDurationMs: number | null = null
+  if (minutes) {
+    maxDurationMs = Number(minutes) * 60000
+    if (!/^\d+(?:\.\d+)?$/.test(minutes) || !Number.isSafeInteger(maxDurationMs) || maxDurationMs <= 0) {
+      throw new Error('运行时长必须是有效正数，精确到毫秒且不能超出安全范围')
+    }
+  }
+  return {
+    maxIterations: optionalInteger(input.maxIterations, '轮次上限'),
+    maxDurationMs,
+    maxConsecutiveFailures: positiveInteger(input.maxConsecutiveFailures, '连续无进展上限'),
+    maxTokens: optionalInteger(input.maxTokens, 'Token 上限'),
+  }
+}
+
+const OPTIONAL_LIMIT_KEYS = ['maxIterations', 'maxDurationMs', 'maxTokens'] as const
+
+/** 把预算补丁合并到现有预算；null 删除对应字段。 */
+export function applyGoalLimitsPatch(limits: AgentGoalLimits, patch: AgentGoalLimitsPatch): AgentGoalLimits {
+  const next: AgentGoalLimits = { ...limits }
+  for (const key of OPTIONAL_LIMIT_KEYS) {
+    const value = patch[key]
+    if (value === null) delete next[key]
+    else if (value !== undefined) next[key] = value
+  }
+  if (patch.maxConsecutiveFailures !== undefined) next.maxConsecutiveFailures = patch.maxConsecutiveFailures
+  return next
+}
+
+/** 预算唯一校验规则：无进展上限必填，其余可选；设置时为正数，轮次与 token 为整数。 */
+export function isValidGoalLimits(limits: unknown): limits is AgentGoalLimits {
+  if (!limits || typeof limits !== 'object') return false
+  const value = limits as Record<string, unknown>
+  const positive = (number: unknown, integer: boolean) => typeof number === 'number' && (integer ? Number.isSafeInteger(number) : Number.isFinite(number)) && number > 0
+  const optional = (number: unknown, integer: boolean) => number === undefined || positive(number, integer)
+  return positive(value.maxConsecutiveFailures, true) && optional(value.maxIterations, true) && optional(value.maxDurationMs, false) && optional(value.maxTokens, true)
+}
+
+export interface GoalBudgetDimension {
+  kind: 'iterations' | 'duration' | 'tokens'
+  used: number
+  limit: number
+}
+
+type GoalBudgetSource = Pick<AgentGoalState, 'iteration' | 'elapsedMs' | 'usage' | 'limits'>
+
+/** 已设置的预算维度及其用量；未设置的维度视为不限，不出现在结果中。 */
+export function getGoalBudgetDimensions(goal: GoalBudgetSource): GoalBudgetDimension[] {
+  const dimensions: GoalBudgetDimension[] = []
+  if (goal.limits.maxIterations !== undefined) dimensions.push({ kind: 'iterations', used: goal.iteration, limit: goal.limits.maxIterations })
+  if (goal.limits.maxDurationMs !== undefined) dimensions.push({ kind: 'duration', used: goal.elapsedMs ?? 0, limit: goal.limits.maxDurationMs })
+  if (goal.limits.maxTokens !== undefined) dimensions.push({ kind: 'tokens', used: goal.usage?.totalTokens ?? 0, limit: goal.limits.maxTokens })
+  return dimensions
+}
+
+const BUDGET_EXHAUSTED_LABELS: Record<GoalBudgetDimension['kind'], string> = {
+  iterations: '已达到轮次上限', duration: '已达到净运行时长上限', tokens: '已达到 Token 上限',
+}
+
+/** 展示、恢复准入与轮次准入共用的预算耗尽判定。 */
+export function getGoalBudgetExhaustedReasons(goal: GoalBudgetSource): string[] {
+  return getGoalBudgetDimensions(goal).filter((item) => item.used >= item.limit).map((item) => BUDGET_EXHAUSTED_LABELS[item.kind])
+}
 
 const GOAL_SUBCOMMANDS = ['status', 'pause', 'resume', 'stop', 'clear'] as const
 
@@ -57,8 +145,8 @@ export function parseGoalContractInput(text: string): { goal: string; contract?:
 
 /**
  * 从展示文本中剥离 <goal_result> 机器协议块。
- * Goal 迭代的结构化结果是控制器与模型的内部协议（main 侧从持久化原文解析），
- * 不应原文显示在对话里。未闭合的尾部块（流式中途）一并剥离。
+ * 仅兼容旧消息展示；main 不再把文本块视为可信控制报告。
+ * 未闭合的尾部块（流式中途）一并剥离。
  */
 export function stripGoalResultBlocks(text: string): string {
   return text.replace(/<goal_result>[\s\S]*?(<\/goal_result>|$)/gi, '').replace(/\n{3,}/g, '\n\n').trimEnd()

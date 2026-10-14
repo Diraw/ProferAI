@@ -8,8 +8,8 @@
 import * as React from 'react'
 import { toast } from 'sonner'
 import { Download, AlertTriangle, Loader2 } from 'lucide-react'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@profer/ui/primitives/dialog'
+import { Button } from '@profer/ui/primitives/button'
 import { cn } from '@/lib/utils'
 import type { MasterSkillMeta, SyncSkillResult } from '@profer/shared'
 

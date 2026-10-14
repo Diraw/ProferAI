@@ -83,7 +83,6 @@ import { downloadInstaller, launchInstaller } from '../installer-downloader'
 import { fetchInstallerManifest, findInstallerSource } from '../installer-manifest'
 import { shouldOfferWindowsShellInstaller } from './windows-shell-installer'
 import { appendGraphEvent, queryNodeById } from '../project-graph-service'
-import { teamMemoryOperations } from '../team-memory-agent-tools'
 import { getWorkspaceMemoryArchivePath } from '../agent-workspace-manager'
 import {
   fetchWebPage,
@@ -118,6 +117,7 @@ import { normalizeGoalToolResult } from '../goal-tools'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 
+import { executePresentVisualization, executeInspectVisualization, PRESENT_VISUALIZATION_DESCRIPTION } from '../agent-visualization-tools'
 // ===== 通用 =====
 
 export interface PiBuiltinToolsContext {
@@ -126,8 +126,6 @@ export interface PiBuiltinToolsContext {
   modelId?: string
   agentRuntime?: AgentRuntime
   workspaceId?: string
-  /** 团队共享记忆仅能在团队工作区会话中注册。 */
-  isTeamWorkspace?: boolean
   workspaceSlug?: string
   permissionMode?: ProferPermissionMode
   triggeredBy?: 'user' | 'automation' | 'delegation' | 'goal'
@@ -139,6 +137,10 @@ export interface PiBuiltinToolsContext {
   pptCapabilityActive?: boolean
   /** 图片生命周期持久化成功后通知 renderer 的安全卡片。 */
   onImageGenerationUpdate?: (record: AgentImageGenerationCard) => void
+  onVisualizationUpdate?: (record: import('@profer/shared').VisualizationRecord) => void
+  /** 可视化记录存储根（配置目录）；缺失时不注册可视化工具。 */
+  visualizationStorageDir?: string
+  assertCanPresentVisualization?: () => void
   /** Agent 请求使用当前会话的正式文件预览入口，并等待用户可见 viewer ready/error。 */
   onPreviewRequest?: (event: Extract<ProferEvent, { type: 'preview_requested' }>) => Promise<AgentFilePreviewReport>
   /** Agent 从当前用户可见的正式 PPTX viewer 读取页级视觉。 */
@@ -230,7 +232,7 @@ export function buildPiMemoryArchiveTools(sdk: PiSdk, ctx: Pick<PiBuiltinToolsCo
 /** Pi 的规划 Todo 工具与 Claude MCP 共享同一操作层，避免 runtime 行为漂移。 */
 export function buildPiPlanningTools(
   sdk: PiSdk,
-  ctx: Partial<Pick<PiBuiltinToolsContext, 'sessionId' | 'workspaceId' | 'isTeamWorkspace' | 'disabledTools'>> & Pick<PiBuiltinToolsContext, 'sessionId'>,
+  ctx: Partial<Pick<PiBuiltinToolsContext, 'sessionId' | 'workspaceId' | 'disabledTools'>> & Pick<PiBuiltinToolsContext, 'sessionId'>,
 ): ToolDefinition[] {
   const tools = [
     sdk.defineTool({
@@ -244,7 +246,7 @@ export function buildPiPlanningTools(
       }),
       async execute(_toolCallId, params) {
         try {
-          return jsonToolResult({ todos: await listPlanningTodos({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, params as TodoListQuery) })
+          return jsonToolResult({ todos: await listPlanningTodos({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, params as TodoListQuery) })
         } catch (error) {
           return jsonToolResult({ error: error instanceof Error ? error.message : String(error) })
         }
@@ -258,7 +260,7 @@ export function buildPiPlanningTools(
       async execute(_toolCallId, params) {
         try {
           const { id } = params as { id: string }
-          return jsonToolResult({ todo: await getPlanningTodo({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, id.trim()) })
+          return jsonToolResult({ todo: await getPlanningTodo({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, id.trim()) })
         } catch (error) {
           return jsonToolResult({ error: error instanceof Error ? error.message : String(error) })
         }
@@ -280,7 +282,7 @@ export function buildPiPlanningTools(
       }),
       async execute(_toolCallId, params) {
         try {
-          return jsonToolResult({ todo: await createPlanningTodo({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, params as Omit<CreateTodoInput, 'sessionId' | 'workspaceId'>) })
+          return jsonToolResult({ todo: await createPlanningTodo({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, params as Omit<CreateTodoInput, 'sessionId' | 'workspaceId'>) })
         } catch (error) {
           return jsonToolResult({ error: error instanceof Error ? error.message : String(error) })
         }
@@ -304,7 +306,7 @@ export function buildPiPlanningTools(
       }),
       async execute(_toolCallId, params) {
         try {
-          return jsonToolResult({ todo: await updatePlanningTodo({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, params as Omit<UpdateTodoInput, 'workspaceId'>) })
+          return jsonToolResult({ todo: await updatePlanningTodo({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, params as Omit<UpdateTodoInput, 'workspaceId'>) })
         } catch (error) {
           return jsonToolResult({ error: error instanceof Error ? error.message : String(error) })
         }
@@ -316,7 +318,7 @@ export function buildPiPlanningTools(
       description: '列出当前 Profer 工作区的本地日程；用户未明确要求外部日历时，日程默认指这里。',
       parameters: Type.Object({ from: Type.Optional(Type.Number({ exclusiveMinimum: 0 })), to: Type.Optional(Type.Number({ exclusiveMinimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })) }),
       async execute(_toolCallId, params) {
-        try { return jsonToolResult({ events: await listPlanningCalendarEvents({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, params as CalendarEventListQuery) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
+        try { return jsonToolResult({ events: await listPlanningCalendarEvents({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, params as CalendarEventListQuery) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
       },
     }),
     sdk.defineTool({
@@ -325,7 +327,7 @@ export function buildPiPlanningTools(
       description: '读取当前 Profer 工作区本地日程的最新记录；更新前必须先读取。',
       parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
       async execute(_toolCallId, params) {
-        try { return jsonToolResult({ event: await getPlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, (params as { id: string }).id) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
+        try { return jsonToolResult({ event: await getPlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, (params as { id: string }).id) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
       },
     }),
     sdk.defineTool({
@@ -336,7 +338,7 @@ export function buildPiPlanningTools(
         title: Type.String({ minLength: 1, maxLength: 500 }), notes: Type.Optional(Type.String()), startAt: Type.Number({ exclusiveMinimum: 0 }), endAt: Type.Optional(Type.Number({ exclusiveMinimum: 0 })), allDay: Type.Optional(Type.Boolean()), groupId: Type.Optional(Type.String({ minLength: 1 })), tagIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))), reminders: Type.Optional(Type.Array(Type.Object({ triggerAt: Type.Number({ exclusiveMinimum: 0 }) }))), todoId: Type.Optional(Type.String({ minLength: 1 })),
       }),
       async execute(_toolCallId, params) {
-        try { return jsonToolResult({ event: await createPlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, params as Omit<CreateCalendarEventInput, 'workspaceId'>) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
+        try { return jsonToolResult({ event: await createPlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, params as Omit<CreateCalendarEventInput, 'workspaceId'>) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
       },
     }),
     sdk.defineTool({
@@ -345,7 +347,7 @@ export function buildPiPlanningTools(
       description: '更新当前 Profer 工作区本地日程；必须先读取最新日程并传入 expectedUpdatedAt。',
       parameters: Type.Object({ id: Type.String({ minLength: 1 }), expectedUpdatedAt: Type.Number({ exclusiveMinimum: 0 }), title: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })), notes: Type.Optional(Type.String()), startAt: Type.Optional(Type.Number({ exclusiveMinimum: 0 })), endAt: Type.Optional(Type.Union([Type.Number({ exclusiveMinimum: 0 }), Type.Null()])), allDay: Type.Optional(Type.Boolean()), groupId: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])), tagIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))), todoId: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])), }),
       async execute(_toolCallId, params) {
-        try { return jsonToolResult({ event: await updatePlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, params as Omit<UpdateCalendarEventInput, 'workspaceId'>) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
+        try { return jsonToolResult({ event: await updatePlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, params as Omit<UpdateCalendarEventInput, 'workspaceId'>) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
       },
     }),
     sdk.defineTool({
@@ -354,7 +356,7 @@ export function buildPiPlanningTools(
       description: '仅在用户明确要求时删除当前 Profer 工作区本地日程。',
       parameters: Type.Object({ id: Type.String({ minLength: 1 }) }),
       async execute(_toolCallId, params) {
-        try { return jsonToolResult({ deleted: await deletePlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId, isTeamWorkspace: ctx.isTeamWorkspace }, (params as { id: string }).id) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
+        try { return jsonToolResult({ deleted: await deletePlanningCalendarEvent({ sessionId: ctx.sessionId, workspaceId: ctx.workspaceId }, (params as { id: string }).id) }) } catch (error) { return jsonToolResult({ error: error instanceof Error ? error.message : String(error) }) }
       },
     }),
   ]
@@ -718,21 +720,52 @@ function buildPiAgentImageOutputTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): T
     sdk.defineTool({
       name: 'send_local_image',
       label: '发送本地图片',
-      description: 'Send an existing local PNG/JPEG/GIF/WebP as an image in the final Agent response. The path must be inside the current session workspace or an explicitly authorized attached directory. Profer automatically attaches the verified image to the conversation; do not output internal image protocol markers. This tool does not generate or edit images.',
-      promptSnippet: 'SendLocalImage: safely copy an authorized local image to the session output; Profer automatically attaches the verified image, so do not output internal image protocol markers.',
+      description: 'Send an existing local PNG/JPEG/GIF/WebP into the final reply. Relative paths resolve from the session cwd; absolute paths must be inside the session cwd or an authorized attached directory. Profer attaches the verified image automatically. Does not generate or edit images.',
+      promptSnippet: 'SendLocalImage: send an authorized existing image into the reply; relative paths resolve from the session cwd.',
       parameters: Type.Object({
         path: Type.String({ minLength: 1, maxLength: 4096 }),
-        caption: Type.Optional(Type.String({ maxLength: 500 })),
       }),
       async execute(_toolCallId, params) {
-        const args = params as { path?: unknown; caption?: unknown }
+        const args = params as { path?: unknown }
         const path = typeof args.path === 'string' ? args.path : ''
-        const caption = typeof args.caption === 'string' ? args.caption : undefined
-        return formatAgentImageOutputToolResult(await sendAgentLocalImage({ path, caption }, {
+        return formatAgentImageOutputToolResult(await sendAgentLocalImage({ path }, {
           agentCwd: ctx.agentCwd!,
           allowedRoots: ctx.allowedRoots ?? [],
         })) as AgentToolResult<unknown>
       },
+    }),
+  ] as unknown as ToolDefinition[]
+}
+
+export function buildPiVisualizationTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefinition[] {
+  if (!ctx.workspaceSlug || !ctx.agentCwd || !ctx.visualizationStorageDir) return []
+  const context = { sessionId: ctx.sessionId, agentCwd: ctx.agentCwd, storageDir: ctx.visualizationStorageDir, allowedRoots: ctx.allowedRoots ?? [], onUpdate: ctx.onVisualizationUpdate, assertCanPresent: ctx.assertCanPresentVisualization }
+  return [
+    sdk.defineTool({
+      name: 'present_visualization', label: '会话内可视化', description: PRESENT_VISUALIZATION_DESCRIPTION,
+      parameters: Type.Object({
+        filePath: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+        format: Type.Optional(Type.Union([Type.Literal('html'), Type.Literal('fragment')])),
+        chart: Type.Optional(Type.Object({
+          chartType: Type.Union(['bar', 'line', 'pie', 'scatter'].map((kind) => Type.Literal(kind))),
+          xKey: Type.Optional(Type.String()), xAxisLabel: Type.Optional(Type.String()), nameKey: Type.Optional(Type.String()), valueKey: Type.Optional(Type.String()),
+          layout: Type.Optional(Type.Union([Type.Literal('horizontal'), Type.Literal('vertical')])),
+          series: Type.Array(Type.Object({ dataKey: Type.String(), label: Type.Optional(Type.String()), valuePrefix: Type.Optional(Type.String()), valueSuffix: Type.Optional(Type.String()) }), { minItems: 1, maxItems: 8 }),
+          data: Type.Array(Type.Record(Type.String(), Type.Union([Type.String(), Type.Number()])), { minItems: 1, maxItems: 200 }),
+        })),
+        title: Type.String({ minLength: 1, maxLength: 120 }),
+        summary: Type.String({ minLength: 1, maxLength: 2000 }),
+        kind: Type.Optional(Type.Union(['structure', 'comparison', 'data', 'explanation'].map((kind) => Type.Literal(kind)))),
+        objects: Type.Optional(Type.Array(Type.Object({ id: Type.String({ minLength: 1, maxLength: 120 }), label: Type.String({ minLength: 1, maxLength: 200 }), text: Type.Optional(Type.String({ maxLength: 2000 })) }), { maxItems: 200 })),
+        visualizationId: Type.Optional(Type.String()), baseRevision: Type.Optional(Type.String()),
+        sourceMessageId: Type.Optional(Type.String({ maxLength: 200 })), sourceText: Type.Optional(Type.String({ maxLength: 10000 })),
+      }),
+      async execute(toolCallId, params, signal) { return executePresentVisualization(params as import('@profer/shared').PresentVisualizationInput, context, toolCallId, signal) },
+    }),
+    sdk.defineTool({
+      name: 'inspect_visualization', label: '读取可视化', description: 'Read saved visualization HTML and object list. Content inspection only; no claim of visual verification.',
+      parameters: Type.Object({ visualizationId: Type.String({ minLength: 1, maxLength: 200 }), revision: Type.Optional(Type.String({ maxLength: 200 })) }),
+      async execute(_, params) { return executeInspectVisualization(params as { visualizationId: string; revision?: string }, context) },
     }),
   ] as unknown as ToolDefinition[]
 }
@@ -1061,18 +1094,6 @@ function validateScheduleFields(input: Partial<CreateAutomationInput | UpdateAut
   if (input.sessionMode !== undefined && input.sessionMode !== 'daily' && input.sessionMode !== 'reuse') {
     throw new Error(`非法的 sessionMode: ${String(input.sessionMode)}`)
   }
-}
-
-function buildTeamMemoryTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefinition[] {
-  if (!ctx.isTeamWorkspace || !ctx.workspaceId) return []
-  const ops = teamMemoryOperations(ctx.workspaceId)
-  return [
-    sdk.defineTool({ name: 'mcp__team-memory__list_team_memories', label: '列出团队记忆', description: '列出当前团队工作区的共享知识记忆。团队记忆不含成员个人记忆。', parameters: Type.Object({}), async execute() { return jsonToolResult(await ops.list()) } }),
-    sdk.defineTool({ name: 'mcp__team-memory__read_team_memory', label: '读取团队记忆', description: '按需读取一篇当前团队的共享知识记忆。', parameters: Type.Object({ memoryId: Type.String() }), async execute(_, params) { return jsonToolResult(await ops.read((params as { memoryId: string }).memoryId)) } }),
-    sdk.defineTool({ name: 'mcp__team-memory__search_team_memories', label: '搜索团队记忆', description: '按标题和路径搜索当前团队的共享知识记忆。', parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 200 }) }), async execute(_, params) { return jsonToolResult(await ops.search((params as { query: string }).query)) } }),
-    sdk.defineTool({ name: 'mcp__team-memory__create_team_memory', label: '创建团队记忆', description: '仅在用户明确确认要沉淀跨成员可复用项目事实时创建团队记忆。', parameters: Type.Object({ path: Type.String(), title: Type.String(), content: Type.String(), changeSummary: Type.Optional(Type.String()) }), async execute(_, params) { return jsonToolResult(await ops.create(params as { path: string; title: string; content: string; changeSummary?: string })) } }),
-    sdk.defineTool({ name: 'mcp__team-memory__update_team_memory', label: '更新团队记忆', description: '更新前先读取；发生版本冲突时必须向用户说明，不能自动覆盖。', parameters: Type.Object({ memoryId: Type.String(), expectedVersion: Type.Integer({ minimum: 1 }), path: Type.Optional(Type.String()), title: Type.Optional(Type.String()), content: Type.Optional(Type.String()), changeSummary: Type.Optional(Type.String()) }), async execute(_, params) { const { memoryId, expectedVersion, ...input } = params as { memoryId: string; expectedVersion: number; path?: string; title?: string; content?: string; changeSummary?: string }; return jsonToolResult(await ops.update(memoryId, expectedVersion, input)) } }),
-  ] as unknown as ToolDefinition[]
 }
 
 function buildAutomationTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefinition[] {
@@ -1660,6 +1681,7 @@ export async function buildPiBuiltinTools(
   if (!isAgentPresetToolGroupDisabled(ctx.disabledToolGroups, 'preview')) {
     try {
       tools.push(...buildPiAgentPreviewTools(sdk, ctx))
+      tools.push(...buildPiVisualizationTools(sdk, ctx))
     } catch (error) {
       console.error('[Pi 桥接] 注入文件预览工具失败:', error)
     }
@@ -1685,7 +1707,6 @@ export async function buildPiBuiltinTools(
   try {
     if (!disabled.has('memory')) {
       tools.push(...buildPiMemoryArchiveTools(sdk, ctx))
-      tools.push(...buildTeamMemoryTools(sdk, ctx))
     }
     if (!disabled.has('task-graph')) {
       tools.push(...buildPiTaskGraphTools(sdk, ctx))
@@ -1694,7 +1715,6 @@ export async function buildPiBuiltinTools(
       tools.push(...buildPiPlanningTools(sdk, {
         sessionId: ctx.sessionId,
         workspaceId: ctx.workspaceId,
-        isTeamWorkspace: ctx.isTeamWorkspace,
         disabledTools: ctx.disabledTools,
       }))
     }

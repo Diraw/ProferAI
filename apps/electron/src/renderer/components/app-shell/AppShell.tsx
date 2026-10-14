@@ -12,7 +12,6 @@ import { LeftSidebar } from './LeftSidebar'
 import { RightSidePanel } from './RightSidePanel'
 import { MainArea } from '@/components/tabs/MainArea'
 import { TabBar } from '@/components/tabs/TabBar'
-import { TeamWorkspaceView } from '@/components/agent/TeamWorkspaceView'
 import { WindowControlsTemplateProvider } from '@/components/WindowControlsTemplate'
 import { AppShellProvider, type AppShellContextType } from '@/contexts/AppShellContext'
 import { appModeAtom } from '@/atoms/app-mode'
@@ -22,11 +21,10 @@ import { automationFormAtom } from '@/atoms/automation-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
 import { leftSidebarWidthAtom } from '@/atoms/sidebar-atoms'
 import { sidebarCollapsedAtom } from '@/atoms/tab-atoms'
-import { detectIsWindows } from '@/lib/platform'
+import { detectIsWindows } from '@profer/ui'
 import { interfaceVariantAtom } from '@/atoms/theme'
 import { usePanelAutoLayout } from '@/hooks/usePanelAutoLayout'
 import { cn } from '@/lib/utils'
-import { TEAM_WORKSPACE_UI_ENABLED } from '@/lib/product-feature-flags'
 
 const MIN_RIGHT_PANEL_WIDTH = 300
 const MAX_RIGHT_PANEL_WIDTH = 560
@@ -74,19 +72,14 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId)
-  const isTeamWorkspace = TEAM_WORKSPACE_UI_ENABLED && currentWorkspace?.type === 'team'
   // 定时任务表单打开时隐藏右侧文件面板，让中间区域扩展到全宽（表单内含自己的右栏配置）
   const activeView = useAtomValue(activeViewAtom)
   const showRightPanel = appMode === 'agent' && !!currentSessionId && !automationForm.open && activeView !== 'planning' && activeView !== 'agent-skills'
   // 文件面板/浏览器仅在 agent 个人视图参与布局判定（团队/规划/自动化表单时右侧面板不渲染）
-  const filePanelActive = !isTeamWorkspace && showRightPanel
+  const filePanelActive = showRightPanel
   // 统一自适应可见性：窗口 resize 监听 + 浏览器/文件面板可见性计算（挂载于此布局容器）
   usePanelAutoLayout({ filePanelActive })
   const isWindows = React.useMemo(() => detectIsWindows(), [])
-  // 团队工作区的默认 Agent 页仍展示文件主区；规划中心必须进入 MainArea，
-  // 否则 TeamWorkspaceView 会覆盖其中的 PlanningView。
-  const showTeamWorkspaceView = isTeamWorkspace && appMode === 'agent' && activeView !== 'agent-skills' && activeView !== 'planning'
-
   // 窗口标题设为用户名
   React.useEffect(() => {
     try {
@@ -239,23 +232,10 @@ export function AppShell({ contextValue }: AppShellProps): React.ReactElement {
 
         {/* 中间容器 */}
         <div className="main-area-glass-host flex-1 min-w-0 p-2 relative z-[60]">
-          {/* 团队工作区也必须挂载统一顶栏；否则团队页面与个人页面各自拥有一套入口，
-              标签切换、关闭和拖拽排序会与团队 Agent 面板脱节。 */}
-          {showTeamWorkspaceView ? (
-            <div className="flex h-full min-h-0 flex-col">
-              <TabBar teamMode />
-              <div className="min-h-0 flex-1">
-                <TeamWorkspaceView />
-              </div>
-            </div>
-          ) : (
-            <MainArea />
-          )}
+          <MainArea />
         </div>
 
-        {/* 右侧边栏：个人模式显示文件面板；团队模式文件已在主区域。
-            实际可见由 filePanelVisible（意图 A + 窗口足够）驱动；SidePanel 内部按此做宽度过渡动画。 */}
-        {!isTeamWorkspace && showRightPanel && (
+        {showRightPanel && (
           <div
             data-profer-navigation-region="right-panel"
             className={cn(

@@ -18,7 +18,7 @@ import {
   Download,
   Rocket,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   installerDownloadStatesAtom,
   installerManifestAtom,

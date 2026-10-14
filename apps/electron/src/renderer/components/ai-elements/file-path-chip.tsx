@@ -6,7 +6,7 @@ import { getFileBaseName, isAbsoluteFilePath as isAbsoluteFilePathCore, resolveR
 import { FileTypeIcon } from '@/components/file-browser/FileTypeIcon'
 import { useOpenPreview } from '@/components/diff/preview-opener'
 import { useFileAccessSessionId } from './file-access-context'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import type { FileSearchCandidateResult } from '@profer/shared'
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'])

@@ -8,7 +8,12 @@
  */
 
 import { useEffect } from 'react'
-import { agentGoalsAtom } from '@/atoms/goal-atoms'
+import { channelsAtom, channelsLoadedAtom, selectedModelAtom, channelCatalogRefreshAtom } from '@/atoms/chat-atoms'
+import { isChannelEnabledForChat } from '@profer/shared'
+import { authStatusAtom } from '@/atoms/identity-atoms'
+import { subscribeChannelCatalog } from '@/lib/channel-catalog-listener'
+import { agentGoalsAtom, hydrateAgentGoalsAtom, mergeAgentGoalAtom } from '@/atoms/goal-atoms'
+import { visualizationsAtom, updateVisualizationSessionCache } from '@/atoms/visualization-atoms'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useStore } from 'jotai'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
@@ -361,30 +366,60 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
 export function useGlobalAgentListeners(): void {
   const store = useStore()
 
+  useEffect(() => subscribeChannelCatalog({
+    subscribe: window.electronAPI.onAgentStreamEvent,
+    subscribeAccount: (callback) => store.sub(authStatusAtom, callback),
+    getAccount: () => store.get(authStatusAtom),
+    subscribeRefresh: (callback) => store.sub(channelCatalogRefreshAtom, callback),
+    listLocalChannels: () => window.electronAPI.listChannels({ localOnly: true }),
+    listInitialChannels: () => window.electronAPI.listChannels({ localOnly: true }),
+    getCatalogSnapshot: () => store.get(channelsAtom),
+    onAccountChange: () => {
+      // 账号切换期间旧目录不再作为可发送绑定，也不继续显示为有效。
+      store.set(channelsLoadedAtom, false)
+      store.set(channelsAtom, [])
+    },
+    apply: (channels) => {
+      store.set(channelsAtom, channels)
+      store.set(channelsLoadedAtom, true)
+      const selected = store.get(selectedModelAtom)
+      if (selected && !channels.some((channel) => channel.id === selected.channelId
+        && isChannelEnabledForChat(channel)
+        && channel.models.some((model) => model.id === selected.modelId && model.enabled))) store.set(selectedModelAtom, null)
+    },
+    onFailure: (error) => console.error('[渠道目录] 本地目录刷新失败，保留当前列表:', error),
+    initialRefresh: true,
+  }), [store])
   useEffect(() => {
     let effectActive = true
     // 启动时水合 Goal 状态（含重启后待恢复的 paused Goal）
     void window.electronAPI.listGoals().then((goals) => {
       if (!effectActive) return
-      store.set(agentGoalsAtom, new Map(goals.map((goal) => [goal.sessionId, goal])))
+      store.set(hydrateAgentGoalsAtom, goals)
     }).catch(() => {})
     const cleanupGoal = window.electronAPI.onGoalEvent((event) => {
+      if (!effectActive) return
       const previous = store.get(agentGoalsAtom).get(event.sessionId)
-      store.set(agentGoalsAtom, (previousMap) => {
-        const next = new Map(previousMap)
-        // clear 后主进程发送 stopReason='cleared' 的快照，渲染层直接移除条目
-        if (event.state && event.state.stopReason !== 'cleared') next.set(event.sessionId, event.state)
-        else next.delete(event.sessionId)
-        return next
-      })
-      // 终态跃迁时通知用户（Goal 常在后台长跑，用户可能不在看该会话）
-      if (event.state && previous && previous.status !== event.state.status) {
+      if (!store.set(mergeAgentGoalAtom, event)) return
+      // 用户启动/修改记录和终态摘要由主进程持久化；只触发重读，不更改真实流状态。
+      if (event.state && (event.state.iteration === 0 || !['active', 'stopping'].includes(event.state.status))) {
+        store.set(agentMessageRefreshAtom, (prev) => {
+          const next = new Map(prev)
+          next.set(event.sessionId, (prev.get(event.sessionId) ?? 0) + 1)
+          return next
+        })
+      }
+      // Goal 描述目标生命周期，不证明实际 run 已启动/停止。流状态和工作消息只由
+      // run 事件更新；禁止 Goal 状态清空普通流内容或抢先将其标成空闲。
+      if (event.state && event.state.stopReason !== 'cleared' && previous?.id === event.state.id && previous.status !== event.state.status) {
         if (event.state.status === 'completed') {
           toast.success('Goal 已完成', { description: event.state.lastSummary || event.state.goal })
         } else if (event.state.status === 'blocked') {
-          toast.warning('Goal 受阻，已在规划中心创建待办', { description: event.state.stopReason || event.state.lastSummary || event.state.goal })
+          toast.warning('Goal 受阻，补充信息后可恢复', { description: event.state.stopReason || event.state.lastSummary || event.state.goal })
         } else if (event.state.status === 'failed') {
           toast.error('Goal 执行失败', { description: event.state.stopReason || event.state.goal })
+        } else if (event.state.status === 'budget_limited') {
+          toast.warning('Goal 预算已耗尽', { description: '请在 Goal 卡片中增加预算后恢复；预算耗尽不代表目标已完成。' })
         }
       }
     })
@@ -713,6 +748,9 @@ export function useGlobalAgentListeners(): void {
         unstable_batchedUpdates(() => {
         const { sessionId, payload } = streamEvent
 
+        // 目录事件由全局目录监听消费，不属于会话流，禁止触发未知会话刷新。
+        if (payload.kind === 'catalog_invalidation') return
+
         // 终态（run_complete / run_error）的语义由专用 IPC（STREAM_COMPLETE / STREAM_ERROR）
         // 统一承担：agent-service 在刷新恢复时会为终态 payload 补发同名 IPC，因此这里直接跳过。
         // 若在这里抢先落后状态，专用 handler 的竞态保护（isCurrentAgentStreamCompletion 要求
@@ -819,6 +857,8 @@ export function useGlobalAgentListeners(): void {
               next.set(sessionId, upsertAgentImageGeneration(previous.get(sessionId) ?? [], proferEvent.record))
               return next
             })
+          } else if (proferEvent.type === 'visualization_updated' && proferEvent.sessionId === sessionId && proferEvent.record.sessionId === sessionId) {
+            store.set(visualizationsAtom, (previous) => updateVisualizationSessionCache(previous, sessionId, [proferEvent.record]))
           } else if (proferEvent.type === 'external_run_started') {
             activateExternalAgentRun(proferEvent)
           } else if (proferEvent.type === 'delegation_session_updated' || proferEvent.type === 'session_updated') {

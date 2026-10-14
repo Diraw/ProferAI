@@ -22,8 +22,8 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-} from '@/components/ui/sheet'
-import { Button } from '@/components/ui/button'
+} from '@profer/ui/primitives/sheet'
+import { Button } from '@profer/ui/primitives/button'
 import { cn } from '@/lib/utils'
 import { DeleteMessageDialog } from './DeleteMessageDialog'
 import type { BranchTreeSnapshot } from '@profer/shared'
@@ -685,7 +685,10 @@ function TreeCanvas({ layout, conversationId, onSwitch, collapsedIds, onToggleCo
       const rect = el.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
-      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
+      // 触控板双指滑动和捏合（ctrlKey+wheel）是一串小增量事件，固定步进 ±12% 会缩放暴动；
+      // 改为按事件增量的连续缩放。鼠标滚轮一格（约 ±100px）≈ 原来的 ±12%。
+      const delta = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 33 : e.deltaY
+      const factor = Math.exp(-delta * 0.0012)
       zoomAt(cx, cy, factor)
     }
     el.addEventListener('wheel', onWheel, { passive: false })

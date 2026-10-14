@@ -13,7 +13,7 @@ import { useAtomValue } from 'jotai'
 import { Globe2 } from 'lucide-react'
 import { browserStateMapAtom } from '@/atoms/browser-atoms'
 import { useCloseTab } from '@/hooks/useCloseTab'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import { BrowserPanel } from './BrowserPanel'
 
 interface BrowserTabContentProps {

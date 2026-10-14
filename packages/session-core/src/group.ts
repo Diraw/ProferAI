@@ -84,6 +84,31 @@ export type MessageGroup =
   | AssistantTurn
 
 /**
+ * 中断/断组语义分层（导航索引与渲染层一致，见下）。
+ *
+ * 渲染层为了把「已被用户中断」这类提示渲染成独立分隔条，把 interruption_record /
+ * skill_routing_notice 也当作断组边界；而本模块的历史默认口径（回溯水位、CLI outline）
+ * 只认 compact_boundary / compacting / permission_denied。
+ *
+ * 两者都是既成事实，不能互相覆盖：回溯水位用本模块默认口径（countTurns 合同已写明
+ * 必须与主进程 retrospective-service 一致），导航计数用渲染口径。
+ */
+const NAVIGATION_BREAKING_SUBTYPES: ReadonlySet<string> = new Set([
+  'compact_boundary',
+  'compacting',
+  'permission_denied',
+  'interruption_record',
+  'skill_routing_notice',
+])
+
+/** 历史默认断组集合（回溯水位 / CLI outline 沿用）。 */
+const DEFAULT_BREAKING_SUBTYPES: ReadonlySet<string> = new Set([
+  'compact_boundary',
+  'compacting',
+  'permission_denied',
+])
+
+/**
  * 将 SDKMessage 列表分组为可渲染的 Turn
  *
  * 规则：
@@ -92,8 +117,16 @@ export type MessageGroup =
  * 3. system（compact_boundary / compacting / permission_denied）→ 独立渲染，其他归入当前 turn
  * 4. 其他类型（result, tool_progress 等）→ 归入当前 assistant-turn
  * 5. 后处理：合并相邻同模型的 assistant-turn（处理子代理切换模型导致的碎片化）
+ *
+ * @param options.breakingSubtypes 覆盖 system 消息的断组集合。渲染层/导航索引需要含
+ *   interruption_record 与 skill_routing_notice 的子集口径；省略时保持历史默认行为。
  */
-export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string): MessageGroup[] {
+export function groupIntoTurns(
+  messages: SDKMessage[],
+  sessionModelId?: string,
+  options?: { breakingSubtypes?: ReadonlySet<string> },
+): MessageGroup[] {
+  const breakingSubtypes = options?.breakingSubtypes ?? DEFAULT_BREAKING_SUBTYPES
   const groups: MessageGroup[] = []
   let currentTurn: AssistantTurn | null = null
   // 收到后台任务完成通知（task_notification）后，若没有用户输入就直接出现新的 assistant 输出，
@@ -152,9 +185,9 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
       }
     } else if (msg.type === 'system') {
       const sysMsg = msg as SDKSystemMessage
-      // 仅需要独立渲染的 system 消息才中断 turn（compact_boundary / compacting / permission_denied）
-      // 其他 system 消息（如 init、task_started、task_progress）归入当前 turn，不中断分组
-      if (sysMsg.subtype === 'compact_boundary' || sysMsg.subtype === 'compacting' || sysMsg.subtype === 'permission_denied') {
+      // 仅需要独立渲染的 system 消息才中断 turn；其他 system 消息（如 init、task_started、
+      // task_progress）归入当前 turn，不中断分组。集合按 breakingSubtypes 决定（见函数头）。
+      if (sysMsg.subtype && breakingSubtypes.has(sysMsg.subtype)) {
         flushTurn()
         groups.push({ type: 'system', message: sysMsg })
       } else if (sysMsg.subtype === 'task_notification') {
@@ -198,6 +231,97 @@ export function countTurns(messages: SDKMessage[]): number {
     if (g.type === 'user' || g.type === 'assistant-turn') n++
   }
   return n
+}
+
+/**
+ * 导航索引条目 —— 「消息导航」里的一行。
+ *
+ * 身份分两级：
+ * - `id`：渲染层 data-message-id 的取值（消息 uuid / assistant 轮首条 uuid）。有 uuid 时
+ *   可直接当滚动锚点用；磁盘上确实无 uuid 的分组（interruption_record、部分旧格式输入）为 null。
+ * - `matchKey`：无 uuid 时的稳定回退键（role + subtype + 创建时间），供渲染层在本已
+ *   加载的 DOM 里找回对应节点，而不是点不动。
+ */
+export interface NavigationEntry {
+  /** 滚动锚点 id（消息 uuid）；无 uuid 时为 null，需用 matchKey 回退 */
+  id: string | null
+  role: 'user' | 'assistant' | 'status'
+  /** 单行预览（<=200 字） */
+  preview: string
+  /** assistant 回合的模型 id（用于取模型图标） */
+  model?: string
+  /** 无 uuid 时的稳定匹配键：`${role}:${subtype}:${createdAt}` */
+  matchKey: string
+}
+
+/** 分组内的身份字段（uuid / subtype / createdAt），供锚点 id 与 matchKey 共用。 */
+function navigationIdentity(group: MessageGroup): {
+  uuid: string | null
+  subtype: string
+  createdAt: string
+} {
+  const anchor = group.type === 'assistant-turn'
+    ? (group.assistantMessages[0] as unknown as Record<string, unknown> | undefined)
+    : (group.message as unknown as Record<string, unknown>)
+  const uuid = typeof anchor?.uuid === 'string' && anchor.uuid.length > 0 ? anchor.uuid : null
+  const subtype = typeof anchor?.subtype === 'string' ? anchor.subtype : ''
+  const createdAt = typeof anchor?._createdAt === 'number' ? String(anchor._createdAt) : ''
+  return { uuid, subtype, createdAt }
+}
+
+/**
+ * 系统消息在「消息导航」里的预览文案。
+ *
+ * 渲染层 MessageGroupRenderer 只渲染这 4 种 subtype（其余返回 null），且中断/技能提示另有
+ * 文案。本模块的 getGroupPreview 是 CLI/回溯共用的历史口径，不能为了导航去改它（会扰动
+ * 已有消费者），所以导航侧在这里单独镜像渲染层的分支。
+ */
+function navigationSystemPreview(sysMsg: SDKSystemMessage): string | null {
+  switch (sysMsg.subtype) {
+    case 'compact_boundary': return '上下文已压缩'
+    case 'permission_denied': return '自动审批已拒绝操作'
+    // `compacting` 只驱动实时状态，渲染层返回 null（不占行）。
+    case 'compacting': return null
+    case 'interruption_record': return sysMsg.message ?? '任务中断'
+    case 'skill_routing_notice': return sysMsg.message ?? 'Skill 未加载'
+    default: return null
+  }
+}
+
+/**
+ * 构建会话导航索引：一轮一行，覆盖传入的全部消息。
+ *
+ * 与渲染层「迷你地图」保持同一断组口径（含 interruption_record / skill_routing_notice）
+ * 与同一行集（仅渲染层真正渲染的 system subtype 占行），因此主进程与渲染层算出的行列、
+ * 顺序与文案一致。
+ */
+export function buildNavigationEntries(
+  messages: SDKMessage[],
+  sessionModelId?: string,
+): NavigationEntry[] {
+  const groups = groupIntoTurns(messages, sessionModelId, { breakingSubtypes: NAVIGATION_BREAKING_SUBTYPES })
+  const entries: NavigationEntry[] = []
+  for (const group of groups) {
+    const role: NavigationEntry['role'] = group.type === 'user' ? 'user' : group.type === 'system' ? 'status' : 'assistant'
+    let preview: string
+    if (group.type === 'system') {
+      const systemPreview = navigationSystemPreview(group.message)
+      // null = 渲染层不占行（compacting / 未知 subtype）。
+      if (systemPreview === null) continue
+      preview = systemPreview
+    } else {
+      preview = getGroupPreview(group)
+    }
+    const { uuid, subtype, createdAt } = navigationIdentity(group)
+    entries.push({
+      id: uuid,
+      role,
+      preview,
+      model: group.type === 'assistant-turn' ? group.model : undefined,
+      matchKey: `${role}:${subtype}:${createdAt}`,
+    })
+  }
+  return entries
 }
 
 /**

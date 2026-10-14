@@ -1,5 +1,72 @@
-import { describe, expect, test } from 'bun:test'
-import { friendlyErrorMessage, getWindowsPowerShellPath, mapSDKErrorToTypedError, SDK_SETTING_SOURCES } from './claude-agent-adapter'
+import { describe, expect, mock, test } from 'bun:test'
+import type { ClaudeAgentQueryOptions } from './claude-agent-adapter'
+
+let capturedSdkQueryOptions: Record<string, unknown> | undefined
+
+mock.module('@anthropic-ai/claude-agent-sdk', () => ({
+  query: ({ options }: { options: Record<string, unknown> }) => {
+    capturedSdkQueryOptions = options
+    return (async function* () {
+      yield { type: 'result', subtype: 'success', session_id: 'test-session', terminal_reason: 'completed' }
+    })()
+  },
+}))
+
+const { friendlyErrorMessage, getWindowsPowerShellPath, mapSDKErrorToTypedError, SDK_SETTING_SOURCES, ClaudeAgentAdapter } = await import('./claude-agent-adapter')
+
+describe('Claude 适配器 Skill 白名单最终透传', () => {
+  for (const { label, skills } of [
+    { label: '未指定白名单', skills: undefined },
+    { label: '空白名单', skills: [] },
+    { label: '非空白名单', skills: ['code-honor', 'plugin:review'] },
+  ]) {
+    test(`Given ${label} When 发起查询 Then sdk.query 收到原始白名单状态`, async () => {
+      capturedSdkQueryOptions = undefined
+      const adapter = new ClaudeAgentAdapter()
+      const input: ClaudeAgentQueryOptions = {
+        sessionId: `claude-skills-${label}`,
+        prompt: '检查白名单',
+        sdkCliPath: '/unused/mock-claude',
+        env: {},
+        sdkPermissionMode: 'auto',
+        allowDangerouslySkipPermissions: false,
+        systemPrompt: 'test',
+        skills,
+      }
+      try {
+        const messages = []
+        for await (const message of adapter.query(input)) messages.push(message)
+        expect(messages).toHaveLength(1)
+        expect(capturedSdkQueryOptions).toBeDefined()
+        if (skills === undefined) {
+          expect(capturedSdkQueryOptions).not.toHaveProperty('skills')
+        } else {
+          expect(capturedSdkQueryOptions).toHaveProperty('skills', skills)
+          expect(capturedSdkQueryOptions!.skills).not.toBe(skills)
+        }
+      } finally {
+        adapter.dispose()
+      }
+    })
+  }
+})
+
+describe('Claude 本轮工具装载', () => {
+  test('纯对话空工具数组透传，后续标准请求省略该覆盖', async () => {
+    const adapter = new ClaudeAgentAdapter()
+    const input: ClaudeAgentQueryOptions = {
+      sessionId: 'light-tools', prompt: '你好', sdkCliPath: '/unused/mock-claude', env: {},
+      sdkPermissionMode: 'auto', allowDangerouslySkipPermissions: false, systemPrompt: 'short prompt', tools: [],
+    }
+    try {
+      for await (const _message of adapter.query(input)) { /* 消费 */ }
+      expect(capturedSdkQueryOptions?.tools).toEqual([])
+      const standardInput: ClaudeAgentQueryOptions = { ...input, tools: undefined }
+      for await (const _message of adapter.query(standardInput)) { /* 消费 */ }
+      expect(capturedSdkQueryOptions).not.toHaveProperty('tools')
+    } finally { adapter.dispose() }
+  })
+})
 
 describe('Claude 适配器 Windows 清理命令', () => {
   test('Given PowerShell 未加入 PATH 但系统组件存在 When 解析 Then 使用 SystemRoot 下的绝对路径', () => {

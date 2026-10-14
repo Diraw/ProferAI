@@ -1,8 +1,8 @@
 import * as React from 'react'
 import type { BrowserStartPageState } from '@profer/shared'
 import { Bookmark, Clock, Globe2, Search, Sparkles, Trash2, X } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { Button } from '@profer/ui/primitives/button'
+import { Input } from '@profer/ui/primitives/input'
 import { normalizeStartPageInput } from './browser-start-page-navigation'
 
 interface BrowserStartPageProps {

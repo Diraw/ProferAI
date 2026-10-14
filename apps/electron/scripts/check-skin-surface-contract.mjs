@@ -14,7 +14,10 @@ import { join, relative } from 'node:path'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const SKINS_DIR = join(ROOT, 'resources', 'skins')
 const TEMPLATE_DIR = join(ROOT, 'resources', 'skin-template')
-const RENDERER_COMPONENTS_DIR = join(ROOT, 'src', 'renderer', 'components')
+const COMPONENT_DIRS = [
+  join(ROOT, 'src', 'renderer', 'components'),
+  join(ROOT, '..', '..', 'packages', 'ui', 'src'),
+]
 const REQUIRED_TOKENS = [
   'shell-surface', 'raised-surface', 'sunken-surface',
   'surface-border', 'surface-border-strong',
@@ -27,6 +30,7 @@ const REQUIRED_TOKENS = [
   'browser-host-surface',
   'success', 'success-foreground', 'warning', 'warning-foreground',
   'info', 'info-foreground',
+  'chart-1', 'chart-2', 'chart-3', 'chart-4', 'chart-5', 'chart-6', 'chart-7', 'chart-8',
 ]
 const SKIN_ID_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 const FORBIDDEN_CSS_RE = /@import\b|@font-face\b|url\(\s*(['"]?)(?:https?:|file:|data:|\/\/)/i
@@ -149,10 +153,10 @@ function collectTsxFiles(dir) {
 
 const hardcodedSurfaceRe = /(?:bg|border|text|from|to|via)-(?:slate|zinc|neutral|gray|white|black)(?:-|['"`\s])/g
 const hardcodedSurfaceHits = []
-for (const file of collectTsxFiles(RENDERER_COMPONENTS_DIR)) {
+for (const file of COMPONENT_DIRS.flatMap(collectTsxFiles)) {
   const source = readFileSync(file, 'utf8')
   const matches = source.match(hardcodedSurfaceRe)
-  if (matches?.length) hardcodedSurfaceHits.push(`${relative(join(ROOT, 'src', 'renderer'), file)} (${matches.length})`)
+  if (matches?.length) hardcodedSurfaceHits.push(`${relative(join(ROOT, '..', '..'), file)} (${matches.length})`)
 }
 if (hardcodedSurfaceHits.length) {
   console.log(`\nℹ 普通中性色审计（非阻断，品牌/媒体/代码高亮等需按域复核）：${hardcodedSurfaceHits.length} 个文件`)
@@ -160,6 +164,26 @@ if (hardcodedSurfaceHits.length) {
   if (hardcodedSurfaceHits.length > 20) console.log(`  - … 另有 ${hardcodedSurfaceHits.length - 20} 个文件`)
 } else {
   console.log('\n✓ 普通中性色审计未发现匹配项')
+}
+
+// 语义状态色审计：running/completed/blocked 这类状态应走 --success/--warning/--info/--destructive，
+// 否则皮肤无法调整状态色。同样只报告不阻断，保留品牌 Logo、文件类型等既定例外。
+const hardcodedStatusRe = /(?:bg|border|text|ring|fill|stroke)-(?:blue|sky|cyan|teal|emerald|green|lime|indigo|violet|purple|fuchsia|pink|rose|red|orange|amber|yellow)(?:-\d{2,3})?(?:\/|['"`\s])/g
+const hardcodedStatusHits = []
+for (const file of COMPONENT_DIRS.flatMap(collectTsxFiles)) {
+  const source = readFileSync(file, 'utf8')
+  const matches = source.match(hardcodedStatusRe)
+  if (matches?.length) hardcodedStatusHits.push(`${relative(join(ROOT, '..', '..'), file)} (${matches.length})`)
+}
+if (hardcodedStatusHits.length) {
+  console.log(`\nℹ 语义状态色审计（非阻断，状态表达优先使用 success/warning/info/destructive token）：${hardcodedStatusHits.length} 个文件`)
+  const ranked = hardcodedStatusHits
+    .map((line) => ({ line, count: Number(/\((\d+)\)$/.exec(line)?.[1] ?? 0) }))
+    .sort((a, b) => b.count - a.count)
+  for (const item of ranked.slice(0, 20)) console.log(`  - ${item.line}`)
+  if (ranked.length > 20) console.log(`  - … 另有 ${ranked.length - 20} 个文件`)
+} else {
+  console.log('\n✓ 语义状态色审计未发现匹配项')
 }
 
 if (failures) {

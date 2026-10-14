@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react'
 import type { AgentFilePreviewReport, FileAccessOptions } from '@profer/shared'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   createOfficeViewer,
   destroyOfficeViewer,

@@ -8,9 +8,11 @@
  * 照搬 conversation-manager.ts 的模式。
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync, readdirSync, cpSync, copyFileSync, createReadStream, createWriteStream, statSync, type WriteStream } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync, readdirSync, cpSync, copyFileSync, createReadStream, createWriteStream, type WriteStream } from 'node:fs'
 import { createInterface } from 'node:readline'
-import { writeJsonFileAtomic, readJsonFileSafe } from './safe-file'
+import { createAgentSessionIndexStore } from './agent-session-index'
+import { createSnippet, extractTextFromPersistedMessage, matchAgentJsonlLine } from './agent-session-search'
+import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, join, relative, resolve, dirname } from 'node:path'
 import {
@@ -24,6 +26,7 @@ import {
   getSdkConfigDir,
 } from './config-paths'
 import { getAgentWorkspace } from './agent-workspace-manager'
+import { collectAttachedDirectories } from './agent-directory-utils'
 import { assertEnabledModelForChannel } from './agent-model-selection'
 import { copyForkWorkspaceFiles } from './agent-fork-workspace-copy'
 import { copyForkFile, buildForkProjectKey, renameForkFile, removeForkPath } from './fork-file-ops'
@@ -66,9 +69,6 @@ import {
   type SessionHealth,
   type AgentRuntime,
   type RewindSessionResult,
-  SESSION_BLOB_REFS_FIELD,
-  SESSION_BLOB_MISSING_FIELD,
-  readSessionBlobRefs,
 } from '@profer/shared'
 import { getConversationMessages } from './conversation-manager'
 import { isUserInputMessage } from '@profer/session-core'
@@ -114,36 +114,10 @@ import {
 } from '@profer/project-core'
 // GPT Image 生图工具仅在 Chat 模式可用，Agent 模式不需要清理逻辑
 
-/**
- * 会话索引文件格式
- */
-interface AgentSessionsIndex {
-  /** 配置版本号 */
-  version: number
-  /** 会话元数据列表 */
-  sessions: AgentSessionMeta[]
-}
-
-/** 当前索引版本 */
-const INDEX_VERSION = 1
-
-/**
- * 会话索引的内存缓存。
- *
- * Agent 运行期间会多次读取和更新会话元数据。索引随历史会话增长后，反复同步
- * readFile + JSON.parse 会直接阻塞主进程；用 mtime 和 size 校验可保留外部修改感知。
- */
-let indexCache: { data: AgentSessionsIndex; mtimeMs: number; size: number } | null = null
-
-function cacheIndex(data: AgentSessionsIndex): void {
-  try {
-    const stat = statSync(getAgentSessionsIndexPath())
-    indexCache = { data, mtimeMs: stat.mtimeMs, size: stat.size }
-  } catch {
-    // 无法确认磁盘版本时绝不复用内存数据，交给下次读取走恢复路径。
-    indexCache = null
-  }
-}
+// 索引存储独立管理缓存与原子读写；manager 保留现有公开入口。
+const sessionIndex = createAgentSessionIndexStore(getAgentSessionsIndexPath)
+const readIndex = sessionIndex.read
+const writeIndex = sessionIndex.write
 
 /** UPDATE_SESSION_AGENT_RUNTIME 需要原子回滚的 runtime-owned 元数据快照。 */
 export interface AgentRuntimeMetaSnapshot {
@@ -198,84 +172,6 @@ export function restoreAgentRuntimeMeta(id: string, snapshot: AgentRuntimeMetaSn
   index.sessions[idx] = restored
   writeIndex(index)
   return restored
-}
-
-/**
- * 在存储边界统一补全 runtime：历史/非法值绝不进入 Pi，均回退 Claude。
- * 此处只更新内存对象，不在读取阶段改写用户索引；下一次正常元数据写入会自然持久化。
- */
-function normalizeSessionRuntime(session: AgentSessionMeta): AgentSessionMeta {
-  const agentRuntime = normalizeAgentRuntime(session.agentRuntime)
-  return session.agentRuntime === agentRuntime ? session : { ...session, agentRuntime }
-}
-
-/** 移除 Agent 知识库下线前遗留的 session allowlist，不影响 Chat 消息中的同名字段。 */
-function removeLegacyAgentKnowledgeReferences(session: AgentSessionMeta): AgentSessionMeta {
-  if (!Object.prototype.hasOwnProperty.call(session, 'knowledgeReferences')) return session
-  const { knowledgeReferences: _removed, ...withoutKnowledgeReferences } = session as AgentSessionMeta & { knowledgeReferences?: unknown }
-  return withoutKnowledgeReferences
-}
-
-/**
- * 读取会话索引文件
- */
-function readIndex(): AgentSessionsIndex {
-  const indexPath = getAgentSessionsIndexPath()
-
-  if (indexCache) {
-    try {
-      const stat = statSync(indexPath)
-      if (stat.mtimeMs === indexCache.mtimeMs && stat.size === indexCache.size) {
-        return indexCache.data
-      }
-    } catch {
-      indexCache = null
-    }
-  }
-
-  const data = readJsonFileSafe<AgentSessionsIndex>(indexPath)
-  if (data) {
-    let removedLegacyKnowledgeReferences = false
-    const sessions = Array.isArray(data.sessions)
-      ? data.sessions.map((session) => {
-          const normalized = normalizeSessionRuntime(session)
-          const cleaned = removeLegacyAgentKnowledgeReferences(normalized)
-          if (cleaned !== normalized) removedLegacyKnowledgeReferences = true
-          return cleaned
-        })
-      : []
-    const normalized: AgentSessionsIndex = { ...data, sessions }
-    let cacheNormalized = true
-    if (removedLegacyKnowledgeReferences) {
-      try {
-        writeJsonFileAtomic(indexPath, normalized)
-        console.info('[Agent 会话] 已清理下线前遗留的知识库引用字段')
-      } catch (error) {
-        cacheNormalized = false
-        console.warn('[Agent 会话] 清理遗留知识库引用字段失败，将在下次读取时重试:', error)
-      }
-    }
-    if (cacheNormalized) cacheIndex(normalized)
-    return normalized
-  }
-  return { version: INDEX_VERSION, sessions: [] }
-}
-
-/**
- * 写入会话索引文件
- */
-function writeIndex(index: AgentSessionsIndex): void {
-  const indexPath = getAgentSessionsIndexPath()
-
-  try {
-    writeJsonFileAtomic(indexPath, index)
-    cacheIndex(index)
-  } catch (error) {
-    // 调用方可能已原地修改缓存对象；写入失败后不能继续返回未落盘数据。
-    indexCache = null
-    console.error('[Agent 会话] 写入索引文件失败:', error)
-    throw new Error('写入 Agent 会话索引失败')
-  }
 }
 
 /**
@@ -341,30 +237,17 @@ export function createDelegatedChildSessionMeta(params: {
  * @param includeArchived 是否包含已归档会话；默认 false（高频侧边栏刷新只拉活跃）
  */
 export function listAgentSessions(includeArchived = false): AgentSessionMeta[] {
-  const index = readIndex()
-  return index.sessions
-    .filter((s) => includeArchived || !s.archived)
-    .sort((a, b) => b.updatedAt - a.updatedAt)
+  return sessionIndex.list(includeArchived)
 }
 
-/**
- * 已归档 Agent 会话数量（轻量计数，不排序、不返回 meta）
- */
+/** 已归档 Agent 会话数量；不含隐藏草稿。 */
 export function countArchivedAgentSessions(): number {
-  const index = readIndex()
-  let count = 0
-  for (const s of index.sessions) {
-    if (s.archived && !s.draft) count += 1
-  }
-  return count
+  return sessionIndex.countArchived()
 }
 
-/**
- * 获取单个会话的元数据
- */
+/** 获取单个会话的元数据。 */
 export function getAgentSessionMeta(id: string): AgentSessionMeta | undefined {
-  const index = readIndex()
-  return index.sessions.find((s) => s.id === id)
+  return sessionIndex.get(id)
 }
 
 /**
@@ -591,277 +474,6 @@ export function appendAgentMessage(id: string, message: AgentMessage): void {
   }
 }
 
-/** 单条 SDKMessage 序列化后最大长度（UTF-16 code units，超出则截断内容） */
-/** 落盘规则：单条消息序列化后的字符上限。写入路径与存量迁移共用此常量。 */
-export const MAX_SDK_MESSAGE_LENGTH = 256 * 1024 // ~256K chars
-/** 截断后保留的预览文本长度 */
-const TRUNCATED_PREVIEW_LENGTH = 2000
-
-/**
- * 按落盘规则收敛一条**已序列化**的会话行；未超限则原样返回。
- *
- * 写入路径（`appendSDKMessages` / `serializeSDKMessageForStorage`）与存量迁移
- * （`oversized-session-migration`）共用这一个入口。此前同一套规则散在两处内联，
- * 正是「各自漏一处」的温床——补 4 个覆盖缺口时已吃过一次这个亏。
- */
-export function sanitizeSerializedSessionLine(line: string, sessionId?: string): string {
-  if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
-
-  let message: SDKMessage
-  try {
-    message = JSON.parse(line) as SDKMessage
-  } catch {
-    // 损坏行不在这里处理（迁移侧会记为 skipped）；原样返回，避免二次破坏
-    return line
-  }
-
-  const sanitized = JSON.stringify(sanitizeOversizedMessage(message, line.length))
-  if (sanitized.length > MAX_SDK_MESSAGE_LENGTH) {
-    console.warn(
-      `[Agent 会话] 消息截断后仍超限 (${(sanitized.length / 1024).toFixed(0)}K chars)${sessionId ? `, session=${sessionId}` : ''}`,
-    )
-  }
-  return sanitized
-}
-
-// ===== 大载荷外部化（把载荷搬出 JSONL 行，而不是删掉） =====
-
-/**
- * 消息级引用表字段名。放在消息顶层，不影响任何已有字段。
- * 为什么不把字段本身换成对象：那会把类型从 string 变成联合类型，
- * 老版本读到新数据会渲染成 `[object Object]` 甚至崩；
- * 保持 string（值为片段）则老代码只是显示得短一点——降级而非崩坏。
- */
-const BLOB_REFS_FIELD = SESSION_BLOB_REFS_FIELD
-/** 还原失败时记录缺失引用，供上层提示「原文不可用」 */
-const BLOB_REFS_MISSING_FIELD = SESSION_BLOB_MISSING_FIELD
-
-/** 第一级：行内保留的片段长度（与截断预览同长） */
-const INLINE_PREVIEW_CHARS = TRUNCATED_PREVIEW_LENGTH
-/**
- * 第一级可抽取下限。短于片段长度的字符串抽了等于没抽（片段就是全文），因此第一级不碰。
- * 同时也是第一级「抽不动了」的终止条件：候选已按长度降序，遇到不达下限的就必然全部不达标。
- */
-const FIRST_TIER_MIN_CHARS = INLINE_PREVIEW_CHARS
-/**
- * 第二级片段长度：第一级抽完仍超限时，把中等字符串也抽走，只留更短的片段。
- *
- * 存在一个真实形态会让第一级无解：**一个工具返回大量（约 150~200 条以上）结构化记录，
- * 每条带一个约 1500 字符的字段**，而整条消息里没有任何字符串超过 2000。
- * 真机的委派列表工具已出现过 25 条记录的实例（每条 resultSummary 3K~12K），
- * 规模再大一个数量级即命中——见工作包 design.md 第 11 节。
- *
- * 抽走之后原文仍在 blob，不丢数据；代价只是片段更短，折叠态可读性下降。
- */
-const SHORT_PREVIEW_CHARS = 200
-const SECOND_TIER_MIN_CHARS = 512
-/** 遍历深度上限，防止异常结构导致栈过深 */
-const MAX_BLOB_WALK_DEPTH = 12
-
-interface StoredBlobRef {
-  /** 相对消息根的对象路径，如 `tool_use_result.content.0.text` */
-  path: string
-  hash: string
-  chars: number
-  bytes: number
-}
-
-interface ExtractableString {
-  path: string
-  length: number
-}
-
-/** 路径 tokenizer：`a.b[0].c` → ['a','b',0,'c'] */
-function tokenizeBlobPath(path: string): (string | number)[] {
-  const tokens: (string | number)[] = []
-  const pattern = /([^.[\]]+)|\[(\d+)\]/g
-  let match: RegExpExecArray | null
-  while ((match = pattern.exec(path)) !== null) {
-    tokens.push(match[2] !== undefined ? Number(match[2]) : match[1]!)
-  }
-  return tokens
-}
-
-function getStringAtPath(root: unknown, path: string): string | undefined {
-  let node: unknown = root
-  for (const token of tokenizeBlobPath(path)) {
-    if (typeof token === 'number') {
-      if (!Array.isArray(node)) return undefined
-      node = node[token]
-    } else {
-      if (!isPlainRecord(node)) return undefined
-      node = node[token]
-    }
-  }
-  return typeof node === 'string' ? node : undefined
-}
-
-function setStringAtPath(root: unknown, path: string, value: string): boolean {
-  const tokens = tokenizeBlobPath(path)
-  if (tokens.length === 0) return false
-  let node: unknown = root
-  for (let i = 0; i < tokens.length - 1; i++) {
-    const token = tokens[i]!
-    if (typeof token === 'number') {
-      if (!Array.isArray(node)) return false
-      node = node[token]
-    } else {
-      if (!isPlainRecord(node)) return false
-      node = node[token]
-    }
-  }
-  const last = tokens[tokens.length - 1]!
-  if (typeof last === 'number') {
-    if (!Array.isArray(node)) return false
-    node[last] = value
-    return true
-  }
-  if (!isPlainRecord(node)) return false
-  node[last] = value
-  return true
-}
-
-/**
- * 递归收集超过 `minChars` 的字符串及其路径（不进入引用表自身，跳过已抽过的路径）。
- * 已抽过的路径必须跳过：第一级留下的片段（2000 字）仍 ≥ 第二级下限，
- * 不跳就会被第二级再抽一遍，把片段也搬走。
- */
-function collectExtractableStrings(
-  value: unknown,
-  path: string,
-  out: ExtractableString[],
-  minChars: number,
-  skipPaths: Set<string>,
-  depth = 0,
-): void {
-  if (depth > MAX_BLOB_WALK_DEPTH) return
-
-  if (typeof value === 'string') {
-    if (value.length > minChars && !skipPaths.has(path)) out.push({ path, length: value.length })
-    return
-  }
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      collectExtractableStrings(value[i], `${path}[${i}]`, out, minChars, skipPaths, depth + 1)
-    }
-    return
-  }
-  if (!isPlainRecord(value)) return
-
-  for (const [key, child] of Object.entries(value)) {
-    if (key === BLOB_REFS_FIELD || key === BLOB_REFS_MISSING_FIELD) continue
-    collectExtractableStrings(child, path ? `${path}.${key}` : key, out, minChars, skipPaths, depth + 1)
-  }
-}
-
-/**
- * 把消息连同引用表一起序列化。
- *
- * 判定预算时【必须】带上引用表：否则循环会在「消息刚好落回上限」时停下，
- * 而附加上引用表后又挠出去几十条引用的大小，最终校验失败导致整个外部化被丢弃。
- */
-function serializeMessageWithRefs(message: Record<string, unknown>, refs: StoredBlobRef[]): string {
-  return refs.length === 0 ? JSON.stringify(message) : JSON.stringify({ ...message, [BLOB_REFS_FIELD]: refs })
-}
-
-/**
- * 按给定片段长度与下限，从最大的字符串开始抽，直到（含引用表）落回行预算内。
- * 返回是否达标，以及达标时可直接落盘的序列化结果。
- */
-function extractUntilUnderBudget(
-  message: Record<string, unknown>,
-  refs: StoredBlobRef[],
-  extractedPaths: Set<string>,
-  fragmentChars: number,
-  minChars: number,
-): { converged: boolean; serialized: string } {
-  let serialized = serializeMessageWithRefs(message, refs)
-  if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return { converged: true, serialized }
-
-  const candidates: ExtractableString[] = []
-  collectExtractableStrings(message, '', candidates, minChars, extractedPaths)
-  if (candidates.length === 0) return { converged: false, serialized }
-  candidates.sort((a, b) => b.length - a.length)
-
-  for (const candidate of candidates) {
-    if (serialized.length <= MAX_SDK_MESSAGE_LENGTH) return { converged: true, serialized }
-
-    const value = getStringAtPath(message, candidate.path)
-    if (typeof value !== 'string' || value.length <= minChars) break
-
-    const { hash, bytes } = writeBlobSync(value)
-    if (!setStringAtPath(message, candidate.path, value.slice(0, fragmentChars))) break
-    extractedPaths.add(candidate.path)
-    refs.push({ path: candidate.path, hash, chars: value.length, bytes })
-    serialized = serializeMessageWithRefs(message, refs)
-  }
-
-  return { converged: serialized.length <= MAX_SDK_MESSAGE_LENGTH, serialized }
-}
-
-/**
- * 把超限行里的超大字符串搬到 blob，行内只留片段 + 引用。
- *
- * 规则（用户 2026-09-17 确认）：
- * 1. 行未超限 → 原样返回，**一个字节都不动**
- * 2. 超了 → 从最大字符串开始抽，原位留前 2000 字片段，再量一次，还超就继续抽
- * 3. 抽不动了（候选已不足片段长度）或 blob 写失败 → 退回截断兜底
- *
- * 为什么「从最大开始抽」：抽一个 12 MB 的字符串就解决问题，不需要动其他字段，干预面最小。
- */
-export function externalizeSerializedSessionLine(line: string, sessionId?: string): string {
-  if (line.length <= MAX_SDK_MESSAGE_LENGTH) return line
-
-  let message: Record<string, unknown>
-  try {
-    const parsed: unknown = JSON.parse(line)
-    if (!isPlainRecord(parsed)) return sanitizeSerializedSessionLine(line, sessionId)
-    message = parsed
-  } catch {
-    return sanitizeSerializedSessionLine(line, sessionId)
-  }
-
-  const refs: StoredBlobRef[] = []
-  const extractedPaths = new Set<string>()
-  try {
-    // 第一级：只抽明显的大字符串（≥ 2000），片段长度也是 2000
-    let { converged, serialized } = extractUntilUnderBudget(
-      message, refs, extractedPaths, INLINE_PREVIEW_CHARS, FIRST_TIER_MIN_CHARS,
-    )
-
-    // 第二级：第一级无解时（典型形态：一条消息里全是中等字符串，无一超过 2000）
-    // 把中等字符串也抽走，只留更短的片段——原文仍在 blob，不丢数据
-    if (!converged) {
-      ;({ converged, serialized } = extractUntilUnderBudget(
-        message, refs, extractedPaths, SHORT_PREVIEW_CHARS, SECOND_TIER_MIN_CHARS,
-      ))
-    }
-
-    // 达标且确实搬走了东西 → 直接用（serialized 已含引用表，无需再拼一次）
-    if (converged && refs.length > 0) return serialized
-
-    // 两级都抽不动（没有超过 512 的字符串）或抽完仍超限 → 交给截断兜底
-    return sanitizeSerializedSessionLine(line, sessionId)
-  } catch (error) {
-    // blob 写失败不能让写入失败：退回截断，保住行上限
-    console.warn(`[Agent 会话] 载荷外部化失败，退回截断${sessionId ? ` session=${sessionId}` : ''}:`, error)
-    return sanitizeSerializedSessionLine(line, sessionId)
-  }
-}
-
-/**
- * 从一条**已序列化**的会话行里读出引用表。
- * 供存量迁移统计「本次搬了多少载荷」使用；解析失败返回空数组（不抛异常）。
- * 复用 shared 的 readSessionBlobRefs，避免同一形状在两处各自实现。
- */
-export function readSerializedBlobRefs(line: string): StoredBlobRef[] {
-  try {
-    return readSessionBlobRefs(JSON.parse(line)) as StoredBlobRef[]
-  } catch {
-    return []
-  }
-}
-
 /**
  * 把一条消息里的引用一次性还原为原文，返回原始形状。
  *
@@ -891,7 +503,21 @@ export async function resolveMessageBlobs(message: SDKMessage): Promise<SDKMessa
   return clone as unknown as SDKMessage
 }
 
-import { readBlob, writeBlobSync } from './blob-store'
+import { readBlob } from './blob-store'
+import {
+  BLOB_REFS_FIELD,
+  BLOB_REFS_MISSING_FIELD,
+  MAX_SDK_MESSAGE_LENGTH,
+  externalizeSerializedSessionLine,
+  setStringAtPath,
+  type StoredBlobRef,
+} from './session-payload-externalize'
+export {
+  MAX_SDK_MESSAGE_LENGTH,
+  externalizeSerializedSessionLine,
+  readSerializedBlobRefs,
+  sanitizeSerializedSessionLine,
+} from './session-payload-externalize'
 
 /**
  *
@@ -916,153 +542,6 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
     console.error(`[Agent 会话] 追加 SDKMessage 失败 (${id}):`, error)
     throw new Error('追加 SDKMessage 失败')
   }
-}
-
-/** 递归收敛 tool_use_result 时的最大深度，防止异常结构导致栈过深 */
-const MAX_TOOL_RESULT_SANITIZE_DEPTH = 8
-
-/**
- * 逐级收紧时的字符串阈值下限。
- * 低于它就不再继续收紧，避免把正常长度的内容也切碎。
- */
-const MIN_SANITIZE_STRING_THRESHOLD = 4000
-
-/** 逐级收紧的最大轮数（128K → 32K → 8K → 4K） */
-const MAX_SANITIZE_ATTEMPTS = 4
-
-/** 仅普通对象（排除数组与 null），供结构化载荷遍历使用 */
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * 递归收敛结构化的工具结果载荷。
- *
- * Pi runtime 会把 tool_result 的完整 details 作为顶层 `tool_use_result` 落盘
- * （见 pi-message-adapter.ts），它与 message.content 等量，实测单条最大约 12 MB
- * （整页 HTML、PDF 的 base64、内嵌图片）。这里用与 message.content 同一套规则处理：
- * 超过阈值的字符串截断为预览 + 说明。
- *
- * 渲染侧只有 parseAgentImageAttachmentDetails 会读它，而该函数提取的是
- * localPath / filename / mediaType 这类路径型标记，不依赖超长字符串，因此截断安全。
- */
-function sanitizeToolResultPayload(
-  payload: unknown,
-  truncationThreshold: number,
-  truncationNote: string,
-  depth = 0,
-): unknown {
-  if (depth > MAX_TOOL_RESULT_SANITIZE_DEPTH) return payload
-  if (typeof payload === 'string') {
-    return payload.length > truncationThreshold
-      ? payload.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
-      : payload
-  }
-  if (Array.isArray(payload)) {
-    return payload.map((item) => sanitizeToolResultPayload(item, truncationThreshold, truncationNote, depth + 1))
-  }
-  if (!isPlainRecord(payload)) return payload
-
-  const sanitized: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(payload)) {
-    sanitized[key] = sanitizeToolResultPayload(value, truncationThreshold, truncationNote, depth + 1)
-  }
-  return sanitized
-}
-
-/**
- * 按给定字符串阈值就地收敛一份消息副本（调用方保证 clone 是可安全修改的深拷贝）。
- * 处理四类膨胀源：超长 text block、超大 tool_result、内嵌 base64 图片、
- * 以及顶层 tool_use_result 副本（message.content 的等量拷贝）。
- */
-function applyOversizedSanitization(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  clone: any,
-  truncationNote: string,
-  truncationThreshold: number,
-): SDKMessage {
-  // 顶层 tool_use_result 是 tool_result 正文的完整副本，必须与 message.content 同规则处理，
-  // 否则即使正文被截断，整行依然超限（实测 161/250 条巨型行涉此，72 条仅副本就超限）。
-  if (clone.tool_use_result !== undefined) {
-    clone.tool_use_result = sanitizeToolResultPayload(clone.tool_use_result, truncationThreshold, truncationNote)
-  }
-  if (clone.toolUseResult !== undefined) {
-    clone.toolUseResult = sanitizeToolResultPayload(clone.toolUseResult, truncationThreshold, truncationNote)
-  }
-
-  const content = clone.message?.content
-  if (Array.isArray(content)) {
-    for (let i = 0; i < content.length; i++) {
-      const block = content[i]
-      if (!block || typeof block !== 'object') continue
-
-      // 截断超长 text block
-      if (block.type === 'text' && typeof block.text === 'string' && block.text.length > truncationThreshold) {
-        block.text = block.text.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
-      }
-
-      // 截断超大 tool_result
-      if (block.type === 'tool_result') {
-        if (typeof block.content === 'string' && block.content.length > truncationThreshold) {
-          block.content = block.content.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
-        }
-        if (Array.isArray(block.content)) {
-          block.content = block.content.map((item: Record<string, unknown>) => {
-            // 剥离 base64 图片数据。两种结构并存：Anthropic 风格 { source: { data } }
-            // 与 Pi 风格 { data } —— 后者此前漏处理，实测约 95 MB 未收敛。
-            if (item?.type === 'image') {
-              const source = item.source as Record<string, unknown> | undefined
-              const data = typeof item.data === 'string'
-                ? item.data
-                : typeof source?.data === 'string'
-                  ? String(source.data)
-                  : undefined
-              if (data) {
-                return { type: 'image', _truncated: true, _originalLength: data.length }
-              }
-            }
-            // 嵌套在数组里的 text block 此前不受限，同样按阈值截断
-            if (item?.type === 'text' && typeof item.text === 'string' && item.text.length > truncationThreshold) {
-              return { ...item, text: item.text.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote }
-            }
-            return item
-          })
-        }
-      }
-    }
-  }
-
-  // 截断 error.message
-  if (clone.error && typeof clone.error === 'object' && typeof clone.error.message === 'string' && clone.error.message.length > truncationThreshold) {
-    clone.error.message = clone.error.message.slice(0, TRUNCATED_PREVIEW_LENGTH) + truncationNote
-  }
-
-  return clone as SDKMessage
-}
-
-/**
- * 截断超大 SDKMessage 的内容，保留元数据结构。
- *
- * 字符串的“原文长度”与“序列化长度”可能严重不等：含大量控制字符的内容会被 JSON
- * 转义为 \\uXXXX（最多膨胀 6 倍，实测 49K 原文 → 279K JSON）。所以这里不以原文长度
- * 一次定稿，而是按**实际序列化结果**逐级收紧阈值，直到落入上限或到达下限。
- */
-function sanitizeOversizedMessage(msg: SDKMessage, originalLength: number): SDKMessage {
-  const truncationNote = `\n[内容已截断: 原始 ${(originalLength / 1024).toFixed(0)}K chars 超出存储限制]`
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const original: any = JSON.parse(JSON.stringify(msg))
-  let threshold = MAX_SDK_MESSAGE_LENGTH / 2
-  let result = applyOversizedSanitization(JSON.parse(JSON.stringify(original)), truncationNote, threshold)
-
-  for (let attempt = 1; attempt < MAX_SANITIZE_ATTEMPTS; attempt++) {
-    if (JSON.stringify(result).length <= MAX_SDK_MESSAGE_LENGTH) return result
-    if (threshold <= MIN_SANITIZE_STRING_THRESHOLD) return result
-    threshold = Math.max(MIN_SANITIZE_STRING_THRESHOLD, Math.floor(threshold / 4))
-    result = applyOversizedSanitization(JSON.parse(JSON.stringify(original)), truncationNote, threshold)
-  }
-
-  return result
 }
 
 /** 桌面端 Agent 会话懒加载单页消息数（首次只取尾部，触顶/按钮加载更早） */
@@ -1653,7 +1132,32 @@ export function moveSessionToWorkspace(sessionId: string, targetWorkspaceId: str
     ...session,
     workspaceId: targetWorkspaceId,
     sdkSessionId: undefined, // SDK 上下文与工作区 cwd 绑定，必须清空
+    ...(normalizeAgentRuntime(session.agentRuntime) === 'pi'
+      ? { piSessionFile: undefined, piEntryBindings: undefined, piFileCheckpoints: undefined }
+      : {}),
     updatedAt: Date.now(),
+  }
+  if (normalizeAgentRuntime(session.agentRuntime) === 'pi') {
+    // Pi transcript 与文件检查点包含旧 cwd 的状态；迁移后重建 runtime，避免在新工作区恢复旧目录快照。
+    const piSessionDir = join(getSdkConfigDir(), 'sessions', 'pi')
+    const oldPiSessionFile = session.piSessionFile && isPathWithin(piSessionDir, session.piSessionFile)
+      ? session.piSessionFile
+      : session.sdkSessionId
+        ? findPiSessionJsonl(session.sdkSessionId)
+        : undefined
+    if (oldPiSessionFile && existsSync(oldPiSessionFile)) {
+      try {
+        unlinkSync(oldPiSessionFile)
+      } catch (error) {
+        console.warn(`[Agent 会话] 迁移工作区时清理旧 Pi transcript 失败: ${oldPiSessionFile}`, error)
+      }
+    }
+    try {
+      const keepPaths = collectForeignCheckpointPaths(sessionId)
+      prunePiFileCheckpoints(getPiCheckpointsDir(), sessionId, { keepPaths })
+    } catch (error) {
+      console.warn(`[Agent 会话] 迁移工作区时清理旧 Pi 检查点失败: sessionId=${sessionId}`, error)
+    }
   }
   index.sessions[idx] = updated
   writeIndex(index)
@@ -2028,6 +1532,140 @@ export async function rewindPiSession(
     remainingMessages: kept.length,
     fileRewind,
   }
+}
+
+/**
+ * 从主路径里挑出「第一轮」的文件检查点路径。
+ *
+ * Pi 在每轮开始前保存工作区基线，并把基线绑定到该轮的 assistant entry，
+ * 所以主路径（root→leaf）上**最早**一个有绑定的 entry 对应的基线就是「第一轮开始前」。
+ *
+ * 该 entry 没有可用检查点时不向后找：后面轮次的基线对应的是中间状态，
+ * 拿来当会话起点会静默恢复出错误的文件状态，宁可返回 undefined 让调用方明确降级。
+ */
+export function resolveFirstTurnCheckpoint(params: {
+  /** 主路径上的 entry id，按 root→leaf 顺序 */
+  branchEntryIds: readonly string[]
+  /** assistant uuid → entry id */
+  bindings: Record<string, string>
+  /** entry id → 检查点路径 */
+  checkpoints: Record<string, string>
+}): string | undefined {
+  const boundEntryIds = new Set(Object.values(params.bindings))
+  for (const entryId of params.branchEntryIds) {
+    if (boundEntryIds.has(entryId)) return params.checkpoints[entryId]
+  }
+  return undefined
+}
+
+/**
+ * 清空 Pi 会话（置回会话起点）。
+ *
+ * 与 `rewindPiSession` 的区别：这里没有可保留的锚点（首轮就失败），目标是
+ * transcript 只剩 header。文件按**第一轮**的 pre-turn 基线恢复：Pi 每轮开始时
+ * 保存工作区基线并绑定到该轮的 assistant entry，因此最早一个有绑定的 entry
+ * 对应的检查点就是「第一轮开始前」的状态。
+ *
+ * 没有可用基线时降级为「只清对话、不动文件」并明确告知，而不是静默假装已回退。
+ */
+export async function resetPiSession(
+  sessionId: string,
+  sessionMeta: AgentSessionMeta,
+): Promise<RewindSessionResult> {
+  const piSessionFile = sessionMeta.piSessionFile
+  // 没有 Pi artifact（会话在第一轮建会话之前就失败了）时无 transcript 可截断。
+  // 清 Profer JSONL 本身就足够且完整（下一轮会建一个全新的 Pi 会话），
+  // 不能因为“没东西可截断”把整个清空卡住。
+  const hasPiArtifact = Boolean(piSessionFile) && existsSync(piSessionFile!)
+
+  /**
+   * 收尾：清空展示 JSONL + 回收 entry 绑定与文件检查点。
+   * 有/无 Pi artifact 两条路径都必须走，避免其中一条漏掉清理。
+   */
+  const finish = (fileRewind: RewindSessionResult['fileRewind'], clearPiSessionFile: boolean): RewindSessionResult => {
+    clearSDKMessages(sessionId)
+    try {
+      const keepPaths = new Set(collectForeignCheckpointPaths(sessionId))
+      prunePiFileCheckpoints(getPiCheckpointsDir(), sessionId, { keepPaths })
+    } catch (error) {
+      console.warn('[Agent 会话] 回收 Pi 文件检查点失败:', error)
+    }
+    updateAgentSessionMeta(sessionId, {
+      ...(clearPiSessionFile ? { piSessionFile: undefined } : {}),
+      piEntryBindings: undefined,
+      piFileCheckpoints: undefined,
+      resumeAtMessageUuid: undefined,
+    })
+    return { remainingMessages: 0, fileRewind }
+  }
+
+  if (!hasPiArtifact) {
+    console.warn(`[Agent 会话] Pi 清空对话：没有可用的 Pi artifact，仅清空对话记录 (sessionId=${sessionId})`)
+    return finish(
+      { canRewind: false, error: '该会话还没有 Pi session artifact，工作区文件未被改动' },
+      true,
+    )
+  }
+
+  const bindings = sessionMeta.piEntryBindings ?? {}
+  const sdk = await import('@earendil-works/pi-coding-agent')
+  const sessionDir = join(getSdkConfigDir(), 'sessions', 'pi')
+  const workspace = sessionMeta.workspaceId ? getAgentWorkspace(sessionMeta.workspaceId) : undefined
+  const sourceDir = workspace ? getAgentSessionWorkspacePath(workspace.slug, sessionMeta.id) : undefined
+  const manager = sdk.SessionManager.open(piSessionFile!, sessionDir, sourceDir)
+  const header = manager.getHeader()
+  if (!header) {
+    throw new Error('Pi session artifact 缺少 header，无法清空对话')
+  }
+
+  // 1. 文件恢复：主路径上最早一个有 entry 绑定的轮次即第一轮，其基线是「第一轮开始前」。
+  //    必须在截断 transcript 之前完成：文件恢复不安全时要整体取消，避免对话已清而文件未知。
+  const checkpointPath = resolveFirstTurnCheckpoint({
+    branchEntryIds: manager.getBranch().map((entry) => entry.id),
+    bindings,
+    checkpoints: sessionMeta.piFileCheckpoints ?? {},
+  })
+
+  let fileRewind: RewindSessionResult['fileRewind']
+  if (!checkpointPath) {
+    console.warn(`[Agent 会话] Pi 清空对话：首轮无文件检查点，跳过文件恢复 (sessionId=${sessionId})`)
+    fileRewind = { canRewind: false, error: '首轮没有文件检查点（旧会话或检查点创建失败），工作区文件未被改动' }
+  } else {
+    let restored: ReturnType<typeof restorePiFileCheckpoint> | undefined
+    try {
+      const cwd = workspace ? getAgentSessionWorkspacePath(workspace.slug, sessionId) : process.cwd()
+      restored = restorePiFileCheckpoint(loadPiFileCheckpoint(checkpointPath), cwd)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[Agent 会话] Pi 文件恢复不可用，将只清空对话: ${message}`)
+      fileRewind = { canRewind: false, error: message }
+    }
+    if (restored) {
+      if (restored.failed) {
+        const message = restored.skipped.map((item) => `${item.path}: ${item.reason}`).join('；') || '无法安全恢复文件检查点'
+        console.warn(`[Agent 会话] Pi 文件恢复不安全，已取消清空对话: ${message}`)
+        throw new Error(`文件恢复不可用，已取消清空对话: ${message}`)
+      }
+      fileRewind = {
+        canRewind: true,
+        filesChanged: restored.changed,
+        ...(restored.skipped.length > 0 && { skippedFiles: restored.skipped.map((item) => item.path) }),
+        ...(restored.incomplete && { incomplete: true }),
+      }
+    }
+  }
+
+  // 2. 物理截断 Pi session 文件：只保留 header（先写临时文件再原子替换）
+  const tempSessionFile = `${piSessionFile}.reset-${process.pid}-${Date.now()}.tmp`
+  try {
+    writeFileSync(tempSessionFile, `${JSON.stringify(header)}\n`, 'utf-8')
+    renameSync(tempSessionFile, piSessionFile!)
+  } finally {
+    if (existsSync(tempSessionFile)) unlinkSync(tempSessionFile)
+  }
+  console.log(`[Agent 会话] Pi session 已清空: sessionId=${sessionId}`)
+
+  return finish(fileRewind, false)
 }
 
 interface CopyForkStoredSDKMessagesInput {
@@ -2539,6 +2177,28 @@ export function truncateSDKMessages(id: string, upToUuidInclusive: string): SDKM
   return kept
 }
 
+/** SDK session JSONL 中的「真实用户消息」：有 uuid 且不是 tool_result。 */
+function isRealUserMessageInSdkJsonl(m: Record<string, unknown>): boolean {
+  if (m.type !== 'user' || !m.uuid) return false
+  const content = (m.message as { content?: Array<{ type: string }> } | undefined)?.content
+  const hasToolResult = Array.isArray(content) && content.some((b) => b.type === 'tool_result')
+  return !hasToolResult
+}
+
+/**
+ * 清空会话的全部展示消息（保留会话本身、标题与元数据）。
+ *
+ * 与 `truncateSDKMessages` 的区别：这里没有可保留的锚点（首轮就失败），
+ * 目标是空历史。写成空文件而不是删文件，保持“会话消息文件始终存在”的隐含约定。
+ */
+export function clearSDKMessages(id: string): SDKMessage[] {
+  const filePath = getAgentSessionMessagesPath(id)
+  const previousCount = getAgentSessionSDKMessages(id).length
+  writeFileSync(filePath, '', 'utf-8')
+  console.log(`[Agent 会话] 消息已清空: sessionId=${id}, 原有 ${previousCount} 条`)
+  return []
+}
+
 /**
  * 从 SDK session JSONL 中查找指定 assistant message 之后最近的 user message UUID
  *
@@ -2621,12 +2281,7 @@ export function resolveUserUuidFromSDK(
     // 如果找不到（最后一个 turn），返回 '__LAST_TURN__' 特殊标记 —— 因为当前文件系统
     // 已经是最后一个 turn 完成后的状态，不需要文件回退。
 
-    const isRealUserMessage = (m: Record<string, unknown>): boolean => {
-      if (m.type !== 'user' || !m.uuid) return false
-      const content = (m.message as { content?: Array<{ type: string }> } | undefined)?.content
-      const hasToolResult = Array.isArray(content) && content.some((b) => b.type === 'tool_result')
-      return !hasToolResult
-    }
+    const isRealUserMessage = isRealUserMessageInSdkJsonl
 
     // 向后找下一条真实 user message
     for (let i = assistantIdx + 1; i < messages.length; i++) {
@@ -2643,6 +2298,113 @@ export function resolveUserUuidFromSDK(
   } catch (err) {
     console.warn(`[Agent 会话] 读取 SDK session JSONL 失败:`, err)
     return undefined
+  }
+}
+
+/**
+ * 从 SDK session JSONL 中查找**第一条**真实用户消息的 UUID。
+ *
+ * 用于「清空对话」时的文件恢复：快照记录的是 user 消息发出时的文件状态，
+ * 恢复到第一条用户消息的快照 = 回到会话起点（第一个 turn 执行前）的状态。
+ *
+ * 与 `resolveUserUuidFromSDK` 一样兼顾 fork：fork 会话自己的 JSONL 已复制了前缀，
+ * 因此先查本会话，再回退到源会话。找不到时返回 undefined（调用方明确降级提示）。
+ */
+export function resolveFirstUserUuidFromSDK(
+  sdkSessionId: string,
+  projectDir?: string,
+  forkSourceSdkSessionId?: string,
+): string | undefined {
+  const candidates = [sdkSessionId, forkSourceSdkSessionId]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+  for (const candidate of candidates) {
+    const sessionFilePath = findSdkSessionJsonl(candidate, projectDir)
+    if (!sessionFilePath) continue
+    try {
+      const lines = readFileSync(sessionFilePath, 'utf-8').split('\n').filter(Boolean)
+      for (const line of lines) {
+        let message: Record<string, unknown>
+        try {
+          message = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        if (isRealUserMessageInSdkJsonl(message)) {
+          console.log(`[Agent 会话] 解析到首条 user uuid=${String(message.uuid)} (sdkSessionId=${candidate})`)
+          return message.uuid as string
+        }
+      }
+    } catch (err) {
+      console.warn('[Agent 会话] 读取 SDK session JSONL 失败:', err)
+    }
+  }
+  console.warn(`[Agent 会话] 未找到首条 user message UUID: sdkSessionId=${sdkSessionId}`)
+  return undefined
+}
+
+/**
+ * 清空整段对话（Claude 路径）：首轮就失败、没有可保留锚点时使用。
+ *
+ * 1. 文件恢复到**第一条用户消息**的快照 = 会话起点（第一个 turn 执行前）
+ * 2. 清空 Profer 展示 JSONL
+ * 3. 同时清掉 `sdkSessionId`：否则下一轮仍会 resume 出已被清空的那段对话；
+ *    没有 sdkSessionId 时编排层会走「上下文回填」路径，而历史已空，即真正从头开始。
+ *
+ * 文件恢复失败时仍然清空对话（优雅降级，结果里带上原因），
+ * 不能让快照问题把用户卡在“既清不掉也重来不了”的状态。
+ */
+export function resetClaudeSession(sessionId: string, sessionMeta: AgentSessionMeta): RewindSessionResult {
+  let projectDir: string | undefined
+  let workspaceSlug: string | undefined
+  if (sessionMeta.workspaceId) {
+    const ws = getAgentWorkspace(sessionMeta.workspaceId)
+    if (ws) {
+      workspaceSlug = ws.slug
+      projectDir = getAgentSessionWorkspacePath(ws.slug, sessionMeta.id)
+    }
+  }
+
+  let fileRewind: RewindSessionResult['fileRewind']
+  const firstUserUuid = sessionMeta.sdkSessionId
+    ? resolveFirstUserUuidFromSDK(sessionMeta.sdkSessionId, projectDir, sessionMeta.forkSourceSdkSessionId)
+    : undefined
+  if (!sessionMeta.sdkSessionId) {
+    console.log(`[Agent 会话] 清空对话: 会话还没有 SDK session，跳过文件恢复 (sessionId=${sessionId})`)
+    fileRewind = { canRewind: false, error: '会话还没有 SDK session，文件未回退' }
+  } else if (!firstUserUuid) {
+    fileRewind = { canRewind: false, error: '无法从 SDK session 中解析首条 user message UUID' }
+  } else {
+    try {
+      let cwd = homedir()
+      if (projectDir) cwd = projectDir
+      const rewindAttachedDirs = collectAttachedDirectories({ sessionMeta, workspaceSlug })
+      console.log(`[Agent 会话] 清空对话: 从首条 user 快照恢复文件 (cwd=${cwd}, attachedDirs=${rewindAttachedDirs.length})`)
+      fileRewind = rewindFilesFromSnapshot(
+        sessionMeta.sdkSessionId,
+        firstUserUuid,
+        cwd,
+        projectDir,
+        sessionMeta.forkSourceSdkSessionId,
+        rewindAttachedDirs,
+      )
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.warn('[Agent 会话] 文件恢复失败，继续清空对话:', errMsg)
+      fileRewind = { canRewind: false, error: errMsg }
+    }
+  }
+
+  const kept = clearSDKMessages(sessionId)
+  updateAgentSessionMeta(sessionId, {
+    resumeAtMessageUuid: undefined,
+    sdkSessionId: undefined,
+  })
+
+  console.log(`[Agent 会话] 对话已清空: sessionId=${sessionId}, 文件恢复=${fileRewind?.canRewind ?? '跳过'}`)
+
+  return {
+    remainingMessages: kept.length,
+    fileRewind,
   }
 }
 
@@ -3020,86 +2782,14 @@ async function findFirstMatchInAgentJsonl(
 
   try {
     for await (const line of rl) {
-      if (!line.trim()) continue
-      let parsed: {
-        role?: string
-        id?: string
-        uuid?: string
-        content?: unknown
-        message?: { role?: string; id?: string; content?: Array<{ type: string; text?: string }> }
-      }
-      try {
-        parsed = JSON.parse(line)
-      } catch {
-        continue
-      }
-
-      const rawRole = parsed.role ?? parsed.message?.role ?? 'assistant'
-      // 收窄到 AgentMessageSearchResult.role 允许的联合类型；不在白名单的退化为 assistant
-      const role: AgentMessageSearchResult['role'] =
-        rawRole === 'user' || rawRole === 'assistant' || rawRole === 'tool' || rawRole === 'status'
-          ? rawRole
-          : 'assistant'
-      const messageId = parsed.id ?? parsed.uuid ?? parsed.message?.id ?? ''
-
-      let textContent = ''
-      if (typeof parsed.content === 'string') {
-        textContent = parsed.content
-      } else if (Array.isArray(parsed.message?.content)) {
-        textContent = parsed.message.content
-          .filter((b) => b.type === 'text' && b.text)
-          .map((b) => b.text!)
-          .join('\n')
-      }
-      if (!textContent) continue
-
-      const contentLower = textContent.toLowerCase()
-      const matchIndex = contentLower.indexOf(queryLower)
-      if (matchIndex === -1) continue
-
-      const snippetStart = Math.max(0, matchIndex - 40)
-      const snippetEnd = Math.min(textContent.length, matchIndex + queryLength + 40)
-      const snippet = (snippetStart > 0 ? '...' : '') +
-        textContent.slice(snippetStart, snippetEnd) +
-        (snippetEnd < textContent.length ? '...' : '')
-      const matchStart = matchIndex - snippetStart + (snippetStart > 0 ? 3 : 0)
-
-      return { messageId, role, snippet, matchStart }
+      const hit = matchAgentJsonlLine(line, queryLower, queryLength)
+      if (hit) return hit
     }
     return null
   } finally {
     rl.close()
     stream.destroy()
   }
-}
-
-function extractTextFromPersistedMessage(parsed: unknown): string {
-  if (!parsed || typeof parsed !== 'object') return ''
-  const record = parsed as {
-    content?: unknown
-    message?: { content?: Array<{ type: string; text?: string }> }
-  }
-
-  if (typeof record.content === 'string') {
-    return record.content
-  }
-
-  if (Array.isArray(record.message?.content)) {
-    return record.message.content
-      .filter((b) => b.type === 'text' && b.text)
-      .map((b) => b.text!)
-      .join('\n')
-  }
-
-  return ''
-}
-
-function createSnippet(text: string, matchIndex: number, matchLength: number): string {
-  const snippetStart = Math.max(0, matchIndex - 48)
-  const snippetEnd = Math.min(text.length, matchIndex + matchLength + 48)
-  return (snippetStart > 0 ? '...' : '') +
-    text.slice(snippetStart, snippetEnd) +
-    (snippetEnd < text.length ? '...' : '')
 }
 
 function findSessionMessageSnippet(sessionId: string, query: string): string | undefined {

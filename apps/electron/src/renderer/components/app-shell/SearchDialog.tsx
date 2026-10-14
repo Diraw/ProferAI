@@ -18,7 +18,7 @@
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { Search, X, MessageSquare, Bot, Archive, Loader2 } from 'lucide-react'
-import { Dialog, DialogContent, DialogPortal, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogPortal, DialogTitle } from '@profer/ui/primitives/dialog'
 import { cn } from '@/lib/utils'
 import { navigationController } from '@/lib/navigation-controller'
 import { searchDialogOpenAtom } from '@/atoms/search-atoms'

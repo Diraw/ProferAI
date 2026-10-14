@@ -5,8 +5,8 @@ import { toast } from 'sonner'
 import { allowsPluginPagePlacement, resolvePluginPageSurfaceVisibility, type ProferPluginTaskReference } from '@profer/plugin-api'
 import { installedPluginsAtom } from '@/atoms/plugin-system'
 import { usePluginPage } from '@/hooks/usePluginPage'
-import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Button } from '@profer/ui/primitives/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 
 function report(error: unknown): void { toast.error(error instanceof Error ? error.message : '无法打开插件') }
 

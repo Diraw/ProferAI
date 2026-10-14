@@ -13,8 +13,8 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+} from '@profer/ui/primitives/alert-dialog'
+import { Dialog, DialogContent, DialogTitle } from '@profer/ui/primitives/dialog'
 
 interface BackgroundTaskControlsProps {
   sessionId: string

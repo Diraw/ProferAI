@@ -318,7 +318,10 @@ export function resolveAgentSdk1MSelection(
   const decision = resolveOneMillionContextDecision(modelId, provider, explicit)
   const hasSuffix = /\[1m\]$/i.test(modelId)
   return {
-    modelId: decision.enabled && !hasSuffix ? `${modelId}[1m]` : modelId,
+    // 关闭时必须去掉已有后缀：只有后缀没有 beta 会被 SDK 按 1M 协商，形成伪 1M。
+    modelId: decision.enabled
+      ? (hasSuffix ? modelId : `${modelId}[1m]`)
+      : strip1MContextSuffix(modelId),
     oneMillionContextEnabled: decision.enabled,
     source: decision.source,
   }

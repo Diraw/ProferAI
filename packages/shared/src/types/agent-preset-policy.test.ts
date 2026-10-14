@@ -36,15 +36,42 @@ describe('EffectiveAgentPresetPolicy', () => {
     expect(resolveEffectivePermissionMode('plan', 'auto')).toBe('plan')
   })
 
-  test('Goal 入口固定使用 bypassPermissions，不受预设 plan/auto 限制', () => {
-    expect(createEffectiveAgentPresetPolicy(preset({ permissionMode: 'plan' }), reference, {
-      permissionMode: 'bypassPermissions',
-      triggeredBy: 'goal',
-    }).permissionMode).toBe('bypassPermissions')
-    expect(createEffectiveAgentPresetPolicy(preset({ permissionMode: 'auto' }), reference, {
-      permissionMode: 'bypassPermissions',
-      triggeredBy: 'goal',
-    }).permissionMode).toBe('bypassPermissions')
+  test('Goal 沿用预设/会话权限交集，不因持续执行提升 Plan/auto', () => {
+    for (const permissionMode of ['plan', 'auto', 'bypassPermissions'] as const) {
+      expect(createEffectiveAgentPresetPolicy(preset({ permissionMode }), reference, {
+        permissionMode: 'bypassPermissions',
+        triggeredBy: 'goal',
+      }).permissionMode).toBe(permissionMode)
+    }
+    expect(createEffectiveAgentPresetPolicy(preset({ permissionMode: 'bypassPermissions' }), reference, {
+      permissionMode: 'plan', triggeredBy: 'goal',
+    }).permissionMode).toBe('plan')
+  })
+
+  test('Goal 与普通入口在禁用组/单工具/Skill/MCP 白名单组合上完全一致', () => {
+    for (const permissionMode of ['plan', 'auto', 'bypassPermissions'] as const) {
+      for (const runtimeSupportsSubagents of [true, false]) {
+        const source = preset({
+          permissionMode,
+          disabledToolGroups: ['browser', 'automation'],
+          disabledTools: ['WebFetch'],
+          skillSlugs: ['code-honor'],
+          mcpServerNames: ['memory-archive'],
+        })
+        const options = { permissionMode: 'bypassPermissions' as const, runtimeSupportsSubagents }
+        const normal = createEffectiveAgentPresetPolicy(source, reference, options)
+        const goal = createEffectiveAgentPresetPolicy(source, reference, { ...options, triggeredBy: 'goal' })
+        expect(goal).toEqual(normal)
+        for (const name of ['BrowserObserve', 'mcp__browser__BrowserObserve', 'WebFetch']) {
+          expect(isEffectiveAgentPresetToolDisabled(goal, name)).toBe(true)
+        }
+        expect(isEffectiveAgentPresetToolGroupDisabled(goal, 'automation')).toBe(true)
+        expect(isEffectiveAgentPresetSkillAllowed(goal, 'code-honor')).toBe(true)
+        expect(isEffectiveAgentPresetSkillAllowed(goal, 'other')).toBe(false)
+        expect(isEffectiveAgentPresetMcpServerAllowed(goal, 'memory-archive')).toBe(true)
+        expect(isEffectiveAgentPresetMcpServerAllowed(goal, 'other')).toBe(false)
+      }
+    }
   })
 
   test('normalizes group policy and maps allowSubagents=false to collaboration', () => {

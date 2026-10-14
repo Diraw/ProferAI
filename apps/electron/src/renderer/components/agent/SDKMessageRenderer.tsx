@@ -15,16 +15,21 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
 import { isGoalIterationMessage } from '@profer/shared'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, RefreshCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
-import { ImageLightbox } from '@/components/ui/image-lightbox'
+import { ImageLightbox } from '@profer/ui/primitives/image-lightbox'
 import { ContentBlock } from './ContentBlock'
 import { TaskProgressCard } from './TaskProgressCard'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
-import { ProcessBlockGroup, buildAssistantTurnRenderItems, buildCompletedToolResultIds } from './ProcessBlockGroup'
-import { applyRenderWindow } from './render-window'
+import { ProcessBlockGroup } from './ProcessBlockGroup'
+import { VisualizationResultInline } from '@/components/visualization/InlineVisualization'
+import { visualizationsAtom } from '@/atoms/visualization-atoms'
+import { visualizationsForTurn } from '@/lib/visualization-projection'
+import { deriveAssistantTurnBlocks, buildAssistantTurnRenderItems, buildCompletedToolResultIds, type StableContentBlock, type AssistantTurnRenderItem } from './render-block-derivation'
+import { applyRenderWindow, DEFAULT_RENDER_WINDOW } from './render-window'
+import { useProcessFoldGate } from './process-fold-gate'
 import { FoldedSegmentsRegion } from './FoldedSegmentsRegion'
 import { extractToolResultText, isTaskProgressTool, parseTaskCreateResult } from './task-progress'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tag-parser'
@@ -41,14 +46,17 @@ import {
 } from '@/components/ai-elements/message'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { CopyButton } from '@/components/chat/CopyButton'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Button } from '@profer/ui/primitives/button'
+import { Badge } from '@profer/ui/primitives/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { formatMessageTime } from '@/components/chat/ChatMessageItem'
 import { getModelLogo, resolveModelDisplayName, resolveModelProvider } from '@/lib/model-logo'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { channelsAtom, requestModelSelectorOpen } from '@/atoms/chat-atoms'
-import { agentProcessGroupsKeepExpandedAtom, agentSessionsAtom, currentAgentSessionIdAtom, resolvedBlobMessagesAtom } from '@/atoms/agent-atoms'
+import { agentProcessGroupsKeepExpandedAtom, agentSessionsAtom, currentAgentSessionIdAtom, resolvedBlobMessagesAtom, unviewedCompletedSessionIdsAtom } from '@/atoms/agent-atoms'
+import { manualReadConfirmEnabledAtom } from '@/atoms/agent-unread-settings'
+import { shouldShowConfirmReadButton } from '@/lib/confirm-read-button'
+import { ConfirmReadButton } from './ConfirmReadButton'
 import { agentInterruptionMapAtom } from '@/atoms/preview-atoms'
 import { activeSessionIdAtom } from '@/atoms/tab-atoms'
 import { automationsAtom, automationFormAtom, automationToDraft } from '@/atoms/automation-atoms'
@@ -146,6 +154,19 @@ function InterruptionRecordNotice({ message }: { message: SDKSystemMessage }): R
         — {label} —
       </span>
       <div className="flex-1 h-px bg-border/40" />
+    </div>
+  )
+}
+
+/** 用户点名的 Skill 被门禁拦下时的提示：原因直接给用户看，不依赖模型转述。 */
+function SkillRoutingNotice({ message }: { message: SDKSystemMessage }): React.ReactElement {
+  const text = typeof message.message === 'string' && message.message.length > 0 ? message.message : 'Skill 未加载'
+  return (
+    <div className="my-3 pl-[46px] pr-1">
+      <div className="flex items-start gap-2.5 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs text-foreground/80">
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
+        <p className="min-w-0 break-words">{text}</p>
+      </div>
     </div>
   )
 }
@@ -407,9 +428,9 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
       }
     } else if (msg.type === 'system') {
       const sysMsg = msg as SDKSystemMessage
-      // 仅需要独立渲染的 system 消息才中断 turn（compact_boundary / compacting / permission_denied / interruption_record）
+      // 仅需要独立渲染的 system 消息才中断 turn（compact_boundary / compacting / permission_denied / interruption_record / skill_routing_notice）
       // 其他 system 消息（如 init、task_started、task_progress）归入当前 turn，不中断分组
-      if (sysMsg.subtype === 'compact_boundary' || sysMsg.subtype === 'compacting' || sysMsg.subtype === 'permission_denied' || sysMsg.subtype === 'interruption_record') {
+      if (sysMsg.subtype === 'compact_boundary' || sysMsg.subtype === 'compacting' || sysMsg.subtype === 'permission_denied' || sysMsg.subtype === 'interruption_record' || sysMsg.subtype === 'skill_routing_notice') {
         flushTurn()
         groups.push({ type: 'system', message: sysMsg })
       } else if (sysMsg.subtype === 'task_notification') {
@@ -722,48 +743,34 @@ export interface AssistantTurnRendererProps {
   stoppedByUser?: boolean
   /** 用户在前端选择的模型 ID（优先用于显示名称） */
   sessionModelId?: string
-  /** 是否展示模型 thinking 块；Pi runtime 已通过独立过程事件呈现。 */
+  /** 是否展示模型 thinking 块；由上层按内核 + 渠道判定（只回摘要的 GPT/Codex 系不展示）。 */
   showThinking?: boolean
+  /** 该 turn 是否为当前会话最新一轮 assistant 回复（「确认已读」按钮的可见性判据之一）。 */
+  isLatestAssistantTurn?: boolean
 }
 
-export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true }: AssistantTurnRendererProps): React.ReactElement | null {
+export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking = true, isLatestAssistantTurn = false }: AssistantTurnRendererProps): React.ReactElement | null {
   // 折叠区状态属于当前 turn，而不是瞬时的窗口/工具块组件；工具完成导致内容重算时保留用户选择。
   const [expandedProcessSegments, setExpandedProcessSegments] = React.useState(false)
   const [expandedReplySegments, setExpandedReplySegments] = React.useState(false)
   const channels = useAtomValue(channelsAtom)
+  // 「确认已读」按钮：开关开启 ∧ 最新一轮 ∧ 该会话有未读。
+  // 读未读集合（而非会话字段）与侧边栏菜单同源；开启态下它就是 completedButUnconfirmed 的派生。
+  const manualReadConfirmEnabled = useAtomValue(manualReadConfirmEnabledAtom)
+  const unviewedSessionIds = useAtomValue(unviewedCompletedSessionIdsAtom)
+  const showConfirmReadButton = shouldShowConfirmReadButton({
+    manualReadConfirmEnabled,
+    isLatestAssistantTurn,
+    sessionUnread: !!sessionIdProp && unviewedSessionIds.has(sessionIdProp),
+  })
   const processGroupsKeepExpanded = useAtomValue(agentProcessGroupsKeepExpandedAtom)
   const currentSessionId = useAtomValue(currentAgentSessionIdAtom)
   const sessionId = sessionIdProp ?? currentSessionId
   const setAgentInterruptionMap = useSetAtom(agentInterruptionMapAtom)
-  // 收集所有 assistant 消息的内容块，保留 parent_tool_use_id 关联
-  interface EnrichedBlock {
-    block: SDKContentBlock
-    parentToolUseId?: string | null
-  }
-
-  const enrichedBlocks: EnrichedBlock[] = []
-  let hasError = false
-  let errorContent: SDKAssistantMessage | null = null
-
-  for (const aMsg of turn.assistantMessages) {
-    if (aMsg.error) {
-      hasError = true
-      errorContent = aMsg
-      continue
-    }
-    const blocks = aMsg.message?.content
-    if (Array.isArray(blocks)) {
-      for (const block of blocks) {
-        for (const normalizedBlock of normalizeThinkTagsInContentBlocks([block], {
-          // 仅终态视觉兜底：若模型漏掉闭合标签，最终答复仍应作为正文显示。
-          // 流式中保留未闭合标签的既有思考渲染，等待可能随后到达的闭标签。
-          unclosedTagAsText: !isStreaming,
-        })) {
-          enrichedBlocks.push({ block: normalizedBlock, parentToolUseId: aMsg.parent_tool_use_id })
-        }
-      }
-    }
-  }
+  const { enrichedBlocks, topLevelItems, topLevelBlocks, childBlocksMap, hasError, errorContent } = React.useMemo(
+    () => deriveAssistantTurnBlocks(turn.assistantMessages, { isStreaming, getMessageIdentity: getAssistantMessageIdentity }),
+    [turn.assistantMessages, isStreaming],
+  )
 
   // 从 turnMessages 中提取 result 消息的耗时和用量
   const { durationMs, usage } = extractTurnUsage(turn.turnMessages, sessionModelId)
@@ -785,30 +792,6 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
     window.electronAPI.updateAgentInterruptionState({ sessionId, state }).catch(console.error)
   }, [sessionId, setAgentInterruptionMap])
 
-  // 构建 Agent/Task tool_use → 子代理内容块映射
-  const agentToolIds = new Set<string>()
-  for (const eb of enrichedBlocks) {
-    if (eb.block.type === 'tool_use') {
-      const tu = eb.block as { name: string; id: string }
-      if (tu.name === 'Agent' || tu.name === 'Task') {
-        agentToolIds.add(tu.id)
-      }
-    }
-  }
-
-  const childBlocksMap = new Map<string, SDKContentBlock[]>()
-  const topLevelBlocks: SDKContentBlock[] = []
-
-  for (const eb of enrichedBlocks) {
-    if (eb.parentToolUseId && agentToolIds.has(eb.parentToolUseId)) {
-      const children = childBlocksMap.get(eb.parentToolUseId) ?? []
-      children.push(eb.block)
-      childBlocksMap.set(eb.parentToolUseId, children)
-    } else {
-      topLevelBlocks.push(eb.block)
-    }
-  }
-
   // 检测是否有主要内容（text 块），用于决定 tool/thinking 是否 dimmed
   const hasTextContent = topLevelBlocks.some(
     (b) => b.type === 'text' && 'text' in b && !!(b as { text: string }).text
@@ -821,20 +804,33 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
   const completedToolResultIds = React.useMemo(() => {
     return buildCompletedToolResultIds(turn.turnMessages)
   }, [turn.turnMessages])
+  const visualizationRecords = useAtomValue(visualizationsAtom)
+  const turnVisualizations = React.useMemo(() => visualizationsForTurn(visualizationRecords.get(sessionId ?? '') ?? [], turn.turnMessages, allMessages), [visualizationRecords, sessionId, turn.turnMessages, allMessages])
   const renderItems = React.useMemo(() => {
-    return buildAssistantTurnRenderItems(topLevelBlocks, {
-      isStreaming,
-      completedToolResultIds,
+    const items: AssistantTurnRenderItem<StableContentBlock>[] = buildAssistantTurnRenderItems(topLevelItems, {
+      isStreaming, completedToolResultIds, showThinking,
     })
-  }, [topLevelBlocks, isStreaming, completedToolResultIds])
+    return [...items, ...turnVisualizations.map((record) => ({ type: 'visualization' as const, record, identity: `visualization:${record.id}` }))]
+  }, [topLevelItems, isStreaming, completedToolResultIds, showThinking, turnVisualizations])
   // 渲染窗口：过程与回复各自取尾部窗口，避免过程把回复挤出可视范围。
-  // 展开/收起的状态由 FoldedSegmentsRegion 自己持有，父组件不参与（否则外层折叠时无法重置）。
-  const { items: windowedItems, foldedProcessItems, foldedReplyItems } = React.useMemo(
-    () => applyRenderWindow(renderItems),
-    [renderItems],
+  // 展开/收起状态属于 turn；裁剪与分组保留已派生的稳定块身份。
+  //
+  // 过程区的折叠边界不随渲染即时前移：折叠会把已经渲染出来的过程段从 DOM 里移走，
+  // 流式中每来一段就回收一段，用户看到的就是过程列表持续重排/闪动（而这些段早已挂载过，
+  // 裁掉省不到创建成本）。边界只在过程内容未挂载时推进，收益落在重新展开与加载历史轮。
+  const processSegmentCount = React.useMemo(() => {
+    for (const item of renderItems) {
+      if (item.type === 'process-group') return item.items.length
+    }
+    return 0
+  }, [renderItems])
+  const processFoldGate = useProcessFoldGate(processSegmentCount, DEFAULT_RENDER_WINDOW.processSegments)
+  const { items: windowedItems, foldedProcessItems, foldedReplyRenderItems } = React.useMemo(
+    () => applyRenderWindow(renderItems, DEFAULT_RENDER_WINDOW, { processFoldCount: processFoldGate.foldCount }),
+    [renderItems, processFoldGate.foldCount],
   )
   const firstReplyIndex = React.useMemo(
-    () => windowedItems.findIndex((item) => item.type === 'block'),
+    () => windowedItems.findIndex((item) => item.type !== 'process-group'),
     [windowedItems],
   )
   // 与本轮工具调用同源的映射，让正文内联的裸文件名可靠定位真实文件。
@@ -856,15 +852,16 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
   }
 
   // 如果没有任何内容
-  if (enrichedBlocks.length === 0 && !hasError) return null
+  if (enrichedBlocks.length === 0 && turnVisualizations.length === 0 && !hasError) return null
 
-  const renderTopLevelBlock = (block: SDKContentBlock, i: number): React.ReactNode => {
+  const renderTopLevelBlock = (item: StableContentBlock): React.ReactNode => {
+    const { block, index: i, identity } = item
     // Task 工具块：聚合为卡片，此处用索引定位首个任务工具
     if (block.type === 'tool_use' && isTaskProgressTool((block as SDKToolUseBlock).name)) {
       if (i === firstTaskIndex) {
         return (
           <TaskProgressCard
-            key="task-progress-card"
+            key={identity}
             activities={taskActivities}
             streamEnded={!isStreaming}
             stoppedByUser={stoppedByUser}
@@ -882,24 +879,25 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
       : undefined
 
     return (
-      <ContentBlock
-        key={i}
-        block={block}
-        allMessages={allMessages}
-        basePath={basePath}
-        basePaths={basePaths}
-        animate={!!isStreaming}
-        index={i}
-        dimmed={hasTextContent && block.type !== 'text'}
-        childBlocks={childBlocks}
-        isStreaming={isStreaming}
-        showThinking={showThinking}
-      />
+      <div key={identity} className="empty:hidden" data-scroll-anchor={identity}>
+        <ContentBlock
+          block={block}
+          allMessages={allMessages}
+          basePath={basePath}
+          basePaths={basePaths}
+          animate={!!isStreaming}
+          index={i}
+          dimmed={hasTextContent && block.type !== 'text'}
+          childBlocks={childBlocks}
+          isStreaming={isStreaming}
+          showThinking={showThinking}
+        />
+      </div>
     )
   }
 
-  const renderProcessGroupBlock = (block: SDKContentBlock, i: number): React.ReactNode => {
-    return renderTopLevelBlock(block, i)
+  const renderProcessGroupBlock = (item: StableContentBlock): React.ReactNode => {
+    return renderTopLevelBlock(item)
   }
 
   return (
@@ -914,43 +912,38 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
           <div className={cn('space-y-2')}>
             <ExternalizedContentNotice sessionId={sessionId ?? undefined} messages={turn.turnMessages} />
             {windowedItems.map((item, itemIndex) => {
-              if (item.type === 'block') {
-                return (
-                  <React.Fragment key={`reply-${item.item.index}`}>
-                    {itemIndex === firstReplyIndex && foldedReplyItems.length > 0 && (
-                      <FoldedSegmentsRegion
-                        count={foldedReplyItems.length}
-                        expanded={expandedReplySegments}
-                        onExpandedChange={setExpandedReplySegments}
-                        renderRevealed={() => foldedReplyItems.map((folded) => renderTopLevelBlock(folded.block, folded.index))}
-                      />
-                    )}
-                    {renderTopLevelBlock(item.item.block, item.item.index)}
-                  </React.Fragment>
-                )
+              if (item.type !== 'process-group') {
+                return <React.Fragment key={item.type === 'block' ? item.item.identity : item.identity}>
+                  {itemIndex === firstReplyIndex && foldedReplyRenderItems.length > 0 && <FoldedSegmentsRegion
+                    count={foldedReplyRenderItems.length} expanded={expandedReplySegments} onExpandedChange={setExpandedReplySegments}
+                    renderRevealed={() => foldedReplyRenderItems.map((folded) => folded.type === 'block' ? renderTopLevelBlock(folded.item)
+                      : <div key={folded.identity} data-scroll-anchor={folded.identity}><VisualizationResultInline record={folded.record} sessionId={sessionId} /></div>)}
+                  />}
+                  {item.type === 'block' ? renderTopLevelBlock(item.item) : !isStreaming && <div data-scroll-anchor={item.identity}><VisualizationResultInline record={item.record} sessionId={sessionId} /></div>}
+                </React.Fragment>
               }
 
               const groupBlocks = item.items.map((groupItem) => groupItem.block)
-              const firstIndex = item.items[0]?.index ?? 0
               return (
                 <ProcessBlockGroup
-                  key={`process-${firstIndex}`}
+                  key="process-group"
                   blocks={groupBlocks}
+                  scrollAnchorId={`${getGroupId(turn)}:process`}
                   isStreaming={isStreaming}
                   keepExpandedAfterComplete={processGroupsKeepExpanded}
                   isMessageTail={itemIndex === windowedItems.length - 1}
+                  onContentVisibilityChange={processFoldGate.reportContentVisibility}
                 >
-                  {/* 折叠占位符放在过程组内部：外层折叠时它随之隐藏；
-                     外层重新展开时子元素已卸载并重建，展开状态自然回到折叠态。 */}
+                  {/* 折叠占位符随过程组隐藏，展开状态仍由 turn 保留。 */}
                   {foldedProcessItems.length > 0 && (
                     <FoldedSegmentsRegion
                       count={foldedProcessItems.length}
                       expanded={expandedProcessSegments}
                       onExpandedChange={setExpandedProcessSegments}
-                      renderRevealed={() => foldedProcessItems.map((folded) => renderProcessGroupBlock(folded.block, folded.index))}
+                      renderRevealed={() => foldedProcessItems.map((folded) => renderProcessGroupBlock(folded))}
                     />
                   )}
-                  {item.items.map((groupItem) => renderProcessGroupBlock(groupItem.block, groupItem.index))}
+                  {item.items.map((groupItem) => renderProcessGroupBlock(groupItem))}
                 </ProcessBlockGroup>
               )
             })}
@@ -984,7 +977,9 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
           : undefined
         const hasActions = !!(textContent || (onFork && lastUuid) || (onRewind && lastUuid))
         const hasDuration = durationMs != null
-        if (!hasDuration && !hasActions && !showStoppedBadge) return null
+        // 「确认已读」按钮可能在「本轮无正文但有未读」时出现；该情况也要保留整条操作栏，
+        // 否则最新一轮没有正文的会话会连按钮一起消失。
+        if (!hasDuration && !hasActions && !showConfirmReadButton && !showStoppedBadge) return null
         return (
           <MessageActions className="agent-turn-actions pl-[46px] mt-0.5 min-h-[28px] justify-start">
             {hasDuration && <DurationBadge durationMs={durationMs!} usage={usage} />}
@@ -1018,6 +1013,8 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
                 <Undo2 className="size-3.5" />
               </MessageAction>
             )}
+            {/* 「确认已读」核心按钮：位于「回退到此处」右侧，仅开关开启且有未读时出现。 */}
+            {showConfirmReadButton && sessionIdProp && <ConfirmReadButton sessionId={sessionIdProp} />}
             {showStoppedBadge && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -1068,7 +1065,10 @@ export function SDKMessageRenderer({
 
     const rawBlocks = aMsg.message?.content
     if (!Array.isArray(rawBlocks) || rawBlocks.length === 0) return null
-    const blocks = normalizeThinkTagsInContentBlocks(rawBlocks)
+    const { topLevelItems: blocks } = deriveAssistantTurnBlocks([aMsg], {
+      isStreaming: true,
+      getMessageIdentity: getAssistantMessageIdentity,
+    })
     if (blocks.length === 0) return null
 
     const model = aMsg._channelModelId || aMsg.message?.model || sessionModelId
@@ -1076,7 +1076,7 @@ export function SDKMessageRenderer({
 
     // 检测是否有主要内容（text 块）
     const hasTextContent = blocks.some(
-      (b) => b.type === 'text' && 'text' in b && !!(b as { text: string }).text
+      ({ block }) => block.type === 'text' && 'text' in block && !!(block as { text: string }).text
     )
 
     return (
@@ -1090,16 +1090,17 @@ export function SDKMessageRenderer({
         )}
         <MessageContent>
           <div className={cn('space-y-2')}>
-            {blocks.map((block, i) => (
-              <ContentBlock
-                key={i}
-                block={block}
-                allMessages={allMessages}
-                basePath={basePath}
-                basePaths={basePaths}
-                index={i}
-                dimmed={hasTextContent && block.type !== 'text'}
-              />
+            {blocks.map(({ block, index, identity }) => (
+              <div key={identity} className="empty:hidden" data-scroll-anchor={identity}>
+                <ContentBlock
+                  block={block}
+                  allMessages={allMessages}
+                  basePath={basePath}
+                  basePaths={basePaths}
+                  index={index}
+                  dimmed={hasTextContent && block.type !== 'text'}
+                />
+              </div>
             ))}
           </div>
         </MessageContent>
@@ -1133,6 +1134,9 @@ export function SDKMessageRenderer({
     }
     if (subtype === 'interruption_record') {
       return <InterruptionRecordNotice message={sysMsg} />
+    }
+    if (subtype === 'skill_routing_notice') {
+      return <SkillRoutingNotice message={sysMsg} />
     }
 
     // compacting 事件已由 isCompacting flag 驱动的尾部指示器接管（见 AgentMessages），此处不再渲染持久条目
@@ -1316,7 +1320,7 @@ function ScheduledRunBadge(): React.ReactElement {
   )
 }
 
-function UserInputMessage({ message, basePath, basePaths }: { message: SDKUserMessage; basePath?: string; basePaths?: string[] }): React.ReactElement {
+function UserInputMessage({ message, basePath, basePaths, onRegenerate }: { message: SDKUserMessage; basePath?: string; basePaths?: string[]; onRegenerate?: () => void }): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
   const rawText = extractUserText(message) ?? ''
   const isScheduledRun = rawText.includes(SCHEDULED_RUN_MARKER)
@@ -1373,6 +1377,12 @@ function UserInputMessage({ message, basePath, basePaths }: { message: SDKUserMe
       {text && (
         <MessageActions className="pl-[46px] mt-0.5">
           <CopyButton content={text} copyAsPlainText />
+          {/* 重新生成：只挂在会话最后一条用户消息下，截断最后一轮后重发该消息 */}
+          {onRegenerate && (
+            <MessageAction tooltip="重新生成" onClick={onRegenerate}>
+              <RefreshCw className="size-4" />
+            </MessageAction>
+          )}
         </MessageActions>
       )}
     </Message>
@@ -1606,6 +1616,8 @@ export interface MessageGroupRendererProps {
   onRetryInNewSession?: () => void
   /** 压缩上下文回调（仅 prompt_too_long 错误使用） */
   onCompact?: () => void
+  /** 会话最后一条用户消息的重新生成回调（仅该条消息显示入口，点击后需回退截断再重发） */
+  onRegenerateLastUserMessage?: () => void
   /** 是否正在流式输出中（隐藏操作栏） */
   isStreaming?: boolean
   /** 是否被用户中断 */
@@ -1613,6 +1625,8 @@ export interface MessageGroupRendererProps {
   /** 用户在前端选择的模型 ID（优先用于显示名称） */
   sessionModelId?: string
   showThinking?: boolean
+  /** 该 group 是否为会话中最后一个 assistant-turn（「确认已读」按钮的可见性判据之一）。 */
+  isLatestAssistantTurn?: boolean
 }
 
 /**
@@ -1622,6 +1636,13 @@ export interface MessageGroupRendererProps {
  */
 const messageIdCache = new WeakMap<object, string>()
 let fallbackIdCounter = 0
+
+function getAssistantMessageIdentity(message: SDKAssistantMessage): string {
+  if (!messageIdCache.has(message)) {
+    messageIdCache.set(message, `assistant-${++fallbackIdCounter}`)
+  }
+  return messageIdCache.get(message)!
+}
 
 /**
  * 从 MessageGroup 中提取稳定的 ID，用于 data-message-id 和迷你地图
@@ -1659,6 +1680,33 @@ export function getGroupId(group: MessageGroup): string {
   return `turn-empty-${++fallbackIdCounter}`
 }
 
+/**
+ * 导航条目的稳定匹配键：`${role}:${subtype}:${createdAt}`。
+ *
+ * 主进程的全量导航索引与渲染层会各自算一次，用于把两侧的行对上号——因为系统消息
+ * （interruption_record 等）在磁盘上没有 uuid，渲染层的 getGroupId 只能回退到
+ * 会话顺序相关的计数器 id，主进程复现不了。匹配键只依赖消息自身字段，两侧必然一致。
+ */
+export function getGroupNavKey(group: MessageGroup): string {
+  const role = group.type === 'user' ? 'user' : group.type === 'system' ? 'status' : 'assistant'
+  const anchor = (group.type === 'assistant-turn'
+    ? group.assistantMessages[0]
+    : group.message) as unknown as Record<string, unknown> | undefined
+  const subtype = typeof anchor?.subtype === 'string' ? anchor.subtype : ''
+  const createdAt = typeof anchor?._createdAt === 'number' ? String(anchor._createdAt) : ''
+  return `${role}:${subtype}:${createdAt}`
+}
+
+/**
+ * 会话最后一条用户消息的 group id。
+ *
+ * Goal 自动迭代分隔条不是用户发言，不计入；供「重新生成」入口判定只挂在这一条下。
+ */
+export function getLatestUserGroupId(groups: MessageGroup[]): string | undefined {
+  const last = groups.findLast((group) => group.type === 'user' && !isGoalIterationMessage(group.message))
+  return last ? getGroupId(last) : undefined
+}
+
 /** 预览文本最大长度（user 与 assistant-turn 共用） */
 const GROUP_PREVIEW_LIMIT = 200
 
@@ -1678,6 +1726,7 @@ export function getGroupPreview(group: MessageGroup): string {
     if (group.message.subtype === 'compacting') return '正在压缩上下文...'
     if (group.message.subtype === 'permission_denied') return '自动审批已拒绝操作'
     if (group.message.subtype === 'interruption_record') return group.message.message ?? '任务中断'
+    if (group.message.subtype === 'skill_routing_notice') return group.message.message ?? 'Skill 未加载'
     return ''
   }
   // assistant-turn：按顺序累加 text 块，达到预览上限即返回。
@@ -1699,33 +1748,36 @@ export function getGroupPreview(group: MessageGroup): string {
   return preview.slice(0, GROUP_PREVIEW_LIMIT)
 }
 
-function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, isStreaming, stoppedByUser, sessionModelId, showThinking }: MessageGroupRendererProps): React.ReactElement | null {
+function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, onRegenerateLastUserMessage, isStreaming, stoppedByUser, sessionModelId, showThinking, isLatestAssistantTurn }: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
+  // 主进程导航索引与本地 DOM 的共同匹配键（无 uuid 的系统消息靠它对上号）。
+  const navKey = getGroupNavKey(group)
 
   if (group.type === 'user') {
     if (isGoalIterationMessage(group.message)) {
       const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
       return (
-        <div data-message-id={groupId} data-message-role="goal-iteration">
+        <div data-message-id={groupId} data-message-nav-key={navKey} data-message-role="goal-iteration">
           <GoalIterationDivider iteration={typeof iteration === 'number' ? iteration : undefined} />
         </div>
       )
     }
     return (
-      <div data-message-id={groupId} data-message-role="user">
-        <UserInputMessage message={group.message} basePath={basePath} basePaths={basePaths} />
+      <div data-message-id={groupId} data-message-nav-key={navKey} data-message-role="user">
+        <UserInputMessage message={group.message} basePath={basePath} basePaths={basePaths} onRegenerate={onRegenerateLastUserMessage} />
       </div>
     )
   }
 
   if (group.type === 'system') {
     const subtype = group.message.subtype
-    if (subtype === 'compact_boundary') return <div data-message-id={groupId}><CompactBoundaryDivider /></div>
+    if (subtype === 'compact_boundary') return <div data-message-id={groupId} data-message-nav-key={navKey}><CompactBoundaryDivider /></div>
     // `compacting` remains in the message stream to drive live state, but its sole
     // visible indicator is rendered at the list tail by AgentMessages from isCompacting.
     if (subtype === 'compacting') return null
-    if (subtype === 'permission_denied') return <div data-message-id={groupId}><PermissionDeniedNotice message={group.message} /></div>
-    if (subtype === 'interruption_record') return <div data-message-id={groupId}><InterruptionRecordNotice message={group.message} /></div>
+    if (subtype === 'permission_denied') return <div data-message-id={groupId} data-message-nav-key={navKey}><PermissionDeniedNotice message={group.message} /></div>
+    if (subtype === 'interruption_record') return <div data-message-id={groupId} data-message-nav-key={navKey}><InterruptionRecordNotice message={group.message} /></div>
+    if (subtype === 'skill_routing_notice') return <div data-message-id={groupId} data-message-nav-key={navKey}><SkillRoutingNotice message={group.message} /></div>
     return null
   }
 
@@ -1735,6 +1787,7 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
   return (
     <div
       data-message-id={groupId}
+      data-message-nav-key={navKey}
       data-message-role="assistant"
       {...(forkMessageId ? { 'data-message-fork-id': forkMessageId } : {})}
     >
@@ -1755,6 +1808,7 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
         stoppedByUser={stoppedByUser}
         sessionModelId={sessionModelId}
         showThinking={showThinking}
+        isLatestAssistantTurn={isLatestAssistantTurn}
       />
     </div>
   )
@@ -1808,10 +1862,12 @@ export const MessageGroupRenderer = React.memo(MessageGroupRendererView, (prev, 
   if (prev.basePaths !== next.basePaths) return false
   if (prev.isStreaming !== next.isStreaming || prev.stoppedByUser !== next.stoppedByUser) return false
   if (prev.sessionModelId !== next.sessionModelId || prev.showThinking !== next.showThinking) return false
+  if (prev.isLatestAssistantTurn !== next.isLatestAssistantTurn) return false
   return prev.onFork === next.onFork
     && prev.onExplore === next.onExplore
     && prev.onRewind === next.onRewind
     && prev.onRetry === next.onRetry
     && prev.onRetryInNewSession === next.onRetryInNewSession
     && prev.onCompact === next.onCompact
+    && prev.onRegenerateLastUserMessage === next.onRegenerateLastUserMessage
 })

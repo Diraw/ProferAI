@@ -28,8 +28,8 @@ import {
   LayoutList,
   LayoutGrid,
 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
+import { Button } from '@profer/ui/primitives/button'
+import { ScrollArea } from '@profer/ui/primitives/scroll-area'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,14 +39,14 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+} from '@profer/ui/primitives/alert-dialog'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+} from '@profer/ui/primitives/dropdown-menu'
 import { cn } from '@/lib/utils'
 import { getLastPathSegments } from '@/lib/file-utils'
 import { toast } from 'sonner'
@@ -112,9 +112,6 @@ interface FileBrowserProps {
   hideEmpty?: boolean
   onAddToChat?: (entry: FileEntry) => void
   onFilePreview?: (filePath: string) => void
-  /** 团队工作区 ID（有值时启用团队网盘模式，从服务器拉清单） */
-  workspaceId?: string
-  workspaceSlug?: string
 }
 
 /**
@@ -166,7 +163,7 @@ function buildFileTree(flatEntries: FileEntry[]): FileEntry[] {
   return root
 }
 
-export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddToChat, onFilePreview, workspaceId, workspaceSlug }: FileBrowserProps): React.ReactElement {
+export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddToChat, onFilePreview }: FileBrowserProps): React.ReactElement {
   const [entries, setEntries] = React.useState<FileEntry[]>([])
   const [loading, setLoading] = React.useState(false)
   const [uploading, setUploading] = React.useState(false)
@@ -230,30 +227,13 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
   const selectedCount = selectedPaths.size
 
   /** 加载根目录 */
-  const isTeamMode = !!(workspaceId && workspaceSlug)
-
   const loadRoot = React.useCallback(async () => {
     if (!rootPath) return
     setLoading(true)
     setError(null)
     try {
-      if (isTeamMode) {
-        const manifest = await window.electronAPI.teamFile.getManifest(workspaceId!, workspaceSlug).catch(() => null)
-        // null = 拉取失败（认证/网络）→ 保留当前列表，避免 token 失效误清空文件
-        if (manifest === null) return
-        const serverItems: FileEntry[] = manifest.map((f: { name: string; path: string; isDirectory: boolean; size: number; sha256?: string; syncStatus?: FileEntry['syncStatus']; localExists?: boolean; uploadedBy?: string; uploadedByName?: string }) => ({
-          name: f.name, path: f.path, isDirectory: f.isDirectory, size: f.size, sha256: f.sha256,
-          syncStatus: f.syncStatus ?? (f.localExists ? 'synced' : 'cloud-only'),
-          uploadedBy: f.uploadedBy ?? '',
-          uploadedByName: f.uploadedByName ?? '',
-        }))
-        // 构建树状结构：目录可折叠展开
-        const tree = buildFileTree(serverItems)
-        setEntries(tree)
-      } else {
-        const items = await window.electronAPI.listDirectory(rootPath)
-        setEntries(items)
-      }
+      const items = await window.electronAPI.listDirectory(rootPath)
+      setEntries(items)
     } catch (err) {
       const msg = err instanceof Error ? err.message : '加载失败'
       setError(msg)
@@ -261,7 +241,7 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
     } finally {
       setLoading(false)
     }
-  }, [rootPath, isTeamMode, workspaceId, workspaceSlug])
+  }, [rootPath])
 
   /** 处理文件上传（拖拽或按钮触发） */
   const handleFileUpload = React.useCallback(async (files: File[]) => {
@@ -270,29 +250,10 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
     for (const file of files) {
       try {
         const buffer = await file.arrayBuffer()
-        if (isTeamMode) {
-          // 团队模式：上传到服务器
-          const data = new Uint8Array(buffer)
-          let sourcePath = ''
-          try {
-            sourcePath = window.electronAPI.getPathForFile(file)
-          } catch {
-            sourcePath = ''
-          }
-          await window.electronAPI.teamFile.upload({
-            workspaceId: workspaceId!,
-            workspaceSlug: workspaceSlug!,
-            fileName: file.name,
-            fileData: data,
-            sourcePath: sourcePath || undefined,
-          })
-        } else {
-          // 个人模式：保存到本地工作区
-          await window.electronAPI.saveFilesToWorkspaceFiles({
-            workspaceSlug: workspaceSlug || 'default',
-            files: [{ filename: file.name, data: new Uint8Array(buffer) }],
-          })
-        }
+        await window.electronAPI.saveFilesToWorkspaceFiles({
+          workspaceSlug: 'default',
+          files: [{ filename: file.name, data: new Uint8Array(buffer) }],
+        })
         count++
       } catch (err) {
         console.error('文件上传失败:', file.name, err)
@@ -300,64 +261,29 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
     }
     setUploading(false)
     if (count > 0) loadRoot()
-  }, [isTeamMode, workspaceId, workspaceSlug, loadRoot])
+  }, [loadRoot])
 
   /** 网格视图删除文件 */
   const handleDeleteGrid = React.useCallback(async (entry: FileEntry) => {
-    if (isTeamMode && workspaceId && workspaceSlug) {
-      const ok = await window.electronAPI.teamFile.delete({
-        workspaceId, workspaceSlug, filePath: entry.path,
-      }).catch(() => false)
-      if (ok) {
-        // 主进程仅失效下载缓存；不得由渲染层删除可能是用户原始上传源的本地路径。
-        loadRoot()
-      }
+    try {
+      await window.electronAPI.deleteFile(entry.path)
+      await loadRoot()
+    } catch (error) {
+      toast.error(friendlyDeleteError(error, entry.name))
     }
-  }, [isTeamMode, workspaceId, workspaceSlug, loadRoot])
+  }, [loadRoot])
 
-  /** 下载云端文件到本地 */
-  const handleDownload = React.useCallback(async (entry: FileEntry): Promise<string | null> => {
-    if (!isTeamMode || !workspaceId || !workspaceSlug) return null
-    const local = await window.electronAPI.teamFile.download({ workspaceId, workspaceSlug, filePath: entry.path, uploadedBy: entry.uploadedBy, sha256: entry.sha256 })
-    if (local) loadRoot()
-    return local
-  }, [isTeamMode, workspaceId, workspaceSlug, loadRoot])
-
-  /** 团队文件预览前必须先落到本地缓存，Office/PDF 等预览器只能读取本地文件。 */
-  const ensureTeamFileLocal = React.useCallback(async (entry: FileEntry): Promise<string | null> => {
-    if (!isTeamMode || !workspaceId || !workspaceSlug) return null
-    const local = await window.electronAPI.teamFile.download({ workspaceId, workspaceSlug, filePath: entry.path, uploadedBy: entry.uploadedBy, sha256: entry.sha256 })
-    if (local && entry.syncStatus === 'cloud-only') void loadRoot()
-    return local
-  }, [isTeamMode, workspaceId, workspaceSlug, loadRoot])
-
-  const handlePreviewFile = React.useCallback(async (entry: FileEntry): Promise<void> => {
+  const handlePreviewFile = React.useCallback((entry: FileEntry): void => {
     if (entry.isDirectory) return
-    if (isTeamMode) {
-      const local = await ensureTeamFileLocal(entry)
-      if (local) {
-        onFilePreview?.(local)
-      } else {
-        window.dispatchEvent(new CustomEvent('profer:file-preview', {
-          detail: { path: entry.path, name: entry.name, download: () => ensureTeamFileLocal(entry) },
-        }))
-      }
-      return
-    }
-
     onFilePreview?.(entry.path)
-  }, [ensureTeamFileLocal, isTeamMode, onFilePreview])
+  }, [onFilePreview])
 
   const dispatchInlinePreview = React.useCallback((entry: FileEntry): void => {
     if (entry.isDirectory) return
     window.dispatchEvent(new CustomEvent('profer:file-preview', {
-      detail: {
-        path: isTeamMode ? entry.path : entry.path,
-        name: entry.name,
-        download: isTeamMode ? () => ensureTeamFileLocal(entry) : undefined,
-      },
+      detail: { path: entry.path, name: entry.name },
     }))
-  }, [ensureTeamFileLocal, isTeamMode])
+  }, [])
 
   /** 拖拽事件 */
   const handleDragOver = React.useCallback((e: React.DragEvent) => {
@@ -408,21 +334,8 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
 
   /** 在文件夹中显示 */
   const handleShowInFolder = React.useCallback(async (entry: FileEntry) => {
-    if (isTeamMode) {
-      if (!entry.isDirectory && workspaceId && workspaceSlug) {
-        const local = await window.electronAPI.teamFile.download({ workspaceId, workspaceSlug, filePath: entry.path, uploadedBy: entry.uploadedBy, sha256: entry.sha256 })
-        if (local) {
-          window.electronAPI.showItemInFolder(local).catch(console.error)
-          await loadRoot()
-        }
-        return
-      }
-      const localPath = `${rootPath}/${entry.path}`
-      window.electronAPI.showItemInFolder(localPath).catch(console.error)
-      return
-    }
     window.electronAPI.showInFolder(entry.path).catch(console.error)
-  }, [isTeamMode, loadRoot, rootPath, workspaceId, workspaceSlug])
+  }, [])
 
   /** 开始重命名 */
   const handleStartRename = React.useCallback((entry: FileEntry) => {
@@ -439,11 +352,6 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
     // 同名检查
     const parentDir = filePath.substring(0, filePath.lastIndexOf('/'))
     try {
-      if (isTeamMode) {
-        toast.error('团队文件暂不支持在侧栏重命名')
-        setRenamingPath(null)
-        return
-      }
       const siblings = await window.electronAPI.listDirectory(parentDir)
       const conflict = siblings.some((s) => s.name === newName && s.path !== filePath)
       if (conflict) {
@@ -465,7 +373,7 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
       toast.error(stripIpcErrorPrefix(err) || '重命名失败')
       setRenamingPath(null)
     }
-  }, [isTeamMode, loadRoot])
+  }, [loadRoot])
 
   /** 触发删除（支持多选） */
   const handleRequestDelete = React.useCallback((entry: FileEntry) => {
@@ -479,16 +387,7 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
     try {
       const paths = selectedPaths.size > 1 ? [...selectedPaths] : [deleteTarget.path]
       for (const filePath of paths) {
-        if (isTeamMode && workspaceId && workspaceSlug) {
-          const ok = await window.electronAPI.teamFile.delete({ workspaceId, workspaceSlug, filePath }).catch(() => false)
-          if (!ok) {
-            toast.error(`删除「${deleteTarget.name}」失败，请重试`)
-            return
-          }
-          // 主进程已按来源映射失效缓存；这里不能二次删除用户原始文件。
-        } else {
-          await window.electronAPI.deleteFile(filePath)
-        }
+        await window.electronAPI.deleteFile(filePath)
       }
       setSelectedPaths(new Set())
       await loadRoot()
@@ -497,7 +396,7 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
       toast.error(friendlyDeleteError(err, deleteTarget?.name ?? '项目'))
     }
     setDeleteTarget(null)
-  }, [deleteTarget, selectedPaths, loadRoot, isTeamMode, workspaceId, workspaceSlug])
+  }, [deleteTarget, selectedPaths, loadRoot])
 
   /** 移动到回收站（可恢复） */
   const handleMoveToTrash = React.useCallback(async () => {
@@ -524,7 +423,6 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
       const result = await window.electronAPI.openFolderDialog()
       if (!result) return
 
-      if (isTeamMode) return
       if (selectedPaths.size > 1) {
         for (const path of selectedPaths) {
           await window.electronAPI.moveFile(path, result.path)
@@ -539,7 +437,7 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
     } finally {
       setMoving(false)
     }
-  }, [isTeamMode, selectedPaths, loadRoot])
+  }, [selectedPaths, loadRoot])
 
   // 显示根路径最后两段作为面包屑（公共实现 R5）
   const breadcrumb = React.useMemo(() => getLastPathSegments(rootPath), [rootPath])
@@ -580,7 +478,6 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
           onClearSelection={() => setSelectedPaths(new Set())}
           onAddToChat={onAddToChat}
           onFilePreview={handlePreviewFile}
-          onDownload={handleDownload}
           rootPath={rootPath}
         />
       ))}
@@ -661,9 +558,9 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
 
       {/* 文件列表 / 卡片视图 */}
       {embedded ? (
-        viewMode === 'grid' ? <FileGridView entries={entries} loading={loading} error={error} onSelect={handleSelect} onDelete={handleDeleteGrid} onDownload={handleDownload} /> : fileTree
+        viewMode === 'grid' ? <FileGridView entries={entries} loading={loading} error={error} onSelect={handleSelect} onDelete={handleDeleteGrid} /> : fileTree
       ) : viewMode === 'grid' ? (
-        <ScrollArea className="flex-1"><FileGridView entries={entries} loading={loading} error={error} onSelect={handleSelect} onDelete={handleDeleteGrid} onDownload={handleDownload} /></ScrollArea>
+        <ScrollArea className="flex-1"><FileGridView entries={entries} loading={loading} error={error} onSelect={handleSelect} onDelete={handleDeleteGrid} /></ScrollArea>
       ) : (
         <ScrollArea className="flex-1">{fileTree}</ScrollArea>
       )}
@@ -687,11 +584,9 @@ export function FileBrowser({ rootPath, hideToolbar, embedded, hideEmpty, onAddT
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            {!isTeamMode && (
-              <AlertDialogAction onClick={handleMoveToTrash} className="bg-secondary text-secondary-foreground hover:bg-secondary/80">
-                移动到回收站
-              </AlertDialogAction>
-            )}
+            <AlertDialogAction onClick={handleMoveToTrash} className="bg-secondary text-secondary-foreground hover:bg-secondary/80">
+              移动到回收站
+            </AlertDialogAction>
             <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
               删除
             </AlertDialogAction>

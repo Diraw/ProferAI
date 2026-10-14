@@ -36,7 +36,7 @@ import {
   MAX_SDK_MESSAGE_LENGTH,
   externalizeSerializedSessionLine,
   readSerializedBlobRefs,
-} from './agent-session-manager'
+} from './session-payload-externalize'
 
 export interface SessionCompactionResult {
   /** 扫描的会话文件数 */

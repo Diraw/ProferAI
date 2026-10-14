@@ -15,13 +15,13 @@ import { Bot, Columns2, FileText, Globe2, MessageSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { tabsAtom, type TabItem } from '@/atoms/tab-atoms'
 import { isGroupEligibleTab } from '@/atoms/tab-group-atoms'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+} from '@profer/ui/primitives/dropdown-menu'
 
 export interface EmptyPanePlaceholderProps {
   /** 已经在组合里的标签 id（不再作为候选） */

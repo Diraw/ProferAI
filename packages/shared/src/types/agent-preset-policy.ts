@@ -178,11 +178,8 @@ export function createEffectiveAgentPresetPolicy(
     allowSubagents: !disabledToolGroups.has('collaboration'),
     runtimeSupportsSubagents: options.runtimeSupportsSubagents === true,
     sessionCanUseSubagents: options.runtimeSupportsSubagents === true && !disabledToolGroups.has('collaboration'),
-    // Goal 是 Profer 内部的持续执行入口，沿用全局 bypassPermissions 语义，
-    // 不让会话预设的 plan/auto 交互设置把自主循环重新卡回审批。
-    permissionMode: options.triggeredBy === 'goal'
-      ? 'bypassPermissions'
-      : resolveEffectivePermissionMode(preset.permissionMode, options.permissionMode),
+    // Goal 持续执行不改变用户或预设授予的权限级别。
+    permissionMode: resolveEffectivePermissionMode(preset.permissionMode, options.permissionMode),
     ...(preset.effort !== undefined && { effort: preset.effort }),
     pptCapabilityActive: options.pptCapabilityActive === true,
     source: sourceForScope(presetReference.presetScope ?? preset.scope),

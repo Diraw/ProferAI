@@ -11,7 +11,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import { currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
-import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
+import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
 import { toCalendarData, type WorkspaceHeatmapEntry } from '@/lib/heatmap-utils'
 
 // ── 布局常量 ──────────────────────────────────────────────

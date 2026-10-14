@@ -13,11 +13,11 @@
 
 import * as React from 'react'
 import { X, Download, ExternalLink, FolderOpen, Loader2 } from 'lucide-react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@profer/ui/primitives/dialog'
+import { Button } from '@profer/ui/primitives/button'
 import { cn } from '@/lib/utils'
 import { OfficePreview } from './office-preview/OfficePreview'
-import { useSmoothZoom } from '@/hooks/useSmoothZoom'
+import { useSmoothZoom } from '@profer/ui'
 import type { FileAccessOptions } from '@profer/shared'
 
 interface FilePreviewDialogProps {
@@ -40,11 +40,13 @@ type PreviewState =
   | { status: 'error'; message: string }
 
 const TEXT_EXTS = new Set([
-  'txt', 'md', 'json', 'csv', 'xml', 'html', 'htm', 'css', 'scss', 'less',
+  'txt', 'md', 'json', 'csv', 'xml', 'css', 'scss', 'less',
   'js', 'jsx', 'ts', 'tsx', 'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h',
   'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'sh', 'bat', 'sql', 'graphql',
   'env', 'gitignore', 'dockerfile', 'log',
 ])
+
+const HTML_EXTS = new Set(['html', 'htm'])
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
 
@@ -103,6 +105,10 @@ export function FilePreviewDialog({ open, filePath, fileName, onClose, teamDownl
         const result = await window.electronAPI.preparePdfPreview(localPath, access)
         if (result?.tmpHtmlUrl) setState({ status: 'iframe', src: result.tmpHtmlUrl })
         else setState({ status: 'error', message: '无法预览 PDF' })
+      } else if (HTML_EXTS.has(e)) {
+        const result = await window.electronAPI.resolveHtmlPreviewPath(localPath, access)
+        if (result?.url) setState({ status: 'iframe', src: result.url })
+        else setState({ status: 'error', message: '无法预览 HTML' })
       } else if (['docx', 'xlsx', 'pptx'].includes(e)) {
         setState({ status: 'office', path: localPath, access })
       } else if (['odt', 'ods', 'odp'].includes(e)) {

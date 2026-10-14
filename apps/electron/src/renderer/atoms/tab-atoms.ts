@@ -104,11 +104,14 @@ export const sidebarCollapsedAtom = atomWithStorage<boolean>(
 
 /** Tab 迷你地图缓存（每个 Tab 的消息预览列表，在消息组件中填充） */
 export interface TabMinimapItem {
-  id: string
+  /** 滚动锚点 id（消息 uuid）；无 uuid 时为 null，需用 matchKey 回退匹配 */
+  id: string | null
   role: 'user' | 'assistant' | 'status'
   preview: string
   avatar?: string
   model?: string
+  /** 无 id 时的稳定匹配键（`${role}:${subtype}:${createdAt}`） */
+  matchKey?: string
 }
 export const tabMinimapCacheAtom = atom<Map<string, TabMinimapItem[]>>(new Map())
 

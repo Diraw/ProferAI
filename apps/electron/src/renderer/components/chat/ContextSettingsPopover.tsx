@@ -6,18 +6,18 @@
  */
 
 import { useState } from 'react'
-import { Button } from '@/components/ui/button'
+import { Button } from '@profer/ui/primitives/button'
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from '@/components/ui/popover'
-import { Slider } from '@/components/ui/slider'
+} from '@profer/ui/primitives/popover'
+import { Slider } from '@profer/ui/primitives/slider'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from '@/components/ui/tooltip'
+} from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 import { AgentComposerToolTrigger } from '@/components/ai-elements/composer/ComposerTool'
 import { Settings2 } from 'lucide-react'

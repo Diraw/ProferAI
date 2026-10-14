@@ -182,32 +182,28 @@ bun run generate:icons    # 生成应用图标
 
 | 服务 | 职责 |
 |------|------|
-| `agent-orchestrator.ts` | Agent 核心编排层（107KB）：并发守卫、渠道查找、环境变量构建、SDK 路径解析、消息持久化、事件流处理、错误处理、自动标题生成 |
-| `agent-collaboration-tools.ts` | Agent 协作委派工具（39KB）：10 个 MCP 工具（delegate_agent / delegate_agents / wait_for_delegations / list_delegations / get_delegation_results / stop_delegation / stop_delegations / answer_delegation_question / continue_delegation / list_available_agent_models），子会话创建、等待、管理和恢复 |
-| `adapters/claude-agent-adapter.ts` | Claude Agent SDK 适配器（45KB）：实现 AgentProviderAdapter 接口，长生命周期消息通道，支持 streamInput 持久化、工具权限注入、thinking signature 错误处理 |
-| `agent-session-manager.ts` | Agent 会话管理（60KB）：SDK 消息持久化、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
-| `agent-prompt-builder.ts` | Agent 系统提示词构建（19KB）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
-| `agent-service.ts` | Agent headless 运行服务（18KB）：无界面 Agent 运行、协作子会话执行 |
+| `agent-orchestrator.ts` | Agent 核心编排层（193KB）：并发守卫、渠道查找、环境变量构建、SDK 路径解析、消息持久化、事件流处理、错误处理、自动标题生成 |
+| `agent-collaboration-tools.ts` | Agent 协作委派工具（64KB）：10 个 MCP 工具（delegate_agent / delegate_agents / wait_for_delegations / list_delegations / get_delegation_results / stop_delegation / stop_delegations / answer_delegation_question / continue_delegation / list_available_agent_models），子会话创建、等待、管理和恢复 |
+| `adapters/claude-agent-adapter.ts` | Claude Agent SDK 适配器（56KB）：实现 AgentProviderAdapter 接口，长生命周期消息通道，支持 streamInput 持久化、工具权限注入、thinking signature 错误处理 |
+| `adapters/pi-agent-adapter.ts` | Pi Agent SDK 适配器（117KB）：Pi 运行时消息通道、内置产品工具注册、AskUserQuestion 闭环 |
+| `agent-session-manager.ts` | Agent 会话管理（119KB）：SDK 消息持久化、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
+| `agent-prompt-builder.ts` | Agent 系统提示词构建（24KB）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
+| `agent-service.ts` | Agent headless 运行服务（39KB）：无界面 Agent 运行、协作子会话执行 |
 | `agent-headless-runner-registry.ts` | Headless runner 注册表：管理协作委派的 Agent 运行实例生命周期 |
 | `agent-model-selection.ts` | 协作委派模型选择验证：确保委派子会话使用已启用的合法模型 |
 | `agent-permission-service.ts` | Agent 权限管理：工具权限检查、权限模式管理 |
 | `agent-ask-user-service.ts` | Agent 用户交互：AskUser 请求处理 |
 | `agent-exit-plan-service.ts` | Agent 退出计划服务 |
-| `agent-workspace-manager.ts` | 工作区管理（16KB）：MCP Server 配置、Skills 配置、工作区 CRUD |
-| `team-manager.ts` / `team-file-service.ts` | 团队工作区与团队文件：远程 CRUD、邀请成员、文件上传 / 下载 / 删除 / 移动、本地缓存 |
-| `chat-service.ts` | Chat 流式调用编排（20KB）：Provider 适配器集成、消息持久化、AbortController |
-| `conversation-manager.ts` | 对话管理（13KB）：对话 CRUD、JSONL 消息存储、置顶、上下文分割 |
-| `channel-manager.ts` | 渠道管理（28KB）：渠道 CRUD、API Key AES-256-GCM 加密（safeStorage）、连接测试、模型获取、NewAPI 积分渠道同步 |
-| `sync-manager.ts` | 同步引擎（13KB）：团队工作区双向同步、轮询远程变更、冲突检测 |
-| `credits/` | 积分与计费系统：`SidebarBalanceBar`（余额显示）、`CreditsSettings`（积分设置页）、`credits-atoms.ts`、`useCreditsLoader.ts`，服务端 `credits-db.js`、`billing-utils.js` |
+| `agent-workspace-manager.ts` | 工作区管理（68KB）：MCP Server 配置、Skills 配置、工作区 CRUD |
+| `chat-service.ts` | Chat 流式调用编排（38KB）：Provider 适配器集成、消息持久化、AbortController |
+| `conversation-manager.ts` | 对话管理（37KB）：对话 CRUD、JSONL 消息存储（parentId-tree）、置顶、上下文分割、活跃分支 activePath、forkBranchAt 分叉 |
+| `channel-manager.ts` | 渠道管理（82KB）：渠道 CRUD、API Key AES-256-GCM 加密（safeStorage）、连接测试、模型获取 |
 
 #### 集成服务
 
 | 服务 | 职责 |
 |------|------|
-| `feishu-bridge.ts` | 飞书集成（68KB）：消息同步、任务通知、OAuth 认证 |
-| `memory-service.ts` | 记忆管理：跨会话记忆存储与检索 |
-| `memos-client.ts` | Memos 客户端：笔记服务集成 |
+| `feishu-bridge.ts` | 飞书集成（91KB）：消息同步、任务通知、OAuth 认证 |
 
 #### 工具与文件
 
@@ -264,7 +260,7 @@ bun run generate:icons    # 生成应用图标
 | `agent-atoms.ts` | Agent 会话列表、当前会话、流式状态（`AgentStreamState`）、工作区选择、渠道选择、权限/AskUser 请求队列（按 sessionId Map） |
 | `active-view.ts` | 主面板视图切换（'conversations' / 'automations' / 'agent-skills'） |
 | `app-mode.ts` | 应用模式（'chat' / 'agent' / 'scratch'） |
-| `settings-tab.ts` | 设置面板当前标签页（17 个 Tab：general / channels / agent / prompts / tools / appearance / proxy / shortcuts / voice-input / memory / bots / storage / migration / credits / brand / team / tutorial / about） |
+| `settings-tab.ts` | 设置面板当前标签页 |
 | `automation-atoms.ts` | 定时任务状态（automationsAtom、automationFormAtom） |
 | `credits-atoms.ts` | 积分余额和用量统计 |
 | `theme.ts` | 主题模式（light / dark / system） |
@@ -275,9 +271,9 @@ bun run generate:icons    # 生成应用图标
 
 - **`app-shell/`**：三面板布局（LeftSidebar | NavigatorPanel | MainContentPanel），侧边栏含模式切换、置顶对话、日期分组列表、流式指示器、余额显示、委派子会话树形折叠
 - **`chat/`**：聊天核心 — ChatView（消息加载/流式订阅）、ChatHeader（模型选择/上下文设置）、ChatInput（Tiptap 富文本编辑器）、ChatMessages（消息列表/自动滚动）、ParallelChatMessages（并排模式）
-- **`agent/`**：Agent 模式 — AgentView（87KB，纯展示 + 交互，IPC 监听已提升到全局）、AgentHeader（渠道/模型选择）、AgentMessages（消息列表 + 工具活动）、SDKMessageRenderer（54KB，SDK 消息渲染，含协作工具 UI）、SidePanel（52KB，右侧面板）、TeamWorkspaceView（77KB，团队工作区文件管理+Agent 侧栏）、WorkspaceSelector（工作区切换）、PermissionBanner/AskUserBanner（权限/问答请求 UI）、MentionList（@ 提及文件/工作区）、ProcessBlockGroup（工具调用分组展示）、TaskProgressCard（任务进度卡片）
-- **`agent-skills/`**：Agent 技能全屏管理视图 — AgentSkillsView（19KB，Skills + MCP 管理）、SkillCard/SkillDetailSheet/McpCard/McpDetailSheet、ImportSkillDialog、useAgentSkillsData
-- **`settings/`**：设置面板（30+ 个组件） — GeneralSettings、AppearanceSettings（含经典/现代风格切换）、ChannelSettings/ChannelForm、AgentSettings、McpServerForm、AboutSettings、FeishuSettings、DingTalkSettings、WeChatSettings、PromptSettings、ToolSettings、MemorySettings、ShortcutSettings、VoiceInputSettings、ProxySettings、MigrationSettings、StorageSettings、CreditsSettings（积分与用量）、BrandManager（Logo/品牌定制）、TeamWorkspaceSettings、BotHubSettings/BotDefaultSettings、UpdateDialog、ReleaseNotesViewer；含 `primitives/` 可复用表单组件
+- **`agent/`**：Agent 模式 — AgentView（160KB，纯展示 + 交互，IPC 监听已提升到全局）、AgentHeader（渠道/模型选择）、AgentMessages（消息列表 + 工具活动）、SDKMessageRenderer（78KB，SDK 消息渲染，含协作工具 UI）、SidePanel（67KB，右侧面板）、PermissionBanner/AskUserBanner（权限/问答请求 UI）、MentionList（@ 提及文件/工作区）、ProcessBlockGroup（工具调用分组展示）、TaskProgressCard（任务进度卡片）；工作区切换器已随工作区模型收敛移除
+- **`agent-skills/`**：Agent 技能全屏管理视图 — AgentSkillsView（35KB，Skills + MCP 管理）、SkillCard/SkillDetailSheet/McpCard/McpDetailSheet、ImportSkillDialog、useAgentSkillsData
+- **`settings/`**：设置面板（30+ 个组件） — GeneralSettings、AppearanceSettings（含经典/现代风格切换）、ChannelSettings/ChannelForm、AgentSettings、McpServerForm、AboutSettings、FeishuSettings、DingTalkSettings、WeChatSettings、PromptSettings、ToolSettings、MemorySettings、ShortcutSettings、VoiceInputSettings、ProxySettings、MigrationSettings、StorageSettings、CreditsSettings（积分与用量）、BrandManager（Logo/品牌定制）、BotHubSettings/BotDefaultSettings、UpdateDialog、ReleaseNotesViewer；含 `primitives/` 可复用表单组件（团队工作区设置页已随团队运行时移除）
 - **`file-browser/`**：文件浏览器 — FileBrowser（工作区文件树浏览）
 - **`diff/`**：Diff 与 Markdown 编辑器 — DiffView/DiffTabContent（55KB，并排 diff 展示）、PreviewPanel/PreviewTabContent（Markdown 预览）、MarkdownRichEditor/MarkdownEditorToolbar（富文本编辑）、MarkdownToc（目录导航）、PreviewFindBar（预览内搜索）、WorktreeSelector
 - **`ai-elements/`**：AI 展示组件 — Markdown 渲染、代码块、Mermaid 图、推理折叠、上下文分割线、富文本输入
@@ -337,17 +333,18 @@ bun run generate:icons    # 生成应用图标
 - JSON 配置 + JSONL 追加日志，无本地数据库，文件可移植
 - Agent 工作区按 slug 隔离，每个会话独立目录
 - MCP 配置和 Skills 按工作区管理
-- 团队文件以服务器清单为唯一数据源，本地 `workspace-files/` 仅作为预览、打开和 Agent 解读的按需缓存
 
-## 团队服务器（`server/`）
+> **2026-10-11 变更**：团队工作区运行时已移除，团队文件同步与 `workspace-files/` 缓存语义不再适用。
 
-> 🔴 **server 服务端已迁移至本地私有 git 仓库**（`D:\profer\server-private.git`），不再随本公开仓库发布，`server/` 仅以未跟踪工作树目录形式保留在本地供开发。
+## 团队服务器
+
+> 🔴 **团队服务器已迁移至独立私有 git 仓库**（原 `server/`），不再随本公开仓库发布。公开仓库中**没有** `server/` 目录。
 >
-> 在公开仓库中：不要提交、讨论 server 源码结构、服务器 IP、部署路径、凭据等敏感信息。server 开发/发布请到私有仓库 `server-private.git` 中操作，完整架构文档见私有仓库。
+> 在公开仓库中：不要提交、讨论 server 源码结构、服务器 IP、部署路径、凭据等敏感信息。server 开发/发布请在私有仓库中操作。
 
 ## 默认 Skills（`apps/electron/default-skills/`）
 
-应用启动时 semver 比较自动同步到 `~/.profer/default-skills/` 和各工作区。共 14 个：
+应用启动时 semver 比较自动同步到 `~/.profer/default-skills/` 和各工作区。共 19 个：
 
 | Skill | 用途 |
 |-------|------|
@@ -357,12 +354,17 @@ bun run generate:icons    # 生成应用图标
 | `executing-plans` | 带审查检查点的实现计划执行 |
 | `find-skills` | 发现和安装 Skills |
 | `guizang-ppt-skill` | 横向翻页网页 PPT 生成 |
+| `in-app-browser` | 应用内受管浏览器操作 |
+| `lark-delivery` | 飞书交付 |
 | `pdf` | PDF 文档处理 |
 | `pptx` | PowerPoint 演示文稿 |
+| `present-visualization` | 会话内可视化（图表/结构/对比） |
 | `profer-coach` | Profer 使用顾问，优化工作流 |
+| `profer-theme-authoring` | 主题/皮肤创作 |
 | `session-cleaner` | 会话 JSONL 清洗为 Markdown |
 | `skill-creator` | Skill 创建/编辑/评估 |
 | `tool-builder` | 自定义 HTTP 工具管理 |
+| `user-sense` | 用户感知/偏好推断 |
 | `writing-plans` | 多步骤任务实施计划 |
 | `xlsx` | 电子表格处理 |
 

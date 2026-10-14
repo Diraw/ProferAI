@@ -1,9 +1,9 @@
 import * as React from 'react'
 import { Check, ChevronDown, Eye, Plus, ShieldCheck, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Button } from '@profer/ui/primitives/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@profer/ui/primitives/dialog'
+import { Popover, PopoverContent, PopoverTrigger } from '@profer/ui/primitives/popover'
 import { SettingsCard, SettingsSection } from '@/components/settings/primitives'
 import type { AgentPreset, AgentWorkspace, PresetReference, PresetReferenceReport, PresetWorkspaceReference } from '@profer/shared'
 
