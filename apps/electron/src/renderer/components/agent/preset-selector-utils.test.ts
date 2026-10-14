@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { AgentPreset } from '@profer/shared'
 import {
   referenceForSelectablePreset,
+  selectableAgentPresets,
   selectablePresetMatchesReference,
 } from './preset-selector-utils'
 
@@ -34,5 +35,22 @@ describe('预设选择器稳定引用', () => {
 
     expect(selectablePresetMatchesReference(builtin, reference)).toBe(true)
     expect(selectablePresetMatchesReference(workspace, reference)).toBe(false)
+  })
+})
+
+describe('可选预设列表', () => {
+  test('明确停用的预设（含元预设）不进入可选列表，未声明的视为可用', () => {
+    const list = [
+      preset({ id: 'on', enabledInWorkspace: true }),
+      preset({ id: 'off', enabledInWorkspace: false }),
+      preset({ id: 'unknown' }),
+    ]
+    expect(selectableAgentPresets(list).map((item) => item.id)).toEqual(['on', 'unknown'])
+  })
+
+  test('返回新数组，不修改入参', () => {
+    const list = [preset({ id: 'off', enabledInWorkspace: false })]
+    expect(selectableAgentPresets(list)).toEqual([])
+    expect(list).toHaveLength(1)
   })
 })

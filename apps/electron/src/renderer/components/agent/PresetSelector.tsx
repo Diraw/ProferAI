@@ -17,7 +17,7 @@ import { agentPresetCacheKey, agentPresetsLoadedAtom, workspacePresetsAtom } fro
 import { agentSessionsAtom, workspaceCapabilitiesVersionAtom } from '@/atoms/agent-atoms'
 import type { AgentEffort, AgentPreset, PresetReference, ProferPermissionMode } from '@profer/shared'
 import { cn } from '@/lib/utils'
-import { referenceForSelectablePreset, selectablePresetMatchesReference } from './preset-selector-utils'
+import { referenceForSelectablePreset, selectableAgentPresets, selectablePresetMatchesReference } from './preset-selector-utils'
 import { useSessionSettingMutation } from '@/lib/use-session-setting-mutation'
 
 /** 预设特性 badge 的中文短标签 */
@@ -87,7 +87,7 @@ export function PresetSelector({ sessionId, persistedPresetId, persistedPresetRe
 
   // Manager 返回当前工作区可见预设；明确停用项不能出现在菜单中（含元预设）。
   const availablePresets = React.useMemo(
-    () => presets.filter((preset) => preset.enabledInWorkspace !== false),
+    () => selectableAgentPresets(presets),
     [presets],
   )
   const current = persistedPresetReference

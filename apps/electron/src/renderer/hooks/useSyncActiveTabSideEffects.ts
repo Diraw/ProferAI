@@ -60,14 +60,9 @@ export function useSyncActiveTabSideEffects(): SyncActiveTabSideEffects {
       }
 
       if (newActiveTab.type === 'scratch' || newActiveTab.type === 'tutorial' || newActiveTab.type === 'frp-guide') {
-        // 个人 Agent 模式下切到 Scratch Pad 时保持右侧文件面板不收起；
-        // 团队工作区没有独立的 Scratch 内容区，必须退出团队视图，避免留下空 Agent 面板。
+        // 个人 Agent 模式下切到 Scratch Pad 时保持右侧文件面板不收起。
         setCurrentConversationId(null)
-        const currentWorkspace = agentWorkspaces.find((workspace) => workspace.id === currentWorkspaceId)
-        if (currentWorkspace?.type === 'team') {
-          setAppMode('scratch')
-          setCurrentAgentSessionId(null)
-        } else if (appMode !== 'agent') {
+        if (appMode !== 'agent') {
           setCurrentAgentSessionId(null)
         }
         return
@@ -103,8 +98,6 @@ export function useSyncActiveTabSideEffects(): SyncActiveTabSideEffects {
       setCurrentAgentWorkspaceId,
       setUnviewedCompleted,
       agentSessions,
-      agentWorkspaces,
-      currentWorkspaceId,
     ],
   )
 }

@@ -3,12 +3,12 @@ import { readFileSync } from 'node:fs'
 import { CHANNEL_IPC_CHANNELS } from '@profer/shared'
 
 // 沿用 Goal IPC 测试模式，执行当前注册片段和 preload 方法，所有 transport/service 由 fixture 截断。
-const source = readFileSync(new URL('../ipc.ts', import.meta.url), 'utf8')
-const start = source.indexOf('  ipcMain.handle(\n    CHANNEL_IPC_CHANNELS.CODEX_LOGIN,')
-const end = source.indexOf('  // ===== 对话管理相关 =====', start)
+const source = readFileSync(new URL('./channel-ipc.ts', import.meta.url), 'utf8')
+const start = source.indexOf('  ipcMain.handle(CHANNEL_IPC_CHANNELS.CODEX_LOGIN,')
+const end = source.lastIndexOf('\n}')
 if (start < 0 || end < start) throw new Error('Codex IPC 注册边界不存在')
 const js = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end))
-const register = new Function('deps', `const { ipcMain, CHANNEL_IPC_CHANNELS, loginCodexChannel, cancelCodexOAuthLogin, listCodexModels, agentCatalogInvalidationPublisher } = deps; ${js}`)
+const register = new Function('deps', `const { ipcMain, CHANNEL_IPC_CHANNELS, loginCodexChannel, cancelCodexOAuthLogin, listCodexModels, agentCatalogInvalidationPublisher } = deps; const context = { invalidateCatalog: (catalog) => agentCatalogInvalidationPublisher.invalidate(catalog) }; ${js}`)
 const preload = readFileSync(new URL('../../preload/index.ts', import.meta.url), 'utf8')
 const preloadStart = preload.lastIndexOf('  loginCodexOAuth: (input:')
 const preloadEnd = preload.indexOf('  // 对话管理', preloadStart)
@@ -39,7 +39,7 @@ describe('Codex IPC/preload 接线（fixture transport）', () => {
     expect(await bridge.loginCodexOAuth('fixture-codex')).toEqual(channel)
     await expect(bridge.loginCodexOAuth('fixture-denied')).rejects.toThrow('fixture-denied')
     await bridge.cancelCodexOAuthLogin()
-    expect(await bridge.listCodexModels()).toEqual([{ id: 'gpt-6-astra', name: 'Fixture Astra', enabled: true, source: 'fetched' }])
+    expect(await bridge.listCodexModels()).toEqual([{ id: 'gpt-6-astra', name: 'Fixture Astra', enabled: true, source: 'builtin-catalog' }])
     expect(inputs).toEqual([input, 'fixture-codex', 'fixture-denied'])
     expect(invalidations).toEqual(['channels', 'channels'])
     expect(cancelled).toBe(1)

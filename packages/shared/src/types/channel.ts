@@ -10,6 +10,9 @@
  */
 export type XaiCredentialMode = 'api-key' | 'oauth'
 
+// AGENT_COMPATIBLE_PROVIDERS 从能力描述符派生（运行时依赖，单向）
+import { PROVIDER_CAPABILITIES } from './provider-capability'
+
 export type ProviderType =
   | 'anthropic'
   | 'anthropic-compatible'
@@ -112,29 +115,20 @@ export const PROVIDER_LABELS: Record<ProviderType, string> = {
 }
 
 /**
- * 支持 Agent 模式的供应商类型
+ * 支持 Claude 内核的供应商类型。
  *
- * Agent SDK 通过 Anthropic 兼容协议调用 `/v1/messages` 端点，
- * 因此所有 Anthropic 协议兼容的供应商都可以用于 Agent。
+ * Claude 只懂 Anthropic Messages 协议，因此集合按「原生协议是否为
+ * anthropic-messages」从能力描述符（provider-capability.ts）派生，
+ * 不再手工枚举。Pi 内核不受此集合限制（Pi 支持四种协议）。
  */
-export const AGENT_COMPATIBLE_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>([
-  'anthropic',
-  'anthropic-compatible',
-  'deepseek',
-  'kimi-api',
-  'kimi-coding',
-  'zhipu-coding',
-  'zhipu-coding-team',
-  'ark-coding-plan',
-  'minimax',
-  'xiaomi',
-  'xiaomi-token-plan',
-  'qwen-anthropic',
-  'ollama',
-])
+export const AGENT_COMPATIBLE_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>(
+  (Object.keys(PROVIDER_CAPABILITIES) as ProviderType[]).filter(
+    (provider) => PROVIDER_CAPABILITIES[provider].isAnthropicProtocol,
+  ),
+)
 
 /**
- * 判断供应商是否兼容 Agent 模式
+ * 判断供应商是否兼容 Claude 内核（原生协议为 anthropic-messages）。
  */
 export function isAgentCompatibleProvider(provider: ProviderType): boolean {
   return AGENT_COMPATIBLE_PROVIDERS.has(provider)
@@ -343,8 +337,14 @@ export interface ChannelModel {
    * - false：强制关闭（即使模型 / 渠道验证支持也不按 1M 处理）
    */
   context1m?: boolean
-  /** 来源标记：手动添加的模型在拉取供应商列表时保留，不会被覆盖清除 */
-  source?: 'manual' | 'fetched'
+  /**
+   * 来源标记：手动添加的模型在拉取供应商列表时保留，不会被覆盖清除。
+   * - 'fetched'：从供应商公网 API 实时拉取
+   * - 'manual'：用户手填
+   * - 'builtin-catalog'：OAuth 订阅的内置目录（Codex / xAI 订阅），
+   *   不是用户可拉取的 vendor API，此前被误标为 'fetched'
+   */
+  source?: 'manual' | 'fetched' | 'builtin-catalog'
   /** 服务端代管模式下，当前登录用户实际可见的模型倍率。 */
   multiplier?: number
 }

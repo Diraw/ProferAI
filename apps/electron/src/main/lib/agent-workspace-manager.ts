@@ -27,7 +27,7 @@ import { readSkillManifest, writeSkillManifest } from './skill-manifest'
 import { diagnoseSkill } from './skill-doctor'
 import { deleteAgentSessionsByWorkspace } from './agent-session-manager'
 import { listAgentPresets, createAgentPreset } from './agent-preset-manager'
-import type { AgentWorkspace, WorkspaceMcpConfig, SkillMeta, SkillImportSource, WorkspaceSkillSource, OtherWorkspaceSkillsGroup, OtherWorkspacePresetsGroup, WorkspaceSkillCardState, SkillManifestPatch, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary, WorkspaceType } from '@profer/shared'
+import type { AgentWorkspace, WorkspaceMcpConfig, SkillMeta, SkillImportSource, WorkspaceSkillSource, OtherWorkspaceSkillsGroup, OtherWorkspacePresetsGroup, WorkspaceSkillCardState, SkillManifestPatch, WorkspaceCapabilities, SkillFileNode, SkillFileContent, WorkspaceMemorySummary } from '@profer/shared'
 import type { AgentPreset } from '@profer/shared'
 
 interface AgentWorkspacesIndex {
@@ -191,7 +191,7 @@ export function getAgentWorkspace(id: string): AgentWorkspace | undefined {
 
 export function createAgentWorkspace(
   name: string,
-  opts?: { type?: WorkspaceType },
+  opts?: { type?: 'personal' },
 ): AgentWorkspace {
   const index = readIndex()
 
@@ -234,8 +234,7 @@ export function createAgentWorkspace(
   index.workspaces.unshift(workspace)
   writeIndex(index)
 
-  const typeLabel = workspace.type === 'team' ? '团队' : '个人'
-  console.log(`[Agent 工作区] 已创建${typeLabel}工作区: ${name} (slug: ${slug})`)
+  console.log(`[Agent 工作区] 已创建个人工作区: ${name} (slug: ${slug})`)
   return workspace
 }
 
@@ -1617,58 +1616,12 @@ function isNewerVersion(a: string, b: string): boolean {
   return false
 }
 
-// ===== 团队工作区同步 =====
-
-/** 将远程团队工作区合并到本地索引，侧边栏即可展示 */
-export function syncTeamWorkspacesToIndex(teamWorkspaces: AgentWorkspace[]): void {
-  // 远端请求失败时调用方不得传空数组。空数组只代表服务端成功确认用户没有团队，
-  // 否则会把仍可访问的团队条目当成“已被踢出”删除，且 UI 没有恢复入口。
-  if (!Array.isArray(teamWorkspaces)) throw new Error('团队工作区同步数据非法')
-  const index = readIndex()
-  let changed = false
-  const serverIds = new Set(teamWorkspaces.map((w) => w.id))
-
-  // 清理：移除本地索引中已不在服务端列表里的团队工作区（被踢出/删除）
-  const before = index.workspaces.length
-  index.workspaces = index.workspaces.filter((w) => {
-    if (w.type === 'team' && !serverIds.has(w.id)) {
-      console.log(`[Agent 工作区] 移除已无权访问的团队工作区: ${w.name} (${w.id})`)
-      changed = true
-      return false
-    }
-    return true
-  })
-
-  for (const tw of teamWorkspaces) {
-    const existing = index.workspaces.find((w) => w.id === tw.id)
-    if (!existing) {
-      // 新建团队工作区到本地索引
-      index.workspaces.unshift({
-        ...tw,
-        type: 'team',
-      })
-      getAgentWorkspacePath(tw.slug)
-      ensurePluginManifest(tw.slug, tw.name)
-      changed = true
-    } else if (existing.type !== 'team') {
-      existing.type = 'team'
-      changed = true
-    }
-  }
-
-  if (changed) {
-    writeIndex(index)
-    const removed = before - index.workspaces.length
-    console.log(`[Agent 工作区] 已同步 ${teamWorkspaces.length} 个团队工作区到本地索引${removed > 0 ? `，移除 ${removed} 个` : ''}`)
-  }
-}
-
 // ===== 工作区类型筛选 =====
 
-/** 列出指定类型的工作区 */
-export function listWorkspacesByType(type: WorkspaceType): AgentWorkspace[] {
+/** 列出个人工作区 */
+export function listWorkspacesByType(type: 'personal'): AgentWorkspace[] {
   const index = readIndex()
-  return index.workspaces.filter((w) => w.type === type && !w.isDeleted)
+  return index.workspaces.filter((w) => (w.type ?? 'personal') === type && !w.isDeleted)
 }
 
 // ===== 工作区配置管理 =====

@@ -5,5 +5,4 @@
 export * from './AgentView'
 export * from './AgentHeader'
 export * from './AgentMessages'
-export * from './WorkspaceSelector'
 export * from './ContextUsageBadge'

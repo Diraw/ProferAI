@@ -58,6 +58,7 @@ import {
 } from './agent-session-manager'
 import { getAgentSessionsDir, getConfigDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
 import { getSettings } from './settings-service'
+import { projectAgentPayloadForPocket, projectSdkMessageForPocket } from './pocket-agent-projection'
 import {
   listAgentWorkspaces,
   createAgentWorkspace,
@@ -101,7 +102,7 @@ import {
   updateContextDividers,
   searchConversationMessages,
 } from './conversation-manager'
-import { sendMessage, stopGeneration, generateTitle } from './chat-service'
+import { sendMessage, stopGeneration, generateTitle, autoTitleConversation, regenerateConversationTitle } from './chat-service'
 import { saveAttachment, readAttachmentAsBase64, deleteAttachment } from './attachment-service'
 import { chatEventBus } from './chat-stream-bus'
 import { resolveAndReadFile, readFileAsDataUrl } from './file-preview-service'
@@ -239,7 +240,7 @@ function isPartialSdkPayload(payload: unknown): boolean {
 
 /** 真正把一条 agent_event 帧广播给所有已连接移动端客户端。 */
 function broadcastAgentFrame(sessionId: string, payload: import('@profer/shared').AgentStreamPayload): void {
-  const record = remoteAgentEventLog.append(sessionId, payload)
+  const record = remoteAgentEventLog.append(sessionId, projectAgentPayloadForPocket(payload))
   const frame = JSON.stringify({
     kind: 'agent_event',
     eventId: record.eventId,
@@ -878,14 +879,20 @@ export async function handleRemoteCommand(
         parsed.before !== undefined ||
         parsed.targetMessages !== undefined
       if (!wantsPaged) {
-        // 返回原始 SDKMessage 数组，供桌面式 AgentMessages 渲染（与持久化格式一致）
-        return { ok: true, data: messages }
+        // Pocket 只接收正文、工具名称和必要 usage，不接收思考正文、工具入参或工具结果。
+        return { ok: true, data: messages.map(projectSdkMessageForPocket) }
       }
       const page = paginateSDKMessages(messages, {
         before: typeof parsed.before === 'number' ? parsed.before : undefined,
         targetMessages: typeof parsed.targetMessages === 'number' ? parsed.targetMessages : undefined,
       })
-      return { ok: true, data: page }
+      return {
+        ok: true,
+        data: {
+          ...page,
+          messages: page.messages.map(projectSdkMessageForPocket),
+        },
+      }
     }
 
     case 'session_detail': {
@@ -912,15 +919,15 @@ export async function handleRemoteCommand(
     }
 
     // 查询某 Pi 模型可用的推理档位能力（Pocket 思考档位菜单与服务端同源，避免两端快照漂移）。
-    // 入参只接受 provider / modelId：档位由主进程的 pi-model-registry 级联解析
-    // （reasoning-profile 纯函数 + pi-ai 目录），渲染端拿不到该目录，因此不能本地推导。
+    // baseUrl 可选，旧版 Pocket 不传时仍按 provider 的静态默认协议处理。
     case 'get_pi_reasoning_capability': {
       const provider = typeof parsed.provider === 'string' ? parsed.provider : ''
       const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : undefined
+      const baseUrl = typeof parsed.baseUrl === 'string' ? parsed.baseUrl : undefined
       if (!provider) return { ok: false, error: '缺少 provider' }
       // resolvePiReasoningCapability 是异步的（需读 pi-ai 目录），必须 await，
       // 否则 data 会变成 Promise 而被 JSON 序列化成 {}。
-      return { ok: true, data: await resolvePiReasoningCapability(provider as import('@profer/shared').ProviderType, modelId) }
+      return { ok: true, data: await resolvePiReasoningCapability(provider as import('@profer/shared').ProviderType, modelId, baseUrl) }
     }
 
     // 工作区文件检索（Pocket `@` 引用）：桌面端由 renderer 提交 rootPath/additionalPaths
@@ -1125,7 +1132,7 @@ export async function handleRemoteCommand(
       const sessionId = parsed.sessionId as string
       const title = typeof parsed.title === 'string' ? parsed.title.trim() : ''
       if (!sessionId || !title) return { ok: false, error: '缺少 sessionId 或 title' }
-      const meta = updateAgentSessionUiMeta(sessionId, { title })
+      const meta = updateAgentSessionUiMeta(sessionId, { title, titleLockedAt: Date.now() })
       return { ok: true, data: buildSessionItem(meta) }
     }
 
@@ -1492,7 +1499,21 @@ export async function handleRemoteCommand(
       const title = typeof parsed.title === 'string' ? parsed.title.trim() : ''
       if (!id || !title) return { ok: false, error: '缺少 conversationId 或 title' }
       if (!listConversations(true).some((c) => c.id === id)) return { ok: false, error: '对话不存在' }
-      return { ok: true, data: updateConversationMeta(id, { title }) }
+      return { ok: true, data: updateConversationMeta(id, { title, titleLockedAt: Date.now() }) }
+    }
+
+    case 'regenerate_conversation_title': {
+      const conversationId = typeof parsed.conversationId === 'string' ? parsed.conversationId : ''
+      if (!conversationId) return { ok: false, error: '缺少 conversationId' }
+      const meta = listConversations(true).find((conversation) => conversation.id === conversationId)
+      if (!meta) return { ok: false, error: '对话不存在' }
+      const channelId = typeof parsed.channelId === 'string' ? parsed.channelId : meta.channelId
+      const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : meta.modelId
+      if (!channelId || !modelId) return { ok: false, error: '重新生成标题失败：当前对话没有可用模型' }
+      const updated = await regenerateConversationTitle(conversationId, channelId, modelId)
+      return updated
+        ? { ok: true, data: updated }
+        : { ok: false, error: '重新生成标题失败：当前对话没有有效消息或模型不可用' }
     }
 
     case 'update_conversation_model': {
@@ -1658,6 +1679,15 @@ export async function handleRemoteCommand(
       if (!conversationId || !dividers) return { ok: false, error: '缺少 conversationId 或 dividers' }
       if (!listConversations(true).some((c) => c.id === conversationId)) return { ok: false, error: '对话不存在' }
       return { ok: true, data: updateContextDividers(conversationId, dividers) }
+    }
+
+    case 'chat_auto_title': {
+      const conversationId = typeof parsed.conversationId === 'string' ? parsed.conversationId : ''
+      const channelId = typeof parsed.channelId === 'string' ? parsed.channelId : ''
+      const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : ''
+      if (!conversationId || !channelId || !modelId) return { ok: false, error: '缺少 conversationId / channelId / modelId' }
+      const updated = await autoTitleConversation({ conversationId, channelId, modelId })
+      return { ok: true, data: updated }
     }
 
     case 'chat_generate_title': {

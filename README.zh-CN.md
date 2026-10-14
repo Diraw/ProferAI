@@ -76,14 +76,11 @@ Agent 将任务分解为带有明确依赖关系的子任务，在可能时并�
 
 使用手机触发桌面 Agent 或审查它们的工作。移动客户端（基于 Capacitor，独立仓库：[Profer-pocket](https://github.com/Yuan-lai-ru-ci/Profer-pocket)）通过本地网络或 VPN 连接——无需云端中继。
 
-### 👥 团队工作区（可选）
+### 🔒 默认本地优先
 
-个人使用完全本地化。对于团队：
+工作区、会话、技能与文件全部留在本机——无需注册账号。
 
-- 仅邀请的工作区，带基于角色的访问控制（Owner / Admin / Member / Viewer）
-- 共享技能库：打包可复用的提示词、工作流、集成
-- 文件、上下文和对话历史的云同步
-- 可自托管的后端（轻量级 Hono + SQLite）
+> **2026-10-11 变更**：桌面端内置的团队工作区运行时已移除（产品入口、IPC 与同步链路一并下线），本仓库不再分发团队功能。
 
 ---
 
@@ -180,7 +177,7 @@ Agent 将：
 
 ## 架构
 
-Profer 是一个**本地优先的 Electron 应用**，带团队可选的云层。
+Profer 是一个**本地优先的 Electron 应用**：工作区、会话与文件全部留在本机。
 
 <img src="./docs/assets/architecture-diagram.svg" alt="Profer 架构图" width="100%" />
 
@@ -189,17 +186,11 @@ Profer 是一个**本地优先的 Electron 应用**，带团队可选的云层�
 **桌面端（Electron）**
 - **Agent Runtime**: 
   - [Claude Agent SDK 0.3.201](https://github.com/anthropics/claude-agent-sdk)
-  - [Pi Agent SDK 0.82.1](https://www.npmjs.com/package/@earendil-works/pi-agent-core)
+  - [Pi Agent SDK 0.86.1](https://www.npmjs.com/package/@earendil-works/pi-agent-core)
   - 任务图编排、子 Agent 生成、MCP 集成
 - **前端**: React 18 + TypeScript + Jotai（状态）+ Tailwind + Radix UI
 - **存储**: SQLite（会话、配置）+ 文件系统（工作区）
 - **IPC**: 类型安全的渲染器 ↔ 主进程通信
-
-**后端（可选，团队功能）**
-- **框架**: Hono（快速边缘运行时）
-- **数据库**: SQLite（轻量级，可移植）
-- **认证**: JWT + 基于角色的访问控制
-- **功能**: 工作区共享、技能市场、文件同步
 
 **移动端（Capacitor + React）**
 - 触发桌面 Agent
@@ -415,7 +406,6 @@ Profer 跨执行步骤维护上下文：
 - [ ] 与 Slack/Discord/Teams 的 Webhook 集成
 
 **v1.0 (2025 Q4)**
-- [ ] 生产就绪的团队后端
 - [ ] 企业 SSO（SAML/OIDC）
 - [ ] 基于使用量的审计日志和计费
 

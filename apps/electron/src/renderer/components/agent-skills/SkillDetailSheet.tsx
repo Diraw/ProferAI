@@ -25,6 +25,7 @@ import { SkillFilesPanel } from "@/components/settings/SkillFilesPanel";
 import { cn } from "@/lib/utils";
 import type { SkillMeta } from "@profer/shared";
 import { extractSkillBody, rebuildSkillMd } from "./skillMdUtils";
+import { skillLocationLabel } from "./skillListSections";
 import { SkillCardSection } from "./SkillCardSection";
 
 interface SkillDetailSheetProps {
@@ -318,7 +319,9 @@ function SkillDetailBody({
                           : "无来源"
                   }
                 />
-                <MetaRow label="位置" value={`skills/${skill.slug}`} />
+                {/* 已关闭的副本仍在列表里可选，位置必须指向它真实所在的 skills-inactive/，
+                    否则用户会以为是目录丢失。 */}
+                <MetaRow label="位置" value={skillLocationLabel(skill)} />
               </SettingsCard>
 
               {/* 路由卡片：触发词 / 依赖 / 触发方式（名称与描述仍由上面的元数据编辑区负责） */}

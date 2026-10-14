@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "proma",
+      "name": "profer",
       "dependencies": {
         "jotai": "^2.17.1",
         "source-map": "^0.7.6",

@@ -20,9 +20,6 @@ import {
   Plus,
   FolderOpen,
   Check,
-  Store,
-  Download,
-  RefreshCw,
   Globe2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -59,8 +56,16 @@ import { MasterSkillDetailSheet } from "./MasterSkillDetailSheet";
 import { CreateWorkspaceSkillDialog } from "./CreateWorkspaceSkillDialog";
 import { WorkspaceScopeSelectDialog } from "./WorkspaceScopeSelectDialog";
 import { AgentSkillsToolbar } from "./AgentSkillsToolbar";
+import {
+  isBuiltinReferenceSkill,
+  isWorkspaceLocalSkill,
+  skillDirectoryPath,
+  skillListKey,
+  skillToggleSourceId,
+  partitionSkills,
+} from "./skillListSections";
 
-type CapabilityTab = "skills" | "marketplace" | "mcp" | "memory" | "presets";
+type CapabilityTab = "skills" | "mcp" | "memory" | "presets";
 
 export function AgentSkillsView(): React.ReactElement {
   const data = useAgentSkillsData();
@@ -125,19 +130,12 @@ export function AgentSkillsView(): React.ReactElement {
     );
   }, [data.skills, q]);
 
-  const workspaceSkills = filteredSkills.filter(
-    (s) => s.actualSource === "workspace",
-  );
-  const globalSkills = filteredSkills.filter(
-    (s) =>
-      s.sourceSkillType === "user-global" && s.actualSource !== "workspace",
-  );
-  const builtinSkills = filteredSkills.filter(
-    (s) =>
-      s.sourceSkillType === "builtin-meta" && s.actualSource !== "workspace",
-  );
+  // 分区按身份（workspaceSkillId）而非 actualSource：已关闭的副本在 skills-inactive/
+  // 重新扫描后 actualSource 为 none，按加载层过滤会让它从列表里彻底消失。
+  const { workspaceSkills, globalSkills, builtinSkills } =
+    partitionSkills(filteredSkills);
   const updateCount = data.skills.filter(
-    (s) => s.hasUpdate && s.actualSource === "workspace",
+    (s) => s.hasUpdate && isWorkspaceLocalSkill(s),
   ).length;
 
   const serverEntries = React.useMemo(() => {
@@ -168,49 +166,11 @@ export function AgentSkillsView(): React.ReactElement {
       .catch(() => {});
   }, [data.workspaceSlug, data.loading]);
 
-  // 团队市场状态
-  const [marketSkills, setMarketSkills] = React.useState<
-    Array<{
-      slug: string;
-      name: string;
-      description: string;
-      version: string;
-      publishedBy: string;
-      publishedAt: number;
-    }>
-  >([]);
-  const [marketLoading, setMarketLoading] = React.useState(false);
-  const [installingSlug, setInstallingSlug] = React.useState<string | null>(
-    null,
-  );
-
-  const currentWs = React.useMemo(
-    () =>
-      (
-        workspaces as Array<{ id: string; type?: string; teamId?: string }>
-      ).find((w) => w.id === currentWorkspaceId),
-    [workspaces, currentWorkspaceId],
-  );
-  const isTeamWorkspace = currentWs?.type === "team";
-  const teamWorkspaceId =
-    (currentWs as { id?: string; teamId?: string } | undefined)?.teamId ||
-    currentWorkspaceId;
-
-  // 顶部 Skills/市场/MCP/记忆 切换按钮（团队工作区多一个团队市场）：roving focus，
-  // 支持 ←/→ 循环切换 + Home/End。与规划中心 Todo/日程/定时任务 tab 行为一致。
-  const tabButtonRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
+  // 顶部 Skills/MCP/记忆/预设切换按钮：支持 ←/→ 循环切换 + Home/End。
+  const tabButtonRefs = React.useRef<Array<HTMLButtonElement | null>>([])
   const tabList: Array<{ value: CapabilityTab; label: string; count: number }> =
     [
       { value: "skills", label: "Skills", count: data.skills.length },
-      ...(isTeamWorkspace
-        ? [
-            {
-              value: "marketplace" as const,
-              label: "团队市场",
-              count: marketSkills.length,
-            },
-          ]
-        : []),
       { value: "mcp", label: "MCP", count: mcpCount },
       { value: "memory", label: "记忆", count: memoryCount },
       { value: "presets", label: "预设", count: presetList.length },
@@ -237,74 +197,20 @@ export function AgentSkillsView(): React.ReactElement {
     [setTab, tabList],
   );
 
-  React.useEffect(() => {
-    if (tab === "marketplace" && isTeamWorkspace && teamWorkspaceId) {
-      setMarketLoading(true);
-      window.electronAPI.skillMarketplace
-        .listTeamSkills(teamWorkspaceId)
-        .then(setMarketSkills)
-        .catch(() => setMarketSkills([]))
-        .finally(() => setMarketLoading(false));
-    }
-  }, [tab, isTeamWorkspace, teamWorkspaceId]);
-
-  const filteredMarket = React.useMemo(() => {
-    if (!q) return marketSkills;
-    return marketSkills.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.slug.toLowerCase().includes(q) ||
-        s.description.toLowerCase().includes(q),
-    );
-  }, [marketSkills, q]);
-
-  const [publishingSlug, setPublishingSlug] = React.useState<string | null>(
-    null,
-  );
-
-  const handlePublish = React.useCallback(
-    async (skillSlug: string) => {
-      if (!isTeamWorkspace || !teamWorkspaceId) return;
-      setPublishingSlug(skillSlug);
-      try {
-        const result = await window.electronAPI.skillMarketplace.publish({
-          workspaceId: teamWorkspaceId,
-          workspaceSlug: data.workspaceSlug,
-          skillSlug,
-        });
-        if (result.success) {
-          toast.success(`已发布 ${skillSlug} 到团队市场`);
-          // 刷新市场列表
-          window.electronAPI.skillMarketplace
-            .listTeamSkills(teamWorkspaceId)
-            .then(setMarketSkills)
-            .catch(() => {});
-        }
-      } catch (e: any) {
-        toast.error(`发布失败: ${e.message}`);
-      } finally {
-        setPublishingSlug(null);
-      }
-    },
-    [isTeamWorkspace, teamWorkspaceId, data.workspaceSlug],
-  );
-
-  const skillKey = (skill: SkillMeta): string =>
-    skill.sourceSkillId && skill.actualSource !== "workspace"
-      ? `global:${skill.sourceSkillId}`
-      : `workspace:${skill.workspaceSkillId ?? skill.slug}`;
+  const skillKey = skillListKey;
   const selectedSkill =
     data.skills.find((s) => skillKey(s) === selectedSkillKey) ?? null;
-  // sourceSkillId 标识全局/元源；actualSource 只表示当前实际加载层，不能用来判断已关闭的全局条目。
+  // workspaceSkillId 标识工作区副本（含已关闭的）；actualSource 只表示当前实际加载层，
+  // 不能用来判断一个条目是不是全局定义。
   const selectedIsGlobal = Boolean(
-    selectedSkill?.sourceSkillId && selectedSkill.actualSource !== "workspace",
+    selectedSkill && skillKey(selectedSkill).startsWith("global:"),
   );
   const selectedIsBuiltin =
     selectedIsGlobal && selectedSkill?.sourceSkillType === "builtin-meta";
 
-  const openSkillFolder = (slug: string): void => {
-    if (data.skillsDir)
-      window.electronAPI.openFile(`${data.skillsDir}/${slug}`);
+  const openSkillFolder = (skill: SkillMeta): void => {
+    const target = skillDirectoryPath(skill, data.skillsDir);
+    if (target) window.electronAPI.openFile(target);
   };
 
   if (!data.hasWorkspace && !globalConfigOpen) {
@@ -496,7 +402,7 @@ export function AgentSkillsView(): React.ReactElement {
         onDomainChange={(value) => {
           if (globalConfigOpen)
             setGlobalConfigTab(value === "presets" ? "presets" : "skills");
-          else if (value !== "memory" || !isTeamWorkspace) setTab(value);
+          else setTab(value as CapabilityTab);
         }}
         onSearchChange={setSearch}
         onCreate={
@@ -554,73 +460,6 @@ export function AgentSkillsView(): React.ReactElement {
               importSkillRequestToken={globalImportSkillToken}
               createPresetRequestToken={globalCreatePresetToken}
             />
-          ) : tab === "marketplace" && isTeamWorkspace ? (
-            marketLoading ? (
-              <div className="py-20 text-center text-sm text-muted-foreground">
-                加载中...
-              </div>
-            ) : filteredMarket.length === 0 ? (
-              <div className="py-20 text-center text-sm text-muted-foreground">
-                <Store size={32} className="mx-auto mb-3 text-foreground/30" />
-                团队市场暂无技能
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {filteredMarket.map((skill) => (
-                  <div
-                    key={skill.slug}
-                    className="flex flex-col rounded-xl border border-border bg-card p-4"
-                  >
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <div className="flex-1 min-w-0">
-                        <h3 className="text-sm font-semibold truncate">
-                          {skill.name}
-                        </h3>
-                        <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
-                          {skill.description || "暂无描述"}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-auto pt-3">
-                      <span>v{skill.version}</span>
-                      <span>·</span>
-                      <span className="truncate">
-                        {skill.publishedBy || "未知"}
-                      </span>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        setInstallingSlug(skill.slug);
-                        try {
-                          await window.electronAPI.skillMarketplace.installTeamSkill(
-                            {
-                              workspaceId: teamWorkspaceId!,
-                              skillSlug: skill.slug,
-                              targetWorkspaceSlug: data.workspaceSlug,
-                            },
-                          );
-                          toast.success(`已安装 ${skill.name}`);
-                          bumpCapabilities((v) => v + 1);
-                        } catch (e: any) {
-                          toast.error(`安装失败: ${e.message}`);
-                        } finally {
-                          setInstallingSlug(null);
-                        }
-                      }}
-                      disabled={installingSlug === skill.slug}
-                      className="mt-3 flex h-7 w-full items-center justify-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-                    >
-                      {installingSlug === skill.slug ? (
-                        <RefreshCw size={12} className="animate-spin" />
-                      ) : (
-                        <Download size={12} />
-                      )}
-                      安装
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )
           ) : tab === "presets" ? (
             <AgentPresetSettings
               workspaceSlug={data.workspaceSlug}
@@ -651,9 +490,7 @@ export function AgentSkillsView(): React.ReactElement {
               onOpen={(skill) => setSelectedSkillKey(skillKey(skill))}
               onToggle={data.toggleSkill}
               onUpdate={data.updateSkill}
-              onPublish={isTeamWorkspace ? handlePublish : undefined}
               onPromote={(skill) => setPromoteSkill(skill)}
-              publishingSlug={publishingSlug}
             />
           ) : tab === "memory" ? (
             <WorkspaceMemoryTab
@@ -734,18 +571,14 @@ export function AgentSkillsView(): React.ReactElement {
             data.toggleSkill(
               selectedSkill.slug,
               enabled,
-              selectedSkill.actualSource === "workspace"
-                ? ""
-                : (selectedSkill.sourceSkillId ?? ""),
+              skillToggleSourceId(selectedSkill),
             )
           }
           onUpdate={() => selectedSkill && data.updateSkill(selectedSkill.slug)}
           onRequestDelete={() =>
             selectedSkill && setPendingDeleteSkill(selectedSkill)
           }
-          onOpenFolder={() =>
-            selectedSkill && openSkillFolder(selectedSkill.slug)
-          }
+          onOpenFolder={() => selectedSkill && openSkillFolder(selectedSkill)}
           onChanged={() => bumpCapabilities((v) => v + 1)}
         />
       )}
@@ -767,6 +600,7 @@ export function AgentSkillsView(): React.ReactElement {
           const ok = await data.deleteSkill(
             pendingDeleteSkill.slug,
             pendingDeleteSkill.name,
+            pendingDeleteSkill.workspaceSkillId,
           );
           setIsDeletingSkill(false);
           setPendingDeleteSkill(null);
@@ -1028,29 +862,20 @@ function SkillSection({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {skills.map((skill) => (
           <SkillCard
-            key={skill.sourceSkillId ?? skill.slug}
+            key={skillListKey(skill)}
             skill={skill}
-            isBuiltin={
-              skill.actualSource !== "workspace" &&
-              skill.sourceSkillType === "builtin-meta"
-            }
+            isBuiltin={isBuiltinReferenceSkill(skill)}
             updating={updatingSkill === skill.slug}
             onOpen={() => onOpen(skill)}
             onToggle={(enabled) =>
-              onToggle(
-                skill.slug,
-                enabled,
-                skill.actualSource === "workspace"
-                  ? ""
-                  : (skill.sourceSkillId ?? ""),
-              )
+              onToggle(skill.slug, enabled, skillToggleSourceId(skill))
             }
             onUpdate={() => onUpdate(skill.slug)}
             onPublish={onPublish ? () => onPublish(skill.slug) : undefined}
             publishing={publishingSlug === skill.slug}
             interactive={interactive}
             onPromote={
-              onPromote && title === "工作区 Skills"
+              onPromote && title === "工作区 Skills" && skill.enabled
                 ? () => onPromote(skill)
                 : undefined
             }

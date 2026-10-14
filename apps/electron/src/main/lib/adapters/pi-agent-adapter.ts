@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { stat as statAsync, writeFile as writeFileAsync } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type {
   AgentThinkingLevel,
@@ -63,7 +64,7 @@ import { createCodexFastModeExtension, withCodexFastModeServiceTier } from './pi
 import { createCodexRequestSettingsExtension } from './pi-codex-request-settings'
 import { createDeepSeekReasoningRequestExtension } from './pi-deepseek-reasoning-request-settings'
 import { createOpenAIReasoningRequestExtension } from './pi-openai-reasoning-request-settings'
-import { inferReasoningTransport, resolveReasoningProfile, calculatePiAutoCompactionReserveTokens } from '@profer/shared'
+import { inferReasoningTransport, isLocalOllamaBaseUrl, resolveReasoningProfile, calculatePiAutoCompactionReserveTokens } from '@profer/shared'
 import { mergeRuntimeEnv, type AgentRuntimeEnv } from '../agent-runtime-env'
 import { commandExecutionErrorCode, createCommandExecutionFailure, type CommandExecutionCallbacks, type CommandExecutionErrorKind, type CommandExecutionResult, type StructuredExecRequest } from '../command-execution'
 import {
@@ -170,12 +171,6 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   /** Passive lifecycle feed for Pi Host Harness; observers cannot control Session or queue prompts. */
   onHarnessLifecycle?: PiHarnessLifecycleObserver
   thinkingLevel?: AgentThinkingLevel
-  /**
-   * DeepSeek V4 思考总开关（已废弃：思考强度与开关统一由 thinkingLevel 驱动，
-   * 通过 createDeepSeekReasoningRequestExtension 注入 output_config.effort）。
-   * 保留字段仅为兼容 orchestrator 旧传参，adapter 不再消费。
-   */
-  deepSeekV4ThinkingEnabled?: boolean
   maxBudgetUsd?: number
   outputFormat?: JsonSchemaOutputFormat
   /** Proma 聚合的附加目录；Pi 内置工具 factory 不接收多 root 参数，编排层会把它们注入 systemPrompt。 */
@@ -288,15 +283,6 @@ function isNonNegativeFiniteNumber(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value >= 0
 }
 
-function isLocalOllamaBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false
-  try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase()
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
-  } catch {
-    return false
-  }
-}
 
 export function buildPiRemoteConnectionSettings(
   input: Pick<
@@ -2017,6 +2003,20 @@ function createPromaBashToolOptions(
   }
 }
 
+function createStrictWriteOperations() {
+  return {
+    async writeFile(path: string, content: string): Promise<void> {
+      await writeFileAsync(path, content, 'utf-8')
+    },
+    async mkdir(dir: string): Promise<void> {
+      const info = await statAsync(dir).catch(() => undefined)
+      if (!info?.isDirectory()) {
+        throw new Error(`Write target parent directory does not exist: ${dir}. Create it explicitly before writing.`)
+      }
+    },
+  }
+}
+
 function buildBuiltinToolDefinitions(
   sdk: PiSdk,
   sessionId: string,
@@ -2026,12 +2026,16 @@ function buildBuiltinToolDefinitions(
   onToolExecutionResult?: PiAgentQueryOptions['onToolExecutionResult'],
 ): ToolDefinition[] {
   const powerShellTool = createWindowsPowerShellToolDefinition(sdk, cwd, runtimeEnv, {}, sessionId)
+  const writeTool = sdk.createWriteToolDefinition(cwd, { operations: createStrictWriteOperations() })
   const definitions = [
     sdk.createReadToolDefinition(cwd),
     sdk.createBashToolDefinition(cwd, createPromaBashToolOptions(sessionId, runtimeEnv, onToolExecutionResult)),
     ...(powerShellTool ? [powerShellTool] : []),
     sdk.createEditToolDefinition(cwd),
-    sdk.createWriteToolDefinition(cwd),
+    {
+      ...writeTool,
+      description: 'Write content to a file. Creates the file if it does not exist, overwrites if it does. The parent directory must already exist; Profer will not create it implicitly.',
+    },
     sdk.createGrepToolDefinition(cwd),
     sdk.createFindToolDefinition(cwd),
     sdk.createLsToolDefinition(cwd),

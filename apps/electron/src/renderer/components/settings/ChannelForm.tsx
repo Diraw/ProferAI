@@ -32,12 +32,14 @@ import { cn } from '@/lib/utils'
 import { Button } from '@profer/ui/primitives/button'
 import { Input } from '@profer/ui/primitives/input'
 import {
+  PROVIDER_CAPABILITIES,
   PROVIDER_DEFAULT_AGENT_URLS,
   PROVIDER_DEFAULT_URLS,
   PROVIDER_LABELS,
   inferAgentRuntimeModes,
   isAgentEnabledForChannel,
   isChannelEnabledForRuntime,
+  resolveProviderNativeProtocol,
 } from '@profer/shared'
 import type {
   AgentRuntimeMode,
@@ -102,49 +104,18 @@ const PROVIDER_SELECT_OPTIONS = PROVIDER_OPTIONS.map((p) => {
   return { value: p, label, icon }
 })
 
-/** 各供应商的 Chat 端点路径，用于 Base URL 预览 */
-const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = {
-  anthropic: '/v1/messages',
-  'anthropic-compatible': '/v1/messages',
-  openai: '/chat/completions',
-  'openai-responses': '/responses',
-  deepseek: '/chat/completions',
-  google: '/v1beta/models/{model}:generateContent',
-  'kimi-api': '/messages',
-  'kimi-coding': '/messages',
-  'opencode-go-openai': '/chat/completions',
-  zhipu: '/chat/completions',
-  'zhipu-coding': '/messages',
-  'zhipu-coding-team': '/messages',
-  'ark-coding-plan': '/messages',
-  minimax: '/v1/messages',
-  doubao: '/chat/completions',
-  qwen: '/chat/completions',
-  'qwen-anthropic': '/messages',
-  xiaomi: '/v1/messages',
-  'xiaomi-token-plan': '/v1/messages',
-  'openai-codex': '',
-  xai: '/responses',
-  ollama: '/v1/chat/completions',
-  custom: '/chat/completions',
-}
+/** 各供应商的 Chat 端点路径，用于 Base URL 预览。从能力描述符派生，不再单独维护。 */
+const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = Object.fromEntries(
+  (Object.keys(PROVIDER_CAPABILITIES) as ProviderType[]).map((p) => [p, PROVIDER_CAPABILITIES[p].chatPath]),
+) as Record<ProviderType, string>
 
-/** 走 Anthropic 协议的供应商集合（共用 /v1/messages 端点）；Ollama 仅用于 Agent。
+/** Chat 维度走 Anthropic 协议的供应商集合（共用 /v1/messages 形态端点）。
+ * 从能力描述符的 chatProtocol 派生；Ollama 仅用于 Agent。
  * 注意：DeepSeek 的 Chat 走 OpenAI 兼容协议（/chat/completions），只有 Agent 走
  * Anthropic 兼容入口，因此不在此集合内。 */
-const ANTHROPIC_PROTOCOL_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>([
-  'anthropic',
-  'anthropic-compatible',
-  'kimi-api',
-  'kimi-coding',
-  'zhipu-coding',
-  'zhipu-coding-team',
-  'ark-coding-plan',
-  'qwen-anthropic',
-  'minimax',
-  'xiaomi',
-  'xiaomi-token-plan',
-])
+const ANTHROPIC_PROTOCOL_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>(
+  (Object.keys(PROVIDER_CAPABILITIES) as ProviderType[]).filter((p) => PROVIDER_CAPABILITIES[p].chatProtocol === 'anthropic'),
+)
 
 /** 根据 Ollama 地址提示请求是否会离开本机。 */
 function getOllamaNetworkScope(baseUrl: string): string {
@@ -286,8 +257,18 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
    */
   const piEnabled = agentRuntimes.includes('pi')
   const claudeEnabled = provider !== 'xai' && provider !== 'openai-codex' && agentRuntimes.includes('claude')
+  // Pi 实际消费哪个地址由协议决定：Anthropic 协议 provider 在 Pi 下吃 agentBaseUrl
+  // （与主进程 resolveRuntimeBaseUrl 一致），因此勾 Pi 的 Anthropic 协议渠道也必须
+  // 暴露 Anthropic 端点字段——否则它的 Pi 请求地址来自一个 UI 上不可见的字段。
+  const piConsumesAnthropicEndpoint = piEnabled && resolveProviderNativeProtocol(provider, baseUrl) === 'anthropic-messages'
   const showOpenAIEndpoint = piEnabled || !claudeEnabled
-  const showAnthropicEndpoint = claudeEnabled
+  const showAnthropicEndpoint = claudeEnabled || piConsumesAnthropicEndpoint
+  // 端点字段标签按协议语义动态化，不再固定叫「OpenAI 端点」：Anthropic 协议渠道
+  // 的主地址其实是 Anthropic 端点，写「OpenAI 端点」是误导（「Pi 必须配 OpenAI 端点」
+  // 这个表象的根源）。
+  const primaryEndpointLabel = PROVIDER_CAPABILITIES[provider].chatProtocol === 'anthropic'
+    ? 'Anthropic 端点'
+    : 'OpenAI 端点'
   const [apiKey, setApiKey] = React.useState('')
   const keyEditedRef = React.useRef(false)
   const keyRevisionRef = React.useRef(0)
@@ -606,11 +587,14 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     if (!options?.keepPreviousResult) setFetchResult(null)
 
     try {
+      // 只配置 Claude 的渠道按 Claude 端点拉取目录；混合或 Pi 渠道保持主地址。
+      const claudeOnly = agentRuntimes.length === 1 && agentRuntimes[0] === 'claude'
       const result = await window.electronAPI.fetchModels({
         requestId: networkId,
         provider,
         baseUrl,
         apiKey,
+        ...(claudeOnly ? { runtime: 'claude' as const, agentBaseUrl } : {}),
       })
 
       if (!mountedRef.current || !isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) return
@@ -627,7 +611,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       activeNetworkRequestsRef.current.delete(networkId)
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) setFetchingModels(false)
     }
-  }, [canDiscoverModels, provider, baseUrl, apiKey])
+  }, [canDiscoverModels, provider, baseUrl, apiKey, agentRuntimes, agentBaseUrl])
 
   /** 手动「从供应商获取」：覆盖上一次结果提示，并记下尝试键避免与自动发现重复请求 */
   const handleFetchModels = (): void => {
@@ -716,7 +700,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     try {
       const catalog = await window.electronAPI.listCodexModels()
       if (!mountedRef.current || !isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) return
-      setModels((previous) => applyModelDiscoveryResult(previous, { success: true, message: 'Pi Codex 模型目录', models: catalog }))
+      setModels((previous) => applyModelDiscoveryResult(previous, { success: true, message: 'Pi Codex 模型目录', models: catalog }, 'builtin-catalog'))
       setFetchResult({ success: true, message: 'Pi Codex 模型目录（账号可用性以实际订阅为准）', models: catalog })
     } catch {
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) {
@@ -733,7 +717,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     try {
       const catalog = await window.electronAPI.listXaiModels()
       if (!mountedRef.current || !isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) return
-      setModels((previous) => applyModelDiscoveryResult(previous, { success: true, message: 'Pi xAI 模型目录', models: catalog }))
+      setModels((previous) => applyModelDiscoveryResult(previous, { success: true, message: 'Pi xAI 模型目录', models: catalog }, 'builtin-catalog'))
       setFetchResult({ success: true, message: 'Pi xAI 模型目录（账号可用性以实际订阅为准）', models: catalog })
     } catch {
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) setFetchResult({ success: false, message: 'xAI 模型目录读取失败，请重试', models: [] })
@@ -1029,7 +1013,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
           />
           {showOpenAIEndpoint && provider !== 'openai-codex' && (
             <SettingsInput
-              label="OpenAI 端点"
+              label={primaryEndpointLabel}
               value={baseUrl}
               onChange={(value) => { discoveryRequestRef.current += 1; testRequestRef.current += 1; setBaseUrl(value) }}
               placeholder="https://api.example.com/v1"
@@ -1054,10 +1038,10 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               onChange={(value) => { agentBaseUrlEditedRef.current = true; setAgentBaseUrl(value) }}
               placeholder={PROVIDER_DEFAULT_AGENT_URLS[provider]}
               description={provider === 'deepseek'
-                ? 'Claude 内核使用；留空自动推导：官方地址用官方入口，第三方地址沿用 OpenAI 端点'
+                ? 'Claude/Pi 内核使用；留空自动推导：官方地址用官方入口，第三方地址沿用主地址'
                 : PROVIDER_DEFAULT_AGENT_URLS[provider]
-                  ? 'Claude 内核使用；留空用官方默认入口'
-                  : 'Claude 内核使用；留空沿用渠道的 OpenAI 端点'}
+                  ? 'Claude/Pi 内核使用；留空用官方默认入口'
+                  : 'Claude/Pi 内核使用；留空沿用主地址'}
             />
           )}
           {/* API Key + 测试连接同行 */}

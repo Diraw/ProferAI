@@ -1681,6 +1681,23 @@ export function getGroupId(group: MessageGroup): string {
 }
 
 /**
+ * 导航条目的稳定匹配键：`${role}:${subtype}:${createdAt}`。
+ *
+ * 主进程的全量导航索引与渲染层会各自算一次，用于把两侧的行对上号——因为系统消息
+ * （interruption_record 等）在磁盘上没有 uuid，渲染层的 getGroupId 只能回退到
+ * 会话顺序相关的计数器 id，主进程复现不了。匹配键只依赖消息自身字段，两侧必然一致。
+ */
+export function getGroupNavKey(group: MessageGroup): string {
+  const role = group.type === 'user' ? 'user' : group.type === 'system' ? 'status' : 'assistant'
+  const anchor = (group.type === 'assistant-turn'
+    ? group.assistantMessages[0]
+    : group.message) as unknown as Record<string, unknown> | undefined
+  const subtype = typeof anchor?.subtype === 'string' ? anchor.subtype : ''
+  const createdAt = typeof anchor?._createdAt === 'number' ? String(anchor._createdAt) : ''
+  return `${role}:${subtype}:${createdAt}`
+}
+
+/**
  * 会话最后一条用户消息的 group id。
  *
  * Goal 自动迭代分隔条不是用户发言，不计入；供「重新生成」入口判定只挂在这一条下。
@@ -1733,18 +1750,20 @@ export function getGroupPreview(group: MessageGroup): string {
 
 function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, onRegenerateLastUserMessage, isStreaming, stoppedByUser, sessionModelId, showThinking, isLatestAssistantTurn }: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
+  // 主进程导航索引与本地 DOM 的共同匹配键（无 uuid 的系统消息靠它对上号）。
+  const navKey = getGroupNavKey(group)
 
   if (group.type === 'user') {
     if (isGoalIterationMessage(group.message)) {
       const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
       return (
-        <div data-message-id={groupId} data-message-role="goal-iteration">
+        <div data-message-id={groupId} data-message-nav-key={navKey} data-message-role="goal-iteration">
           <GoalIterationDivider iteration={typeof iteration === 'number' ? iteration : undefined} />
         </div>
       )
     }
     return (
-      <div data-message-id={groupId} data-message-role="user">
+      <div data-message-id={groupId} data-message-nav-key={navKey} data-message-role="user">
         <UserInputMessage message={group.message} basePath={basePath} basePaths={basePaths} onRegenerate={onRegenerateLastUserMessage} />
       </div>
     )
@@ -1752,13 +1771,13 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
 
   if (group.type === 'system') {
     const subtype = group.message.subtype
-    if (subtype === 'compact_boundary') return <div data-message-id={groupId}><CompactBoundaryDivider /></div>
+    if (subtype === 'compact_boundary') return <div data-message-id={groupId} data-message-nav-key={navKey}><CompactBoundaryDivider /></div>
     // `compacting` remains in the message stream to drive live state, but its sole
     // visible indicator is rendered at the list tail by AgentMessages from isCompacting.
     if (subtype === 'compacting') return null
-    if (subtype === 'permission_denied') return <div data-message-id={groupId}><PermissionDeniedNotice message={group.message} /></div>
-    if (subtype === 'interruption_record') return <div data-message-id={groupId}><InterruptionRecordNotice message={group.message} /></div>
-    if (subtype === 'skill_routing_notice') return <div data-message-id={groupId}><SkillRoutingNotice message={group.message} /></div>
+    if (subtype === 'permission_denied') return <div data-message-id={groupId} data-message-nav-key={navKey}><PermissionDeniedNotice message={group.message} /></div>
+    if (subtype === 'interruption_record') return <div data-message-id={groupId} data-message-nav-key={navKey}><InterruptionRecordNotice message={group.message} /></div>
+    if (subtype === 'skill_routing_notice') return <div data-message-id={groupId} data-message-nav-key={navKey}><SkillRoutingNotice message={group.message} /></div>
     return null
   }
 
@@ -1768,6 +1787,7 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
   return (
     <div
       data-message-id={groupId}
+      data-message-nav-key={navKey}
       data-message-role="assistant"
       {...(forkMessageId ? { 'data-message-fork-id': forkMessageId } : {})}
     >

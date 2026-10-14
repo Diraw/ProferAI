@@ -6,7 +6,7 @@
 
 import * as React from 'react'
 import { PluginSidebarEntries } from '@/components/plugins/PluginEntries'
-import { PanelLeftClose, Plus, Search, FolderOpen, LogIn, Archive, ArchiveRestore, ArrowLeft, Settings } from 'lucide-react'
+import { PanelLeftClose, Plus, Search, FolderOpen, Archive, ArchiveRestore, ArrowLeft, Settings } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
 import { Popover, PopoverTrigger, PopoverContent } from '@profer/ui/primitives/popover'
@@ -20,7 +20,6 @@ import { getRelatedSessionSummary, getSessionTreeStatus, treeContainsSessionId }
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { useCloseTab } from '@/hooks/useCloseTab'
 import type { SidebarModel } from './use-left-sidebar'
-import { TEAM_WORKSPACE_UI_ENABLED } from '@/lib/product-feature-flags'
 
 export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement {
   const {
@@ -47,6 +46,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     handleRequestDelete,
     handleRename,
     handleRegenerateConversationTitle,
+    regeneratingConversationTitleIds,
     handleTogglePin,
     handleToggleArchive,
     pinnedAgentSessionTrees,
@@ -66,9 +66,6 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     relativeTimeNow,
     workspaceSortMode,
     handleCycleWorkspaceSort,
-    authStatus,
-    accountCaps,
-    handleStartJoinWorkspace,
     handleStartCreateProject,
     creatingProject,
     setCreatingProject,
@@ -218,6 +215,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   onRequestDelete={handleRequestDelete}
                   onRename={handleRename}
                   onRegenerateTitle={handleRegenerateConversationTitle}
+                  regeneratingTitle={regeneratingConversationTitleIds.has(conversation.id)}
                   onTogglePin={handleTogglePin}
                   onToggleArchive={handleToggleArchive}
                   onCloseTab={() => requestCloseTab(tab.id)}
@@ -278,6 +276,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                         onRequestDelete={handleRequestDelete}
                         onRename={handleRename}
                         onRegenerateTitle={handleRegenerateConversationTitle}
+                        regeneratingTitle={regeneratingConversationTitleIds.has(conv.id)}
                         onTogglePin={handleTogglePin}
                         onToggleArchive={handleToggleArchive}
                       />
@@ -312,6 +311,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                       onRequestDelete={handleRequestDelete}
                       onRename={handleRename}
                       onRegenerateTitle={handleRegenerateConversationTitle}
+                      regeneratingTitle={regeneratingConversationTitleIds.has(conv.id)}
                       onTogglePin={handleTogglePin}
                       onToggleArchive={handleToggleArchive}
                     />
@@ -472,22 +472,6 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   当前{WORKSPACE_SORT_LABEL[workspaceSortMode]}排序，点击切换排序方式
                 </TooltipContent>
               </Tooltip>
-              {/* 团队版功能入口（登录且非免费档才展示） */}
-              {TEAM_WORKSPACE_UI_ENABLED && authStatus.isLoggedIn && accountCaps.membershipTier !== 'free' && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={handleStartJoinWorkspace}
-                      className="size-6 flex items-center justify-center rounded-md text-foreground/35 hover:bg-foreground/[0.06] hover:text-foreground/60 transition-colors titlebar-no-drag"
-                      aria-label="加入工作区"
-                    >
-                      <LogIn size={12} />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">加入团队工作区</TooltipContent>
-                </Tooltip>
-              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
@@ -603,6 +587,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                         onRequestDelete={handleRequestDelete}
                         onRename={handleRename}
                         onRegenerateTitle={handleRegenerateConversationTitle}
+                        regeneratingTitle={regeneratingConversationTitleIds.has(conv.id)}
                         onTogglePin={handleTogglePin}
                         onToggleArchive={handleToggleArchive}
                       />

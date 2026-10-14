@@ -201,8 +201,6 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId)
   const workspaceSlug = currentWorkspace?.slug
-  const isTeamWorkspace = currentWorkspace?.type === 'team'
-  const teamWorkspaceId = isTeamWorkspace ? (currentWorkspaceId ?? undefined) : undefined
 
   // 附加目录列表（会话级）
   const attachedDirsMap = useAtomValue(agentAttachedDirectoriesMapAtom)
@@ -805,7 +803,7 @@ export function SidePanel({ sessionId, sessionPath, activeTab, onTabChange, widt
                       {hasWorkspaceAttachedItems && (
                         <div className="text-[11px] font-medium text-muted-foreground mb-1 px-3 pt-2">工作文件（存储于该工作区目录）</div>
                       )}
-                      <FileBrowser rootPath={workspaceFilesPath!} hideToolbar embedded hideEmpty={hasWorkspaceAttachedItems} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} workspaceId={teamWorkspaceId} workspaceSlug={workspaceSlug as string | undefined} />
+                      <FileBrowser rootPath={workspaceFilesPath!} hideToolbar embedded hideEmpty={hasWorkspaceAttachedItems} onAddToChat={handleAddToChat} onFilePreview={handleFilePreview} />
                     </>
                   )}
                   <FileDropZone

@@ -1,26 +1,22 @@
 /**
  * 会话索引读取（electron-free）。
  *
- * 与主进程 agent-session-manager.ts 的 readIndex/listAgentSessions 等价，
+ * 与主进程共用 @profer/session-core 的 normalizeSessionIndexData 做格式归一，
  * 但不依赖 electron——直接读 <configDir>/agent-sessions.json。CLI 只做只读，
- * 不写索引（导出/清洗不修改用户数据）。
+ * 不写索引（导出/清洗不修改用户数据），因此不做主进程的清理回写。
  */
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import type { AgentSessionMeta } from '@profer/shared'
+import { normalizeSessionIndexData, type SessionIndexData } from '@profer/session-core'
 import { getSessionsIndexPath, getSessionMessagesPath, type PathOptions } from './paths'
-
-interface AgentSessionsIndex {
-  version: number
-  sessions: AgentSessionMeta[]
-}
 
 /** 读取会话索引；文件不存在或损坏时返回空列表。 */
 export function readSessionIndex(opts: PathOptions = {}): AgentSessionMeta[] {
   const indexPath = getSessionsIndexPath(opts)
   if (!existsSync(indexPath)) return []
   try {
-    const data = JSON.parse(readFileSync(indexPath, 'utf-8')) as AgentSessionsIndex
-    return Array.isArray(data?.sessions) ? data.sessions : []
+    const data = JSON.parse(readFileSync(indexPath, 'utf-8')) as SessionIndexData
+    return normalizeSessionIndexData(data).index.sessions
   } catch {
     return []
   }

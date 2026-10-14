@@ -51,9 +51,7 @@ mock.module('../../domains/credits/credits-api', () => ({
 const { CreditsSettings } = await import('./CreditsSettings')
 const { SubscriptionSettings } = await import('./SubscriptionSettings')
 const { DataManagementSettings } = await import('./DataManagementSettings')
-const { TeamWorkspaceSettings } = await import('./TeamWorkspaceSettings')
 const { creditsBalanceAtom, creditsLoadingAtom, subscriptionAtom } = await import('../../domains/credits/credits-state')
-const { teamWorkspacesAtom } = await import('../../atoms/team-atoms')
 const { agentWorkspacesAtom, agentSDKMessagesCacheAtom, resolvedBlobMessagesAtom, currentAgentSessionIdAtom, agentMessageRefreshAtom } = await import('../../atoms/agent-atoms')
 
 type Props = Record<string, unknown>
@@ -132,9 +130,9 @@ function deferred<T>() {
   let reject!: (reason: Error) => void
   return { promise: new Promise<T>((yes, no) => { resolve = yes; reject = no }), resolve: (value: T) => resolve(value), reject: (reason: Error) => reject(reason) }
 }
-const workspace = (id: string, role: 'owner' | 'member' = 'owner') => ({ id, name: id, slug: id, type: 'team' as const, role, createdAt: 1, updatedAt: 1 })
+const workspace = (id: string) => ({ id, name: id, slug: id, type: 'personal' as const, createdAt: 1, updatedAt: 1 })
 const compactFixture = { scannedFiles: 1, rewrittenFiles: 1, rewrittenLines: 2, skippedFiles: 0, failedFiles: 0, charsBefore: 1000, charsAfter: 100, blobRefs: 1, blobCount: 1, blobBytes: 900, errors: [], backupDir: '/fixture/backup' }
-function api(overrides: Props = {}, team: Props = {}) {
+function api(overrides: Props = {}) {
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { electronAPI: {
     getSettings: async () => ({}), updateSettings: async () => {},
     getStorageStats: async () => ({ totalBytes: 1024, calculatedAt: 1, categories: [{ key: 'temp-files', label: '临时文件', bytes: 1024, count: 1, orphanBytes: 0, orphanCount: 0, hasOrphans: false }] }),
@@ -143,7 +141,6 @@ function api(overrides: Props = {}, team: Props = {}) {
     previewSessionCompaction: async () => compactFixture, applySessionCompaction: async () => compactFixture,
     listAgentWorkspaces: async () => [], migrationSaveFileDialog: async () => '/fixture/export.profer-share', migrationExportV2: async () => ({ success: true, filePath: '/fixture/export.profer-share' }),
     auth: { getServerInfo: async () => [] },
-    team: { listWorkspaces: async () => [workspace('A'), workspace('B')], getMembers: async () => [], listInvitations: async () => [], getStats: async () => ({ totalSize: 0, fileCount: 0, dirCount: 0, memberCount: 0, onlineCount: 0, pendingInvites: 0 }), removeMember: async () => {}, transferOwnership: async () => {}, deleteWorkspace: async () => {}, leaveWorkspace: async () => {}, createInvitation: async () => ({ token: 'fixture-token' }), ...team },
     ...overrides,
   } } })
 }
@@ -371,91 +368,7 @@ describe('DataManagementSettings 迁移与清理安全', () => {
   })
 })
 
-describe('TeamWorkspaceSettings 工作区隔离', () => {
-  test('A/B/A 交错加载丢弃旧成员、邀请、统计，错误可重试；选择清空确认名称', async () => {
-    const firstA = deferred<unknown[]>()
-    const firstStats = deferred<{ totalSize: number; fileCount: number; dirCount: number; memberCount: number; onlineCount: number; pendingInvites: number } | null>()
-    let aReads = 0
-    api({}, { getMembers: (id: string) => id === 'A' && ++aReads === 1 ? firstA.promise : Promise.resolve([{ userId: 'new', displayName: 'New member', role: 'member' }]), getStats: (id: string) => id === 'A' && aReads === 1 ? firstStats.promise : Promise.resolve(null), listInvitations: fail })
-    const host = mount(TeamWorkspaceSettings); await tick(); host.render()
-    change(host.field('选择团队工作区'), 'A'); host.render()
-    change(host.field('删除工作区名称确认'), 'A'); host.render()
-    change(host.field('选择团队工作区'), 'B'); host.render()
-    change(host.field('选择团队工作区'), 'A'); host.render()
-    await tick(); host.render()
-    firstA.resolve([{ userId: 'old', displayName: 'Old member', role: 'owner' }]); firstStats.resolve({ totalSize: 9999, fileCount: 9999, dirCount: 0, memberCount: 0, onlineCount: 0, pendingInvites: 0 }); await tick(); host.render()
-    expect(host.text()).toContain('New member')
-    expect(host.text()).not.toContain('Old member')
-    expect(host.text()).not.toContain('9999')
-    expect(host.field('删除工作区名称确认').value).toBe('')
-    expect(host.text()).toContain('加载失败，未将失败当作空数据')
-    expect(host.text()).toContain('邀请记录暂不可用')
-    click(host.button('重试工作区数据')); await tick(); host.render()
-    expect(aReads).toBe(3)
-  })
-  test('移除、转让、删除明确确认；失败留在确认可重试；转让成功更新角色', async () => {
-    let removals = 0, transfers = 0, deletes = 0
-    api({}, { getMembers: async () => [{ userId: 'admin', displayName: 'Admin fixture', role: 'admin' }], removeMember: async () => { if (++removals === 1) throw new Error('fixture remove failure') }, transferOwnership: async () => { transfers += 1 }, deleteWorkspace: async () => { deletes += 1 } })
-    const host = mount(TeamWorkspaceSettings); await tick(); host.render()
-    change(host.field('选择团队工作区'), 'A'); host.render(); await tick(); host.render()
-    click(host.button('移除成员Admin fixture')); host.render(); expect(removals).toBe(0)
-    click(host.button('确认执行')); await tick(); host.render(); expect(removals).toBe(1)
-    click(host.button('确认执行')); await tick(); host.render(); expect(removals).toBe(2)
-    change(host.field('选择团队工作区'), 'B'); host.render(); await tick(); host.render()
-    change(host.field('删除工作区名称确认'), 'B'); host.render()
-    click(host.button('删除')); host.render(); expect(deletes).toBe(0)
-    click(host.button('确认执行')); await tick(); host.render(); expect(deletes).toBe(1)
-    expect(store.get(teamWorkspacesAtom).some((ws) => ws.id === 'B')).toBe(false)
-    change(host.field('选择团队工作区'), 'A'); host.render(); await tick(); host.render()
-    click(host.button('转让拥有者给Admin fixture')); host.render(); expect(transfers).toBe(0)
-    click(host.button('确认执行')); await tick(); host.render(); expect(transfers).toBe(1)
-    expect(store.get(teamWorkspacesAtom).find((ws) => ws.id === 'A')!.role).toBe('admin')
-  })
-  test('远程空列表不回退为旧团队；列表失败标识本地快照且加入入口仍可用', async () => {
-    store.set(teamWorkspacesAtom, [workspace('old')])
-    api({}, { listWorkspaces: async () => [] })
-    const host = mount(TeamWorkspaceSettings); await tick(); host.render()
-    expect(store.get(teamWorkspacesAtom)).toHaveLength(0)
-    expect(host.text()).toContain('尚未加入团队工作区')
-    expect(host.field('团队工作区邀请码')).toBeDefined()
-    api({ listAgentWorkspaces: async () => [workspace('cached')] }, { listWorkspaces: fail })
-    click(host.button('刷新工作区')); await tick(); host.render()
-    expect(host.text()).toContain('当前显示本地快照')
-    expect(host.button('新建').disabled).toBe(true)
-  })
-  test('生成邀请后的旧刷新响应不能覆盖 A/B/A 返回后的新邀请', async () => {
-    const old = deferred<unknown[]>()
-    let reads = 0
-    api({}, { listInvitations: async (id: string) => {
-      reads += 1
-      if (reads === 2) return old.promise
-      return id === 'A' ? [{ id: 'new', workspaceId: 'A', inviterName: 'New fixture', inviteeEmail: 'new@fixture.invalid', role: 'member', status: 'accepted', token: 'fixture', expiresAt: 1 }] : []
-    } })
-    const host = mount(TeamWorkspaceSettings); await tick(); host.render()
-    change(host.field('选择团队工作区'), 'A'); host.render(); await tick(); host.render()
-    click(host.button('生成邀请码')); await tick(); host.render()
-    change(host.field('选择团队工作区'), 'B'); host.render()
-    change(host.field('选择团队工作区'), 'A'); host.render(); await tick(); host.render()
-    old.resolve([{ id: 'old', workspaceId: 'A', inviterName: 'Old fixture', inviteeEmail: 'old@fixture.invalid', role: 'member', status: 'accepted', token: 'old', expiresAt: 1 }]); await tick(); host.render()
-    expect(host.text()).toContain('new@fixture.invalid')
-    expect(host.text()).not.toContain('old@fixture.invalid')
-  })
-  test('通知配置加载失败可重试，保存失败保持原值且不写伪默认', async () => {
-    let reads = 0, writes = 0
-    api({}, { getNotificationSettings: async () => { if (++reads === 1) throw new Error('fixture notification failure'); return { enabled: true, fileUpload: true, fileDelete: true, memberJoin: true, memberLeave: true, invitation: true } }, updateNotificationSettings: async () => { writes += 1; throw new Error('fixture save failure') } })
-    const parent = mount(TeamWorkspaceSettings); await tick(); parent.render()
-    change(parent.field('选择团队工作区'), 'A'); parent.render(); await tick(); parent.render()
-    const node = parent.elements().find((item) => typeof item.type === 'function' && item.type.name === 'NotificationSettingsRow')!
-    const host = mount(node.type as () => React.ReactElement); await tick(); host.render()
-    expect(host.text()).toContain('通知设置加载失败'); expect(writes).toBe(0)
-    click(host.button('重试通知配置')); await tick(); host.render()
-    ;(host.field('启用桌面通知').onCheckedChange as (value: boolean) => void)(false); await tick(); host.render()
-    expect(host.field('启用桌面通知').checked).toBe(true)
-    expect(errors.at(-1)).toContain('保留原设置')
-  })
-})
-
-test('SSR 分层/响应式结构与团队隐藏入口契约保持', () => {
+test('SSR 分层/响应式结构保持', () => {
   api(); store.set(creditsBalanceAtom, null); store.set(subscriptionAtom, null)
   const data = renderToStaticMarkup(<DataManagementSettings />)
   expect(data).toContain('备份与迁移'); expect(data).toContain('磁盘与清理')
@@ -463,10 +376,6 @@ test('SSR 分层/响应式结构与团队隐藏入口契约保持', () => {
   expect(data).toContain('aria-pressed="true"')
   const subscription = renderToStaticMarkup(<SubscriptionSettings />)
   expect(subscription).toContain('minmax(min(100%,180px),1fr)')
-  const team = renderToStaticMarkup(<TeamWorkspaceSettings />)
-  expect(team).toContain('aria-label="选择团队工作区"')
   const panel = readFileSync(new URL('./SettingsPanel.tsx', import.meta.url), 'utf8')
-  expect(panel).toContain('TEAM_WORKSPACE_UI_ENABLED')
-  const flags = readFileSync(new URL('../../lib/product-feature-flags.ts', import.meta.url), 'utf8')
-  expect(flags).toContain('TEAM_WORKSPACE_UI_ENABLED = false')
+  expect(panel).not.toContain('team management settings')
 })

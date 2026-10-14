@@ -49,6 +49,7 @@ import type {
 } from '@profer/shared'
 import type { AgentPreset, AgentRuntime } from '@profer/shared'
 import { DEFAULT_PRESET_ID } from '@profer/shared'
+import { selectableAgentPresets } from '@/components/agent/preset-selector-utils'
 
 import {
   canPersistDraft, isReadyToRun, listMissingFields, getDraftSignature,
@@ -171,6 +172,8 @@ export function AutomationFormView(): React.ReactElement | null {
   const [runningNow, setRunningNow] = React.useState(false)
   const [feishuBindings, setFeishuBindings] = React.useState<FeishuChatBinding[]>([])
   const [presets, setPresets] = React.useState<AgentPreset[]>([])
+  // 停用的预设不能出现在选择菜单中（与会话预设选择器同一规则）
+  const selectablePresets = React.useMemo(() => selectableAgentPresets(presets), [presets])
   const [defaultPresetId, setDefaultPresetId] = React.useState<string>(DEFAULT_PRESET_ID)
   const presetRequestIdRef = React.useRef(0)
   const [saveStatus, setSaveStatus] = React.useState<SaveStatus>('idle')
@@ -1028,9 +1031,9 @@ export function AutomationFormView(): React.ReactElement | null {
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={PRESET_FOLLOW_DEFAULT}>
-                  跟随工作区默认（{presets.find((p) => p.id === defaultPresetId)?.name ?? '标准'}）
+                  跟随工作区默认（{selectablePresets.find((p) => p.id === defaultPresetId)?.name ?? '标准'}）
                 </SelectItem>
-                {presets.map((preset) => (
+                {selectablePresets.map((preset) => (
                   <SelectItem key={preset.id} value={preset.id}>
                     {preset.name}{preset.isBuiltin ? '（内置）' : ''}
                   </SelectItem>

@@ -3,7 +3,7 @@
  *
  * 负责渠道的 CRUD 操作、API Key 加密/解密、连接测试。
  * 使用 Electron safeStorage 进行 API Key 加密（底层使用 OS 级加密）。
- * 数据持久化到 ~/.proma/channels.json。
+ * 数据持久化到 ~/.profer/channels.json（历史 ~/.proma 路径由 config-paths 迁移）。
  */
 
 import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs'
@@ -24,7 +24,7 @@ import type {
   ProviderType,
   XaiOAuthCredentials,
 } from '@profer/shared'
-import { PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApiToken, isAgentEnabledForChannel, isCodexCredentialExpired, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
+import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApiToken, isAgentEnabledForChannel, isCodexCredentialExpired, isLocalOllamaBaseUrl, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveProviderNativeProtocol, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { assertSdkBaseUrlSupportsRouting, isAnthropicShapedEndpoint, resolveAnthropicMessagesUrl, resolveAnthropicModelsUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
@@ -106,11 +106,31 @@ export function resolveChannelAgentBaseUrl(channel: Pick<Channel, 'provider' | '
 }
 
 /**
+ * Chat 抓取器/测试器分派：把 provider 归类到具体请求实现。
+ * 规则与能力描述符 chatProtocol 对齐（单一事实源），三处 switch（testChannel /
+ * testChannelDirect / fetchModels）共用，不再各写一份 provider 枚举。
+ * ollama 与 google 有独立实现，单列；deepseek 走 OpenAI 兼容（chatProtocol=openai）。
+ */
+type ChatAdapterKind = 'anthropic' | 'openai' | 'google' | 'ollama' | 'unsupported'
+function resolveChatAdapterKind(provider: ProviderType): ChatAdapterKind {
+  // openai-codex 走 OAuth 内置目录，没有可用的 vendor Chat/抓取 API，原 switch
+  // 落 default 返回「不支持」；分派表保持这个行为。
+  if (provider === 'openai-codex') return 'unsupported'
+  if (provider === 'ollama') return 'ollama'
+  if (provider === 'google') return 'google'
+  return PROVIDER_CAPABILITIES[provider].chatProtocol === 'anthropic' ? 'anthropic' : 'openai'
+}
+
+/**
  * 合并服务端下发的渠道模型与本地状态。
  *
  * 服务端只负责「有哪些模型」，以下两项属于用户本地决定，不得被同步洗掉：
  * - 模型级 enabled（用户启停）
  * - 模型上的 1M 勾选（context1m）
+ *
+ * 注意：这里的 localModels 只会是「同 ID 的服务端渠道」上次同步留下的本地记录
+ * （官方/模型族渠道在 UI 上没有 1M 开关，用户改不了 context1m），
+ * 不会与用户自配渠道（id 不同）发生交叉。
  */
 export function mergeServerChannelModels(
   serverModels: readonly Partial<ChannelModel>[],
@@ -161,7 +181,7 @@ function assertChannelsConfig(value: unknown): asserts value is ChannelsConfig {
       if (!isRecord(model) || typeof model.id !== 'string' || !model.id || modelIds.has(model.id)
         || typeof model.name !== 'string' || typeof model.enabled !== 'boolean'
         || (model.context1m !== undefined && typeof model.context1m !== 'boolean')
-        || (model.source !== undefined && model.source !== 'manual' && model.source !== 'fetched')) {
+        || (model.source !== undefined && model.source !== 'manual' && model.source !== 'fetched' && model.source !== 'builtin-catalog')) {
         throw new Error('渠道配置包含无效模型')
       }
       modelIds.add(model.id)
@@ -992,29 +1012,12 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
   const proxyUrl = await getEffectiveProxyUrl()
 
   try {
-    switch (channel.provider) {
+    // ollama 无独立测试实现，沿用 Anthropic 兼容测试（与原 switch 一致）。
+    const adapterKind = channel.provider === 'ollama' ? 'anthropic' : resolveChatAdapterKind(channel.provider)
+    switch (adapterKind) {
       case 'anthropic':
-      case 'anthropic-compatible':
-      case 'kimi-api':
-      case 'kimi-coding':
-      case 'zhipu-coding':
-      case 'zhipu-coding-team':
-      case 'ark-coding-plan':
-      case 'qwen-anthropic':
-      case 'minimax':
-      case 'xiaomi':
-      case 'xiaomi-token-plan':
-      case 'ollama':
         return await testAnthropicCompatible(channel.baseUrl, apiKey, proxyUrl, channel.provider)
       case 'openai':
-      case 'openai-responses':
-      case 'xai':
-      case 'opencode-go-openai':
-      case 'deepseek':
-      case 'zhipu':
-      case 'doubao':
-      case 'qwen':
-      case 'custom':
         return await testOpenAICompatible(channel.baseUrl, apiKey, proxyUrl)
       case 'google':
         return await testGoogle(channel.baseUrl, apiKey, proxyUrl)
@@ -1701,9 +1704,15 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
   try {
     signal?.throwIfAborted()
     // Agent 测试不能把直接 fetch 成功误报为 SDK 路由可用。
+    // 测试地址必须与运行时实际消费的派生地址一致（resolveRuntimeBaseUrl 的分派）：
+    // Claude 用 inferAgentBaseUrl；Pi 对 Anthropic 协议渠道也吃 agentBaseUrl，
+    // 不能只用 input.baseUrl——否则「测试通过 ≠ Agent 可用」。
     if (input.runtime) {
       const runtimeUrl = input.runtime === 'claude'
-        ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl) : input.baseUrl
+        ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+        : resolveProviderNativeProtocol(input.provider, input.baseUrl) === 'anthropic-messages'
+          ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+          : input.baseUrl
       try {
         if (runtimeUrl) assertSdkBaseUrlSupportsRouting(runtimeUrl)
       } catch (error) {
@@ -1721,37 +1730,22 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
       }
       const agentUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
       if (!agentUrl) return { success: false, message: '未配置 Claude 端点' }
-      const provider = ['custom', 'openai', 'openai-responses', 'google', 'zhipu', 'doubao', 'qwen', 'opencode-go-openai'].includes(input.provider)
-        ? 'anthropic' : input.provider
+      const provider = claudeProtocolProvider(input.provider)
       const result = await testAnthropicCompatible(agentUrl, input.apiKey, proxyUrl, provider, input.modelId, signal)
       return { ...result, message: `Claude 端点：${result.message}` }
     }
     if (input.provider === 'deepseek' && isAnthropicShapedEndpoint(input.baseUrl)) {
       return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider, input.modelId, signal)
     }
-    switch (input.provider) {
+    // 远程 Ollama 的 Pi runtime 使用 OpenAI Chat Completions；本机 Ollama 保留
+    // 现有 Anthropic 兼容测试路径，避免把本机 Agent sentinel 当成网络协议。
+    const directAdapterKind = input.provider === 'ollama' && input.runtime === 'pi' && !isLocalOllamaBaseUrl(input.baseUrl)
+      ? 'openai'
+      : input.provider === 'ollama' ? 'anthropic' : resolveChatAdapterKind(input.provider)
+    switch (directAdapterKind) {
       case 'anthropic':
-      case 'anthropic-compatible':
-      case 'kimi-api':
-      case 'kimi-coding':
-      case 'zhipu-coding':
-      case 'zhipu-coding-team':
-      case 'ark-coding-plan':
-      case 'qwen-anthropic':
-      case 'minimax':
-      case 'xiaomi':
-      case 'xiaomi-token-plan':
-      case 'ollama':
         return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider, input.modelId, signal)
       case 'openai':
-      case 'openai-responses':
-      case 'xai':
-      case 'opencode-go-openai':
-      case 'deepseek':
-      case 'zhipu':
-      case 'doubao':
-      case 'qwen':
-      case 'custom':
         return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl, input.modelId, input.provider, signal)
       case 'google':
         return await testGoogle(input.baseUrl, input.apiKey, proxyUrl, input.modelId, signal)
@@ -1772,39 +1766,36 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
  * 直接使用传入的凭证（无需已保存渠道），支持创建渠道时预先拉取模型。
  * 针对不同供应商使用不同的 API 端点和响应解析。
  */
+/** Claude 协议请求时，兼容网关统一按 Anthropic 协议处理；目录拉取与连接测试共用。 */
+function claudeProtocolProvider(provider: ProviderType): ProviderType {
+  return ['custom', 'openai', 'openai-responses', 'google', 'zhipu', 'doubao', 'qwen', 'opencode-go-openai'].includes(provider)
+    ? 'anthropic' : provider
+}
+
 export async function fetchModels(input: FetchModelsInput, signal?: AbortSignal): Promise<FetchModelsResult> {
   try {
     signal?.throwIfAborted()
     const proxyUrl = await getEffectiveProxyUrl()
     signal?.throwIfAborted()
-    switch (input.provider) {
+    // Claude-only 渠道的目录必须来自 Claude 端点，与运行时、连接测试使用同一地址推导。
+    if (input.runtime === 'claude') {
+      if (input.provider === 'xai' || input.provider === 'openai-codex') {
+        return { success: false, message: '此供应商不支持 Claude 内核', models: [] }
+      }
+      const claudeUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+      if (!claudeUrl) return { success: false, message: '未配置 Claude 端点', models: [] }
+      return await fetchAnthropicCompatibleModels(claudeUrl, input.apiKey, proxyUrl, claudeProtocolProvider(input.provider), signal)
+    }
+    switch (resolveChatAdapterKind(input.provider)) {
       case 'anthropic':
-      case 'anthropic-compatible':
-      case 'kimi-api':
-      case 'kimi-coding':
-      case 'zhipu-coding':
-      case 'zhipu-coding-team':
-      case 'ark-coding-plan':
-      case 'qwen-anthropic':
-      case 'minimax':
-      case 'xiaomi':
-      case 'xiaomi-token-plan':
         return await fetchAnthropicCompatibleModels(input.baseUrl, input.apiKey, proxyUrl, input.provider, signal)
       case 'ollama':
         return await fetchOllamaModels(input.baseUrl, input.apiKey, proxyUrl, signal)
       case 'openai':
-      case 'openai-responses':
-      case 'xai':
-      case 'opencode-go-openai':
-      case 'deepseek':
-      case 'zhipu':
-      case 'doubao':
-      case 'qwen':
-      case 'custom':
         return await fetchOpenAICompatibleModels(input.baseUrl, input.apiKey, proxyUrl, signal)
       case 'google':
         return await fetchGoogleModels(input.baseUrl, input.apiKey, proxyUrl, signal)
-      default:
+      case 'unsupported':
         return { success: false, message: `不支持的供应商: ${input.provider}`, models: [] }
     }
   } catch (error) {

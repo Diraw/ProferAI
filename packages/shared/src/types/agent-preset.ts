@@ -166,11 +166,6 @@ export const AGENT_PRESET_CAPABILITY_GROUPS = [
     id: 'memory', label: '长期记忆', hint: 'Auto Memory 与 memory-archive', suppressPromptSection: 'memory',
     tools: [
       capabilityTool('search_memory', '搜索个人记忆', '检索工作区长期记忆索引'),
-      capabilityTool('list_team_memories', '列出团队记忆', '列出当前团队共享记忆'),
-      capabilityTool('read_team_memory', '读取团队记忆', '读取一条团队共享记忆'),
-      capabilityTool('search_team_memories', '搜索团队记忆', '检索团队共享记忆'),
-      capabilityTool('create_team_memory', '创建团队记忆', '写入一条团队共享记忆', 'write'),
-      capabilityTool('update_team_memory', '更新团队记忆', '修改一条团队共享记忆', 'write'),
     ],
   }),
   capabilityGroup({

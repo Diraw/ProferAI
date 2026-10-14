@@ -81,6 +81,27 @@ describe('F14：请求超时与测试能力边界', () => {
     expect((await fetchModels(input('openai'))).success).toBe(true)
   })
 
+  test('Given 远程 Ollama + Pi runtime When 测试连接 Then 使用 OpenAI Chat Completions', async () => {
+    responder = async () => json({ choices: [{ message: { content: 'fixture' } }] })
+    const result = await testChannelDirect(input('ollama', {
+      baseUrl: 'https://remote.example/v1',
+      modelId: 'fixture-model',
+      runtime: 'pi',
+    }))
+    expect(result).toMatchObject({ success: true, message: '模型 fixture-model 生成测试成功' })
+    expect(requests[0]!.url).toBe('https://remote.example/v1/chat/completions')
+  })
+
+  test('Given 本机 Ollama + Pi runtime When 测试连接 Then 保留 Anthropic 兼容测试路径', async () => {
+    responder = async () => json({ content: [{ type: 'text', text: 'fixture' }] })
+    const result = await testChannelDirect(input('ollama', {
+      baseUrl: 'http://127.0.0.1:11434',
+      modelId: 'fixture-model',
+      runtime: 'pi',
+    }))
+    expect(result).toMatchObject({ success: true, message: '模型 fixture-model 生成测试成功' })
+    expect(requests[0]!.url).toBe('http://127.0.0.1:11434/v1/messages')
+  })
   test('Given 用户手工模型 When Anthropic 测试 Then 仅发送指定模型、不要求目录或硬编码模型', async () => {
     responder = async () => json({ type: 'message', content: [{ type: 'text', text: 'fixture' }] })
     const result = await testChannelDirect(input('anthropic-compatible', {
@@ -209,6 +230,22 @@ describe('F15：严格模型目录与完整分页', () => {
     expect(await fetchModels(input('google'))).toMatchObject({ success: false, models: [] })
     responder = async () => json({ data: [{ id: 'a' }], has_more: true })
     expect(await fetchModels(input('openai'))).toMatchObject({ success: false, models: [] })
+  })
+})
+
+describe('Claude-only 渠道目录拉取', () => {
+  test('Given Claude-only 且配置了 Claude 端点 When 拉取目录 Then 请求 Claude 端点而非主地址', async () => {
+    responder = async () => json(valid('anthropic'))
+    const result = await fetchModels(input('openai', { runtime: 'claude', agentBaseUrl: 'https://fixture.invalid/anthropic' }))
+    expect(result.success).toBe(true)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toMatch(/^https:\/\/fixture\.invalid\/anthropic\/models/)
+  })
+
+  test('Given Claude 端点无法推导 When 拉取目录 Then 明确失败且不发送请求', async () => {
+    const result = await fetchModels(input('xai', { runtime: 'claude' }))
+    expect(result).toMatchObject({ success: false, models: [] })
+    expect(requests).toHaveLength(0)
   })
 })
 

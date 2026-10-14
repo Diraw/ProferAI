@@ -33,6 +33,7 @@ import { spawn as spawnChild, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { win32 } from 'node:path'
 import { BackgroundTaskManager } from '../background-task-manager'
+import { validateWriteTargetParent } from '../agent-tool-input-validator'
 
 /** SDK Query 对象类型（从动态导入中推断） */
 type SDKQuery = ReturnType<typeof import('@anthropic-ai/claude-agent-sdk').query>
@@ -994,6 +995,31 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
         // 在 result 消息发到 host 之前完成，故 result 处理时 backgroundTasksPending 已是最新。
         // 仅观察、绝不返回 decision:'block'（那会强制模型继续输出）。
         hooks: {
+          PreToolUse: [{
+            hooks: [async (input: unknown) => {
+              const hookInput = input as { tool_name?: unknown; tool_input?: unknown }
+              if (hookInput.tool_name !== 'Write' || !hookInput.tool_input || typeof hookInput.tool_input !== 'object') {
+                return { continue: true }
+              }
+              const failure = validateWriteTargetParent(
+                hookInput.tool_input as Record<string, unknown>,
+                options.cwd,
+                'Write',
+              )
+              return failure
+                ? {
+                    continue: false,
+                    decision: 'block',
+                    reason: failure.message,
+                    hookSpecificOutput: {
+                      hookEventName: 'PreToolUse',
+                      permissionDecision: 'deny',
+                      permissionDecisionReason: failure.message,
+                    },
+                  }
+                : { continue: true }
+            }],
+          }],
           Stop: [{
             hooks: [async (input: unknown) => {
               const bt = (input as { background_tasks?: unknown[] }).background_tasks

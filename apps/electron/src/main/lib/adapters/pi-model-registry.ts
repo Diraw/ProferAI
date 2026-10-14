@@ -20,8 +20,10 @@ import {
   resolveReasoningCapability,
   resolveReasoningProfile,
   type ReasoningCapability,
+  resolveProviderNativeProtocol,
+  isLocalOllamaBaseUrl,
 } from '@profer/shared'
-import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, isAnthropicShapedEndpoint, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
+import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk, resolveAnthropicMessagesUrl } from '@profer/core'
 import type { Api, KnownProvider, Model } from '@earendil-works/pi-ai/compat'
 import type { PiAgentQueryOptions } from './pi-agent-adapter'
 import { refreshXaiOAuthCredentialsSerial, rememberXaiOAuthCredentials } from '../xai-oauth-credentials'
@@ -205,20 +207,7 @@ function compilePiReasoningCapabilities(api: Api, modelId: string | undefined): 
   }
 }
 
-function isLocalOllamaBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false
-  try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase()
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
-  } catch {
-    return false
-  }
-}
 
-/** 商业代管 relay 的 Base：协议由服务端路由决定，不能按端点形态推断。 */
-function isRelayProxyBaseUrl(baseUrl: string): boolean {
-  return baseUrl.trim().replace(/\/+$/, '').endsWith('/v1/proxy')
-}
 
 /**
  * 解析 Pi 请求使用的协议。
@@ -231,30 +220,11 @@ function isRelayProxyBaseUrl(baseUrl: string): boolean {
  * 例外：商业代管 relay（`…/v1/proxy`）由服务端路由决定协议，保持 provider 判定。
  */
 export function normalizePiApi(provider: ProviderType, baseUrl?: string): Api {
-  if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) return 'openai-completions'
-  if (
-    provider === 'deepseek'
-    && baseUrl?.trim()
-    && !isRelayProxyBaseUrl(baseUrl)
-    && !isAnthropicShapedEndpoint(baseUrl)
-  ) {
-    return 'openai-completions'
-  }
-  switch (provider) {
-    case 'openai':
-    case 'opencode-go-openai':
-    case 'zhipu':
-    case 'doubao':
-    case 'qwen':
-    case 'custom':
-      return 'openai-completions'
-    case 'openai-responses':
-      return 'openai-responses'
-    case 'google':
-      return 'google-generative-ai'
-    default:
-      return 'anthropic-messages'
-  }
+  // 协议判定整体收口到 shared 的 resolveProviderNativeProtocol（单一事实源）：
+  // 静态归属来自能力描述符，deepseek/ollama 的端点形态嗅探也在那里完成。
+  // DeepSeek 第三方网关若误判为 Anthropic，Agent 会发送 `/v1/messages` 而完全不可用，
+  // 而 Chat 走 OpenAI 适配器却正常——协议必须跟随配置的端点，而不是写死 provider。
+  return resolveProviderNativeProtocol(provider, baseUrl)
 }
 
 function candidatePiProviders(provider: ProviderType): KnownProvider[] {
@@ -332,10 +302,12 @@ async function findPiCatalogModel(provider: ProviderType, modelId: string): Prom
  *
  * 由 IPC 桥接给 renderer，无能力返回 undefined（renderer 回退完整七档或隐藏菜单）。
  */
-export async function resolvePiReasoningCapability(provider: ProviderType, modelId: string | undefined): Promise<ReasoningCapability | undefined> {
+export async function resolvePiReasoningCapability(provider: ProviderType, modelId: string | undefined, baseUrl?: string): Promise<ReasoningCapability | undefined> {
   if (!modelId) return undefined
 
-  const transport = inferReasoningTransport(provider)
+  // 传入 baseUrl 让 deepseek/ollama 这类端点形态可变的渠道拿到与运行时
+  // 一致的协议判定；否则菜单显示的档位可能在实际注入时被跳过。
+  const transport = inferReasoningTransport(provider, baseUrl)
   if (transport === 'other') return undefined
 
   const profile = resolveReasoningProfile({ modelId, transport })
@@ -459,7 +431,8 @@ function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType)
   if (!baseUrl) return undefined
   assertSdkBaseUrlSupportsRouting(baseUrl)
   if (provider === 'ollama' && !isLocalOllamaBaseUrl(baseUrl)) {
-    return `${baseUrl.trim().replace(/\/+$/, '').replace(/\/v1$/, '')}/v1`
+    const normalized = normalizeOpenAIBaseUrlForSdk(baseUrl)
+    return /\/v1$/i.test(normalized) ? normalized : `${normalized}/v1`
   }
   const api = normalizePiApi(provider, baseUrl)
   if (api === 'anthropic-messages') {

@@ -38,6 +38,8 @@ import {
   DialogTitle,
 } from '@profer/ui/primitives/dialog'
 import { SettingsSection } from './primitives/SettingsSection'
+import * as feishuApi from '@/domains/feishu/feishu-api'
+import { initialRegistrationState, registrationReducer, type RegistrationEvent, type RegistrationState, BOT_CONNECT_POLL_INTERVAL_MS, BOT_CONNECT_TIMEOUT_MS, QR_EXPIRED_MESSAGE, buildBotSavePayload, buildNewBotPayload, canTestBot, dropBinding, isRegistrationAbortError, nextSessionMirrorSettings, normalizeSessionMirrorSettings, qrExpireDelayMs, registrationErrorMessage, registrationRetryAction, replaceBinding, resolveBotToggleAction } from '@/domains/feishu/feishu-flow'
 import { SettingsCard } from './primitives/SettingsCard'
 import { SettingsInput } from './primitives/SettingsInput'
 import { SettingsSecretInput } from './primitives/SettingsSecretInput'
@@ -217,7 +219,7 @@ function FeishuTutorialVideo(): React.ReactElement | null {
 
 /** 安全地用系统浏览器打开链接 */
 function openLink(url: string): void {
-  window.electronAPI.openExternal(url)
+  feishuApi.openExternal(url)
 }
 
 /** 可点击的外部链接组件 */
@@ -401,7 +403,7 @@ function LarkCloudCapabilitiesSection(): React.ReactElement {
     setLoading(true)
     setLoadError('')
     try {
-      setStatus(await window.electronAPI.refreshLarkCliStatus())
+      setStatus(await feishuApi.refreshLarkCliStatus())
     } catch {
       setLoadError('无法检测 Lark CLI，请重试。')
     } finally {
@@ -411,7 +413,7 @@ function LarkCloudCapabilitiesSection(): React.ReactElement {
 
   React.useEffect(() => {
     void refresh()
-    return window.electronAPI.onLarkLoginEvent((event) => {
+    return feishuApi.onLarkLoginEvent((event) => {
       setLoginEvent(event)
       if (event.type === 'completed') {
         void refresh()
@@ -425,7 +427,7 @@ function LarkCloudCapabilitiesSection(): React.ReactElement {
   const install = React.useCallback(async () => {
     setWorking(true)
     try {
-      const result = await window.electronAPI.installLarkCli()
+      const result = await feishuApi.installLarkCli()
       result.success ? toast.success('Lark CLI 安装完成') : toast.error(result.message)
       if (result.success) await refresh()
     } catch { toast.error('Lark CLI 安装失败，请重试。') } finally {
@@ -437,7 +439,7 @@ function LarkCloudCapabilitiesSection(): React.ReactElement {
     setWorking(true)
     setLoginEvent(null)
     try {
-      const result = await window.electronAPI.startLarkLogin()
+      const result = await feishuApi.startLarkLogin()
       if (!result.started) toast.error(result.message)
       else if (result.authorizationUrl) {
         setLoginEvent({ type: 'url', authorizationUrl: result.authorizationUrl, message: '请在浏览器中完成授权' })
@@ -458,7 +460,7 @@ function LarkCloudCapabilitiesSection(): React.ReactElement {
 
   const authLabel = status?.auth.state === 'logged_in' ? '已登录' : status?.auth.state === 'reauthorization_required' ? '需要重新授权' : status?.auth.state === 'logged_out' ? '未登录' : '未知'
   const ready = status?.cli.available && status.cli.version
-  const isMac = window.electronAPI.getPlatformInfo().platform === 'darwin'
+  const isMac = feishuApi.getPlatformInfo().platform === 'darwin'
   const nodeMissing = Boolean(status && !status.node.available)
   const nodeDownloadUrl = 'https://nodejs.org/dist/v22.13.1/node-v22.13.1.pkg'
 
@@ -500,7 +502,7 @@ function LarkCloudCapabilitiesSection(): React.ReactElement {
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" onClick={() => openLink(loginEvent.authorizationUrl!)} className="gap-1.5"><ExternalLink size={14} />打开授权页</Button>
                 <Button size="sm" variant="outline" onClick={copyUrl} className="gap-1.5"><Copy size={14} />复制链接</Button>
-                <Button size="sm" variant="ghost" onClick={() => void window.electronAPI.cancelLarkLogin().then(() => setLoginEvent(null)).catch(() => toast.error('取消授权失败，请重试。'))}>取消</Button>
+                <Button size="sm" variant="ghost" onClick={() => void feishuApi.cancelLarkLogin().then(() => setLoginEvent(null)).catch(() => toast.error('取消授权失败，请重试。'))}>取消</Button>
               </div>
             </div>
           )}
@@ -525,7 +527,7 @@ function LarkMcpSection(): React.ReactElement {
   const refresh = React.useCallback(async () => {
     setLoadError('')
     try {
-      const next = await window.electronAPI.getLarkMcpStatus()
+      const next = await feishuApi.getLarkMcpStatus()
       setStatus(next)
       if (!workspaceSlug && workspaces[0]) setWorkspaceSlug(workspaces[0].slug)
     } catch {
@@ -535,7 +537,7 @@ function LarkMcpSection(): React.ReactElement {
 
   React.useEffect(() => { void refresh() }, [refresh])
 
-  React.useEffect(() => window.electronAPI.onLarkMcpLoginEvent((event) => {
+  React.useEffect(() => feishuApi.onLarkMcpLoginEvent((event) => {
     setLoginEvent(event)
     if (event.type === 'completed') toast.success('Lark MCP 用户授权已完成')
     if (event.type === 'failed') toast.error(event.message)
@@ -545,7 +547,7 @@ function LarkMcpSection(): React.ReactElement {
     setSaving(true)
     setActionError('')
     try {
-      const result = await window.electronAPI.saveLarkMcpCredentials({ appId, appSecret })
+      const result = await feishuApi.saveLarkMcpCredentials({ appId, appSecret })
       if (!result.success) { setActionError(result.message); return }
       setAppSecret('')
       toast.success('MCP 应用凭据已安全保存')
@@ -557,7 +559,7 @@ function LarkMcpSection(): React.ReactElement {
     setSaving(true)
     setActionError('')
     try {
-      const result = await window.electronAPI.testLarkMcpConnection()
+      const result = await feishuApi.testLarkMcpConnection()
       result.success ? toast.success('官方 Lark MCP 协议握手成功') : setActionError(result.message)
     } catch { setActionError('MCP 连接测试失败，请重试。') } finally { setSaving(false) }
   }, [])
@@ -567,7 +569,7 @@ function LarkMcpSection(): React.ReactElement {
     setActionError('')
     setLoginEvent(null)
     try {
-      const result = await window.electronAPI.startLarkMcpLogin()
+      const result = await feishuApi.startLarkMcpLogin()
       if (!result.started) setActionError(result.message)
       else toast.info('MCP 授权流程已启动，请在浏览器中完成确认')
     } catch { setActionError('MCP 授权启动失败，请重试。') } finally { setSaving(false) }
@@ -584,7 +586,7 @@ function LarkMcpSection(): React.ReactElement {
     setSaving(true)
     setActionError('')
     try {
-      const result = await window.electronAPI.enableLarkMcpForWorkspace(workspaceSlug)
+      const result = await feishuApi.enableLarkMcpForWorkspace(workspaceSlug)
       result.success ? toast.success('已为工作区启用官方 Lark MCP') : setActionError(result.message)
       if (result.success) await refresh()
     } catch { setActionError('启用 Lark MCP 失败，请重试。') } finally { setSaving(false) }
@@ -595,7 +597,7 @@ function LarkMcpSection(): React.ReactElement {
     setSaving(true)
     setActionError('')
     try {
-      const result = await window.electronAPI.disableLarkMcpForWorkspace(workspaceSlug)
+      const result = await feishuApi.disableLarkMcpForWorkspace(workspaceSlug)
       result.success ? toast.success('已从工作区停用 Lark MCP') : setActionError(result.message)
       if (result.success) await refresh()
     } catch { setActionError('停用 Lark MCP 失败，请重试。') } finally { setSaving(false) }
@@ -644,7 +646,7 @@ function LarkMcpSection(): React.ReactElement {
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" onClick={() => openLink(loginEvent.authorizationUrl!)} className="gap-1.5"><ExternalLink size={14} />打开授权页</Button>
                 <Button size="sm" variant="outline" onClick={copyLoginUrl} className="gap-1.5"><Copy size={14} />复制链接</Button>
-                <Button size="sm" variant="ghost" onClick={() => void window.electronAPI.cancelLarkMcpLogin().then(() => setLoginEvent(null)).catch(() => toast.error('取消授权失败，请重试。'))}>取消</Button>
+                <Button size="sm" variant="ghost" onClick={() => void feishuApi.cancelLarkMcpLogin().then(() => setLoginEvent(null)).catch(() => toast.error('取消授权失败，请重试。'))}>取消</Button>
               </div>
             </div>
           )}
@@ -784,7 +786,7 @@ function FeishuBindingsTab(): React.ReactElement {
     setRefreshing(true)
     setLoadError('')
     try {
-      const list = await window.electronAPI.listFeishuBindings()
+      const list = await feishuApi.listFeishuBindings()
       setBindings(list)
     } catch {
       setLoadError('获取绑定列表失败，保留上次读取结果。请刷新重试。')
@@ -808,10 +810,10 @@ function FeishuBindingsTab(): React.ReactElement {
   // 更新绑定
   const handleUpdate = React.useCallback((chatId: string, updates: { workspaceId?: string; sessionId?: string }) => run(async () => {
     try {
-      const result = await window.electronAPI.updateFeishuBinding({ chatId, ...updates })
+      const result = await feishuApi.updateFeishuBinding({ chatId, ...updates })
       if (!result) throw new Error('未更新绑定')
       if (result) {
-        setBindings((prev) => prev.map((b) => b.chatId === chatId ? result : b))
+        setBindings((prev) => replaceBinding(prev, chatId, result))
         toast.success('绑定已更新')
       }
     } catch {
@@ -822,10 +824,10 @@ function FeishuBindingsTab(): React.ReactElement {
   // 移除绑定
   const handleRemove = React.useCallback((chatId: string) => run(async () => {
     try {
-      const ok = await window.electronAPI.removeFeishuBinding(chatId)
+      const ok = await feishuApi.removeFeishuBinding(chatId)
       if (!ok) throw new Error('未解除绑定')
       if (ok) {
-        setBindings((prev) => prev.filter((b) => b.chatId !== chatId))
+        setBindings((prev) => dropBinding(prev, chatId))
         toast.success('绑定已解除')
       }
     } catch {
@@ -922,12 +924,16 @@ interface RegisterFeishuDialogProps {
 function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuDialogProps): React.ReactElement {
   const [qrcode, setQrcode] = React.useState<FeishuRegisterAppQRCode | null>(null)
   const [status, setStatus] = React.useState<FeishuRegisterAppStatus | null>(null)
-  const [phase, setPhase] = React.useState<'idle' | 'qrcode' | 'saving' | 'success' | 'error'>('idle')
+  const [registration, setRegistration] = React.useState<RegistrationState>(initialRegistrationState)
+  const { phase, errorMsg } = registration
+  // 用 useState + 函数式更新承接 reducer，与页面其余 hook 保持一致，也便于测试桩复用
+  const dispatchRegistration = React.useCallback((event: RegistrationEvent) => {
+    setRegistration((previous) => registrationReducer(previous, event))
+  }, [])
   const [attempt, setAttempt] = React.useState(0)
   const qrExpired = React.useRef(false)
   const credentials = React.useRef<{ appId: string; appSecret: string } | null>(null)
   const { busy: persisting, run: runPersist } = useIntegrationAction()
-  const [errorMsg, setErrorMsg] = React.useState<string>('')
 
   // 用 ref 持有最新的 onSuccess，避免依赖 onSuccess 后回调引用变化触发整个 effect 重启
   // 重启会调 cancelFeishuRegistration 中断当前正在等待扫码的流程
@@ -938,16 +944,15 @@ function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuD
 
   const persist = React.useCallback(() => runPersist(async () => {
     if (!credentials.current) return
-    setPhase('saving')
+    dispatchRegistration({ type: 'saving' })
     try {
       await onSuccessRef.current(credentials.current)
       credentials.current = null
-      setPhase('success')
+      dispatchRegistration({ type: 'success' })
     } catch {
-      setPhase('error')
-      setErrorMsg('应用已创建，但保存失败。凭据保留在当前弹窗，请重试保存。')
+      dispatchRegistration({ type: 'error', message: '应用已创建，但保存失败。凭据保留在当前弹窗，请重试保存。' })
     }
-  }), [runPersist])
+  }), [runPersist, dispatchRegistration])
 
   // 弹窗打开 → 监听推送 + 启动注册；关闭 → 解监听 + 取消
   React.useEffect(() => {
@@ -956,20 +961,19 @@ function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuD
     let cancelled = false
     credentials.current = null
     qrExpired.current = false
-    setPhase('idle')
-    setErrorMsg('')
+    dispatchRegistration({ type: 'start' })
     setQrcode(null)
     setStatus(null)
 
-    const offQr = window.electronAPI.onFeishuRegisterQrcode((payload) => {
+    const offQr = feishuApi.onFeishuRegisterQrcode((payload) => {
       setQrcode(payload)
-      setPhase('qrcode')
+      dispatchRegistration({ type: 'qrcode' })
     })
-    const offStatus = window.electronAPI.onFeishuRegisterStatus((payload) => {
+    const offStatus = feishuApi.onFeishuRegisterStatus((payload) => {
       setStatus(payload)
     })
 
-    window.electronAPI.registerFeishuApp()
+    feishuApi.registerFeishuApp()
       .then((result) => {
         if (cancelled || qrExpired.current) return
         credentials.current = { appId: result.appId, appSecret: result.appSecret }
@@ -977,11 +981,10 @@ function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuD
       })
       .catch((err: unknown) => {
         if (cancelled) return
-        const msg = err instanceof Error ? err.message : String(err)
+        const msg = registrationErrorMessage(err)
         // SDK 在 abort 时抛出的错误，关闭弹窗时不显示
-        if (msg.includes('aborted') || msg.includes('Abort')) return
-        setPhase('error')
-        setErrorMsg(msg)
+        if (isRegistrationAbortError(msg)) return
+        dispatchRegistration({ type: 'error', message: msg })
       })
 
     return () => {
@@ -989,24 +992,23 @@ function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuD
       credentials.current = null
       offQr()
       offStatus()
-      window.electronAPI.cancelFeishuRegistration().catch(() => {})
+      feishuApi.cancelFeishuRegistration().catch(() => {})
     }
   }, [open, attempt, persist])
 
   React.useEffect(() => {
     if (phase !== 'qrcode' || !qrcode) return
     const timeout = window.setTimeout(() => {
-      setPhase('error')
+      dispatchRegistration({ type: 'error', message: QR_EXPIRED_MESSAGE })
       qrExpired.current = true
-      setErrorMsg('二维码已过期，请重新获取。')
-      void window.electronAPI.cancelFeishuRegistration().catch(() => {})
-    }, Math.max(0, qrcode.expireIn) * 1_000)
+      void feishuApi.cancelFeishuRegistration().catch(() => {})
+    }, qrExpireDelayMs(qrcode.expireIn))
     return () => window.clearTimeout(timeout)
   }, [phase, qrcode])
 
   const handleOpenInBrowser = React.useCallback(() => {
     if (qrcode?.url) {
-      window.electronAPI.openExternal(qrcode.url)
+      feishuApi.openExternal(qrcode.url)
     }
   }, [qrcode])
 
@@ -1091,7 +1093,7 @@ function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuD
         </div>
 
         <DialogFooter>
-          {phase === 'error' && <Button onClick={() => { if (credentials.current) void persist(); else setAttempt((previous) => previous + 1) }} disabled={persisting}>{credentials.current ? '重试保存' : '重新获取二维码'}</Button>}
+          {phase === 'error' && <Button onClick={() => { if (registrationRetryAction(Boolean(credentials.current)) === 'retry-save') void persist(); else setAttempt((previous) => previous + 1) }} disabled={persisting}>{credentials.current ? '重试保存' : '重新获取二维码'}</Button>}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={persisting}>
             {phase === 'success' ? '关闭' : '取消'}
           </Button>
@@ -1102,21 +1104,11 @@ function RegisterFeishuDialog({ open, onOpenChange, onSuccess }: RegisterFeishuD
 }
 
 // 用于将新名称生成的占位符（参考 handleAddBot 的命名规则保持一致）
-function defaultBotName(index: number): string {
-  return `飞书助手 ${index + 1}`
-}
-
 // ===== Session 镜像设置 =====
 
 const SESSION_SYNC_LABELS: Record<FeishuSessionSyncMode, string> = {
   off: '关闭',
   stream: '实时同步到飞书群',
-}
-
-function normalizeSessionMirrorSettings(settings: FeishuSessionMirrorSettings | undefined): FeishuSessionMirrorSettings {
-  return settings?.mode === 'stream'
-    ? { mode: 'stream', botId: settings.botId }
-    : { mode: 'off' }
 }
 
 function SessionMirrorSection({ bots }: { bots: FeishuBotConfig[] }): React.ReactElement {
@@ -1144,7 +1136,7 @@ function SessionMirrorSection({ bots }: { bots: FeishuBotConfig[] }): React.Reac
   const load = React.useCallback(async () => {
     setLoadError('')
     try {
-      const [appSettings, list] = await Promise.all([window.electronAPI.getSettings(), window.electronAPI.listFeishuBindings()])
+      const [appSettings, list] = await Promise.all([feishuApi.getSettings(), feishuApi.listFeishuBindings()])
       setSettings(normalizeSessionMirrorSettings(appSettings.feishuSessionMirror))
       setBindings(list)
     } catch { setLoadError('无法读取 Session 镜像配置和绑定，未使用默认值。请重试。') }
@@ -1154,18 +1146,14 @@ function SessionMirrorSection({ bots }: { bots: FeishuBotConfig[] }): React.Reac
   const saveSettings = React.useCallback((next: FeishuSessionMirrorSettings) => run(async () => {
     setSaveError('')
     try {
-      await window.electronAPI.updateSettings({ feishuSessionMirror: next })
+      await feishuApi.updateSettings({ feishuSessionMirror: next })
       setSettings(next)
       toast.success('飞书 Session 镜像设置已更新')
     } catch { setSaveError('保存飞书 Session 镜像设置失败，保留已保存值。请重新选择以重试。') }
   }), [run])
 
   const handleModeChange = React.useCallback((value: string) => {
-    const mode = value as FeishuSessionSyncMode
-    const fallbackBotId = settings?.botId ?? enabledBots[0]?.id
-    const next: FeishuSessionMirrorSettings = mode === 'stream'
-      ? { mode, botId: fallbackBotId }
-      : { mode, botId: settings?.botId }
+    const next = nextSessionMirrorSettings(value as FeishuSessionSyncMode, settings?.botId, enabledBots.map((bot) => bot.id))
     saveSettings(next).catch(() => {})
   }, [enabledBots, saveSettings, settings?.botId])
 
@@ -1287,12 +1275,12 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
     if (!bot.appSecret) return
     setSecretError('')
     try {
-      const secret = await window.electronAPI.getDecryptedFeishuBotSecret(bot.id)
+      const secret = await feishuApi.getDecryptedFeishuBotSecret(bot.id)
       if (!secretEdited.current) setAppSecret(secret)
     } catch {
-      if (bot.id === 'legacy' && window.electronAPI.getDecryptedFeishuSecret) {
+      if (bot.id === 'legacy' && feishuApi.getDecryptedFeishuSecret) {
         try {
-          const legacySecret = await window.electronAPI.getDecryptedFeishuSecret()
+          const legacySecret = await feishuApi.getDecryptedFeishuSecret()
           if (!secretEdited.current) setAppSecret(legacySecret)
           return
         } catch { /* 继续显示具体错误 */ }
@@ -1307,18 +1295,10 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
 
   const handleSave = React.useCallback(() => run(async () => {
     setActionError('')
-    if (!appId.trim() || !name.trim()) return
+    const payload = buildBotSavePayload(bot, { name, appId, appSecret })
+    if (!payload) return
     try {
-      await window.electronAPI.saveFeishuBotConfig({
-        id: bot.id,
-        name: name.trim(),
-        enabled: true,
-        appId: appId.trim(),
-        appSecret: appSecret || '',
-        defaultWorkspaceId: bot.defaultWorkspaceId,
-        defaultChannelId: bot.defaultChannelId,
-        defaultModelId: bot.defaultModelId,
-      })
+      await feishuApi.saveFeishuBotConfig(payload)
       toast.success(`Bot "${name}" 已保存`)
       onSaved()
     } catch {
@@ -1327,11 +1307,11 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
   }), [bot, name, appId, appSecret, onSaved, run])
 
   const handleTest = React.useCallback(async () => {
-    if (!appId.trim() || !appSecret.trim()) return
+    if (!canTestBot(appId, appSecret)) return
     setTesting(true)
     setTestResult(null)
     try {
-      const result = await window.electronAPI.testFeishuConnection(appId.trim(), appSecret.trim())
+      const result = await feishuApi.testFeishuConnection(appId.trim(), appSecret.trim())
       setTestResult(result)
     } catch (err) {
       setTestResult({ success: false, message: `测试失败: ${err instanceof Error ? err.message : String(err)}` })
@@ -1343,7 +1323,7 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
   /** 操作完成后主动拉取最新状态，确保 UI 同步 */
   const refreshBotStates = React.useCallback(async () => {
     try {
-      const multiState = await window.electronAPI.getFeishuMultiStatus?.()
+      const multiState = await feishuApi.getFeishuMultiStatus?.()
       if (multiState?.bots) {
         setBotStates(multiState.bots)
       }
@@ -1353,11 +1333,11 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
   // 连接中的短轮询随组件卸载/终态清理，超时提供可见的重试信息。
   React.useEffect(() => {
     if (state?.status !== 'connecting') return
-    const timer = window.setInterval(() => void refreshBotStates(), 1_000)
+    const timer = window.setInterval(() => void refreshBotStates(), BOT_CONNECT_POLL_INTERVAL_MS)
     const timeout = window.setTimeout(() => {
       window.clearInterval(timer)
       setActionError('等待连接已超时，可停止连接后重试；当前配置已保留。')
-    }, 60_000)
+    }, BOT_CONNECT_TIMEOUT_MS)
     return () => { window.clearInterval(timer); window.clearTimeout(timeout) }
   }, [state?.status, refreshBotStates])
 
@@ -1365,14 +1345,14 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
     setActionError('')
     const generation = ++connectionGeneration.current
     try {
-      if (isConnected) {
-        await window.electronAPI.stopFeishuBot(bot.id)
+      if (resolveBotToggleAction(isConnected) === 'stop') {
+        await feishuApi.stopFeishuBot(bot.id)
         toast.success(`Bot "${bot.name}" 已停止`)
         await refreshBotStates()
       } else {
         setBotStates((previous) => ({ ...previous, [bot.id]: { botId: bot.id, botName: bot.name, status: 'connecting', activeBindings: 0 } }))
         // 保留停止入口；真实连接结果由状态订阅与轮询返回。
-        void window.electronAPI.startFeishuBot(bot.id).then(refreshBotStates).catch(() => {
+        void feishuApi.startFeishuBot(bot.id).then(refreshBotStates).catch(() => {
           if (generation !== connectionGeneration.current) return
           setActionError('启动失败，可再次启动。当前配置已保留。')
           void refreshBotStates()
@@ -1384,7 +1364,7 @@ function BotConfigCard({ bot, state, onSaved, onRemoved }: BotConfigCardProps): 
   const handleRemove = React.useCallback(() => run(async () => {
     setActionError('')
     try {
-      if (!await window.electronAPI.removeFeishuBot(bot.id)) throw new Error('Bot 未删除')
+      if (!await feishuApi.removeFeishuBot(bot.id)) throw new Error('Bot 未删除')
       toast.success(`Bot "${bot.name}" 已删除`)
       setDeleteOpen(false)
       onRemoved()
@@ -1618,11 +1598,11 @@ function FeishuConfigTab(): React.ReactElement {
   const loadBots = React.useCallback(async () => {
     setLoadError('')
     try {
-      const config = await window.electronAPI.getFeishuMultiConfig()
+      const config = await feishuApi.getFeishuMultiConfig()
       setBots(config.bots)
     } catch {
       try {
-        const legacy = await window.electronAPI.getFeishuConfig()
+        const legacy = await feishuApi.getFeishuConfig()
         if (legacy.appId) {
           setBots([{ id: 'legacy', name: '飞书助手', enabled: legacy.enabled, appId: legacy.appId, appSecret: legacy.appSecret }])
         } else {
@@ -1640,7 +1620,7 @@ function FeishuConfigTab(): React.ReactElement {
   const refreshStates = React.useCallback(async () => {
     setStateError('')
     try {
-      const multiState = await window.electronAPI.getFeishuMultiStatus?.()
+      const multiState = await feishuApi.getFeishuMultiStatus?.()
       if (multiState?.bots) {
         setBotStates(multiState.bots)
       }
@@ -1654,15 +1634,7 @@ function FeishuConfigTab(): React.ReactElement {
 
   const handleAddBot = React.useCallback(() => runAdd(async () => {
     try {
-      const saved = await window.electronAPI.saveFeishuBotConfig({
-        name: defaultBotName(bots.length),
-        enabled: false,
-        appId: '',
-        appSecret: '',
-        defaultWorkspaceId: undefined,
-        defaultChannelId: undefined,
-        defaultModelId: undefined,
-      })
+      const saved = await feishuApi.saveFeishuBotConfig(buildNewBotPayload(bots.length))
       setBots((prev) => [...prev, saved])
     } catch {
       toast.error('创建 Bot 失败')
@@ -1676,8 +1648,8 @@ function FeishuConfigTab(): React.ReactElement {
     if (!bot?.appId) return
     setTesting(true)
     try {
-      const secret = await window.electronAPI.getDecryptedFeishuBotSecret(bot.id)
-      const result = await window.electronAPI.testFeishuConnection(bot.appId, secret)
+      const secret = await feishuApi.getDecryptedFeishuBotSecret(bot.id)
+      const result = await feishuApi.testFeishuConnection(bot.appId, secret)
       result.success ? toast.success(`连接测试通过${result.botName ? `：${result.botName}` : ''}`) : toast.error(result.message)
     } catch {
       toast.error('连接测试失败，请展开 Bot 管理查看详细信息')
@@ -1689,19 +1661,11 @@ function FeishuConfigTab(): React.ReactElement {
   /** 扫码成功后：保存配置 + 自动启动 Bot */
   const handleRegisterSuccess = React.useCallback(async (result: { appId: string; appSecret: string }) => {
     try {
-      const saved = await window.electronAPI.saveFeishuBotConfig({
-        name: defaultBotName(bots.length),
-        enabled: true,
-        appId: result.appId,
-        appSecret: result.appSecret,
-        defaultWorkspaceId: undefined,
-        defaultChannelId: undefined,
-        defaultModelId: undefined,
-      })
+      const saved = await feishuApi.saveFeishuBotConfig(buildNewBotPayload(bots.length, result))
       setBots((prev) => [...prev, saved])
       toast.success(`Bot "${saved.name}" 已创建`)
       // 自动启动 Bot（不阻塞 UI）
-      window.electronAPI.startFeishuBot(saved.id).catch((err: unknown) => {
+      feishuApi.startFeishuBot(saved.id).catch((err: unknown) => {
         toast.error(err instanceof Error ? err.message : '自动启动失败，请手动启动')
       })
     } catch (err) {

@@ -141,7 +141,7 @@ const AGENT_REFRESH_HEADROOM = 100
 const AGENT_CACHE_WINDOW = DESKTOP_AGENT_PAGE_SIZE + AGENT_REFRESH_HEADROOM
 
 import { MAX_ATTACHMENT_SIZE, isAgentPresetToolGroupDisabled, parseGoalCommand } from '@profer/shared'
-import { fileToBase64, formatFileNames, getFileBaseName, getFileParentPath } from '@/lib/file-utils'
+import { fileToBase64, formatFileNames, getFileBaseName, getFileParentPath, isMissingAttachmentData } from '@/lib/file-utils'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 import { AgentMessageQueue } from './AgentMessageQueue'
 import { normalizeAgentHistoryRefresh, normalizeAgentHistoryResult } from './agent-history-pagination'
@@ -721,7 +721,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       return
     }
     let cancelled = false
-    window.electronAPI.getPiReasoningCapability(channel.provider, agentModelId)
+    window.electronAPI.getPiReasoningCapability(channel.provider, agentModelId, channel.baseUrl)
       .then((capability) => { if (!cancelled) setPiReasoningCapability(capability) })
       .catch(() => { if (!cancelled) setPiReasoningCapability(undefined) })
     return () => { cancelled = true }
@@ -2257,7 +2257,9 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
         filename: f.filename,
         data: window.__pendingAgentFileData?.get(f.id) || '',
       }))
-      const missingDataFiles = inMemoryFilesToSave.filter((f) => !f.data).map((f) => f.filename)
+      const missingDataFiles = newFiles
+        .filter((f) => isMissingAttachmentData(f.size, window.__pendingAgentFileData?.get(f.id)))
+        .map((f) => f.filename)
       if (missingDataFiles.length > 0) {
         toast.error('附件数据已失效', {
           description: `请移除后重新添加文件：${missingDataFiles.join('、')}`,
