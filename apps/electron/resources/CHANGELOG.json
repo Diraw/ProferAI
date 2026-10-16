@@ -1,6 +1,12 @@
 {
   "releases": [
     {
+      "version": "0.16.9",
+      "date": "2026-10-16",
+      "title": "v0.16.9",
+      "notes": "- 新增：Agent 执行链默认经过宿主无关的 Agent Runtime，普通桌面发送可通过显式回退值回到旧编排器；Claude / Pi provider 独立拆包\n- 新增：Electron host adapter、运行时选择与状态投影，Claude/Pi 生命周期、权限、取消、重试、后台任务和工具装配边界更清晰\n- 新增：文档 Office 引擎包，提供 DOCX / PPTX / XLSX 的布局与拓扑解析能力\n- 优化：Pi 请求代理、Codex 标题生成、模型目录、Skill 资源和产品工具桥接统一收口\n- 修复：会话导航索引与渲染层分组口径不一致、工作区热力图错误接纳团队工作区、模型选择 facade 迁移后的交互回归\n- 优化：补齐 runtime/provider 隔离构建、无 Electron 加载、边界检查和完整生命周期测试"
+    },
+    {
       "version": "0.16.2",
       "date": "2026-10-10",
       "title": "v0.16.2",
