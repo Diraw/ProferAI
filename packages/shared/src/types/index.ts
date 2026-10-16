@@ -85,3 +85,6 @@ export * from './knowledge-base'
 
 // 本地任务与日程（Planning）相关类型
 export * from './planning'
+
+// 文档布局 AST 契约（PDF / Office 共用，见 document-layout.ts 头部说明）
+export * from './document-layout'
