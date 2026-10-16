@@ -757,6 +757,8 @@ export interface AgentSessionUiProjection {
   channelId: string | null
   modelId: string | null
   agentRuntime: AgentRuntime
+  /** 缺省兼容旧 projection；consumer 按历史已绑定处理。 */
+  agentRuntimeLocked?: boolean
   permissionMode: ProferPermissionMode
   presetId: string | null
   presetReference: import('./agent-preset').PresetReference | null
@@ -812,6 +814,8 @@ export interface AgentSessionMeta {
   piFileCheckpoints?: Record<string, string>
   /** 本会话使用的 Agent runtime；历史会话缺省时按 Claude 处理。 */
   agentRuntime?: AgentRuntime
+  /** 首次运行前为 false；历史会话缺省值按已锁定处理，避免误切换。 */
+  agentRuntimeLocked?: boolean
   /** 兼容旧版本的本会话预设 ID；新数据同时保存 presetReference。 */
   presetId?: string
   /** 本会话绑定的显式预设引用。 */
@@ -1686,6 +1690,17 @@ export interface AgentStreamEvent {
   event?: AgentEvent
 }
 
+export interface AgentRuntimeRestoreSnapshot {
+  sessionId: string
+  /** renderer 刷新时仍由主进程持有的运行所有权。 */
+  active: boolean
+  /** 已回放的实时事件窗口是否包含终态。 */
+  hasTerminalEvent: boolean
+  /** 主进程已知的上下文窗口；缺失时 renderer 保留已有值。 */
+  contextWindow?: number
+  contextUpdatedAt?: number
+}
+
 /**
  * Agent 流式完成事件载荷（主进程 → 渲染进程）
  * 包含已持久化的消息列表，避免异步重新加载的竞态窗口。
@@ -2008,6 +2023,14 @@ export interface PermissionRequest {
   command?: string
   /** 危险等级 */
   dangerLevel: DangerLevel
+  /** SDK 当前工具调用 ID；用于回传权限决策关联。 */
+  toolUseID?: string
+  /** 子代理 ID；用于主进程安全审计。 */
+  agentID?: string
+  /** SDK 建议的权限更新；只在授权结果中按用户选择应用。 */
+  suggestions?: readonly Record<string, unknown>[]
+  /** SDK 阻断路径提示。 */
+  blockedPath?: string
   /** SDK 提供的原因说明 */
   decisionReason?: string
   /** SDK 提供的原因分类，如 classifier / safetyCheck / rule */
@@ -2415,7 +2438,7 @@ export const AGENT_IPC_CHANNELS = {
   UPDATE_SESSION_AGENT_EFFORT: 'agent:update-session-agent-effort',
   /** 查询某 Pi 模型可用的推理档位能力（renderer 思考档位菜单展示）。 */
   GET_PI_REASONING_CAPABILITY: 'agent:get-pi-reasoning-capability',
-  /** 切换指定空闲会话的 Agent runtime；跨 runtime 时清除 SDK 会话恢复 ID。 */
+  /** 首次发送前选择 Agent runtime；已运行或历史会话固定使用原 runtime。 */
   UPDATE_SESSION_AGENT_RUNTIME: 'agent:update-session-agent-runtime',
 
   // AskUserQuestion 交互式问答

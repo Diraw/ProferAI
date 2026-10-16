@@ -1,0 +1,26 @@
+{
+  "name": "@profer/agent-runtime",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "description": "Host-independent Agent execution contracts and pure runtime lifecycle utilities.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./error-patterns": "./src/error-patterns.ts",
+    "./runtime-guards": "./src/runtime-guards.ts",
+    "./runtime-routing-adapter": "./src/runtime-routing-adapter.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check:isolation": "bun run test/isolation/run-isolation-check.ts"
+  },
+  "dependencies": {
+    "@profer/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
