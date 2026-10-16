@@ -8,6 +8,7 @@
 
 import { expect, test } from 'bun:test'
 import {
+  GROUP_MIN_ADJUSTABLE_BAND,
   GROUP_MIN_PANE_WIDTH,
   resolveGroupDropSide,
   emptyGroupSide,
@@ -292,22 +293,35 @@ test('几何：比例受两栏最小宽度约束后回调', () => {
   expect(geometry.ratio).toBeCloseTo(972 / 1392, 5)
 })
 
-test('几何：两栏宽度之和 + 分栏缝 = 容器宽度，且都不小于最小宽', () => {
+test('几何：两栏宽度之和 + 分栏缝 = 容器宽度；够宽时都不小于最小宽，偏窄时让位给保底可调区间', () => {
   const EPSILON = 1e-6
+  const floorShare = (1 - GROUP_MIN_ADJUSTABLE_BAND) / 2
   for (const containerWidth of [1000, 1200, 1440, 1920]) {
     for (const ratio of [0.25, 0.4, 0.5, 0.62, 0.75]) {
       const geometry = resolveGroupSplitGeometry(containerWidth, ratio, { gap: 8, minPaneWidth: 420 })
-      expect(geometry.leftWidth + geometry.rightWidth).toBeCloseTo(containerWidth - 8, 5)
-      expect(geometry.leftWidth).toBeGreaterThanOrEqual(420 - EPSILON)
-      expect(geometry.rightWidth).toBeGreaterThanOrEqual(420 - EPSILON)
+      const available = containerWidth - 8
+      expect(geometry.leftWidth + geometry.rightWidth).toBeCloseTo(available, 5)
+      // 420 是首选下限；只有当它会把可调区间挤到保底值以下时，才放宽到保底占比。
+      const floor = Math.min(420, available * floorShare)
+      expect(geometry.leftWidth).toBeGreaterThanOrEqual(floor - EPSILON)
+      expect(geometry.rightWidth).toBeGreaterThanOrEqual(floor - EPSILON)
     }
   }
 })
 
-test('几何：容器装不下两个最小宽时等分，容器为 0 时输出 0', () => {
+test('几何：容器偏窄时不再等分锁死，分栏缝保留保底可调区间；容器为 0 时输出 0', () => {
+  // 862 ≈ 1510 窗口 + 侧栏 300 + 文件面板 300 时的主区容器宽：
+  // 两栏各 420px 只剩 ±7px 可调（旧实现等分后完全拖不动），这里要求仍能横跨保底区间。
+  const containerWidth = 862
+  const available = containerWidth - 8
+  const leftMost = resolveGroupSplitGeometry(containerWidth, 0.25, { gap: 8 })
+  const rightMost = resolveGroupSplitGeometry(containerWidth, 0.75, { gap: 8 })
+  expect(rightMost.rightWidth - leftMost.rightWidth).toBeCloseTo(available * GROUP_MIN_ADJUSTABLE_BAND, 5)
+  expect(leftMost.leftWidth + leftMost.rightWidth).toBeCloseTo(available, 5)
+
   const narrow = resolveGroupSplitGeometry(GROUP_MIN_PANE_WIDTH + 100, 0.75, { gap: 8 })
-  expect(narrow.ratio).toBe(0.5)
-  expect(narrow.leftWidth).toBeCloseTo(narrow.rightWidth, 5)
+  expect(narrow.ratio).toBeCloseTo((1 + GROUP_MIN_ADJUSTABLE_BAND) / 2, 6)
+  expect(narrow.leftWidth + narrow.rightWidth).toBeCloseTo(GROUP_MIN_PANE_WIDTH + 100 - 8, 5)
 
   expect(resolveGroupSplitGeometry(0, 0.5)).toEqual({ rightWidth: 0, leftWidth: 0, ratio: 0.5 })
   expect(resolveGroupSplitGeometry(-100, 0.5)).toEqual({ rightWidth: 0, leftWidth: 0, ratio: 0.5 })

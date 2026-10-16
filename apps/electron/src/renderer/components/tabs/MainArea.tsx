@@ -173,19 +173,29 @@ export function MainArea(): React.ReactElement {
   )
   const indicatorMap = useAtomValue(tabIndicatorMapAtom)
   const { executeClose } = useCloseTab()
-  const groupContainerRef = React.useRef<HTMLDivElement>(null)
+  const groupContainerRef = React.useRef<HTMLDivElement | null>(null)
+  const groupContainerObserverRef = React.useRef<ResizeObserver | null>(null)
   // 分栏像素宽由实测容器宽算出，保证比例与最小宽度约束一致
   const [groupContainerWidth, setGroupContainerWidth] = React.useState(0)
   const groupDragging = React.useRef(false)
 
-  React.useLayoutEffect(() => {
-    const element = groupContainerRef.current
-    if (!element) return
-    const update = (): void => setGroupContainerWidth(element.clientWidth)
-    const observer = new ResizeObserver(update)
+  // 分栏容器只在「对话视图」渲染（规划中心 / Agent 技能视图整屏取代 TabBar + 内容），
+  // 切回来时是**新节点**。所以观察者必须跟着元素出现/消失挂载，不能写成 [] 依赖的
+  // 一次性 useLayoutEffect：那一刻容器不在 DOM 里就永远测不到宽度（groupGeometryReady
+  // 恒为 false → 右栏被钉在 CSS 等分，表现为分栏缝能拖、两栏不动）；换成新节点后
+  // 观察者还会留在已卸载的旧节点上，窗口缩放/面板让位都不再更新宽度。
+  const attachGroupContainer = React.useCallback((element: HTMLDivElement | null): void => {
+    groupContainerRef.current = element
+    groupContainerObserverRef.current?.disconnect()
+    groupContainerObserverRef.current = null
+    if (!element) {
+      setGroupContainerWidth(0)
+      return
+    }
+    const observer = new ResizeObserver(() => setGroupContainerWidth(element.clientWidth))
     observer.observe(element)
-    update()
-    return () => observer.disconnect()
+    groupContainerObserverRef.current = observer
+    setGroupContainerWidth(element.clientWidth)
   }, [])
 
   const groupGeometry = resolveGroupSplitGeometry(groupContainerWidth, tabGroupRatio)
@@ -324,7 +334,7 @@ export function MainArea(): React.ReactElement {
               {/* data-group-drop-split = 真实分界线（相对区域左缘的 px）：TabBar 判定左右落点
                   必须用它，不能用容器中点——比例被拖过、或空栏只占 1/3 时中点与实际分界不符。 */}
               <div
-                ref={groupContainerRef}
+                ref={attachGroupContainer}
                 data-group-drop-region="true"
                 data-group-drop-split={groupGeometryReady ? Math.round(groupGeometry.leftWidth + GROUP_SPLIT_GAP / 2) : undefined}
                 className="flex h-full min-w-0 relative"

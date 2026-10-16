@@ -346,6 +346,20 @@ export interface AppSettings {
   pocketModePort?: number
   /** Windows Shell 环境偏好：'auto'（自动检测，优先 Git Bash）| 'git-bash' | 'wsl'（默认 'auto'） */
   agentShellPreference?: 'auto' | 'git-bash' | 'wsl'
+  /** 桌面输入工具栏的显示与排序偏好；移动端不读取此字段。 */
+  composerToolbarPreferences?: ComposerToolbarPreferences
+}
+
+/** 单个输入工具的桌面显示与排序偏好。 */
+export interface ComposerToolbarItemPreference {
+  visible: boolean
+  order: number
+}
+
+/** Chat/Agent 各自维护工具栏偏好，便于两个模式独立配置。 */
+export interface ComposerToolbarPreferences {
+  chat?: Record<string, ComposerToolbarItemPreference>
+  agent?: Record<string, ComposerToolbarItemPreference>
 }
 
 /** 主窗口大小、位置和最大化状态 */

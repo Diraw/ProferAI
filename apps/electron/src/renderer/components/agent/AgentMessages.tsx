@@ -39,13 +39,14 @@ import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@profer/ui/primitives/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
-import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupNavKey, getGroupPreview, getLatestUserGroupId, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
+import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupNavKey, getGroupPreview, getLatestUserGroupId, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
 import { extractUserText } from '@profer/session-core'
 import { shouldRegenerateFromRetry } from '@/lib/agent-regenerate-anchor'
 import { buildLiveGroupSet } from './live-group-set'
 import { mergeMessagesByUuid } from '@/lib/agent-message-merge'
 import { applyResolvedBlobMessages } from '@/lib/resolved-blob-messages'
-import { shouldShowAgentRunningIndicator } from '@/lib/agent-running-indicator'
+import { deriveAgentRuntimeDisplay } from '@/domains/agent-runtime/agent-runtime-display-policy'
+import { AgentRuntimeStatus } from './AgentRuntimeStatus'
 import { ContentBlock } from './ContentBlock'
 import { parseThinkTagsFromText } from './thinking-tag-parser'
 import { AgentHistorySelectionLayer } from './AgentHistorySelectionLayer'
@@ -135,6 +136,14 @@ interface AgentMessagesProps {
    * 不传时错误卡片回落 `onRetry` 的追加语义（无回退锚点，如首轮就失败）。
    */
   onRegenerateLastTurn?: () => void
+  /** 任意用户消息可进入原地编辑态（「修改重发」）；编辑框渲染在消息里，提交时才回退重发。 */
+  onEditUserMessage?: (userMessageUuid: string) => void
+  /** 提交原地编辑：上层按 userMessageUuid 回退到该轮并重发编辑后的正文。 */
+  onSubmitEditUserMessage?: (request: EditResendRequest) => void
+  /** 取消原地编辑。 */
+  onCancelEditUserMessage?: () => void
+  /** 当前处于原地编辑态的消息 uuid（由上层持有，保证只可能有一条在编辑）。 */
+  editingUserMessageUuid?: string | null
   onFork?: (upToMessageUuid: string) => void
   /** 探索分支回调（Pi `/tree`）；仅 Pi 会话可用 */
   onExplore?: (upToMessageUuid: string) => void
@@ -496,7 +505,7 @@ function AgentRunningIndicator({ startedAt }: { startedAt?: number }): React.Rea
   )
 }
 
-export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onRegenerateLastTurn, onFork, onExplore, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
+export function AgentMessages({ sessionId, sessionModelId, agentRuntime, messagesLoaded, persistedSDKMessages, streaming, streamState, runningDelegationCount = 0, liveMessages, sessionPath, attachedDirs, stoppedByUser, streamError, onRetry, onRetryInNewSession, onRegenerateLastTurn, onEditUserMessage, onSubmitEditUserMessage, onCancelEditUserMessage, editingUserMessageUuid, onFork, onExplore, onRewind, onCompact, imageGenerations, onLoadEarlierHistory, historyMoreAvailable, historyLoadingEarlier, explorationEnabled = true }: AgentMessagesProps): React.ReactElement {
   const store = useStore()
   React.useEffect(() => {
     if (!window.electronAPI?.listVisualizations) return
@@ -664,7 +673,11 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   const resolvedVisibleGroupStart = pagedMode
     ? 0
     : (visibleGroupStart ?? Math.max(0, allGroups.length - HISTORY_GROUP_PAGE_SIZE))
-  const visibleGroups = allGroups.slice(resolvedVisibleGroupStart)
+  // 输入草稿/运行状态更新不改变消息窗口，保持导航与时间线的依赖引用稳定。
+  const visibleGroups = React.useMemo(
+    () => allGroups.slice(resolvedVisibleGroupStart),
+    [allGroups, resolvedVisibleGroupStart],
+  )
   // When SDK history is paged, do not inject cards older than the loaded message tail;
   // they appear naturally after the user loads the corresponding older message page.
   const visibleImageGenerations = React.useMemo(() => {
@@ -787,11 +800,23 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     ? allGroups.some((g) => g.type === 'assistant-turn' && liveGroupSet.has(g))
     : (liveMessages != null && liveMessages.some((m) => (m as { type: string }).type === 'assistant'))
 
-  const showAgentRunningIndicator = shouldShowAgentRunningIndicator({
-    streaming,
+  const runtimeDisplay = deriveAgentRuntimeDisplay({
+    running: streaming,
+    stopping: streamState?.stopping,
+    backgroundWaiting: streamState?.backgroundWaiting,
+    isCompacting: streamState?.isCompacting,
+    compactInFlight: streamState?.compactInFlight,
+    retrying: retrying !== undefined,
+    retryFailed: retrying?.failed,
     streamError,
     liveMessages,
+    runningDelegationCount,
   })
+  const showAgentRunningIndicator = runtimeDisplay.showRunningIndicator
+  const showRuntimeStatus = runtimeDisplay.kind === 'stopping'
+    || (runtimeDisplay.kind === 'interrupted' && !runtimeDisplay.showRetry)
+    || runtimeDisplay.kind === 'background'
+    || runtimeDisplay.kind === 'delegation'
 
   const resolvedBasePaths = React.useMemo(
     () => [...(sessionPath ? [sessionPath] : []), ...(attachedDirs ?? [])],
@@ -802,7 +827,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
     <FileAccessSessionProvider sessionId={sessionId}>
     <BasePathsProvider basePaths={resolvedBasePaths}>
     <div ref={historySelectionRootRef} className="relative flex min-h-0 flex-1 flex-col">
-    <Conversation key={sessionId} resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 transition-opacity duration-200') : 'opacity-0'}>
+    <Conversation key={sessionId} resize={ready && !transitioning ? 'smooth' : 'instant'} className={ready ? (skipFadeIn ? 'opacity-100' : 'opacity-100 motion-safe:transition-opacity motion-safe:duration-200') : 'opacity-0'}>
       <ScrollPositionManager id={sessionId} ready={ready} />
       <TopHistoryLoader
         onLoadEarlierHistory={onLoadEarlierHistory}
@@ -843,7 +868,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
             </ConversationHistoryButton>
           </div>
         )}
-        {!hasContent && !streaming && runningDelegationCount === 0 ? (
+        {!hasContent && !runtimeDisplay.active ? (
           <EmptyState />
         ) : (
           <>
@@ -874,6 +899,13 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
               const retryLatestTurn = shouldRegenerateFromRetry({ isLatestTurn: isLatestAssistantTurn, sessionActive: isSessionActive })
                 ? onRegenerateLastTurn
                 : undefined
+              // 「修改重发」入口挂在**每一条**用户消息上（对齐 Chat 模式）：点击后该条消息原地
+              // 变成编辑框，提交时由 AgentView 回退到该轮之前再重发。会话活跃
+              //（流式/后台任务/子 Agent）时不暴露入口，避免与正在运行的 agent session 冲突。
+              const canEditUserMessage = group.type === 'user'
+                && !isGoalIterationMessage(group.message)
+                && !shouldDisableActions
+                && !isSessionActive
               return (
                 <MessageGroupRenderer
                   key={getGroupId(group)}
@@ -890,6 +922,10 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                   onRetryInNewSession={shouldDisableActions ? undefined : onRetryInNewSession}
                   onCompact={(shouldDisableActions || isSessionActive) ? undefined : onCompact}
                   onRegenerateLastUserMessage={(isLatestUserTurn && !shouldDisableActions && !isSessionActive) ? onRegenerateLastTurn : undefined}
+                  onEditUserMessage={canEditUserMessage ? onEditUserMessage : undefined}
+                  onSubmitEditUserMessage={onSubmitEditUserMessage}
+                  onCancelEditUserMessage={onCancelEditUserMessage}
+                  editingUserMessageUuid={editingUserMessageUuid ?? null}
                   isStreaming={isLive || undefined}
                   stoppedByUser={isLastAssistantTurn || undefined}
                   sessionModelId={sessionModelId}
@@ -950,30 +986,9 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                 视觉上被流中新出现的"上下文已压缩"分隔符无缝替换 */}
             {streamState?.isCompacting && <CompactingIndicator />}
 
-            {/* 后台任务等待态指示器：主轮次文本输出已完成，但后台任务（subagent/Bash 等）仍在执行。
-                此时 running=false、backgroundWaiting=true，AgentRunningIndicator 不渲染，
-                若无此指示器用户会误以为对话已结束从而触发压缩等危险操作 */}
-            {streamState?.backgroundWaiting && !suppressAgentRunning && !streamState?.isCompacting && (
+            {showRuntimeStatus && !suppressAgentRunning && (
               <div className="pl-[56px] min-h-[28px]">
-                <div className="flex items-center gap-2">
-                  <Spinner size="sm" className="text-muted-foreground/40" />
-                  <span className="text-[13px] font-light text-muted-foreground/45 tabular-nums">
-                    后台任务执行中
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* 委派等待态：父会话本轮答复已经结束，但子会话仍在独立运行；
-                全部结束后主进程会自动续跑父会话。 */}
-            {!streaming && runningDelegationCount > 0 && !suppressAgentRunning && !streamState?.isCompacting && (
-              <div className="pl-[56px] min-h-[28px]">
-                <div className="flex items-center gap-2">
-                  <Spinner size="sm" className="text-blue-500/70" />
-                  <span className="text-[13px] font-light text-muted-foreground/70 tabular-nums">
-                    本轮已答复，仍在等待 {runningDelegationCount} 个协作子会话；完成后将自动继续。
-                  </span>
-                </div>
+                <AgentRuntimeStatus display={runtimeDisplay} />
               </div>
             )}
 

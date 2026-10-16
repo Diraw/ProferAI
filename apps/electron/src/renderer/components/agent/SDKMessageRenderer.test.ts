@@ -3,7 +3,7 @@ import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Provider, createStore } from 'jotai'
 import type { SDKMessage } from '@profer/shared'
-import { groupIntoTurns, getGroupPreview, getLatestUserGroupId, MessageGroupRenderer, parseAttachedFiles, buildHistoricalTaskSubjects, type MessageGroup } from './SDKMessageRenderer'
+import { groupIntoTurns, getGroupPreview, getLatestUserGroupId, MessageGroupRenderer, parseAttachedFiles, buildHistoricalTaskSubjects, splitUserMessagePrefix, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
 
 function userText(text: string): SDKMessage {
   return {
@@ -244,12 +244,19 @@ describe('最后一条用户消息定位（重新生成入口挂载点）', () =
   })
 })
 
-describe('最后一条用户消息的重新生成入口渲染', () => {
-  function renderUserGroup(onRegenerate?: () => void): string {
+describe('用户消息操作入口渲染（重新生成 / 修改重发）', () => {
+  function renderUserGroup(options: {
+    onRegenerate?: () => void
+    onEdit?: (userMessageUuid: string) => void
+    onSubmitEdit?: (request: EditResendRequest) => void
+    isEditing?: boolean
+    uuid?: string | undefined
+    text?: string
+  } = {}): string {
     const message = {
       type: 'user',
-      uuid: 'u1',
-      message: { content: [{ type: 'text', text: '帮我改成 TypeScript' }] },
+      ...(options.uuid === undefined ? { uuid: 'u1' } : options.uuid ? { uuid: options.uuid } : {}),
+      message: { content: [{ type: 'text', text: options.text ?? '帮我改成 TypeScript' }] },
       parent_tool_use_id: null,
     } as unknown as SDKMessage
     const groups = groupIntoTurns([message])
@@ -261,17 +268,75 @@ describe('最后一条用户消息的重新生成入口渲染', () => {
           group: groups[0]!,
           allMessages: [],
           historicalTaskSubjects: new Map<string, string>(),
-          ...(onRegenerate ? { onRegenerateLastUserMessage: onRegenerate } : {}),
+          ...(options.onRegenerate ? { onRegenerateLastUserMessage: options.onRegenerate } : {}),
+          ...(options.onEdit ? { onEditUserMessage: options.onEdit } : {}),
+          ...(options.onSubmitEdit ? { onSubmitEditUserMessage: options.onSubmitEdit } : {}),
+          editingUserMessageUuid: options.isEditing ? (options.uuid ?? 'u1') : null,
         }),
       ),
     )
   }
 
   test('传入重新生成回调时渲染入口', () => {
-    expect(renderUserGroup(() => {})).toContain('重新生成')
+    expect(renderUserGroup({ onRegenerate: () => {} })).toContain('重新生成')
   })
 
-  test('非最后一条用户消息（无回调）不渲染入口', () => {
+  test('传入修改回调时渲染修改重发入口', () => {
+    expect(renderUserGroup({ onEdit: () => {} })).toContain('修改重发')
+  })
+
+  test('未传回调时不渲染入口', () => {
     expect(renderUserGroup()).not.toContain('重新生成')
+    expect(renderUserGroup()).not.toContain('修改重发')
+  })
+
+  test('消息没有 uuid 时不渲染修改重发入口（无法定位回退锚点）', () => {
+    expect(renderUserGroup({ onEdit: () => {}, uuid: undefined, text: '' })).not.toContain('修改重发')
+  })
+
+  test('原地编辑态：编辑框渲染在消息里，而不是底部 composer', () => {
+    const markup = renderUserGroup({ onEdit: () => {}, onSubmitEdit: () => {}, isEditing: true })
+
+    // 编辑框（textarea）与取消/发送都在消息内部
+    expect(markup).toContain('编辑消息...')
+    expect(markup).toContain('取消')
+    expect(markup).toContain('发送')
+    // 编辑态下该消息不再显示 hover 操作栏
+    expect(markup).not.toContain('修改重发')
+  })
+
+  test('原地编辑态不加额外说明段落（保持最小内容）', () => {
+    const markup = renderUserGroup({ onEdit: () => {}, onSubmitEdit: () => {}, isEditing: true })
+
+    expect(markup).not.toContain('发送后会回退到这条消息并重发，其后的对话会被截断，工作区文件一并恢复。')
+  })
+
+  test('原地编辑态复用消息气泡与正文排版（不换样式、不跳位置）', () => {
+    const markup = renderUserGroup({ onEdit: () => {}, onSubmitEdit: () => {}, isEditing: true })
+
+    // 与 UserMessageContent 同一套气泡与内边距
+    expect(markup).toContain('rounded-[10px] bg-primary/10 px-3.5 py-2.5')
+    // 与正文同一套字号/行高（随字号设置一起变）
+    expect(markup).toContain('text-[length:var(--md-preview-font-size,15px)]')
+    expect(markup).toContain('leading-[1.6]')
+    // 最小高度 = 3 行
+    expect(markup).toContain('min-h-[72px]')
+  })
+
+  test('非编辑态不渲染编辑框', () => {
+    expect(renderUserGroup({ onEdit: () => {} })).not.toContain('编辑消息...')
+  })
+
+  test('点击修改重发回传该条消息的 uuid、正文与附件前缀', () => {
+    // 静态渲染无法触发点击，入口回传的 payload 由 splitUserMessagePrefix 决定切点：
+    // 这里直接按同口径验证「附件/引用前缀不被丢掉」。
+    const rawText = '<attached_files>\n<file path="/tmp/a.ts" />\n</attached_files>\n\n帮我改成 TypeScript'
+    const { text } = parseAttachedFiles(rawText)
+    expect(text).toBe('帮我改成 TypeScript')
+    expect(splitUserMessagePrefix(rawText, text)).toBe('<attached_files>\n<file path="/tmp/a.ts" />\n</attached_files>')
+    // 无前缀的普通消息：不凭空造前缀
+    expect(splitUserMessagePrefix('帮我改成 TypeScript', '帮我改成 TypeScript')).toBe('')
+    // 正文里有重复片段时，以最后一段为准（与渲染态一致）
+    expect(splitUserMessagePrefix('aaa\nbbb\naaa', 'aaa')).toBe('aaa\nbbb')
   })
 })

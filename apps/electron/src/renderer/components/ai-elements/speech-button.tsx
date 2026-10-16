@@ -20,6 +20,7 @@ import {
   voiceDictationEnabledAtom,
   voiceDictationSettingsAtom,
 } from '@/atoms/voice-dictation-atoms'
+import { getComposerVoiceSettings, toggleComposerVoice } from '@/domains/composer/composer-api'
 
 interface SpeechButtonProps {
   /** @deprecated 语音结果统一由全局语音输入回填到当前输入框 */
@@ -35,7 +36,7 @@ export function useLoadVoiceDictationSettings(): void {
   const setSettings = useSetAtom(voiceDictationSettingsAtom)
   useEffect(() => {
     let cancelled = false
-    window.electronAPI.getVoiceDictationSettings()
+    getComposerVoiceSettings()
       .then((settings) => {
         if (!cancelled) setSettings(settings)
       })
@@ -59,7 +60,7 @@ export function SpeechButton({
   const handleClick = useCallback((): void => {
     void (async () => {
       try {
-        await window.electronAPI.toggleVoiceDictation()
+        await toggleComposerVoice()
       } catch (error) {
         console.error('[语音输入] 唤起浮窗失败:', error)
         toast.error('唤起语音输入失败')

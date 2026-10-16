@@ -76,8 +76,18 @@ export const GROUP_ELIGIBLE_TAB_TYPES: readonly string[] = ['agent', 'chat', 'pr
 /** 组合内分栏缝宽度，与浏览器/预览分栏保持一致 */
 export const GROUP_SPLIT_GAP = 8
 
-/** 单栏最小可用宽度，对齐 panel-layout 的 CONVERSATION_MIN_WIDTH */
+/** 单栏最小可用宽度（首选值），对齐 panel-layout 的 CONVERSATION_MIN_WIDTH */
 export const GROUP_MIN_PANE_WIDTH = 420
+
+/**
+ * 分栏缝的最小可调区间（占可用宽的比例）。
+ *
+ * 两栏最小宽把可调区间挤到比它还窄时，放宽的是**最小栏宽**而不是可调区间：
+ * 0.25 表示比例至少能从 0.375 拖到 0.625。典型触发场景：窗口 1510 + 侧栏 300 +
+ * 文件面板 300 → 主区容器约 862px，两栏各 420px 只剩 ±7px 可调（看起来就是"线拖不动"）。
+ * 只影响渲染几何；窗口预算（mainAreaNeed）仍按 CONVERSATION_MIN_WIDTH 判定。
+ */
+export const GROUP_MIN_ADJUSTABLE_BAND = 0.25
 
 /** 右栏占比的拖拽边界 */
 export const GROUP_MIN_RATIO = 0.25
@@ -473,7 +483,11 @@ export interface GroupSplitGeometry {
 
 /**
  * 由容器宽度与比例算出两栏像素宽，并把比例限制在「两栏都不小于最小宽度」的区间内。
- * 容器过窄（可用宽装不下两个最小宽）时退化为等分，由调用方决定是否提示。
+ *
+ * 两栏最小宽是**首选**约束，不是硬约束：当它会把分栏缝的可调区间挤到
+ * GROUP_MIN_ADJUSTABLE_BAND 以下（含可用宽装不下两栏最小宽、clamp 区间反转的情况）时，
+ * 让位给保底可调区间——「分栏缝始终可用」是组合分栏的既定契约，
+ * 宁可让两栏临时窄于 CONVERSATION_MIN_WIDTH，也不能出现"线能拖、两栏不动"的死区。
  */
 export function resolveGroupSplitGeometry(
   containerWidth: number,
@@ -488,14 +502,12 @@ export function resolveGroupSplitGeometry(
   }
 
   const base = clampGroupRatio(ratio)
-  // 两栏最小宽都放不下时 clamp 区间会反转；此时等分，避免负宽度或抖动。
-  if (available < minPaneWidth * 2) {
-    const rightWidth = available / 2
-    return { rightWidth, leftWidth: available - rightWidth, ratio: 0.5 }
-  }
-
-  const lower = minPaneWidth / available
-  const upper = 1 - minPaneWidth / available
+  // 首选下限 = 两栏最小宽对应的占比；保底下限 = 保住可调区间时的占比。
+  // 取两者较小值：容器够宽时完全是前者（两栏都不小于 420），
+  // 容器偏窄时由后者接管（区间至少横跨 GROUP_MIN_ADJUSTABLE_BAND，不会锁死）。
+  const minPaneShare = minPaneWidth / available
+  const lower = Math.min(minPaneShare, (1 - GROUP_MIN_ADJUSTABLE_BAND) / 2)
+  const upper = 1 - lower
   const effective = Math.max(lower, Math.min(upper, base))
   const rightWidth = available * effective
   return { rightWidth, leftWidth: available - rightWidth, ratio: effective }

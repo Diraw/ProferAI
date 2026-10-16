@@ -145,11 +145,14 @@ export class ConversationScrollController {
   scrolled(): void {
     if (this.disposed || this.port.viewport.clientHeight <= 0) return
     const el = this.port.viewport
-    const ownWrite = this.writtenTop !== null && Math.abs(el.scrollTop - this.writtenTop) < 1
+    // 明确用户输入后的微小位移不能被程序写入的 1px 容差吞掉。
+    const ownWrite = this.writtenTop !== null && (this.userIntent
+      ? el.scrollTop === this.writtenTop
+      : Math.abs(el.scrollTop - this.writtenTop) < 1)
     const geometryChanged = this.height !== el.scrollHeight || this.viewportHeight !== el.clientHeight
-    const topChanged = Math.abs(el.scrollTop - this.previousTop) > 1
+    const topChanged = Math.abs(el.scrollTop - this.previousTop) > (this.userIntent ? 0 : 1)
     if (topChanged && !ownWrite && (!geometryChanged || this.userIntent) && !this.navigating) {
-      if (this.following && el.scrollTop < this.previousTop - 1) this.pause()
+      if (this.following && el.scrollTop < this.previousTop) this.pause()
       else if (!this.following) {
         this.revision++
         this.layoutAnchor = null
@@ -166,6 +169,9 @@ export class ConversationScrollController {
     if (this.disposed) return
     const el = this.port.viewport
     if (el.clientHeight <= 0) return
+    // 浏览器可能先更新 scrollTop，再派发 resize，最后才通知 scroll。
+    // 先接纳已发生的用户滚动，避免下方阅读锚点恢复把首个向上动作拉回底部。
+    if (this.userIntent && el.scrollTop !== this.previousTop) this.scrolled()
     const viewportChanged = this.viewportHeight !== el.clientHeight
     this.height = el.scrollHeight
     this.viewportHeight = el.clientHeight

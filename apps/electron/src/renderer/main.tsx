@@ -71,6 +71,7 @@ import {
   initializeUiScale,
 } from './atoms/ui-scale'
 import { installedPluginsAtom } from './atoms/plugin-system'
+import { composerToolbarPreferencesAtom, initializeComposerToolbarPreferences } from './atoms/composer-toolbar-preferences'
 import { developerModeEnabledAtom, openEpistemicModeEnabledAtom } from './atoms/developer-mode'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useBrowserLocalFileSelectionQuote } from './hooks/useBrowserLocalFileSelectionQuote'
@@ -540,6 +541,16 @@ function UiScaleInitializer(): null {
   useEffect(() => {
     initializeUiScale(setUiScale)
   }, [setUiScale])
+
+  return null
+}
+
+function ComposerToolbarPreferencesInitializer(): null {
+  const setPreferences = useSetAtom(composerToolbarPreferencesAtom)
+
+  useEffect(() => {
+    void initializeComposerToolbarPreferences(setPreferences)
+  }, [setPreferences])
 
   return null
 }
@@ -1130,6 +1141,7 @@ if (isQuickTaskWindow) {
       <AgentUnreadSettingsInitializer />
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
+      <ComposerToolbarPreferencesInitializer />
       <MarkdownFontSizeInitializer />
       <UiScaleInitializer />
       <PluginSystemInitializer />

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKMessage } from '@profer/shared'
-import { getUserTextFromSDKMessage, resolveRegenerateTarget, shouldRegenerateFromRetry } from './agent-regenerate-anchor'
+import { getUserTextFromSDKMessage, resolveRegenerateTarget, resolveRewriteSubmitBlock, resolveRewriteTarget, shouldRegenerateFromRetry } from './agent-regenerate-anchor'
 
 function user(text: string, uuid = `u-${text}`): SDKMessage {
   return {
@@ -158,5 +158,81 @@ describe('shouldRegenerateFromRetry（错误卡片重试是否改走重新生成
 
   test('会话活跃（流式/后台任务/子 Agent）时不改走', () => {
     expect(shouldRegenerateFromRetry({ isLatestTurn: true, sessionActive: true })).toBe(false)
+  })
+})
+
+describe('resolveRewriteTarget（修改重发目标）', () => {
+  test('中间轮次：锚点为该条用户消息之前的主线 assistant', () => {
+    const messages = [
+      user('第一问', 'u1'),
+      assistant('a1'),
+      user('第二问', 'u2'),
+      assistant('a2'),
+      user('第三问', 'u3'),
+    ]
+    expect(resolveRewriteTarget(messages, 'u2'))
+      .toEqual({ kind: 'rewind', userMessage: '第二问', rewindToAssistantUuid: 'a1' })
+  })
+
+  test('上一轮有多条主线 assistant：锚点取最靠近该消息的那条（它之后的才被截断）', () => {
+    const messages = [user('第一问', 'u1'), assistant('a1'), assistant('a2'), user('第二问', 'u2')]
+    expect(resolveRewriteTarget(messages, 'u2'))
+      .toEqual({ kind: 'rewind', userMessage: '第二问', rewindToAssistantUuid: 'a2' })
+  })
+
+  test('子代理 assistant 消息不作为回退锚点', () => {
+    const messages = [
+      user('第一问', 'u1'),
+      assistant('a1'),
+      assistant('sub-1', 'tool-1'),
+      user('第二问', 'u2'),
+    ]
+    expect(resolveRewriteTarget(messages, 'u2'))
+      .toEqual({ kind: 'rewind', userMessage: '第二问', rewindToAssistantUuid: 'a1' })
+  })
+
+  test('会话第一条用户消息：前面没可保留的锚点 → 清空整段对话', () => {
+    const messages = [user('第一问', 'u1'), assistant('a1'), user('第二问', 'u2')]
+    expect(resolveRewriteTarget(messages, 'u1'))
+      .toEqual({ kind: 'reset', userMessage: '第一问' })
+  })
+
+  test('目标就是最后一条用户消息时与 resolveRegenerateTarget 结果一致', () => {
+    const messages = [user('第一问', 'u1'), assistant('a1'), user('第二问', 'u2')]
+    expect(resolveRewriteTarget(messages, 'u2')).toEqual(resolveRegenerateTarget(messages))
+  })
+
+  test('uuid 不在已加载历史里 → undefined（不猜锚点）', () => {
+    const messages = [user('第一问', 'u1'), assistant('a1')]
+    expect(resolveRewriteTarget(messages, 'u-unknown')).toBeUndefined()
+    expect(resolveRewriteTarget(messages, '')).toBeUndefined()
+  })
+
+  test('uuid 指向的不是真实用户发言 → undefined', () => {
+    expect(resolveRewriteTarget([user('第一问', 'u1'), assistant('a1'), toolResultUser()], 'tr-1')).toBeUndefined()
+    expect(resolveRewriteTarget([goalIteration(), assistant('a1')], 'goal-1')).toBeUndefined()
+  })
+})
+
+describe('resolveRewriteSubmitBlock（修改重发提交前的安全判据）', () => {
+  const rewindTarget = { kind: 'rewind', userMessage: '第二问', rewindToAssistantUuid: 'a1' } as const
+  const resetTarget = { kind: 'reset', userMessage: '第一问' } as const
+
+  test('会话空闲且锚点正常 → 可以提交', () => {
+    expect(resolveRewriteSubmitBlock({ sessionActive: false, hasEarlierHistory: false, target: rewindTarget })).toBeUndefined()
+  })
+
+  test('会话活跃 → 拦下（否则回退后发送会被静默拦下，留下已截断未重发的中间态）', () => {
+    expect(resolveRewriteSubmitBlock({ sessionActive: true, hasEarlierHistory: false, target: rewindTarget })).toBe('session-active')
+    // 活跃优先：即使同时还处于历史窗口边界，也先报会话运行中
+    expect(resolveRewriteSubmitBlock({ sessionActive: true, hasEarlierHistory: true, target: resetTarget })).toBe('session-active')
+  })
+
+  test('reset 锚点 + 还有更早历史 → 拦下（那是窗口边界，不是首轮）', () => {
+    expect(resolveRewriteSubmitBlock({ sessionActive: false, hasEarlierHistory: true, target: resetTarget })).toBe('history-boundary')
+  })
+
+  test('reset 锚点 + 历史已全部加载 → 确实首轮，可以提交', () => {
+    expect(resolveRewriteSubmitBlock({ sessionActive: false, hasEarlierHistory: false, target: resetTarget })).toBeUndefined()
   })
 })

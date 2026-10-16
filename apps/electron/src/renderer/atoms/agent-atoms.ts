@@ -12,6 +12,7 @@ import { PROFER_DEFAULT_PERMISSION_MODE } from '@profer/shared'
 import { manualReadConfirmEnabledAtom } from './agent-unread-settings'
 import { deriveUnreadIdsFromSessions } from '@/lib/agent-unread-derive'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
+import { deriveAgentRuntimeDisplay } from '@/domains/agent-runtime/agent-runtime-display-policy'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
 import type { SessionFileChange } from '@/lib/session-file-changes'
 
@@ -676,11 +677,17 @@ export const agentSessionIndicatorMapAtom = atom<Map<string, SessionIndicatorSta
   const map = new Map<string, SessionIndicatorStatus>()
 
   for (const [id, state] of streamStates) {
-    if (!state.running) continue
+    const isActive = state.running || state.stopping === true || state.backgroundWaiting === true
+    if (!isActive) continue
+    const display = deriveAgentRuntimeDisplay({
+      running: state.running,
+      stopping: state.stopping,
+      backgroundWaiting: state.backgroundWaiting,
+    })
     const hasBlock = (pendingPerms.get(id)?.length ?? 0) > 0
       || (pendingAskUser.get(id)?.length ?? 0) > 0
       || (pendingExitPlan.get(id)?.length ?? 0) > 0
-    map.set(id, hasBlock ? 'blocked' : 'running')
+    map.set(id, hasBlock ? 'blocked' : display.active ? 'running' : 'idle')
   }
 
   for (const id of unviewedCompleted) {
