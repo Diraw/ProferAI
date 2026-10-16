@@ -56,5 +56,15 @@ export function normalizeChatStreamError(provider: string, error: unknown): Chat
     }
   }
 
+  // 404 表示请求路径没落到上游的生成接口上。OpenAI 兼容格式渠道最常见的原因是
+  // Base URL 只填到协议根（如 /v1），或模型 ID 不在该渠道的模型目录里；
+  // 上游原文往往只是一句 "404 page not found"，对用户没有可操作性，因此换成定位提示。
+  if (status === 404 && provider.toLowerCase() === 'custom') {
+    return {
+      message: '请求地址未匹配到上游接口（404）：OpenAI 兼容格式渠道的地址需指向 /chat/completions（例如 https://host/v1/chat/completions），同时确认模型 ID 在该渠道可用。',
+      errorTitle: '请求地址可能不正确',
+    }
+  }
+
   return { message: rawMessage }
 }

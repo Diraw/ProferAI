@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test'
+import { join } from 'node:path'
 import * as actualAgentService from './agent-service'
 
 /**
@@ -110,5 +111,18 @@ describe('send_message 的 uuid / startedAt 透传', () => {
     expect(input.startedAt as number).toBeGreaterThanOrEqual(before)
     expect(input.startedAt as number).toBeLessThanOrEqual(after)
     expect(Object.prototype.hasOwnProperty.call(input, 'uuid')).toBe(false)
+  })
+})
+
+describe('runtime coordinator remote opt-in', () => {
+  test('Given the default remote service When sending a message Then legacy runner remains default and runtime switch is explicit', async () => {
+    const source = await Bun.file(join(import.meta.dir, 'remote-service.ts')).text()
+    expect(source).toContain("process.env.PROFER_RUNTIME_REMOTE === '1'")
+    expect(source).toContain('runAgentRuntimeHeadless(')
+    expect(source).toContain('runAgentHeadless(headlessInput, {')
+    expect(source).toContain("initiator: 'user'")
+    // 2026-10-16 集成会话：remote 新分支改为共享入口接线，query 构造移入 agent-runtime-entry；
+    // 入口在副作用之前先做非破坏性执行权预检（被拒绝时同步返回 ok:false）。
+    expect(source).toContain('peekAgentRunClaimFailureForSession(')
   })
 })

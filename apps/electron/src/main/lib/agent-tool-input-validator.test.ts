@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { normalizeToolInputForValidation, validateToolInput, validateToolPathPlatform, validateWriteTargetParent } from './agent-tool-input-validator'
+import { validateWriteTargetParent as validateWriteTargetParentInClaudeProvider } from '@profer/agent-provider-claude/write-target-guard'
 
 describe('agent tool input validation', () => {
   test('rejects a Windows absolute path on a non-Windows platform', () => {
@@ -110,5 +111,20 @@ describe('agent tool input validation', () => {
 
   test('unknown tools remain compatible', () => {
     expect(validateToolInput('CustomTool', {})).toBeNull()
+  })
+})
+
+// GAP-7 E2 去重后，宿主导出与 Claude provider 导出是**同一个函数对象**，不再有第二份实现。
+// 保留行为用例（上一 describe）作为契约回归；这里只锁定「单一来源」这个结构事实。
+describe('Write parent guard：宿主与 provider 共享同一实现（E2 去重）', () => {
+  test('Given 宿主导出 When 与 provider 子路径导出比较 Then 是同一个函数（不是等价副本）', () => {
+    expect(validateWriteTargetParent).toBe(validateWriteTargetParentInClaudeProvider)
+  })
+
+  test('Given 宿主包声明 When 检查 provider 子路径导出 Then write-target-guard 已注册', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../../../../../packages/agent-provider-claude/package.json', import.meta.url), 'utf8')) as {
+      exports?: Record<string, string>
+    }
+    expect(manifest.exports?.['./write-target-guard']).toBe('./src/write-target-guard.ts')
   })
 })

@@ -5,16 +5,19 @@ import { join } from 'node:path'
 import { DefaultResourceLoader, SettingsManager, AgentSession, ModelRuntime, SessionManager, formatSkillsForPrompt, loadSkillsFromDir } from '@earendil-works/pi-coding-agent'
 import { Agent } from '@earendil-works/pi-agent-core'
 import { createEffectiveAgentPresetPolicy } from '@profer/shared'
+import type { ClaudeSdkModule } from '@profer/agent-provider-claude'
 import { prepareAgentSkillRouting, buildSkillRuntimeOptions } from './skill-runtime-routing'
 import { routeSkillsForTask } from './skill-routing'
 import { createPromaSkillsOverride, preparePromptWithPromaSkills } from './adapters/pi-skill-resources'
 import type { ClaudeAgentQueryOptions } from './adapters/claude-agent-adapter'
 
 let captured: { options: Record<string, unknown>; prompt: unknown } | undefined
-mock.module('@anthropic-ai/claude-agent-sdk', () => ({ query: (input: { options: Record<string, unknown>; prompt: unknown }) => {
+// Claude adapter 已迁到 @profer/agent-provider-claude：它的 SDK 解析路径与测试文件不同，
+// mock.module('@anthropic-ai/claude-agent-sdk') 不再能拦截它，改用 provider 的 sdkLoader 注入。
+const fakeClaudeSdk = { query: (input: { options: Record<string, unknown>; prompt: unknown }) => {
   captured = input
   return (async function* () { yield { type: 'result', subtype: 'success', terminal_reason: 'completed', session_id: 'mock' } })()
-} }))
+} } as unknown as ClaudeSdkModule
 const { ClaudeAgentAdapter } = await import('./adapters/claude-agent-adapter')
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -50,7 +53,7 @@ describe('共享策略 → 实际 adapter/SDK Skill 链路', () => {
     expect(route.prompt).toContain('SECRET_beta')
     expect(route.prompt).toContain('SECRET_pdf')
     expect(route.prompt).not.toContain('SECRET_automation')
-    const adapter = new ClaudeAgentAdapter()
+    const adapter = new ClaudeAgentAdapter({ sdkLoader: async () => fakeClaudeSdk })
     const input: ClaudeAgentQueryOptions = { sessionId: 'chain', prompt: route.prompt, sdkCliPath: '/mock', env: {}, sdkPermissionMode: 'auto', allowDangerouslySkipPermissions: false, systemPrompt: 'test', ...runtime }
     try {
       for await (const _message of adapter.query(input)) { /* 消费最终 SDK query */ }

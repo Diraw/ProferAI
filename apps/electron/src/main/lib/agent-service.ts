@@ -11,10 +11,11 @@
  */
 
 import { join, dirname, basename, sep } from 'node:path'
+import { homedir } from 'node:os'
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { BrowserWindow } from 'electron'
 import type { WebContents } from 'electron'
-import { AGENT_IPC_CHANNELS, MAX_ATTACHMENT_SIZE, resolveRunInitiator } from '@profer/shared'
+import { AGENT_IPC_CHANNELS, MAX_ATTACHMENT_SIZE, resolveRunInitiator, AgentSessionRuntimeMismatchError } from '@profer/shared'
 import type {
   AgentSendInput,
   AgentMessage,
@@ -28,7 +29,12 @@ import type {
   AgentRunInitiator,
   ProferPermissionMode,
   AgentExternalRunSource,
+  AgentRuntimeRestoreSnapshot,
 } from '@profer/shared'
+import { normalizeAgentRuntime } from '@profer/shared'
+import type { AgentRuntime, AgentRuntimeCallbacks, AgentRuntimeQuery, AgentRunOutcome, AgentRuntimePreparedContext } from '@profer/agent-runtime'
+import { AgentRuntimeCoordinator, createAgentRunOwnershipRegistry, createAgentRunRejectionError, createAgentRuntimeProviderAdapter, peekAgentRunClaimFailure } from '@profer/agent-runtime'
+import type { AgentRunClaimFailure } from '@profer/agent-runtime'
 import { ClaudeAgentAdapter, scanAndKillOrphanedClaudeSubprocesses } from './adapters/claude-agent-adapter'
 import { PiAgentAdapter } from './adapters/pi-agent-adapter'
 import { RuntimeRoutingAgentAdapter } from './adapters/runtime-routing-agent-adapter'
@@ -39,8 +45,9 @@ import { AgentOrchestrator, serializeErrorDetail } from './agent-orchestrator'
 import { AgentRunAlreadyActiveError } from './agent-orchestrator-p0-guards'
 import { createAgentRunOutcomeReporter } from './agent-run-outcome'
 import { forwardHeadlessAgentCompletion, setHeadlessAgentRunner, type HeadlessAgentRunCallbacks } from './agent-headless-runner-registry'
-import { getAgentSessionWorkspacePath, getWorkspaceFilesDir } from './config-paths'
-import { getAgentSessionMeta, setAgentSessionActiveChecker, updateAgentSessionMeta } from './agent-session-manager'
+import { getAgentSessionWorkspacePath, getWorkspaceFilesDir, getSdkConfigDir } from './config-paths'
+import { getAgentWorkspace } from './agent-workspace-manager'
+import { getAgentSessionMeta, getAgentSessionMessages, setAgentSessionActiveChecker, updateAgentSessionMeta } from './agent-session-manager'
 import {
   configureAgentSessionProjectionPublisher,
   publishAgentSessionProjection,
@@ -49,6 +56,22 @@ import {
 import { shouldClearSessionUnreadOnRunStart, shouldMarkSessionUnreadOnCompletion } from './agent-unread-policy'
 import { getAgentUnreadPolicyMode } from './agent-unread-mode'
 import { AgentRuntimeContextStore } from './agent-runtime-context'
+import { createExecutionService } from './execution-service'
+import { buildPiBuiltinTools } from './adapters/pi-builtin-tools'
+import { createElectronAgentHost } from './agent-runtime-host'
+import { runRuntimeHeadlessEntry, type RuntimeEntryRunContext, type RuntimeEntryTitleNaming } from './agent-runtime-entry'
+import { resolveDesktopRunChain } from './agent-runtime-desktop-switch'
+import { runDesktopRuntimeAgent } from './agent-runtime-desktop-entry'
+import { beginPiCheckpointTurn } from './pi-file-checkpoint-lifecycle'
+import type { AgentRuntimePolicyResolutionInput } from './agent-runtime-policy-snapshot'
+import { ensurePresetSystemReady, getAgentPresetByReference, presetReferenceForId } from './agent-preset-manager'
+import { DEFAULT_MODEL_ID, DEFAULT_SESSION_TITLE } from './agent-prompt-utils'
+import { evaluatePptCapability } from './ppt-capability-gate'
+import { sdkPermissionModeForProferMode } from './agent-retry-utils'
+import { createElectronClaudeProcessLifecyclePort } from './claude-process-lifecycle-port'
+import { resolveSDKCliPath } from './agent-sdk-cli-path'
+import { buildPiRuntimeCredentialOptions } from './agent-runtime-credentials'
+import { applyAgentSdkAuthEnv } from './agent-sdk-auth-env'
 
 // ===== 实例创建 =====
 
@@ -64,16 +87,84 @@ configureAgentSessionProjectionPublisher(eventBus)
 // 目录失效发布器单例：ipc.ts / remote-service.ts / workspace-watcher.ts 共享同一 revision 序列，
 // 保证 Pocket 按 (catalog, workspaceSlug) 去重时看到的 revision 单调可信。
 export const agentCatalogInvalidationPublisher = new AgentCatalogInvalidationPublisher(eventBus)
-const claudeAdapter = new ClaudeAgentAdapter()
-const piAdapter = new PiAgentAdapter()
-// Both runtimes remain behind the same orchestrator, credential gate, P0 lifecycle and Plan-mode boundary.
+const executionService = createExecutionService()
+/**
+ * Pi 内置工具装配的原始构建器。
+ *
+ * 不在这里自己包端口：宿主（`createElectronAgentHost`）会用**同一份**产品能力把授权根、
+ * 可视化回调与正式文件预览回调投影进装配 context（B8-Pi），避免在 service 里重算一套授权根。
+ */
+const toolAssemblyBuild = async (sdk: unknown, context: unknown) => {
+  const result = await buildPiBuiltinTools(sdk as Parameters<typeof buildPiBuiltinTools>[0], context as Parameters<typeof buildPiBuiltinTools>[1])
+  return { tools: result.tools, collaborationAvailable: result.collaborationAvailable }
+}
+/** Runtime ports 的 Electron 组合根；旧 orchestrator 通过显式 ports 逐步脱离宿主 service。 */
+const claudeProcessLifecycle = createElectronClaudeProcessLifecyclePort()
+export const agentRuntimeHost = createElectronAgentHost({ eventBus, execution: executionService, toolAssemblyBuild, processLifecycle: claudeProcessLifecycle })
+const claudeAdapter = new ClaudeAgentAdapter({ processLifecycle: agentRuntimeHost.ports.processLifecycle })
+const piAdapter = new PiAgentAdapter({ commands: agentRuntimeHost.ports.commands, backgroundTasks: agentRuntimeHost.ports.backgroundTasks, processRegistration: agentRuntimeHost.ports.processRegistration })
+// 两个内核共用编排器和宿主权限，Pi 命令执行使用组合根注入的端口。
 const adapter = new RuntimeRoutingAgentAdapter({ claude: claudeAdapter, pi: piAdapter })
-const orchestrator = new AgentOrchestrator(adapter, eventBus)
-setAgentSessionActiveChecker((sessionId) => orchestrator.isActive(sessionId))
+/**
+ * 新旧两条执行链共用的唯一执行权登记表（跨引擎互斥的唯一事实源）。
+ *
+ * 互斥由 `claim` 保证，而不是由「查两个 map 再各写自己」保证：
+ * 桌面 `runAgent` 与 runtime 入口在同一张表上原子取得同一 session 的执行权，
+ * 两个引擎内部的 map（coordinator 的控制表、编排器的运行令牌视图）只承担各自的
+ * stop/wait 路由与诊断，不再承担互斥。
+ */
+const runOwnership = createAgentRunOwnershipRegistry()
+const orchestrator = new AgentOrchestrator(adapter, eventBus, {
+  sessions: agentRuntimeHost.sessions,
+  credentials: agentRuntimeHost.credentials,
+  resources: agentRuntimeHost.resources,
+  permissions: agentRuntimeHost.ports.permissions,
+  events: agentRuntimeHost.ports.events,
+  toolAssembly: agentRuntimeHost.ports.toolAssembly,
+  preview: agentRuntimeHost.ports.preview,
+  queryPreparation: agentRuntimeHost.ports.queryPreparation,
+}, runOwnership)
+const runtimeCoordinator = new AgentRuntimeCoordinator({
+  adapters: {
+    claude: createAgentRuntimeProviderAdapter('claude', claudeAdapter),
+    pi: createAgentRuntimeProviderAdapter('pi', piAdapter),
+  },
+  ports: agentRuntimeHost.ports,
+  ownership: runOwnership,
+})
+/**
+ * 只读的「是否有活跃 run」查询（backlog / 恢复路由用）。
+ *
+ * 这里保留 OR 写法是为了让渲染层刷新重连与快照清理能同时看到两个引擎；
+ * 接线后 `orchestrator.isActive` 本身就读共享登记表，因此 OR 的语义是
+ * 「登记表里是否有 owner」（两个分支实际同源），**不是**互斥手段。
+ */
+setAgentSessionActiveChecker((sessionId) => orchestrator.isActive(sessionId) || runtimeCoordinator.isRunning(sessionId))
 const runtimeContextStore = new AgentRuntimeContextStore()
 
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
 export { eventBus as agentEventBus }
+
+/**
+ * 非破坏性执行权预检：供入口在**做任何副作用之前**同步失败。
+ *
+ * - remote：不能让客户端先收到 `accepted: true` 再永远等不到 `run_completed`；
+ * - automation：不能把「未取得执行权」记成一次失败运行（含连续失败退避计数）。
+ *
+ * 它本身不是互斥手段（读后写仍可能竞争）；互斥仍由 coordinator / 编排器的 `claim` 保证，
+ * 因此调用方在预检与真正运行之间**不得有 await**。返回 `undefined` 表示当前无 owner。
+ */
+export function peekAgentRunClaimFailureForSession(
+  sessionId: string,
+  runtime: AgentRuntime,
+): AgentRunClaimFailure | undefined {
+  return peekAgentRunClaimFailure(runOwnership, sessionId, runtime)
+}
+
+/** 把结构化拒绝原因映射为可展示的文案（不做字符串判断）。 */
+export function describeAgentRunRejection(failure: AgentRunClaimFailure): string {
+  return createAgentRunRejectionError(failure).message
+}
 
 /**
  * 返回当前活跃会话的运行时上下文窗口快照，供 Pocket 在首次连接/重连时水合。
@@ -101,9 +192,15 @@ const activeStreamEventBacklogs = new Map<string, AgentStreamPayload[]>()
 const completedStreamEventBacklogs = new Map<string, AgentStreamPayload[]>()
 const COMPLETED_BACKLOG_TTL_MS = 60_000
 
+function isTerminalBacklogEvent(payload: AgentStreamPayload): boolean {
+  return payload.kind === 'run_complete'
+    || payload.kind === 'run_error'
+    || (payload.kind === 'profer_event' && payload.event.type === 'run_completed')
+}
+
 function preserveCompletedBacklog(sessionId: string): void {
   const backlog = activeStreamEventBacklogs.get(sessionId)
-  if (!backlog?.some((payload) => payload.kind === 'run_complete')) return
+  if (!backlog?.some(isTerminalBacklogEvent)) return
   completedStreamEventBacklogs.set(sessionId, backlog)
   // unref：只是过期清理，不应在进程退出前锁住事件循环。
   setTimeout(() => {
@@ -147,17 +244,45 @@ export function unregisterWebContents(sessionId: string): void {
   sessionWebContents.delete(sessionId)
 }
 
+function isAgentExecutionActive(sessionId: string): boolean {
+  return orchestrator.isActive(sessionId) || runtimeCoordinator.isRunning(sessionId)
+}
+
+function beginActiveStreamBacklog(sessionId: string): void {
+  if (isAgentExecutionActive(sessionId)) return
+  activeStreamEventBacklogs.set(sessionId, [])
+  completedStreamEventBacklogs.delete(sessionId)
+}
+
+function finishActiveStreamBacklog(sessionId: string): void {
+  if (isAgentExecutionActive(sessionId)) return
+  runtimeContextStore.clear(sessionId)
+  sessionWebContents.delete(sessionId)
+  preserveCompletedBacklog(sessionId)
+  activeStreamEventBacklogs.delete(sessionId)
+}
+
 /**
  * renderer 刷新后的重连入口：先把当前 webContents 绑定为活跃 run 的接收方，
  * 再同步回放本轮事件。调用方必须先安装 STREAM_EVENT listener，避免回放丢失。
  */
-export function restoreActiveAgentStreams(webContents: WebContents): string[] {
-  const restored: string[] = []
+export function restoreActiveAgentStreams(webContents: WebContents): AgentRuntimeRestoreSnapshot[] {
+  const restored: AgentRuntimeRestoreSnapshot[] = []
   const snapshots = new Map([...completedStreamEventBacklogs, ...activeStreamEventBacklogs])
+  const contextSnapshots = new Map(runtimeContextStore.list().map((snapshot) => [snapshot.sessionId, snapshot]))
   for (const [sessionId, backlog] of snapshots) {
-    if (!orchestrator.isActive(sessionId) && !completedStreamEventBacklogs.has(sessionId)) continue
+    if (!isAgentExecutionActive(sessionId) && !completedStreamEventBacklogs.has(sessionId)) continue
     registerWebContents(sessionId, webContents)
-    if (orchestrator.isActive(sessionId)) restored.push(sessionId)
+    const active = isAgentExecutionActive(sessionId)
+    if (active) {
+      const context = contextSnapshots.get(sessionId)
+      restored.push({
+        sessionId,
+        active: true,
+        hasTerminalEvent: backlog.some(isTerminalBacklogEvent),
+        ...(context ? { contextWindow: context.contextWindow, contextUpdatedAt: context.updatedAt } : {}),
+      })
+    }
     for (const payload of backlog) {
       if (webContents.isDestroyed()) break
       webContents.send(AGENT_IPC_CHANNELS.STREAM_EVENT, { sessionId, payload } as AgentStreamEvent)
@@ -166,9 +291,20 @@ export function restoreActiveAgentStreams(webContents: WebContents): string[] {
         webContents.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, payload.completion)
       } else if (payload.kind === 'run_error') {
         webContents.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId, error: payload.error })
+      } else if (payload.kind === 'profer_event' && payload.event.type === 'run_completed') {
+        webContents.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, {
+          sessionId,
+          messages: getAgentSessionMessages(sessionId),
+          stoppedByUser: payload.event.stoppedByUser,
+          resultSubtype: payload.event.resultSubtype,
+          resultErrors: payload.event.resultErrors,
+          backgroundTasksPending: payload.event.backgroundTasksPending,
+          endReason: payload.event.endReason,
+          endReasonLabel: payload.event.endReasonLabel,
+        })
       }
     }
-    if (!orchestrator.isActive(sessionId)) completedStreamEventBacklogs.delete(sessionId)
+    if (!isAgentExecutionActive(sessionId)) completedStreamEventBacklogs.delete(sessionId)
   }
   return restored
 }
@@ -274,6 +410,44 @@ export function emitSessionStreamEvent(
 
 // ===== IPC 薄包装函数 =====
 
+/**
+ * 自动命名窗口的宿主接线（GAP-D1）。
+ *
+ * 判据与编排在 `agent-session-title-naming.ts`（旧链同一实现，由共享入口
+ * `runRuntimeHeadlessEntry` 在同一时机调用）；这里只提供旧链同源的宿主事实：
+ *
+ * - **生成器**：`orchestrator.generateTitle` —— 旧链 `autoGenerateTitle` 用的就是它，
+ *   不另写渠道解析 / 请求构造（因此重试、兜底标题、"1M"模型后缀处理全部一致）。
+ * - **投影**：与旧链入口逐字同形 —— 先（可选）回给 headless 调用方
+ *   （旧链 `runAgentHeadless` 的 `callbacks.onTitleUpdated`），再发一条
+ *   `profer_event: title_updated`，最后向该会话**已登记**的 webContents 直发
+ *   `TITLE_UPDATED`（旧链用 `sessionWebContents.get`，不是请求时的 sender ——
+ *   刷新后旧窗口已销毁时不丢事件）。
+ * - **两个常量**：`DEFAULT_SESSION_TITLE`（`planTitleWindow` 的「人工命名」判定）与
+ *   `DEFAULT_MODEL_ID`（旧链 `input.modelId || DEFAULT_MODEL_ID` 的同一个常量）。
+ */
+function buildRuntimeTitleNaming(
+  sessionId: string,
+  forwardToCaller?: (title: string) => void,
+): RuntimeEntryTitleNaming {
+  return {
+    generate: input => orchestrator.generateTitle(input),
+    onTitleUpdated: title => {
+      forwardToCaller?.(title)
+      eventBus.emit(sessionId, {
+        kind: 'profer_event',
+        event: { type: 'title_updated', title },
+      })
+      const currentWc = sessionWebContents.get(sessionId)
+      if (currentWc && !currentWc.isDestroyed()) {
+        currentWc.send(AGENT_IPC_CHANNELS.TITLE_UPDATED, { sessionId, title })
+      }
+    },
+    defaultTitle: DEFAULT_SESSION_TITLE,
+    defaultModelId: DEFAULT_MODEL_ID,
+  }
+}
+
 /** 解析一轮 run 的规范化发起者：显式 initiator 优先，否则按 triggeredBy / headless source 推断。 */
 function resolveInputInitiator(input: AgentSendInput, headlessSource: AgentExternalRunSource | undefined): AgentRunInitiator {
   return input.initiator ?? resolveRunInitiator(input.triggeredBy, headlessSource)
@@ -352,12 +526,51 @@ export async function runAgent(
   webContents: WebContents,
   onDraftPromoted?: (session: import('@profer/shared').AgentSessionMeta) => void | Promise<void>,
 ): Promise<void> {
+  // IR-D1：桌面 runtime 开关默认启用；显式回退值为 0 时回退旧链。
+  // 任何 await 之前读一次；显式回退态下面的旧代码路径逐字节不变。Goal 输入始终回旧链（GAP-6 未关闭）。
+  // 顺序：开关判定 → 桌面入口自承担 registerWebContents / backlog / 入口清未读 → 守卫 → claim；
+  // claim 之前不得有 await（runDesktopRuntimeAgent 内部同样保证）。
+  if (resolveDesktopRunChain(input) === 'runtime') {
+    await runDesktopRuntimeAgent(input, {
+      sender: webContents,
+      registerWebContents,
+      isExecutionActive: isAgentExecutionActive,
+      beginActiveStreamBacklog,
+      finishActiveStreamBacklog,
+      emit: (sessionId, payload) => eventBus.emit(sessionId, payload),
+      clearUnreadOnRequestEntry: clearSessionUnreadOnRequestEntry,
+      applyRunStartUnreadPolicy,
+      applyCompletionUnreadPolicy,
+      getSessionMeta: getAgentSessionMeta,
+      promoteDraftSession: (sessionId) => {
+        const before = getAgentSessionMeta(sessionId)
+        if (before?.draft !== true) return { session: before, promoted: false }
+        return { session: updateAgentSessionMeta(sessionId, { draft: false }), promoted: true }
+      },
+      publishSessionProjection: publishAgentSessionProjection,
+      // 删除 / 分叉守卫的唯一来源（与旧链 sendMessage 共用）。
+      checkEntryGuards: (sessionId) => orchestrator.checkEntryGuards(sessionId),
+      ...(onDraftPromoted ? { onDraftPromoted } : {}),
+      // GAP-D1：标题自动命名（旧链同一判据 + 同一投影）。
+      titleNaming: buildRuntimeTitleNaming(input.sessionId),
+      resolveRunContext: (sendInput) => buildRuntimeHeadlessRunContext(sendInput),
+      run: (query, callbacks) => runtimeCoordinator.run(query, callbacks),
+      sessions: agentRuntimeHost.sessions,
+      messages: getAgentSessionMessages,
+      emitPlanModeEvent: (sessionId, event) => {
+        void agentRuntimeHost.ports.host?.emit({ type: 'host_event', sessionId, event })
+      },
+      setProviderPermissionMode: (sessionId, mode) => {
+        void adapter.setPermissionMode?.(sessionId, sdkPermissionModeForProferMode(mode))
+      },
+    })
+    return
+  }
   // 更新 webContents 映射（允许覆盖 — 由 orchestrator.activeSessions 处理真正的并发保护）
   registerWebContents(input.sessionId, webContents)
   // 被 active-run 并发保护拒绝的请求不能清空已有 run 的恢复记录。
-  if (!orchestrator.isActive(input.sessionId)) {
-    activeStreamEventBacklogs.set(input.sessionId, [])
-    completedStreamEventBacklogs.delete(input.sessionId)
+  if (!isAgentExecutionActive(input.sessionId)) {
+    beginActiveStreamBacklog(input.sessionId)
   }
   // 本轮发起者：run 内不变。未显式给 initiator 时按 triggeredBy 推断（桌面 IPC 发送缺省 = 用户）。
   const initiator = resolveInputInitiator(input, undefined)
@@ -439,7 +652,7 @@ export async function runAgent(
   } catch (err) {
     // 请求没有获得 run ownership：不要向同 session 的 owner run 广播假的错误/终态。
     // 让 ipcRenderer.invoke 直接 reject，renderer 会恢复发送前状态和用户草稿。
-    if (err instanceof AgentRunAlreadyActiveError) {
+    if (err instanceof AgentRunAlreadyActiveError || err instanceof AgentSessionRuntimeMismatchError) {
       outcomeReporter.rejectBeforeStart()
       throw err
     }
@@ -466,26 +679,197 @@ export async function runAgent(
   } finally {
     // 仅在 orchestrator 已完成此会话时清理映射
     // 避免被拒绝的请求误删仍在运行的会话映射
-    if (!orchestrator.isActive(input.sessionId)) {
-      runtimeContextStore.clear(input.sessionId)
-      sessionWebContents.delete(input.sessionId)
-      preserveCompletedBacklog(input.sessionId)
-      activeStreamEventBacklogs.delete(input.sessionId)
+    if (!isAgentExecutionActive(input.sessionId)) {
+      finishActiveStreamBacklog(input.sessionId)
     }
     if (runStarted) outcomeReporter.finish()
   }
 }
 
 /**
+ * 直接使用 runtime coordinator 的 headless 入口（runtime 链**唯一**一条宿主入口接线）。
+ *
+ * 桌面 bridge headless、协作子会话、remote（Pocket）与 automation 全部走这里，
+ * 因此它们共用：同一份有效策略快照、同一份终态投影、同一张执行权登记表、
+ * 同一份未读与 draft 投影、同一份原生 session 持久化、同一份会话 cwd。
+ *
+ * 执行权由 coordinator 的 `claim` 统一保证（与旧链共用同一登记表），这里**不再预检**：
+ * 预检是 TOCTOU 的，而且会把具名拒绝压成 failed 伪终态（G1 的根因）。
+ * 被拒绝时 `handle.promise` 直接抛具名错误，本函数不投递任何终态。
+ *
+ * cwd：**不再接受**调用方覆盖。旧链（remote / automation / bridge 都走 `orchestrator.sendMessage`）
+ * 的 cwd 语义是 `getAgentSessionWorkspacePath(workspaceSlug, sessionId)`，无 workspace 时用
+ * 用户主目录；新链曾让 remote / automation 传 workspace 根，导致多个 session 共享 cwd、
+ * Pi checkpoint 与相对路径文件串线。现在统一由 `buildRuntimeHeadlessRunContext` 推导。
+ */
+export async function runAgentRuntimeHeadless(
+  input: AgentSendInput,
+  callbacks: HeadlessAgentRunCallbacks,
+): Promise<void> {
+  const wc = getMainRendererWebContents()
+  if (wc) registerWebContents(input.sessionId, wc)
+  beginActiveStreamBacklog(input.sessionId)
+  // 本轮发起者：run 内不变。headless 运行没有显式 initiator 时按 source 推断（缺省 external，不清未读）。
+  const initiator = input.initiator ?? resolveRunInitiator(input.triggeredBy, callbacks.source)
+  const runtimeCallbacks: AgentRuntimeCallbacks = { onEvent: () => {} }
+  try {
+    await runRuntimeHeadlessEntry(input, runtimeCallbacks, {
+      ...(callbacks.source !== undefined ? { source: callbacks.source } : {}),
+      initiator,
+      resolveRunContext: sendInput => buildRuntimeHeadlessRunContext(sendInput),
+      run: (query, cbs) => runtimeCoordinator.run(query, cbs),
+      sessions: agentRuntimeHost.sessions,
+      messages: getAgentSessionMessages,
+      emitPlanModeEvent: (sessionId, event) => {
+        // host port 的 host_event 会被 Electron createElectronEventPort 转成 profer_event 推给 UI。
+        void agentRuntimeHost.ports.host?.emit({ type: 'host_event', sessionId, event })
+      },
+      setProviderPermissionMode: (sessionId, mode) => {
+        void adapter.setPermissionMode?.(sessionId, sdkPermissionModeForProferMode(mode))
+      },
+      // GAP-D1：标题自动命名。headless 链与旧链一致地先回调用方（`callbacks.onTitleUpdated`），
+      // 再走同一事件出口与专用 IPC —— remote / automation / 协作子会话因此也拿到旧链行为。
+      titleNaming: buildRuntimeTitleNaming(input.sessionId, title => callbacks.onTitleUpdated(title)),
+      onRunStarted: async (input, startedAt) => {
+        // 用户自己发出新一轮（Pocket send_message 也算）清未读；定时自动化 / 外部 IM / 委派子会话不清。
+        if (input.initiator) applyRunStartUnreadPolicy(input.sessionId, input.initiator)
+        // draft 晋升（与 runAgent.onRunStarted 对齐）：对话真正开始后草稿会话转为正式。
+        const beforePromotion = getAgentSessionMeta(input.sessionId)
+        const session = beforePromotion?.draft
+          ? updateAgentSessionMeta(input.sessionId, { draft: false })
+          : beforePromotion
+        if (beforePromotion?.draft && session) publishAgentSessionProjection(session)
+        if (input.triggeredBy === 'goal') {
+          // 仅在真实 run 已启动后建立 UI 流状态，不把恢复/排队的 Goal 伪装为运行中。
+          eventBus.emit(input.sessionId, {
+            kind: 'profer_event',
+            event: { type: 'external_run_started', source: 'goal', sessionId: input.sessionId, startedAt, title: session?.title, workspaceId: session?.workspaceId, modelId: input.modelId, session },
+          })
+        }
+      },
+      applyCompletionUnread: (input, fields, runStarted) => {
+        // 未读先于终态广播落盘：渲染层收到 STREAM_COMPLETE 时侧边栏绿标与角标必须已就绪。
+        // `started` 必须透传：从未真正启动的请求（并发拒绝 / 准备失败）在开启态不得写未读。
+        applyCompletionUnreadPolicy({
+          sessionId: input.sessionId,
+          initiator,
+          backgroundTasksPending: fields.backgroundTasksPending,
+          started: runStarted,
+        })
+      },
+      sink: {
+        onError: error => callbacks.onError(error),
+        onComplete: (messages, fields) => callbacks.onComplete(messages, fields),
+      },
+    })
+  } finally {
+    finishActiveStreamBacklog(input.sessionId)
+  }
+}
+
+export async function stopAgentRuntime(sessionId: string, reason = 'stopped_by_user'): Promise<void> {
+  await runtimeCoordinator.stop(sessionId, reason)
+}
+
+function canUseRuntimeHeadless(input: AgentSendInput): boolean {
+  return process.env.PROFER_RUNTIME_HEADLESS === '1'
+    && !input.goalRunId
+    && !input.reportGoalResult
+    && !input.onRuntimeSessionId
+    && !input.onRuntimeMessage
+}
+
+/**
+ * 将完整 headless 输入交给 runtime coordinator 所需的宿主环境（runtime / cwd / 工具装配基座 / 策略）。
+ *
+ * cwd 与旧链同源（`AgentOrchestrator.sendMessage`）：workspace 存在时用会话级工作目录
+ * `getAgentSessionWorkspacePath(workspaceSlug, sessionId)`，否则回退用户主目录。
+ * 不用 `process.cwd()`：桌面应用启动目录可能是安装目录 / 快捷方式目录，不稳定。
+ */
+function buildRuntimeHeadlessRunContext(
+  input: AgentSendInput,
+): RuntimeEntryRunContext {
+  const sessionMeta = getAgentSessionMeta(input.sessionId)
+  const runtime = normalizeAgentRuntime(input.agentRuntime ?? sessionMeta?.agentRuntime)
+  const workspaceSlug = input.workspaceId ? getAgentWorkspace(input.workspaceId)?.slug : undefined
+  const cwd = workspaceSlug ? getAgentSessionWorkspacePath(workspaceSlug, input.sessionId) : homedir()
+  const policy = resolveRuntimeHeadlessPolicyContext(input, runtime, sessionMeta, workspaceSlug)
+  return {
+    runtime,
+    cwd,
+    // GAP-2：Pi 文件回退检查点必须在 provider 启动前创建（Claude 走 SDK 自带 file-history-snapshot）。
+    // 使用与 provider 相同的 `cwd`（否则快照根与实际被改写的目录不一致）。
+    ...(runtime === 'pi'
+      ? { checkpointTurn: beginPiCheckpointTurn({ sessionId: input.sessionId, cwd }) }
+      : {}),
+    toolAssemblyContext: {
+      sessionId: input.sessionId,
+      // 委派子会话的内核继承：旧链把本会话的 `agentRuntime` 传进 Pi 装配 context。
+      // 缺它时子会话的内核选择会回落到 'claude'
+      // （agent-collaboration-tools.ts 的 `ctx.agentRuntime ?? 'claude'`、
+      //   pi-builtin-tools.ts 的 `a.agentRuntime ?? 'claude'`、automation-agent-tools.ts），
+      // 于是 Pi 会话派生出的子会话 / 自动化会话会变成 Claude 会话。
+      agentRuntime: runtime,
+      channelId: input.channelId,
+      modelId: input.modelId,
+      workspaceId: input.workspaceId,
+      workspaceSlug,
+      agentCwd: cwd,
+      permissionMode: input.permissionModeOverride,
+      triggeredBy: input.triggeredBy,
+    },
+    ...(policy ? { policy } : {}),
+  }
+}
+
+/**
+ * 解析本轮的有效策略上下文（唯一规则来源是 @profer/shared 的共享实现）。
+ *
+ * 这里只负责「把宿主事实收集齐」，不做任何权限 / 工具 / 能力判定：
+ * 判定与收敛全部交给 `createEffectiveAgentPresetPolicy`，避免出现第二份规则。
+ */
+function resolveRuntimeHeadlessPolicyContext(
+  input: AgentSendInput,
+  runtime: AgentRuntime,
+  sessionMeta: ReturnType<typeof getAgentSessionMeta>,
+  workspaceSlug: string | undefined,
+): AgentRuntimePolicyResolutionInput | undefined {
+  ensurePresetSystemReady()
+  const presetReference = sessionMeta?.presetReference
+    ?? presetReferenceForId(workspaceSlug, sessionMeta?.presetId)
+  const preset = getAgentPresetByReference(presetReference, workspaceSlug)
+  // PPT 能力门禁：复用既有判定，不另写一套。
+  const pptDecision = evaluatePptCapability({
+    userMessage: input.userMessage,
+    active: sessionMeta?.pptCapabilityActive === true,
+    hasActiveDeckProject: sessionMeta?.pptCapabilityActive === true,
+  })
+  return {
+    preset,
+    presetReference,
+    ...(input.permissionModeOverride ? { permissionModeOverride: input.permissionModeOverride } : {}),
+    ...(input.triggeredBy === 'goal' ? { triggeredBy: 'goal' as const } : {}),
+    pptCapabilityActive: !preset.disabledToolGroups?.includes('ppt-materials') && pptDecision.active,
+    runtimeSupportsSubagents:
+      adapter.getRuntimeCapabilities?.(runtime)?.runtimeSupportsSubagents
+      ?? false,
+  }
+}
+
+/**
  * 无渲染进程的 Agent 运行（供飞书 Bridge 等外部调用方使用）
  *
- * 如果桌面窗口存在，同时注册 webContents 以便事件同步到桌面端 UI。
+ * 如果桌面窗口存在，同时注册主窗口 webContents 以便事件同步到桌面端 UI。
  * 事件同时通过 EventBus listeners 分发给飞书 Bridge。
  */
 export async function runAgentHeadless(
   input: AgentSendInput,
   callbacks: HeadlessAgentRunCallbacks,
 ): Promise<void> {
+  if (canUseRuntimeHeadless(input)) {
+    await runAgentRuntimeHeadless(input, callbacks)
+    return
+  }
   // 尝试注册主窗口 webContents，让流式事件同步推送到桌面端
   const wc = getMainRendererWebContents()
   const runInput: AgentSendInput = input.startedAt != null ? input : { ...input, startedAt: Date.now() }
@@ -500,10 +884,7 @@ export async function runAgentHeadless(
     registerWebContents(runInput.sessionId, wc)
   }
   // 同理：外部入口的重复请求不得覆盖仍在运行的会话快照。
-  if (!orchestrator.isActive(runInput.sessionId)) {
-    activeStreamEventBacklogs.set(runInput.sessionId, [])
-    completedStreamEventBacklogs.delete(runInput.sessionId)
-  }
+  beginActiveStreamBacklog(runInput.sessionId)
 
   try {
     await orchestrator.sendMessage(runInput, {
@@ -592,8 +973,8 @@ export async function runAgentHeadless(
       },
     })
   } catch (err) {
-    // 同一会话已有 owner run 时，本次 headless 请求从未启动；不得广播终态破坏它。
-    if (err instanceof AgentRunAlreadyActiveError) throw err
+    // 并发或内核不匹配的请求从未取得 owner；不得广播终态破坏已有运行。
+    if (err instanceof AgentRunAlreadyActiveError || err instanceof AgentSessionRuntimeMismatchError) throw err
     console.error(`[Agent 服务] ══════════ runAgentHeadless 未处理异常 ══════════`)
     console.error(`[Agent 服务] sessionId: ${runInput.sessionId}`)
     console.error(`[Agent 服务] raw error 详细诊断:\n${serializeErrorDetail(err)}`)
@@ -616,11 +997,8 @@ export async function runAgentHeadless(
       currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, terminal)
     }
   } finally {
-    if (!orchestrator.isActive(runInput.sessionId)) {
-      runtimeContextStore.clear(runInput.sessionId)
-      sessionWebContents.delete(runInput.sessionId)
-      preserveCompletedBacklog(runInput.sessionId)
-      activeStreamEventBacklogs.delete(runInput.sessionId)
+    if (!isAgentExecutionActive(runInput.sessionId)) {
+      finishActiveStreamBacklog(runInput.sessionId)
     }
   }
 }
@@ -665,6 +1043,12 @@ export async function regenerateAgentTitle(
  * 中止指定会话的 Agent 执行
  */
 export function stopAgent(sessionId: string): void {
+  if (runtimeCoordinator.isRunning(sessionId)) {
+    void runtimeCoordinator.stop(sessionId).catch((error) => {
+      console.error(`[Agent 服务] runtime coordinator 停止失败: sessionId=${sessionId}`, error)
+    })
+    return
+  }
   orchestrator.stop(sessionId)
 }
 
@@ -686,6 +1070,10 @@ export async function stopAgentTask(sessionId: string, taskId: string, type?: 'a
 
 /** 删除运行中会话前停止并等待其真实运行生命周期结束。 */
 export async function stopAgentAndWait(sessionId: string): Promise<void> {
+  if (runtimeCoordinator.isRunning(sessionId)) {
+    await runtimeCoordinator.stopAndWait(sessionId)
+    return
+  }
   await orchestrator.stopAndWait(sessionId)
 }
 
@@ -725,12 +1113,15 @@ export async function rewindAgentSession(
  * 检查指定会话是否正在运行
  */
 export function isAgentSessionActive(sessionId: string): boolean {
-  return orchestrator.isActive(sessionId)
+  return orchestrator.isActive(sessionId) || runtimeCoordinator.isRunning(sessionId)
 }
 
 /** 中止所有活跃的 Agent 会话（应用退出时调用） */
 export function stopAllAgents(): void {
   orchestrator.stopAll()
+  void runtimeCoordinator.stopAll().catch((error) => {
+    console.error('[Agent 服务] runtime coordinator 批量停止失败', error)
+  })
 }
 
 /**

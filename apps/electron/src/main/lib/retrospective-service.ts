@@ -16,12 +16,11 @@ import type { SDKMessage, SDKAssistantMessage, SDKUserMessage, ProviderType } fr
 import { groupIntoTurns, extractUserText, summarizeToolInput } from '@profer/session-core'
 import { getAdapter } from '@profer/core'
 import type { TaskGraph, TaskNode, GraphEvent, RetrospectiveResult, UnmappedAbandonment } from '@profer/project-core'
-import { listChannels, decryptApiKey, isCommercialMode } from './channel-manager'
+import { listChannels, decryptApiKey } from './channel-manager'
 import { getTeamAuthWithRefresh } from './auth-service'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
-import { isCommercialBuild } from './build-target'
-import { isOfficialManagedChannel } from './official-channel'
+import { shouldUseManagedCommercialRoute } from './commercial-routing-policy'
 import { getSettings } from './settings-service'
 import { getAgentSessionSDKMessages, getAgentSessionMeta, updateAgentSessionMeta } from './agent-session-manager'
 import { loadGraph, appendGraphEvent } from './project-graph-service'
@@ -244,7 +243,7 @@ async function oneShotJsonCall(systemPrompt: string, userPrompt: string): Promis
 
   let apiKey: string
   let proxyBaseUrl = ''
-  if ((isCommercialBuild() || isCommercialMode()) && isOfficialManagedChannel(channel)) {
+  if (shouldUseManagedCommercialRoute(channel)) {
     const auth = await getTeamAuthWithRefresh()
     if (!auth) {
       console.warn('[回溯] 团队账号登录已过期，跳过')

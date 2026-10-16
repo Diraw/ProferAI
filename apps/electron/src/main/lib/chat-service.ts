@@ -25,7 +25,7 @@ import {
   detectInsufficientCredits,
 } from '@profer/core'
 import type { ImageAttachmentData, ContinuationMessage } from '@profer/core'
-import { listChannels, decryptApiKey, isCommercialMode, canSelfConfig } from './channel-manager'
+import { listChannels, decryptApiKey, canSelfConfig } from './channel-manager'
 import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
 import { appendMessage, appendBranchTail, updateConversationMeta, getConversationBranch, getConversationMeta, DEFAULT_CONVERSATION_TITLE } from './conversation-manager'
 import { readAttachmentAsBase64, isImageAttachment } from './attachment-service'
@@ -34,8 +34,7 @@ import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { getEnabledTools } from './chat-tool-registry'
 import { executeToolCalls } from './chat-tool-executor'
-import { isCommercialBuild } from './build-target'
-import { isOfficialManagedChannel } from './official-channel'
+import { shouldUseManagedCommercialRoute } from './commercial-routing-policy'
 import { searchKnowledgeItemsForChat } from './knowledge-item-service'
 import { prepareChatKnowledgeRequest } from './chat-knowledge-request'
 import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, mergeTitleRefineAttempts, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
@@ -279,11 +278,8 @@ export async function sendMessage(
 
   let apiKey: string
   let proxyBaseUrl = ''
-  // 代管模式判定：商业构建 或 服务端标记代管，且用户无自配权限
-  // 自配用户(canSelfConfigApi=true)可用自己配的渠道直连，不强制走统一 proxy
-  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode())
-    && isOfficialManagedChannel(channel)
-    && channel.directDataPlane !== true
+  // 代管模式判定集中由商业旁侧策略提供；自配渠道继续走直连。
+  const shouldUseCommercialProxy = shouldUseManagedCommercialRoute(channel, { respectDirectDataPlane: true })
 
   if (shouldUseCommercialProxy) {
     const auth = await getTeamAuthWithRefresh()
@@ -787,9 +783,7 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
 
   let apiKey: string
   let proxyBaseUrl = ''
-  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode())
-    && isOfficialManagedChannel(channel)
-    && channel.directDataPlane !== true
+  const shouldUseCommercialProxy = shouldUseManagedCommercialRoute(channel, { respectDirectDataPlane: true })
 
   if (shouldUseCommercialProxy) {
     const auth = await getTeamAuthWithRefresh().catch((error) => {

@@ -12,12 +12,22 @@ describe('AgentRuntimeContextStore', () => {
     ])
   })
 
+  test('Given a context window snapshot When restoring Then it preserves the timestamp and filters sessions', () => {
+    const store = new AgentRuntimeContextStore()
+    store.setContextWindow('session', 200_000, 300)
+
+    expect(store.list(['session'])).toEqual([
+      { sessionId: 'session', contextWindow: 200_000, updatedAt: 300 },
+    ])
+    expect(store.list(['other'])).toEqual([])
+  })
   test('Given an invalid context window When recording Then it is ignored', () => {
     const store = new AgentRuntimeContextStore()
     store.setContextWindow('session', 0)
 
     expect(store.list()).toEqual([])
   })
+
 
   test('Given a completed session When cleared Then it is excluded from future snapshots', () => {
     const store = new AgentRuntimeContextStore()

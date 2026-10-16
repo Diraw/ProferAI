@@ -24,7 +24,7 @@ export interface RuntimeProcessRecord {
   sessionId: string
   runtime: 'pi'
   source: 'pi-owned'
-  launcher: 'bash' | 'powershell'
+  launcher: 'bash' | 'powershell' | 'wsl'
   /** true when command matches a known long-running shape; unknown commands are still observed. */
   likelyService: boolean
   command: string
@@ -116,7 +116,7 @@ export function registerPendingPiRuntimeProcess(
   sessionId: string,
   command: string,
   cwd: string,
-  launcher: 'bash' | 'powershell' = 'bash',
+  launcher: 'bash' | 'powershell' | 'wsl' = 'bash',
   shellPid?: number,
 ): RuntimeProcessRecord | undefined {
   const likelyService = isLongRunningServiceCommand(command)
@@ -164,7 +164,7 @@ export function registerPiRuntimeProcessShell(
   command: string,
   cwd: string,
   shellPid: number,
-  launcher: 'bash' | 'powershell' = 'bash',
+  launcher: 'bash' | 'powershell' | 'wsl' = 'bash',
 ): RuntimeProcessRecord | undefined {
   return registerPendingPiRuntimeProcess(sessionId, command, cwd, launcher, shellPid)
 }

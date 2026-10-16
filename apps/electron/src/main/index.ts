@@ -494,6 +494,9 @@ function createWindow(): void {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      // 移动端消息仍需在窗口隐藏、最小化或被其他窗口遮挡时实时落到桌面状态。
+      // 默认后台节流会暂停/降频 renderer 的定时器与动画帧，导致消息直到重新显示窗口才提交。
+      backgroundThrottling: false,
     },
     ...titleBarOptions,
   })

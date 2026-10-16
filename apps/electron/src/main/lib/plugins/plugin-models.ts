@@ -2,10 +2,9 @@ import { supportsPluginModel } from './plugin-model-availability'
 import { getAdapter, streamSSE } from '@profer/core'
 import { resolveXaiCredentialMode } from '@profer/shared'
 import type { ProferPluginModel, ProferPluginGenerateResult } from '@profer/plugin-api'
-import { listChannels, decryptApiKey, isCommercialMode } from '../channel-manager'
+import { listChannels, decryptApiKey } from '../channel-manager'
 import { getTeamAuthWithRefresh } from '../auth-service'
-import { isCommercialBuild } from '../build-target'
-import { isOfficialManagedChannel } from '../official-channel'
+import { shouldUseManagedCommercialRoute } from '../commercial-routing-policy'
 import { getEffectiveProxyUrl } from '../proxy-settings-service'
 import { getFetchFn } from '../proxy-fetch'
 import { generateSchema } from './plugin-capabilities'
@@ -25,7 +24,7 @@ export async function generatePluginModel(raw: unknown, signal: AbortSignal): Pr
   if (!supportsPluginModel(channel, 'chat')) throw new Error('此渠道仅支持 Agent；插件生成请选择 Chat 模型')
   const adapter = getAdapter(channel.provider)
   let apiKey: string, baseUrl = channel.baseUrl, commercial = false
-  if ((isCommercialBuild() || isCommercialMode()) && isOfficialManagedChannel(channel)) {
+  if (shouldUseManagedCommercialRoute(channel)) {
     const auth = await getTeamAuthWithRefresh()
     if (!auth) throw new Error('请重新登录团队账号')
     apiKey = auth.proxyToken || auth.token
