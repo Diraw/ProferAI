@@ -1,3 +1,5 @@
+import { createAgentQueryPreparationPort } from '@profer/agent-runtime'
+import type { PiBuiltinToolsContext } from './pi-builtin-tools'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 // memory-archive 使用 node:sqlite，Pi bridge 测试只验证注册契约，避免 Bun 测试运行器加载原生 Node 模块。
@@ -77,6 +79,27 @@ function createPiSdkStub(): {
 }
 
 describe('Pi Profer in-process tool bridges', () => {
+  test('Given actual Pi SDK and a paired host context When runtime preparation assembles builtin tools Then policy filtering and SDK definitions survive', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const context: PiBuiltinToolsContext = {
+      sessionId: 'prepared-sdk-probe', channelId: 'fixture', agentRuntime: 'pi',
+      disabledToolGroups: ['task-graph', 'memory', 'collaboration', 'automation', 'browser', 'clipboard', 'preview', 'image', 'web', 'ppt-materials'],
+      allowedPresetOperations: [],
+    }
+    let invoked = false
+    const port = createAgentQueryPreparationPort({ toolAssembly: { build: async actual => {
+      expect(actual.sdk).toBe(sdk)
+      expect(actual.context).toBe(context)
+      invoked = true
+      return buildPiBuiltinTools(sdk, context)
+    } } })
+    const prepared = await port.prepare({ sessionId: context.sessionId, runtime: 'pi', prompt: 'fixture', toolAssemblyContext: { sdk, context } }, new AbortController().signal)
+    expect(invoked).toBe(true)
+    expect(prepared.collaborationAvailable).toBe(false)
+    expect(prepared.tools?.map(tool => (tool as CapturedTool).name)).toEqual(['mcp__agent-presets__preset_list'])
+    expect((prepared.tools?.[0] as CapturedTool).execute).toEqual(expect.any(Function))
+  })
+
   test('Given no explicit preset mutation intent When building Pi preset tools Then only preset_list is exposed', () => {
     const { sdk, tools } = createPiSdkStub()
     buildPiAgentPresetTools(sdk, {

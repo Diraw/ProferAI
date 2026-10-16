@@ -1,0 +1,60 @@
+{
+  "name": "@profer/agent-provider-pi",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "description": "Host-independent Pi Agent SDK provider: full agent adapter, message conversion and Pi tool integration.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./pi-agent-adapter": "./src/pi-agent-adapter.ts",
+    "./ports": "./src/ports.ts",
+    "./pi/message-adapter": "./src/pi/message-adapter.ts",
+    "./pi/model-registry": "./src/pi/model-registry.ts",
+    "./pi/model-runtime-options": "./src/pi/model-runtime-options.ts",
+    "./pi/prompt-chain": "./src/pi/prompt-chain.ts",
+    "./pi/harness-lifecycle": "./src/pi/harness-lifecycle.ts",
+    "./pi/retry-control": "./src/pi/retry-control.ts",
+    "./pi/streaming-control": "./src/pi/streaming-control.ts",
+    "./pi/command-bash": "./src/pi/command-bash.ts",
+    "./pi/command-powershell": "./src/pi/command-powershell.ts",
+    "./pi/command-execution": "./src/pi/command-execution.ts",
+    "./pi/runtime-env": "./src/pi/runtime-env.ts",
+    "./pi/shell-execution": "./src/pi/shell-execution.ts",
+    "./pi/skill-slugs": "./src/pi/skill-slugs.ts",
+    "./pi/skill-resources": "./src/pi/skill-resources.ts",
+    "./pi/resource-loader-overrides": "./src/pi/resource-loader-overrides.ts",
+    "./pi/project-instruction": "./src/pi/project-instruction.ts",
+    "./pi/project-instruction-scope": "./src/pi/project-instruction-scope.ts",
+    "./pi/codex-fast-mode": "./src/pi/codex-fast-mode.ts",
+    "./pi/codex-request-settings": "./src/pi/codex-request-settings.ts",
+    "./pi/deepseek-reasoning-request-settings": "./src/pi/deepseek-reasoning-request-settings.ts",
+    "./pi/openai-reasoning-request-settings": "./src/pi/openai-reasoning-request-settings.ts",
+    "./pi/powershell-tool": "./src/pi/powershell-tool.ts",
+    "./pi/request-proxy": "./src/pi/request-proxy.ts",
+    "./pi/tool-definition-compaction": "./src/pi/tool-definition-compaction.ts",
+    "./host/minimal-pi-host": "./src/host/minimal-pi-host.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test --isolate",
+    "runner:minimal": "bun test/minimal-pi-runner.ts",
+    "check:isolation": "bun run test/isolation/run-isolation-check.ts"
+  },
+  "dependencies": {
+    "@profer/agent-runtime": "workspace:*",
+    "@profer/core": "workspace:*",
+    "@profer/shared": "workspace:*",
+    "typebox": "1.1.38",
+    "undici": "^7.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "0.86.1",
+    "@earendil-works/pi-ai": "0.86.1",
+    "@earendil-works/pi-coding-agent": "0.86.1"
+  }
+}
