@@ -703,13 +703,20 @@ export function createElectronEventPort(eventBus: AgentEventBus): { emit(event: 
       // 也是一轮真实 run 的存在期，只是还没有产生「用户可见的运行开始」。
       if (event.type === 'runtime_claimed' || event.type === 'runtime_started') markRuntimeRunStarted(event.sessionId)
       else if (event.type === 'runtime_finished') markRuntimeRunFinished(event.sessionId)
-      const sessionId = event.type === 'runtime_claimed' || event.type === 'runtime_started' || event.type === 'runtime_finished'
-        ? event.sessionId
-        : event.type === 'message'
-          ? event.message.session_id
-          : event.type === 'host_event' || event.type === 'stream_payload'
-            ? event.sessionId
-            : undefined
+      // 路由键一律取事件自带的 `sessionId`，**不得**从 `event.message.session_id` 推断。
+      // 后者是内核原生会话 id（Pi 的 `sdkSessionId` / Claude 的 SDK session id），与 agent 会话 id
+      // 不同；`sessionWebContents` 绑定表是按 agent 会话 id 建的，用错键会让 `sdk_message`
+      // 在 EventBus 转发层查不到目标而被静默丢弃 —— 实机症状是 UI 失去逐字出流，
+      // 且 `result` 消息会存进错误的 observation 键，连带终态字段与刷新回放一起丢。
+      const sessionId =
+        event.type === 'message' ||
+        event.type === 'runtime_claimed' ||
+        event.type === 'runtime_started' ||
+        event.type === 'runtime_finished' ||
+        event.type === 'host_event' ||
+        event.type === 'stream_payload'
+          ? event.sessionId
+          : undefined
       if (!sessionId) return
 
       if (event.type === 'message') {
@@ -814,6 +821,9 @@ export function createElectronAgentRuntimeQuery(input: AgentSendInput, options: 
     ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
     ...(input.isolatedRuntimeSession !== undefined ? { isolatedRuntimeSession: input.isolatedRuntimeSession } : {}),
     ...(options.toolAssemblyContext !== undefined ? { deferredToolAssemblyContext: options.toolAssemblyContext } : {}),
+    ...(input.startedAt !== undefined
+      ? { metadata: { startedAt: input.startedAt } }
+      : {}),
     ...(Object.keys(providerInput).length ? { providerInput } : {}),
     ...(persistedUserMessage ? { persistedUserMessage } : {}),
   }

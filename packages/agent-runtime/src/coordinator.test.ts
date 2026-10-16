@@ -48,6 +48,95 @@ describe('AgentRuntimeCoordinator headless host', () => {
     expect(coordinator.isRunning(query.sessionId)).toBe(false)
   })
 
+  test('Given a Pi partial stream When messages are forwarded Then partial frames stay live-only and result keeps duration', async () => {
+    const persisted: Array<import('@profer/shared').SDKMessage> = []
+    const events: AgentRuntimeEvent[] = []
+    let now = 1000
+    const coordinator = new AgentRuntimeCoordinator({
+      now: () => now,
+      adapters: {
+        pi: streamAdapter(() => (async function* () {
+          now = 1040
+          // 内核消息带的是**原生**会话 id（与 agent 会话 id 不同），夹具不得用 query.sessionId 顶替。
+          yield { type: 'assistant', uuid: 'assistant-1', _partial: true, session_id: 'pi-native-session-9' } as never
+          now = 1060
+          yield { type: 'assistant', uuid: 'assistant-1', session_id: 'pi-native-session-9' } as never
+          now = 1120
+          yield { type: 'result', subtype: 'success', session_id: 'pi-native-session-9' } as never
+        })()),
+      },
+      ports: {
+        sessions: {
+          getMeta: () => undefined,
+          appendMessages: (_sessionId, messages) => { persisted.push(...messages) },
+          updateMeta: () => undefined,
+        },
+        host: { emit: event => { events.push(event) } },
+      },
+    })
+
+    await expect(coordinator.run(query).promise).resolves.toEqual({ status: 'completed' })
+    const messageEvents = events.filter((event): event is Extract<AgentRuntimeEvent, { type: 'message' }> => event.type === 'message')
+    // 路由键必须是 agent 会话 id，不能是内核消息自带的 `session_id`。
+    expect(messageEvents.every(event => event.sessionId === query.sessionId)).toBe(true)
+    expect(messageEvents.map(event => event.message.type)).toEqual(['assistant', 'assistant', 'result'])
+    expect(persisted.map(message => message.type)).toEqual(['assistant', 'result'])
+    expect((messageEvents[0]!.message as Record<string, unknown>)._partial).toBe(true)
+    expect((messageEvents[2]!.message as Record<string, unknown>)._durationMs).toBe(120)
+  })
+
+  test('Given runtime messages When persisted Then replay and internal frames stay out of history while tool results and visible system frames remain', async () => {
+    const persisted: Array<import('@profer/shared').SDKMessage> = []
+    const coordinator = new AgentRuntimeCoordinator({
+      now: () => 2000,
+      adapters: {
+        pi: streamAdapter(() => (async function* () {
+          yield { type: 'assistant', uuid: 'replay', isReplay: true, session_id: query.sessionId } as never
+          yield { type: 'system', subtype: 'task_progress', session_id: query.sessionId } as never
+          yield { type: 'tool_progress', tool_use_id: 'tool-1', session_id: query.sessionId } as never
+          yield { type: 'user', uuid: 'internal-user', message: { content: [{ type: 'text', text: 'internal' }] }, session_id: query.sessionId } as never
+          yield { type: 'user', uuid: 'tool-result', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'done' }] }, session_id: query.sessionId } as never
+          yield { type: 'system', subtype: 'compact_boundary', session_id: query.sessionId } as never
+          yield { type: 'result', subtype: 'success', session_id: query.sessionId } as never
+        })()),
+      },
+      ports: {
+        sessions: {
+          getMeta: () => undefined,
+          appendMessages: (_sessionId, messages) => { persisted.push(...messages) },
+          updateMeta: () => undefined,
+        },
+      },
+    })
+
+    await expect(coordinator.run({ ...query, modelId: 'configured-model' }).promise).resolves.toEqual({ status: 'completed' })
+    expect(persisted.map(message => message.type === 'system' ? `system:${(message as { subtype?: string }).subtype}` : message.type)).toEqual([
+      'user',
+      'system:compact_boundary',
+      'result',
+    ])
+    expect(persisted.every(message => typeof (message as Record<string, unknown>)._createdAt === 'number')).toBe(true)
+  })
+
+  test('Given an assistant message without channel metadata When runtime persists it Then model identity is normalized for replay', async () => {
+    const persisted: Array<import('@profer/shared').SDKMessage> = []
+    const coordinator = new AgentRuntimeCoordinator({
+      now: () => 3000,
+      adapters: {
+        pi: streamAdapter(() => (async function* () {
+          yield { type: 'assistant', uuid: 'assistant-model', session_id: query.sessionId } as never
+          yield { type: 'result', subtype: 'success', session_id: query.sessionId } as never
+        })()),
+      },
+      ports: {
+        sessions: { getMeta: () => undefined, appendMessages: (_sessionId, messages) => { persisted.push(...messages) }, updateMeta: () => undefined },
+      },
+    })
+
+    await expect(coordinator.run({ ...query, modelId: 'configured-model' }).promise).resolves.toEqual({ status: 'completed' })
+    expect(persisted[0]).toMatchObject({ _channelModelId: 'configured-model', _createdAt: 3000 })
+  })
+
   test('Given a persisted user message When runtime starts Then it is appended once after ownership lock before provider preparation', async () => {
     const messages: unknown[] = []
     const order: string[] = []

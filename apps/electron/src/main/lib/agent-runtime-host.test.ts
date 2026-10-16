@@ -120,6 +120,16 @@ describe('Electron Agent host ports', () => {
     expect(query).toMatchObject({ title: 'visible prompt', workspaceId: undefined, initiator: 'goal' })
   })
 
+  test('Given a renderer run timestamp When creating a runtime query Then it is carried into runtime metadata', () => {
+    const query = createElectronAgentRuntimeQuery({
+      sessionId: 'session-started-at',
+      userMessage: 'fixture',
+      channelId: 'channel-1',
+      startedAt: 1234,
+    }, { runtime: 'pi' })
+    expect(query.metadata).toEqual({ startedAt: 1234 })
+  })
+
   test('Given suppressed user persistence When creating a runtime query Then no transcript message is attached', () => {
     const query = createElectronAgentRuntimeQuery({ sessionId: 'suppressed', userMessage: 'hidden', internalPrompt: 'runtime hidden', channelId: 'channel-1', suppressUserMessagePersistence: true }, { runtime: 'pi' })
     expect(query.persistedUserMessage).toBeUndefined()
@@ -203,7 +213,7 @@ describe('Electron Agent host ports', () => {
     const port = createElectronEventPort({ emit: (sessionId: string, payload: AgentStreamPayload) => events.push({ sessionId, payload }) } as never)
     const message = { type: 'result', session_id: 'session-1', subtype: 'success', usage: { input_tokens: 1, output_tokens: 1 } } as unknown as SDKMessage
 
-    port.emit({ type: 'message', message })
+    port.emit({ type: 'message', sessionId: 'session-1', message })
     port.emit({ type: 'host_event', sessionId: 'session-1', event: { type: 'run_resumed', sessionId: 'session-1' } })
     port.emit({ type: 'stream_payload', sessionId: 'session-1', payload: { kind: 'run_error', error: 'fixture error' } })
     port.emit({ type: 'runtime_started', sessionId: 'session-1', runtime: 'pi', startedAt: 123, title: 'Fixture title', workspaceId: 'workspace-1', modelId: 'model-1', initiator: 'automation' })
@@ -215,6 +225,37 @@ describe('Electron Agent host ports', () => {
     expect(events[2]?.payload).toEqual({ kind: 'run_error', error: 'fixture error' })
     expect(events[3]?.payload).toEqual({ kind: 'profer_event', event: { type: 'external_run_started', source: 'bridge', sessionId: 'session-1', startedAt: 123, title: 'Fixture title', workspaceId: 'workspace-1', modelId: 'model-1', initiator: 'automation' } })
     expect(events[4]?.payload).toMatchObject({ kind: 'profer_event', event: { type: 'run_completed', sessionId: 'session-1', stoppedByUser: false, title: 'Fixture title', workspaceId: 'workspace-1', modelId: 'model-1', initiator: 'automation', resultErrors: ['terminal fixture error'] } })
+  })
+
+  test('Given a message whose native session id differs When the host event port emits Then it routes by the agent session id', () => {
+    const events: Array<{ sessionId: string; payload: AgentStreamPayload }> = []
+    const port = createElectronEventPort({ emit: (sessionId: string, payload: AgentStreamPayload) => events.push({ sessionId, payload }) } as never)
+    // 真实形状：内核消息带的是**原生**会话 id（Pi 的 sdkSessionId / Claude 的 SDK session id），
+    // 与 agent 会话 id 不同。夹具里两者取同一个值会掩盖路由键缺陷。
+    const message = { type: 'assistant', session_id: 'pi-native-session-9', message: { content: [{ type: 'text', text: 'hi' }] } } as unknown as SDKMessage
+
+    port.emit({ type: 'message', sessionId: 'agent-session-1', message })
+
+    expect(events).toHaveLength(1)
+    expect(events[0]?.sessionId).toBe('agent-session-1')
+    expect(events[0]?.payload).toEqual({ kind: 'sdk_message', message })
+  })
+
+  test('Given a result message with a foreign native session id When the run finishes Then the terminal observation is still found', () => {
+    const events: Array<{ sessionId: string; payload: AgentStreamPayload }> = []
+    const port = createElectronEventPort({ emit: (sessionId: string, payload: AgentStreamPayload) => events.push({ sessionId, payload }) } as never)
+    const message = { type: 'result', session_id: 'pi-native-session-9', subtype: 'success', usage: { input_tokens: 1, output_tokens: 1 } } as unknown as SDKMessage
+
+    port.emit({ type: 'message', sessionId: 'agent-session-1', message })
+    port.emit({ type: 'runtime_started', sessionId: 'agent-session-1', runtime: 'pi', startedAt: 123 })
+    port.emit({ type: 'runtime_finished', sessionId: 'agent-session-1', outcome: { status: 'completed' }, finishedAt: 456 })
+
+    const started = events.find(item => (item.payload as { event?: { type?: string } }).event?.type === 'external_run_started')
+    const completed = events.find(item => (item.payload as { event?: { type?: string } }).event?.type === 'run_completed')
+    expect(started?.sessionId).toBe('agent-session-1')
+    expect(completed?.sessionId).toBe('agent-session-1')
+    // `startedAt` 只能来自本轮 observation；若 result 存进了别的键，observation 被删后仍应保留 startedAt。
+    expect((completed?.payload as { event?: Record<string, unknown> }).event).toMatchObject({ type: 'run_completed', sessionId: 'agent-session-1', stoppedByUser: false })
   })
 
   test('Given an injected execution service When the command port executes and cancels Then it preserves the structured execution contract', async () => {

@@ -34,6 +34,24 @@ describe('外部 Agent 运行激活', () => {
     })
   })
 
+  test('Given 本地会话已经在运行 When 收到重复的 external start Then 保留本地 run id', () => {
+    const result = buildExternalAgentRunActivation({
+      tabs: [{ id: session.id, type: 'agent', sessionId: session.id, title: session.title }],
+      sessions: [session],
+      sessionId: session.id,
+      startedAt: 200,
+      currentStreamState: {
+        running: true,
+        content: '已有输出',
+        toolActivities: [],
+        startedAt: 100,
+      },
+    })
+
+    expect(result.streamState.startedAt).toBe(100)
+    expect(result.streamState.running).toBe(true)
+  })
+
   test('Given 会话标签已存在 When 再次收到外部运行开始事件 Then 复用原标签并保留已有工具活动', () => {
     const tabs: ExternalAgentRunTab[] = [
       { id: session.id, type: 'agent', sessionId: session.id, title: session.title },

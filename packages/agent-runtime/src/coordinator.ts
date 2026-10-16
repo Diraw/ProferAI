@@ -38,6 +38,45 @@ function isBackgroundWakeMessage(message: SDKMessage): boolean {
   return subtype === 'task_started' || subtype === 'task_progress'
 }
 
+function isPartialRuntimeMessage(message: SDKMessage): boolean {
+  return (message as Record<string, unknown>)._partial === true
+}
+
+function hasToolResult(message: SDKMessage): boolean {
+  if (message.type !== 'user') return false
+  const content = (message as { message?: { content?: Array<{ type?: unknown }> } }).message?.content
+  return Array.isArray(content) && content.some(block => block?.type === 'tool_result')
+}
+
+/** 与旧编排层一致：只把用户可见转录写入历史，内部流控制消息仅实时投影。 */
+function isPersistableRuntimeMessage(message: SDKMessage): boolean {
+  if (isPartialRuntimeMessage(message) || (message as Record<string, unknown>).isReplay === true) return false
+  if (message.type === 'assistant' || message.type === 'result') return true
+  if (message.type === 'user') return hasToolResult(message)
+  if (message.type !== 'system') return false
+  const subtype = (message as { subtype?: unknown }).subtype
+  return subtype === 'compact_boundary' || subtype === 'permission_denied'
+}
+
+function normalizeRuntimeMessage(message: SDKMessage, modelId: string | undefined, createdAt: number): SDKMessage {
+  const record = message as Record<string, unknown>
+  const normalized: Record<string, unknown> = {
+    ...record,
+    ...(typeof record._createdAt === 'number' ? {} : { _createdAt: createdAt }),
+  }
+  if (message.type === 'assistant' && modelId && !record._channelModelId) {
+    normalized._channelModelId = modelId
+  }
+  return normalized as SDKMessage
+}
+
+function addRuntimeDuration(message: SDKMessage, startedAt: number, finishedAt: number): SDKMessage {
+  if (message.type !== 'result') return message
+  const record = message as Record<string, unknown>
+  if (typeof record._durationMs === 'number') return message
+  return { ...message, _durationMs: Math.max(0, finishedAt - startedAt) } as SDKMessage
+}
+
 async function consumeRuntimeStream(
   stream: AsyncIterable<SDKMessage>,
   signal: AbortSignal,
@@ -198,6 +237,9 @@ export class AgentRuntimeCoordinator {
     }
     if (input.abortSignal?.aborted) abort()
     else input.abortSignal?.addEventListener('abort', abort, { once: true })
+    const startedAt = typeof input.metadata?.startedAt === 'number' && Number.isFinite(input.metadata.startedAt)
+      ? input.metadata.startedAt
+      : this.now()
     const emit = (event: AgentRuntimeEvent): void | Promise<void> => this.options.ports?.host?.emit(event)
     const runCallbacks: AgentRuntimeCallbacks = {
       onEvent: async (event) => {
@@ -207,9 +249,14 @@ export class AgentRuntimeCoordinator {
       },
       onMessage: async (message: SDKMessage) => {
         if (finished) return
-        session?.appendMessages(input.sessionId, [message])
-        await emit({ type: 'message', message })
-        await callbacks.onMessage?.(message)
+        const runtimeMessage = addRuntimeDuration(message, startedAt, this.now())
+        if (isPersistableRuntimeMessage(runtimeMessage)) {
+          session?.appendMessages(input.sessionId, [normalizeRuntimeMessage(runtimeMessage, input.modelId, this.now())])
+        }
+        // 路由键用本轮 run 的 agent 会话 id（`input.sessionId`），不能用 `runtimeMessage.session_id`：
+        // 后者是内核原生会话 id，宿主 EventBus 转发层按 agent 会话 id 找绑定 webContents。
+        await emit({ type: 'message', sessionId: input.sessionId, message: runtimeMessage })
+        await callbacks.onMessage?.(runtimeMessage)
       },
       onError: async () => {
         // provider 的中间错误只由 retry loop 判断；最终 outcome 统一回调宿主。
@@ -224,7 +271,6 @@ export class AgentRuntimeCoordinator {
       },
     }
 
-    const startedAt = this.now()
     const rawPromise = (async (): Promise<AgentRunOutcome> => {
       // claim/active 与「provider 真正启动」是两件事：先只声明执行权已被本轮 run 取得。
       // 凭证 / 资源 / 工具装配可能失败，此时 provider 从未参与，宿主不得据此清未读、晋升 draft

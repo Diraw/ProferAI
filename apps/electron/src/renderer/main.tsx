@@ -56,10 +56,12 @@ import {
 } from './atoms/notifications'
 import {
   stickyUserMessageEnabledAtom,
+  userMessagePositionAtom,
   showCreditsInSidebarAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
   composerCompactModeAtom,
+  previewOpenModeAtom,
   initializeUiPreferences,
 } from './atoms/ui-preferences'
 import {
@@ -497,19 +499,23 @@ function DockBadgeInitializer(): null {
 function UiPreferencesInitializer(): null {
   const setShowCreditsInSidebar = useSetAtom(showCreditsInSidebarAtom)
   const setStickyUserMessageEnabled = useSetAtom(stickyUserMessageEnabledAtom)
+  const setUserMessagePosition = useSetAtom(userMessagePositionAtom)
   const setLongTextPasteAsAttachmentEnabled = useSetAtom(longTextPasteAsAttachmentEnabledAtom)
   const setRichTextRenderingEnabled = useSetAtom(richTextRenderingEnabledAtom)
   const setComposerCompactMode = useSetAtom(composerCompactModeAtom)
+  const setPreviewOpenMode = useSetAtom(previewOpenModeAtom)
 
   useEffect(() => {
     initializeUiPreferences(
       setShowCreditsInSidebar,
       setStickyUserMessageEnabled,
+      setUserMessagePosition,
       setLongTextPasteAsAttachmentEnabled,
       setRichTextRenderingEnabled,
-      setComposerCompactMode
+      setComposerCompactMode,
+      setPreviewOpenMode
     )
-  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode])
+  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setUserMessagePosition, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode, setPreviewOpenMode])
 
   return null
 }

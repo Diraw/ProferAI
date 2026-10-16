@@ -3006,7 +3006,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
    * 重新生成最后一轮：截断最后一轮（一问一答）后重发该用户消息；
    * 首轮就失败时没有锚点，改为清空整段对话后重发。
    *
-   * 两个入口共用它：最后一条用户消息下的重新生成按钮，以及最新一轮错误卡片的「重试」。
+   * 唯一入口是最新一轮错误卡片的「重试」（用户消息下的重新生成按钮已移除，改走「修改重发」）。
    * 复用回退能力完成截断（含文件快照恢复），所以需要确认弹窗。
    */
   const handleRegenerateLastTurn = React.useCallback((): void => {

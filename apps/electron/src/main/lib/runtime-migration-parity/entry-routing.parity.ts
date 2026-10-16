@@ -24,7 +24,7 @@ const mainLibDir = new URL('../../', import.meta.url)
 
 /** 全入口共享的路由表；下面的断言逐条钉住它，表格不会静默失效。 */
 export const ROUTING_TABLE = [
-  { entry: 'desktop send_message', switch: 'PROFER_RUNTIME_DESKTOP', condition: "默认启用；仅 === '0' 回退旧链，且无 Goal 回调", evidence: 'agent-service.ts runAgent → resolveDesktopRunChain（读取点在 agent-runtime-desktop-switch.ts）' },
+  { entry: 'desktop send_message', switch: 'PROFER_RUNTIME_DESKTOP', condition: "==='1' 才启用新链；无值 / 非 1 值走旧链，且无 Goal 回调", evidence: 'agent-service.ts runAgent → resolveDesktopRunChain（读取点在 agent-runtime-desktop-switch.ts）' },
   { entry: 'goal run / goal 续跑', switch: 'PROFER_RUNTIME_HEADLESS', condition: 'goalRunId / reportGoalResult / onRuntimeSessionId / onRuntimeMessage 任一存在即回旧链', evidence: 'canUseRuntimeHeadless 执行结果' },
   { entry: 'headless（飞书 Bridge / 协作 / agent-fabric）', switch: 'PROFER_RUNTIME_HEADLESS', condition: "==='1' 且无 goal 回调", evidence: 'canUseRuntimeHeadless 执行结果' },
   { entry: 'remote / Pocket send_message', switch: 'PROFER_RUNTIME_REMOTE', condition: "==='1' → runAgentRuntimeHeadless（绕过 runAgentHeadless）", evidence: 'remote-service.ts 分支片段' },
@@ -70,7 +70,7 @@ describe('入口路由表与真实条件', () => {
     }
   })
 
-  test('桌面 runAgent 默认走 runtime，显式 0 回退旧链，且仍保留两条链', () => {
+  test('桌面 runAgent 仅在显式启用时走 runtime，且仍保留两条链', () => {
     const runAgentSlice = sliceBetween(agentServiceSource, 'export async function runAgent(', '/**\n * 直接使用 runtime coordinator 的 headless 入口', 'runAgent')
     // 开关读取点集中在 agent-runtime-desktop-switch.ts；runAgent 只调判定函数一次，不自读环境变量。
     expect(countOccurrences(runAgentSlice, 'resolveDesktopRunChain(')).toBe(1)

@@ -3,7 +3,7 @@ import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Provider, createStore } from 'jotai'
 import type { SDKMessage } from '@profer/shared'
-import { groupIntoTurns, getGroupPreview, getLatestUserGroupId, MessageGroupRenderer, parseAttachedFiles, buildHistoricalTaskSubjects, splitUserMessagePrefix, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
+import { groupIntoTurns, getGroupPreview, MessageGroupRenderer, parseAttachedFiles, buildHistoricalTaskSubjects, splitUserMessagePrefix, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
 
 function userText(text: string): SDKMessage {
   return {
@@ -203,50 +203,8 @@ describe('buildHistoricalTaskSubjects', () => {
   })
 })
 
-describe('最后一条用户消息定位（重新生成入口挂载点）', () => {
-  function userWithUuid(text: string, uuid: string): SDKMessage {
-    return {
-      type: 'user',
-      uuid,
-      message: { content: [{ type: 'text', text }] },
-      parent_tool_use_id: null,
-    } as unknown as SDKMessage
-  }
-
-  test('返回最后一条真实用户消息的 group id，忽略其后的 assistant turn', () => {
-    const groups = groupIntoTurns([
-      userWithUuid('第一条', 'u1'),
-      assistantText('回复一'),
-      userWithUuid('第二条', 'u2'),
-      assistantText('回复二'),
-    ])
-    expect(getLatestUserGroupId(groups)).toBe('u2')
-  })
-
-  test('Goal 自动迭代分隔条不计入用户发言', () => {
-    const goalIteration = {
-      type: 'user',
-      uuid: 'goal-1',
-      _goalIteration: 2,
-      message: { content: [{ type: 'text', text: '继续' }] },
-      parent_tool_use_id: null,
-    } as unknown as SDKMessage
-    const groups = groupIntoTurns([
-      userWithUuid('真实发言', 'u1'),
-      assistantText('回复'),
-      goalIteration,
-    ])
-    expect(getLatestUserGroupId(groups)).toBe('u1')
-  })
-
-  test('没有用户消息时返回 undefined', () => {
-    expect(getLatestUserGroupId(groupIntoTurns([assistantText('只有回复')]))).toBeUndefined()
-  })
-})
-
-describe('用户消息操作入口渲染（重新生成 / 修改重发）', () => {
+describe('用户消息操作入口渲染（修改重发）', () => {
   function renderUserGroup(options: {
-    onRegenerate?: () => void
     onEdit?: (userMessageUuid: string) => void
     onSubmitEdit?: (request: EditResendRequest) => void
     isEditing?: boolean
@@ -268,7 +226,6 @@ describe('用户消息操作入口渲染（重新生成 / 修改重发）', () =
           group: groups[0]!,
           allMessages: [],
           historicalTaskSubjects: new Map<string, string>(),
-          ...(options.onRegenerate ? { onRegenerateLastUserMessage: options.onRegenerate } : {}),
           ...(options.onEdit ? { onEditUserMessage: options.onEdit } : {}),
           ...(options.onSubmitEdit ? { onSubmitEditUserMessage: options.onSubmitEdit } : {}),
           editingUserMessageUuid: options.isEditing ? (options.uuid ?? 'u1') : null,
@@ -277,16 +234,27 @@ describe('用户消息操作入口渲染（重新生成 / 修改重发）', () =
     )
   }
 
-  test('传入重新生成回调时渲染入口', () => {
-    expect(renderUserGroup({ onRegenerate: () => {} })).toContain('重新生成')
-  })
-
   test('传入修改回调时渲染修改重发入口', () => {
     expect(renderUserGroup({ onEdit: () => {} })).toContain('修改重发')
   })
 
+  test('不再渲染「重新生成」入口（改走修改重发）', () => {
+    expect(renderUserGroup({ onEdit: () => {} })).not.toContain('重新生成')
+  })
+
+  test('用户消息操作栏默认隐藏，悬停整条消息时淡入', () => {
+    const markup = renderUserGroup({ onEdit: () => {} })
+
+    expect(markup).toContain('opacity-0 group-hover:opacity-100 focus-within:opacity-100')
+  })
+
+  test('用户名字与时间在居右时右对齐（居左时保持左对齐）', () => {
+    const markup = renderUserGroup({ onEdit: () => {} })
+
+    expect(markup).toContain('group-[.user-message-right]:items-end')
+  })
+
   test('未传回调时不渲染入口', () => {
-    expect(renderUserGroup()).not.toContain('重新生成')
     expect(renderUserGroup()).not.toContain('修改重发')
   })
 

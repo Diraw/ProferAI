@@ -437,7 +437,7 @@ describe('Pi builtin tools disabledToolGroups pruning (preset capability pruning
   test('Given each new capability group disabled Then only its registered tools are pruned', async () => {
     const cases = [
       { group: 'browser', names: ['BrowserObserve', 'BrowserNavigate'] },
-      { group: 'clipboard', names: ['clipboard_read_text', 'clipboard_write_text'] },
+      { group: 'clipboard', names: ['clipboard_write_text'] },
       { group: 'preview', names: ['inspect_preview', 'open_file_preview', 'inspect_file_preview', 'present_visualization', 'inspect_visualization'] },
       { group: 'image', names: ['send_local_image', 'generate_image', 'create_skin'] },
       { group: 'web', names: ['WebSearch', 'WebFetch'] },

@@ -15,7 +15,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
 import { isGoalIterationMessage } from '@profer/shared'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, RefreshCw, Pencil, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Pencil, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -1408,11 +1408,10 @@ export function splitUserMessagePrefix(rawText: string, text: string): string {
   return textStart >= 0 ? rawText.slice(0, textStart).trimEnd() : ''
 }
 
-function UserInputMessage({ message, basePath, basePaths, onRegenerate, onEdit, isEditing = false, onSubmitEdit, onCancelEdit }: {
+function UserInputMessage({ message, basePath, basePaths, onEdit, isEditing = false, onSubmitEdit, onCancelEdit }: {
   message: SDKUserMessage
   basePath?: string
   basePaths?: string[]
-  onRegenerate?: () => void
   /** 点击「修改重发」：上层把这条消息置为原地编辑态（入参是消息 uuid）。 */
   onEdit?: (userMessageUuid: string) => void
   /** 这条消息是否处于原地编辑态（编辑框就渲染在消息里，与 Chat 一致）。 */
@@ -1431,9 +1430,9 @@ function UserInputMessage({ message, basePath, basePaths, onRegenerate, onEdit, 
 
   return (
     <Message from="user">
-      <div className="flex items-start gap-2.5 mb-2.5">
+      <div className="flex items-start gap-2.5 mb-2.5 group-[.user-message-right]:flex-row-reverse">
         <UserAvatar avatar={userProfile.avatar} size={35} />
-        <div className="flex flex-col justify-between h-[35px]">
+        <div className="flex flex-col justify-between h-[35px] group-[.user-message-right]:items-end">
           <span className="text-sm font-semibold text-foreground/60 leading-none">{userProfile.userName}</span>
           {(meta.createdAt || isScheduledRun) && (
             <span className="flex items-center gap-2 leading-none">
@@ -1487,14 +1486,8 @@ function UserInputMessage({ message, basePath, basePaths, onRegenerate, onEdit, 
         ))}
       </MessageContent>
       {text && !isEditing && (
-        <MessageActions className="pl-[46px] mt-0.5">
+        <MessageActions revealOnHover className="pl-[46px] mt-0.5 group-[.user-message-right]:pl-0 group-[.user-message-right]:pr-[46px]">
           <CopyButton content={text} copyAsPlainText />
-          {/* 重新生成：只挂在会话最后一条用户消息下，截断最后一轮后重发该消息 */}
-          {onRegenerate && (
-            <MessageAction tooltip="重新生成" onClick={onRegenerate}>
-              <RefreshCw className="size-4" />
-            </MessageAction>
-          )}
           {/* 修改重发：每一条用户消息都可进入原地编辑（对齐 Chat）；编辑框就在消息里，不进 composer */}
           {onEdit && typeof message.uuid === 'string' && message.uuid.length > 0 && (
             <MessageAction tooltip="修改重发" onClick={() => onEdit(message.uuid as string)}>
@@ -1734,8 +1727,6 @@ export interface MessageGroupRendererProps {
   onRetryInNewSession?: () => void
   /** 压缩上下文回调（仅 prompt_too_long 错误使用） */
   onCompact?: () => void
-  /** 会话最后一条用户消息的重新生成回调（仅该条消息显示入口，点击后需回退截断再重发） */
-  onRegenerateLastUserMessage?: () => void
   /** 「修改重发」入口：任意用户消息都可进入原地编辑态（编辑框就在消息里，与 Chat 一致）。 */
   onEditUserMessage?: (userMessageUuid: string) => void
   /** 提交原地编辑（上层回退到该消息并重发编辑后的内容）。 */
@@ -1823,16 +1814,6 @@ export function getGroupNavKey(group: MessageGroup): string {
   return `${role}:${subtype}:${createdAt}`
 }
 
-/**
- * 会话最后一条用户消息的 group id。
- *
- * Goal 自动迭代分隔条不是用户发言，不计入；供「重新生成」入口判定只挂在这一条下。
- */
-export function getLatestUserGroupId(groups: MessageGroup[]): string | undefined {
-  const last = groups.findLast((group) => group.type === 'user' && !isGoalIterationMessage(group.message))
-  return last ? getGroupId(last) : undefined
-}
-
 /** 预览文本最大长度（user 与 assistant-turn 共用） */
 const GROUP_PREVIEW_LIMIT = 200
 
@@ -1874,7 +1855,7 @@ export function getGroupPreview(group: MessageGroup): string {
   return preview.slice(0, GROUP_PREVIEW_LIMIT)
 }
 
-function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, onRegenerateLastUserMessage, onEditUserMessage, onSubmitEditUserMessage, onCancelEditUserMessage, editingUserMessageUuid, isStreaming, stoppedByUser, sessionModelId, showThinking, isLatestAssistantTurn }: MessageGroupRendererProps): React.ReactElement | null {
+function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, onEditUserMessage, onSubmitEditUserMessage, onCancelEditUserMessage, editingUserMessageUuid, isStreaming, stoppedByUser, sessionModelId, showThinking, isLatestAssistantTurn }: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
   // 主进程导航索引与本地 DOM 的共同匹配键（无 uuid 的系统消息靠它对上号）。
   const navKey = getGroupNavKey(group)
@@ -1894,7 +1875,6 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
           message={group.message}
           basePath={basePath}
           basePaths={basePaths}
-          onRegenerate={onRegenerateLastUserMessage}
           onEdit={onEditUserMessage}
           isEditing={editingUserMessageUuid != null && group.message.uuid === editingUserMessageUuid}
           onSubmitEdit={onSubmitEditUserMessage}
@@ -2005,7 +1985,6 @@ export const MessageGroupRenderer = React.memo(MessageGroupRendererView, (prev, 
     && prev.onRetry === next.onRetry
     && prev.onRetryInNewSession === next.onRetryInNewSession
     && prev.onCompact === next.onCompact
-    && prev.onRegenerateLastUserMessage === next.onRegenerateLastUserMessage
     && prev.onEditUserMessage === next.onEditUserMessage
     && prev.onSubmitEditUserMessage === next.onSubmitEditUserMessage
     && prev.onCancelEditUserMessage === next.onCancelEditUserMessage

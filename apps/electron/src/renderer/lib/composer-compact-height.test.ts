@@ -59,16 +59,17 @@ describe('紧凑档最小高度（空内容时的可见高度）', () => {
     expect(normalizeCompactMinHeight('x')).toBe(DEFAULT_COMPACT_MIN_HEIGHT)
   })
 
-  test('收敛到 40–101，不会超过常规最小高度', () => {
+  test('收敛到 40–81，不会超过常规最小高度', () => {
     expect(normalizeCompactMinHeight(80)).toBe(80)
     expect(normalizeCompactMinHeight(10)).toBe(COMPACT_MIN_HEIGHT_RANGE.min)
     expect(normalizeCompactMinHeight(999)).toBe(COMPOSER_EDITOR_MIN_HEIGHT)
   })
 
-  test('常规档 101px；紧凑档降到配置值（默认 60px → 变矮约 40px）', () => {
+  test('常规档 81px；紧凑档降到配置值（默认 60px → 变矮约 21px）', () => {
     expect(resolveComposerMinHeight({ compact: false, compactMinHeight: 60 })).toBe(COMPOSER_EDITOR_MIN_HEIGHT)
     expect(resolveComposerMinHeight({ compact: true, compactMinHeight: 60 })).toBe(60)
-    expect(COMPOSER_EDITOR_MIN_HEIGHT - 60).toBeGreaterThanOrEqual(39)
+    // 常规高度从 101 下调到 81 后，紧凑档变矮量由 41px 变为 21px；断言只保证紧凑档仍有可见变矮。
+    expect(COMPOSER_EDITOR_MIN_HEIGHT - DEFAULT_COMPACT_MIN_HEIGHT).toBeGreaterThanOrEqual(20)
     expect(resolveComposerMinHeight({ compact: true, compactMinHeight: Number.NaN })).toBe(DEFAULT_COMPACT_MIN_HEIGHT)
   })
 })

@@ -1,16 +1,6 @@
 /**
- * Agent 系统剪贴板工具服务
- *
- * 提供 `clipboard_read_text` / `clipboard_write_text` 两个 Agent 工具的正规主进程实现，
- * 底层用 Electron `clipboard`（UTF-8，天然无 Windows 代码页乱码问题）。
- *
- * 背景：Profer 此前没有暴露剪贴板工具给 Agent，导致 Agent 读到系统剪贴板时只能退化为
- * `PowerShell Get-Clipboard`，而 Windows 控制台默认代码页（GBK/936）会让中文乱码。
- * 本服务给 Agent 一条优雅的正路：走主进程 Electron clipboard，不依赖 PowerShell。
- *
- * 安全边界：用户已确认「完全放开」读/写系统剪贴板，与受管浏览器 clipboard-read
- * 许可策略保持一致。读取的文本会经 JSON 序列化返回给模型，剪贴板内敏感内容
- * （如密码）存在被 Agent 读取的可能，属用户已知并接受的边界。
+ * Agent 剪贴板写入工具的主进程实现，底层使用 Electron `clipboard`。
+ * 剪贴板读取仅供应用自身交互使用，不向 Agent 暴露。
  */
 
 import { clipboard } from 'electron'

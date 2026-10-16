@@ -29,6 +29,7 @@ import {
   isSessionConsistentGroup,
   planAutoGroupWorkTab,
   planFollowWorkTab,
+  planPreviewSplit,
   planGroupDrop,
   reconcileGroup,
   reconcileTabGroups,
@@ -554,6 +555,54 @@ test('planFollowWorkTab：对话+同会话预览组合跟随最新文件，焦�
   })
   expect(next).toHaveLength(1)
   expect(next![0]).toEqual({ leftTabId: 's1', rightTabId: '__preview__:s1:b', focusedTabId: 's1' })
+})
+
+test('planPreviewSplit：无组合时把会话与预览摆成左右两栏，焦点按参数', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: '__preview__:s1:a', type: 'preview', sessionId: 's1', title: 'a', filePath: '/w/a' },
+  ] as const
+  const next = planPreviewSplit({ groups: [], tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })
+  expect(next!.focusedTabId).toBe('__preview__:s1:a')
+  expect(next!.groups).toEqual([{ leftTabId: 's1', rightTabId: '__preview__:s1:a', focusedTabId: '__preview__:s1:a' }])
+  // 不要求用户此刻正看着该会话（与 planFollowWorkTab 的关键区别）
+  const focusedAgent = planPreviewSplit({ groups: [], tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'agent' })
+  expect(focusedAgent!.focusedTabId).toBe('s1')
+})
+
+test('planPreviewSplit：会话已在右栏时预览补左栏，不改变用户摆的左右顺序', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: '__preview__:s1:a', type: 'preview', sessionId: 's1', title: 'a', filePath: '/w/a' },
+  ] as const
+  const groups = [{ leftTabId: null, rightTabId: 's1', focusedTabId: 's1' }] as const
+  const next = planPreviewSplit({ groups: [...groups], tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })
+  expect(next!.groups[0]).toEqual({ leftTabId: '__preview__:s1:a', rightTabId: 's1', focusedTabId: '__preview__:s1:a' })
+})
+
+test('planPreviewSplit：对侧是浏览器/其他会话内容时不改写用户布局', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: '__browser__:s1', type: 'browser', sessionId: 's1', title: '浏览器' },
+  ] as const
+  const groups = [{ leftTabId: 's1', rightTabId: '__browser__:s1', focusedTabId: 's1' }]
+  expect(planPreviewSplit({ groups, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })).toBeNull()
+})
+
+test('planPreviewSplit：预览已入别的组合时不抢，同一组合内则只切焦点', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: 's2', type: 'agent', sessionId: 's2', title: 's2' },
+    { id: '__preview__:s1:a', type: 'preview', sessionId: 's1', title: 'a', filePath: '/w/a' },
+  ] as const
+  // 预览被用户编进了「s2 + 预览」的组合：不抢
+  const otherGroup = [{ leftTabId: 's2', rightTabId: '__preview__:s1:a', focusedTabId: 's2' }]
+  expect(planPreviewSplit({ groups: otherGroup, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })).toBeNull()
+  // 会话与预览已在同一组合：仅切焦点，组合不变
+  const sameGroup = [{ leftTabId: 's1', rightTabId: '__preview__:s1:a', focusedTabId: 's1' }]
+  const next = planPreviewSplit({ groups: sameGroup, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })
+  expect(next!.groups).toBe(sameGroup)
+  expect(next!.focusedTabId).toBe('__preview__:s1:a')
 })
 
 test('planFollowWorkTab：右栏是浏览器/其他会话内容时不改写用户布局', () => {

@@ -30,6 +30,7 @@ import type {
   ProferPermissionMode,
   AgentExternalRunSource,
   AgentRuntimeRestoreSnapshot,
+  AgentStreamCompletePayload,
 } from '@profer/shared'
 import { normalizeAgentRuntime } from '@profer/shared'
 import type { AgentRuntime, AgentRuntimeCallbacks, AgentRuntimeQuery, AgentRunOutcome, AgentRuntimePreparedContext } from '@profer/agent-runtime'
@@ -44,7 +45,7 @@ import { AgentCatalogInvalidationPublisher } from './agent-catalog-invalidation'
 import { AgentOrchestrator, serializeErrorDetail } from './agent-orchestrator'
 import { AgentRunAlreadyActiveError } from './agent-orchestrator-p0-guards'
 import { createAgentRunOutcomeReporter } from './agent-run-outcome'
-import { forwardHeadlessAgentCompletion, setHeadlessAgentRunner, type HeadlessAgentRunCallbacks } from './agent-headless-runner-registry'
+import { forwardHeadlessAgentCompletion, setHeadlessAgentRunner, type HeadlessAgentCompletionOptions, type HeadlessAgentRunCallbacks } from './agent-headless-runner-registry'
 import { getAgentSessionWorkspacePath, getWorkspaceFilesDir, getSdkConfigDir } from './config-paths'
 import { getAgentWorkspace } from './agent-workspace-manager'
 import { getAgentSessionMeta, getAgentSessionMessages, setAgentSessionActiveChecker, updateAgentSessionMeta } from './agent-session-manager'
@@ -274,15 +275,13 @@ export function restoreActiveAgentStreams(webContents: WebContents): AgentRuntim
     if (!isAgentExecutionActive(sessionId) && !completedStreamEventBacklogs.has(sessionId)) continue
     registerWebContents(sessionId, webContents)
     const active = isAgentExecutionActive(sessionId)
-    if (active) {
-      const context = contextSnapshots.get(sessionId)
-      restored.push({
-        sessionId,
-        active: true,
-        hasTerminalEvent: backlog.some(isTerminalBacklogEvent),
-        ...(context ? { contextWindow: context.contextWindow, contextUpdatedAt: context.updatedAt } : {}),
-      })
-    }
+    const context = contextSnapshots.get(sessionId)
+    restored.push({
+      sessionId,
+      active,
+      hasTerminalEvent: backlog.some(isTerminalBacklogEvent),
+      ...(context ? { contextWindow: context.contextWindow, contextUpdatedAt: context.updatedAt } : {}),
+    })
     for (const payload of backlog) {
       if (webContents.isDestroyed()) break
       webContents.send(AGENT_IPC_CHANNELS.STREAM_EVENT, { sessionId, payload } as AgentStreamEvent)
@@ -712,6 +711,40 @@ export async function runAgentRuntimeHeadless(
   // 本轮发起者：run 内不变。headless 运行没有显式 initiator 时按 source 推断（缺省 external，不清未读）。
   const initiator = input.initiator ?? resolveRunInitiator(input.triggeredBy, callbacks.source)
   const runtimeCallbacks: AgentRuntimeCallbacks = { onEvent: () => {} }
+  let runtimeError: string | undefined
+  const forwardRuntimeError = (error: string): void => {
+    runtimeError = error
+    callbacks.onError(error)
+    eventBus.emit(input.sessionId, { kind: 'run_error', error })
+    const currentWc = sessionWebContents.get(input.sessionId)
+    if (currentWc && !currentWc.isDestroyed()) {
+      currentWc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error })
+    }
+  }
+  const forwardRuntimeCompletion = (
+    messages: AgentMessage[] | undefined,
+    fields: HeadlessAgentCompletionOptions,
+  ): void => {
+    callbacks.onComplete(messages, fields)
+    const completion: AgentStreamCompletePayload = {
+      sessionId: input.sessionId,
+      messages,
+      stoppedByUser: fields.stoppedByUser ?? false,
+      startedAt: fields.startedAt,
+      resultSubtype: fields.resultSubtype,
+      resultErrors: fields.resultErrors ?? (runtimeError ? [runtimeError] : undefined),
+      backgroundTasksPending: fields.backgroundTasksPending,
+      endReason: fields.endReason,
+      endReasonLabel: fields.endReasonLabel,
+      initiator,
+    }
+    // runtime host 的 run_completed 负责跨端事件；这里补桌面 renderer 的专用终态通道。
+    eventBus.emit(input.sessionId, { kind: 'run_complete', completion })
+    const currentWc = sessionWebContents.get(input.sessionId)
+    if (currentWc && !currentWc.isDestroyed()) {
+      currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, completion)
+    }
+  }
   try {
     await runRuntimeHeadlessEntry(input, runtimeCallbacks, {
       ...(callbacks.source !== undefined ? { source: callbacks.source } : {}),
@@ -758,8 +791,8 @@ export async function runAgentRuntimeHeadless(
         })
       },
       sink: {
-        onError: error => callbacks.onError(error),
-        onComplete: (messages, fields) => callbacks.onComplete(messages, fields),
+        onError: forwardRuntimeError,
+        onComplete: forwardRuntimeCompletion,
       },
     })
   } finally {

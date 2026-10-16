@@ -465,8 +465,8 @@ const PRODUCT_TOOL_PATTERNS: readonly RegExp[] = [
   /^inspect_preview$/,
   /^plan_ppt_visuals$/,
   /^audit_ppt_delivery$/,
-  /^clipboard_read_text$/,
   /^clipboard_write_text$/,
+
   /^Browser/,
 ]
 
@@ -578,7 +578,7 @@ describe('B8-Pi：矩阵（8 组上下文 × 策略门禁）产品字段与真�
     // 用例本身必须“真的在比较产品工具”（否则两边都为空会假绿）。
     const allOn = await runNew(cases[0]!)
     const allOnTools = (await toolNamesOf(allOn.context)).filter(isProductTool)
-    for (const expected of ['send_local_image', 'generate_image', 'create_skin', 'present_visualization', 'inspect_visualization', 'open_file_preview', 'inspect_file_preview', 'inspect_preview', 'plan_ppt_visuals', 'audit_ppt_delivery', 'clipboard_read_text', 'clipboard_write_text', 'BrowserObserve']) {
+    for (const expected of ['send_local_image', 'generate_image', 'create_skin', 'present_visualization', 'inspect_visualization', 'open_file_preview', 'inspect_file_preview', 'inspect_preview', 'plan_ppt_visuals', 'audit_ppt_delivery', 'clipboard_write_text', 'BrowserObserve']) {
       expect(allOnTools).toContain(expected)
     }
     // 缺 cwd / 缺工作区：可视化与图片三件套不注册（与旧链一致）。

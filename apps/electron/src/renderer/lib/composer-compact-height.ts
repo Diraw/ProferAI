@@ -2,7 +2,7 @@
  * Composer 紧凑档（窗口高度驱动）纯逻辑
  *
  * 需求：窗口内高较低时，输入框仍按常规高度会明显挤占消息区，需要在矮窗口下把输入框
- * 整体压矮（默认 < 700px 时：空内容高度 101px → 60px、上限 200px → 140px）。
+ * 整体压矮（默认 < 700px 时：空内容高度 81px → 60px、上限 200px → 140px）。
  * 阈值与两个高度都可在设置里调整，阈值 0 = 关闭。
  *
  * 历史：2026-09-13 曾移除过一版「窗口高度驱动紧凑档」，原因是拖拽窗口时输入框在阈值
@@ -24,7 +24,7 @@ export const COMPACT_EXIT_HYSTERESIS_PX = 60
 
 /** 输入框三档基准高度（px），与 rich-text-input 既有视觉保持一致。 */
 export const COMPOSER_TIER_HEIGHTS = {
-  collapsed: 101,
+  collapsed: 81,
   default: 200,
   expanded: 500,
 } as const
@@ -33,9 +33,9 @@ export const COMPOSER_TIER_HEIGHTS = {
  * 编辑器（ProseMirror）常规最小高度（px）。
  * 输入框空内容时的可见高度就由它决定，所以「是否真的变矮」看的是这个值。
  */
-export const COMPOSER_EDITOR_MIN_HEIGHT = 101
+export const COMPOSER_EDITOR_MIN_HEIGHT = 81
 
-/** 紧凑档默认最小高度（px）：矮窗口下输入框整体变矮约 40px 的关键。 */
+/** 紧凑档默认最小高度（px）：矮窗口下输入框整体变矮约 21px 的关键。 */
 export const DEFAULT_COMPACT_MIN_HEIGHT = 60
 
 /** 紧凑档最小高度的可配置范围（px）：上限不超过常规最小高度，否则不会变矮。 */
@@ -103,7 +103,7 @@ export function resolveCompactViewport(
 
 /**
  * 计算输入框当前应使用的 max-height（px）。
- * - 手动折叠档优先（101px），与窗口高度无关
+ * - 手动折叠档优先（81px），与窗口高度无关
  * - 非紧凑档：展开 500px / 默认 200px
  * - 紧凑档：默认档压到配置上限（默认 140px）；展开档取该上限的 2 倍且不超过常规展开档
  */
@@ -130,7 +130,7 @@ export function resolveComposerMaxHeight(input: {
  * 计算编辑器（ProseMirror）的 min-height（px）。
  *
  * 输入框空内容时的可见高度 = 这个值，所以「窗口矮就降低输入框高度」的可见效果靠它：
- * 常规 101px（可容纳占位文字 + 折叠按钮），紧凑档降到配置值（默认 60px）。
+ * 常规 81px（可容纳占位文字 + 折叠按钮），紧凑档降到配置值（默认 60px）。
  */
 export function resolveComposerMinHeight(input: {
   compact: boolean

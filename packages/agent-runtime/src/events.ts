@@ -6,7 +6,15 @@ export type AgentRunOutcome =
   | { status: 'stopped' }
 
 export type AgentRuntimeEvent =
-  | { type: 'message'; message: SDKMessage }
+  /**
+   * 内核产出的一条消息（含 `_partial` 增量帧）。
+   *
+   * `sessionId` 必须是 **agent 会话 id**，不得从 `message.session_id` 推断：后者是内核
+   * 原生会话 id（Pi 的 sdkSessionId / Claude 的 SDK session id），与 agent 会话 id 不同。
+   * 宿主用事件自带的 `sessionId` 做 EventBus 路由键；用错键会让 `sdk_message` 在转发层
+   * 查不到已绑定的 webContents 而被静默丢弃（症状：UI 不再逐字出流）。
+   */
+  | { type: 'message'; sessionId: string; message: SDKMessage }
   | { type: 'agent_event'; event: AgentEvent }
   | { type: 'host_event'; sessionId: string; event: ProferEvent }
   | { type: 'stream_payload'; sessionId: string; payload: AgentStreamPayload }

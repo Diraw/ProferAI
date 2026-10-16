@@ -93,7 +93,7 @@ import {
 } from '../web-search-service'
 import { browserController } from '../browser-controller'
 import { resolveBrowserProfileKey } from '../browser-profile-policy'
-import { readClipboardText, writeClipboardText } from '../clipboard-agent-tools'
+import { writeClipboardText } from '../clipboard-agent-tools'
 import { auditPptDelivery, planPptVisuals } from '../ppt-delivery-audit-service'
 import { sendAgentLocalImage } from '../agent-image-output-service'
 import { formatAgentImageOutputToolResult } from '../agent-image-output-tools'
@@ -1305,27 +1305,9 @@ function buildAutomationTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefin
 
 // ===== 系统剪贴板工具 =====
 
-/**
- * Agent 读/写系统剪贴板的正规工具；走主进程 Electron clipboard（UTF-8），
- * 避免 Agent 退化为 PowerShell Get-Clipboard 时踩 Windows 代码页中文乱码。
- */
+/** Agent 写入系统剪贴板的工具，走主进程 Electron clipboard。 */
 function buildPiClipboardTools(sdk: PiSdk): ToolDefinition[] {
   return [
-    sdk.defineTool({
-      name: 'clipboard_read_text',
-      label: '读取系统剪贴板文本',
-      description: '读取系统剪贴板文本。获取剪贴板内容请优先使用本工具，不要使用 PowerShell Get-Clipboard（Windows 控制台代码页会导致中文乱码）。',
-      parameters: Type.Object({}),
-      async execute() {
-        const { text, truncated, totalChars } = readClipboardText()
-        return jsonToolResult({
-          text,
-          truncated,
-          totalChars,
-          message: truncated ? `剪贴板文本超过上限，已截断到 ${text.length} 字符（原文 ${totalChars} 字符）。` : `已读取 ${totalChars} 个字符。`,
-        })
-      },
-    }),
     sdk.defineTool({
       name: 'clipboard_write_text',
       label: '写入系统剪贴板文本',
@@ -1771,8 +1753,7 @@ export async function buildPiBuiltinTools(
     }
   }
 
-  // 系统剪贴板工具：Agent 读取/写入系统剪贴板走主进程 Electron clipboard（UTF-8），
-  // 避免退化为 PowerShell Get-Clipboard（Windows 代码页导致中文乱码）。
+  // 系统剪贴板写入工具使用主进程 Electron clipboard。
   if (!isAgentPresetToolGroupDisabled(ctx.disabledToolGroups, 'clipboard')) {
     try {
       tools.push(...buildPiClipboardTools(sdk))

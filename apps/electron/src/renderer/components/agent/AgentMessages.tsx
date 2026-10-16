@@ -39,7 +39,7 @@ import { ScrollPositionManager } from '@/hooks/useScrollPositionMemory'
 import { cn } from '@/lib/utils'
 import { Spinner } from '@profer/ui/primitives/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
-import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupNavKey, getGroupPreview, getLatestUserGroupId, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
+import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupNavKey, getGroupPreview, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
 import { extractUserText } from '@profer/session-core'
 import { shouldRegenerateFromRetry } from '@/lib/agent-regenerate-anchor'
 import { buildLiveGroupSet } from './live-group-set'
@@ -131,8 +131,8 @@ interface AgentMessagesProps {
   onRetry?: () => void
   onRetryInNewSession?: () => void
   /**
-   * 重新生成最后一轮（截断最后一轮再重发），同时作为两个入口的回调：
-   * 最后一条用户消息下的重新生成按钮，以及最新一轮错误卡片的「重试」。
+   * 重新生成最后一轮（截断最后一轮再重发）；唯一入口是最新一轮错误卡片的「重试」
+   * （用户消息下的重新生成按钮已移除，改走「修改重发」）。
    * 不传时错误卡片回落 `onRetry` 的追加语义（无回退锚点，如首轮就失败）。
    */
   onRegenerateLastTurn?: () => void
@@ -789,9 +789,6 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
       })
   }, [visibleGroups])
 
-  // 会话最后一条用户消息（Goal 迭代分隔条不是用户发言）——「重新生成」入口只挂在这一条下面
-  const latestUserGroupId = React.useMemo(() => getLatestUserGroupId(allGroups), [allGroups])
-
   // 实时消息中是否已有可渲染的助手内容
   // 流式中：通过 liveGroupSet 精确判断（只有 streaming 时 liveGroupSet 才非空）
   // 流式结束后：直接检查 liveMessages 中是否有助手消息，
@@ -889,11 +886,6 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
               // （中断态不显示分叉/回退属预期，但未读仍应可确认）。
               const isLatestAssistantTurn = group.type === 'assistant-turn'
                 && getGroupId(group) === getGroupId(allGroups.findLast((g) => g.type === 'assistant-turn') ?? group)
-              // 「重新生成」入口只挂在会话最后一条用户消息下；会话活跃（流式/后台任务/子 Agent）时不暴露，
-              // 避免与正在运行的 agent session 冲突（与 AgentView 侧的 rewind 护栏一致）。
-              const isLatestUserTurn = group.type === 'user'
-                && !isGoalIterationMessage(group.message)
-                && getGroupId(group) === latestUserGroupId
               // 最新一轮错误卡片的「重试」也走重新生成（截断+重发）；历史错误卡片不带这个回调，
               // 否则会用一个只认「最后一条用户消息」的锚点去截断与本卡片无关的最新一轮。
               const retryLatestTurn = shouldRegenerateFromRetry({ isLatestTurn: isLatestAssistantTurn, sessionActive: isSessionActive })
@@ -921,7 +913,6 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
                   onRetry={shouldDisableActions ? undefined : (retryLatestTurn ?? onRetry)}
                   onRetryInNewSession={shouldDisableActions ? undefined : onRetryInNewSession}
                   onCompact={(shouldDisableActions || isSessionActive) ? undefined : onCompact}
-                  onRegenerateLastUserMessage={(isLatestUserTurn && !shouldDisableActions && !isSessionActive) ? onRegenerateLastTurn : undefined}
                   onEditUserMessage={canEditUserMessage ? onEditUserMessage : undefined}
                   onSubmitEditUserMessage={onSubmitEditUserMessage}
                   onCancelEditUserMessage={onCancelEditUserMessage}

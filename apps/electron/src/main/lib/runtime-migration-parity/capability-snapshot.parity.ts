@@ -513,6 +513,6 @@ describe('策略快照接线（模块级行为验证）', () => {
     // Claude 侧同一策略折算为 disallowedTools，保证两套 runtime 工具面等价。
     const disallowed = collectPolicyDisallowedTools(snapshot)
     expect(disallowed).toContain('BrowserNavigate')
-    expect(disallowed).toContain('clipboard_read_text')
+    expect(disallowed).not.toContain('clipboard_read_text')
   })
 })

@@ -303,6 +303,55 @@ export function planFollowWorkTab(input: {
 }
 
 /**
+ * 「预览与对话分屏」：把会话与其预览标签摆成左右并排（会话在左、预览在右）。
+ *
+ * 与 planFollowWorkTab 的区别：不要求用户此刻正看着该会话（用户主动打开预览时强制生效），
+ * 且允许替换对侧「同会话的预览」。
+ *
+ * 以下情况返回 null，由调用方退化为普通标签页聚焦：
+ * - 会话与预览是同一个标签；
+ * - 会话已入组，但对侧是别的标签（用户自己摆的布局，不抢）；
+ * - 预览已入组而会话不在同一组（用户已把预览编进别的组合）。
+ */
+export function planPreviewSplit(input: {
+  groups: TabGroupsState
+  tabs: readonly TabItem[]
+  agentTabId: string
+  workTabId: string
+  focus: 'agent' | 'preview'
+}): { groups: TabGroupsState; focusedTabId: string } | null {
+  const { groups, tabs, agentTabId, workTabId, focus } = input
+  if (!agentTabId || !workTabId || agentTabId === workTabId) return null
+  const focusedTabId = focus === 'preview' ? workTabId : agentTabId
+  const agentGroup = findTabGroup(groups, agentTabId)
+
+  if (!agentGroup) {
+    // 预览已被用户编进别的组合 → 尊重既有布局
+    if (findTabGroup(groups, workTabId)) return null
+    const created = createGroup(agentTabId, workTabId, focusedTabId)
+    return created ? { groups: replaceTabGroup(groups, null, created), focusedTabId } : null
+  }
+
+  // 预览与会话已在同一组合：只切焦点
+  if (isGroupMember(agentGroup, workTabId)) return { groups, focusedTabId }
+
+  const agentSide = groupSideOf(agentGroup, agentTabId)
+  if (!agentSide) return null
+  const otherTabId = agentSide === 'left' ? agentGroup.rightTabId : agentGroup.leftTabId
+  const otherTab = otherTabId ? tabs.find((tab) => tab.id === otherTabId) : null
+  // 只在对侧空闲、或对侧本来就是同一会话的预览（可被最新文件替换）时改写
+  const replaceable = !otherTabId || (otherTab?.type === 'preview' && otherTab.sessionId === agentTabId)
+  if (!replaceable) return null
+
+  const next = createGroup(
+    agentSide === 'left' ? agentTabId : workTabId,
+    agentSide === 'left' ? workTabId : agentTabId,
+    focusedTabId,
+  )
+  return next ? { groups: replaceTabGroup(groups, agentGroup, next), focusedTabId } : null
+}
+
+/**
  * 合并手势的落点语义（无组合时）：
  * - 被拖标签就是当前激活标签（"只有一个会话"）：只把它放进落点那一栏，**另一栏留空**，
  *   等用户自己挑对照会话——不自动补位；

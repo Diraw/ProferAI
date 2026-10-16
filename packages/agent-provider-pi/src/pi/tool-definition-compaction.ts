@@ -31,7 +31,6 @@ const COMPACT_DESCRIPTIONS: Record<string, string> = {
   inspect_visualization: '读取已保存可视化的内容和对象列表，不代表视觉验收。',
   WebSearch: '检索公开网页的时效信息；query 不得包含私密文件、密钥或 token。',
   WebFetch: '读取指定 HTTP(S) 页面或搜索结果；按需提取相关内容。',
-  clipboard_read_text: '读取系统剪贴板文本；不要改用 PowerShell Get-Clipboard。',
   clipboard_write_text: '写入剪贴板；先确认文本不含不应泄露的敏感信息。',
   update_goal: '向 Goal 控制器报告本轮结构化结果；complete 必须有真实证据。',
 }

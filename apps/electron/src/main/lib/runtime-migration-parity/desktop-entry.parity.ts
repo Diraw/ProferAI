@@ -46,17 +46,17 @@ import { createOldEngine, type OldEngineDriver } from './support/old-engine'
 import { createParityHost, type ParityHostFixture } from './support/parity-host'
 
 // ============================================================================
-// 1. 开关（默认启用，0 回退）
+// 1. 开关（默认关闭，显式 1 启用）
 // ============================================================================
 
-describe('桌面 runtime 开关（默认启用，0 回退）', () => {
+describe('桌面 runtime 开关（默认关闭，显式 1 启用）', () => {
   const plainInput: Pick<AgentSendInput, 'goalRunId' | 'reportGoalResult' | 'onRuntimeSessionId' | 'onRuntimeMessage'> = {}
 
-  test('默认启用：未设置 / 1 / 其他值都走新链，显式 0 回退旧链', () => {
+  test('默认关闭：未设置 / 0 / 其他值都走旧链，显式 1 才走新链', () => {
     expect(DESKTOP_RUNTIME_SWITCH_ENV).toBe('PROFER_RUNTIME_DESKTOP')
-    expect(resolveDesktopRunChain(plainInput, {})).toBe('runtime')
+    expect(resolveDesktopRunChain(plainInput, {})).toBe('orchestrator')
     expect(resolveDesktopRunChain(plainInput, { [DESKTOP_RUNTIME_SWITCH_ENV]: '1' })).toBe('runtime')
-    expect(resolveDesktopRunChain(plainInput, { [DESKTOP_RUNTIME_SWITCH_ENV]: 'true' })).toBe('runtime')
+    expect(resolveDesktopRunChain(plainInput, { [DESKTOP_RUNTIME_SWITCH_ENV]: 'true' })).toBe('orchestrator')
     expect(resolveDesktopRunChain(plainInput, { [DESKTOP_RUNTIME_SWITCH_ENV]: '0' })).toBe('orchestrator')
   })
 
@@ -68,12 +68,12 @@ describe('桌面 runtime 开关（默认启用，0 回退）', () => {
     expect(resolveDesktopRunChain({ onRuntimeMessage: () => undefined }, on)).toBe('orchestrator')
   })
 
-  test('开关读取点唯一：桌面开关模块读一次，runAgent 经判定函数接线（默认启用）', () => {
+  test('开关读取点唯一：桌面开关模块读一次，runAgent 经判定函数接线（默认关闭）', () => {
     const switchSource = readMainSource('agent-runtime-desktop-switch.ts')
     expect(countOccurrences(switchSource, DESKTOP_RUNTIME_SWITCH_ENV)).toBe(1)
 
-    // 已接线（IR-D1）：runAgent 在任何 await 之前经 `resolveDesktopRunChain` 判定一次；
-    // 默认启用态直接走 runtime；显式回退态仍保留旧链。环境变量的唯一读取点仍在桌面开关模块，IPC 不自读。
+    // 已接线（IR-D1）：runAgent 在任何 await 之前经 `resolveDesktopRunChain` 判定一次；默认关闭。
+    // 默认关闭态走旧链；显式启用态才走 runtime；环境变量的唯一读取点仍在桌面开关模块，IPC 不自读。
     const agentServiceSource = readMainSource('agent-service.ts')
     const runAgentSlice = sliceBetween(
       agentServiceSource,

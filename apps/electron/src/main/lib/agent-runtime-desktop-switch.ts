@@ -1,8 +1,8 @@
 /**
  * agent-runtime-desktop-switch —— 桌面 `runAgent`（IPC SEND_MESSAGE）的 runtime 开关。
  *
- * 与既有三个运行时开关保持同一入口读取模式，但桌面链默认启用：未设置或不是 `0` 时走新链。
- * 仅显式设置桌面 runtime 回退值为 `0` 才回退到旧编排器，便于发布后止损。
+ * 与既有三个运行时开关保持同一入口读取模式：桌面链默认关闭，显式设置为 `1` 时走新链。
+ * 未设置或设置为其他值时继续走旧编排器；显式 `0` 也保持旧链，便于发布后止损。
  *
  * ## 读取点 / 生效点 / 回退方式
  *
@@ -12,7 +12,7 @@
  * - **生效点**：只作用于**新发起**的 run。`claim` 发生在读取之后、且 run 一旦取得 owner，
  *   owner 与终态口径就由取得时那条链负责到底 —— 运行中改环境变量不会让在飞的 run 换链
  *   （`ownership` 登记表按 sessionId + token 释放，token 校验保证旧链的 finally 清不掉新 run）。
- * - **回退方式**：显式设置桌面 runtime 回退变量为 `0`。未设置时使用新链；回退后行为与今天逐字节等价。
+ * - **回退方式**：未设置、设置为 `0` 或其他非 `1` 值时走旧链；只有显式设置为 `1` 才走新链。
  * - 新链只作用于**新发起**的 run。`claim` 发生在读取之后，运行中修改环境变量不会切换在飞 run。
  *
  * ## 为什么桌面开关需要单独存在
@@ -38,9 +38,9 @@ export type DesktopRunChain = 'runtime' | 'orchestrator'
 /** 环境变量快照的最小形态（便于测试注入，不直接读全局）。 */
 export type DesktopSwitchEnv = Readonly<Record<string, string | undefined>>
 
-/** 默认启用；仅显式 `0` 作为紧急回退开关。 */
+/** 显式设为 1 才启用；缺省保持旧编排器。 */
 export function isDesktopRuntimeSwitchEnabled(env: DesktopSwitchEnv = process.env): boolean {
-  return env[DESKTOP_RUNTIME_SWITCH_ENV] !== '0'
+  return env[DESKTOP_RUNTIME_SWITCH_ENV] === '1'
 }
 
 /**

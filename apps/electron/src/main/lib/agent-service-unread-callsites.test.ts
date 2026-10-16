@@ -123,7 +123,8 @@ describe('runtime coordinator stream restore ownership', () => {
     const restoreBody = slice(source, 'export function restoreActiveAgentStreams(', 'function isMainRendererWindow(')
     expect(restoreBody).toContain('isAgentExecutionActive(sessionId)')
     expect(restoreBody).toContain('registerWebContents(sessionId, webContents)')
-    expect(restoreBody).toContain('active: true')
+    expect(restoreBody).toContain('const active = isAgentExecutionActive(sessionId)')
+    expect(restoreBody).toContain('active,')
   })
 
   test('Given runtime lifecycle completion When preserving a backlog Then it is treated as terminal', async () => {
@@ -145,6 +146,16 @@ describe('runtime coordinator run-start projection', () => {
     expect(runtimeBody).toContain('applyRunStartUnreadPolicy(input.sessionId, input.initiator)')
     expect(runtimeBody).toContain('updateAgentSessionMeta(input.sessionId, { draft: false })')
     expect(runtimeBody).toContain('publishAgentSessionProjection(session)')
+  })
+  test('Given a runtime-owned headless terminal When the runtime settles Then the desktop renderer receives the legacy terminal channels too', async () => {
+    const source = await readAgentService()
+    const runtimeBody = slice(source, 'export async function runAgentRuntimeHeadless(', 'export async function stopAgentRuntime(')
+    expect(runtimeBody).toContain("eventBus.emit(input.sessionId, { kind: 'run_error', error })")
+    expect(runtimeBody).toContain("currentWc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error })")
+    expect(runtimeBody).toContain("eventBus.emit(input.sessionId, { kind: 'run_complete', completion })")
+    expect(runtimeBody).toContain("currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, completion)")
+    expect(runtimeBody).toContain('resultErrors: fields.resultErrors ?? (runtimeError ? [runtimeError] : undefined)')
+    expect(runtimeBody).toContain('initiator,')
   })
 })
 

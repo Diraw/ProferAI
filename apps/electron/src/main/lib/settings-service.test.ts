@@ -212,6 +212,33 @@ describe('侧栏积分条显隐设置', () => {
   })
 })
 
+describe('用户消息位置设置', () => {
+  test('Given 旧 settings.json 无该键 When 读取 Then 默认显示在右侧', () => {
+    writeSettingsFile(process.env.PROFER_CONFIG_DIR!, {})
+
+    expect(getSettings().userMessagePosition).toBe('right')
+  })
+
+  test('Given 用户选择左侧 When 更新设置 Then 落盘并保持左侧', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+
+    updateSettings({ userMessagePosition: 'left' })
+
+    expect(getSettings().userMessagePosition).toBe('left')
+    expect(readSettingsFile(configDir).userMessagePosition).toBe('left')
+  })
+
+  test('Given 配置值非法 When 读取或更新 Then 回退到右侧', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+    writeSettingsFile(configDir, { userMessagePosition: 'center' })
+    expect(getSettings().userMessagePosition).toBe('right')
+
+    updateSettings({ userMessagePosition: 'center' as 'left' | 'right' })
+    expect(getSettings().userMessagePosition).toBe('right')
+    expect(readSettingsFile(configDir).userMessagePosition).toBe('right')
+  })
+})
+
 /**
  * 「手动确认已读」开关的配置层（`design.md` §4.1 / §10 单测第 7 组）。
  *
@@ -270,5 +297,44 @@ describe('手动确认已读开关', () => {
 
     expect(getSettings().manualReadConfirmEnabled).toBe(true)
     expect(getAgentUnreadPolicyMode()).toBe('manual')
+  })
+})
+
+describe('文件预览打开方式', () => {
+  test('Given 未落盘任何设置 When 读默认值 Then 独立标签页', () => {
+    expect(getSettings().previewModePreference).toBe('tab')
+  })
+
+  test('Given 旧 settings.json 无该键 When 读取 Then 归一为 tab', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+    writeSettingsFile(configDir, { themeMode: 'dark' })
+
+    expect(getSettings().previewModePreference).toBe('tab')
+    expect(getSettings().themeMode).toBe('dark')
+  })
+
+  test('Given 落盘非法值 When 读取 Then 回退 tab', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+    writeSettingsFile(configDir, { previewModePreference: 'merged' })
+
+    expect(getSettings().previewModePreference).toBe('tab')
+  })
+
+  test('Given 选择与对话分屏 When 更新设置 Then 落盘且重启后保持', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+
+    updateSettings({ previewModePreference: 'split' })
+
+    expect(readSettingsFile(configDir).previewModePreference).toBe('split')
+    clearSettingsCache()
+    expect(getSettings().previewModePreference).toBe('split')
+  })
+
+  test('Given 传入非法模式 When 更新设置 Then 写盘值归一为 tab', () => {
+    const configDir = process.env.PROFER_CONFIG_DIR!
+
+    updateSettings({ previewModePreference: 'whatever' as never })
+
+    expect(readSettingsFile(configDir).previewModePreference).toBe('tab')
   })
 })

@@ -5,6 +5,7 @@
  */
 
 import { atom } from 'jotai'
+import { DEFAULT_PREVIEW_OPEN_MODE, DEFAULT_USER_MESSAGE_POSITION, type PreviewOpenMode, type UserMessagePosition } from '@/types/settings'
 import {
   DEFAULT_COMPACT_MAX_HEIGHT,
   DEFAULT_COMPACT_MIN_HEIGHT,
@@ -22,6 +23,9 @@ export const showCreditsInSidebarAtom = atom<boolean>(true)
 /** 是否显示用户消息悬浮置顶条 */
 export const stickyUserMessageEnabledAtom = atom<boolean>(true)
 
+/** 用户消息与头像的显示位置，默认在右侧 */
+export const userMessagePositionAtom = atom<UserMessagePosition>(DEFAULT_USER_MESSAGE_POSITION)
+
 /** 粘贴长文本时是否自动转为附件 */
 export const longTextPasteAsAttachmentEnabledAtom = atom<boolean>(false)
 
@@ -38,12 +42,19 @@ export interface ComposerCompactModeSettings {
   maxHeight: number
 }
 
-/** 窗口高度驱动输入框紧凑档（默认 < 700px 时输入框 101px → 60px、上限 200px → 140px） */
+/** 窗口高度驱动输入框紧凑档（默认 < 700px 时输入框 81px → 60px、上限 200px → 140px） */
 export const composerCompactModeAtom = atom<ComposerCompactModeSettings>({
   viewportHeight: DEFAULT_COMPACT_VIEWPORT_HEIGHT,
   minHeight: DEFAULT_COMPACT_MIN_HEIGHT,
   maxHeight: DEFAULT_COMPACT_MAX_HEIGHT,
 })
+
+/**
+ * 文件预览打开方式（默认独立标签页）：
+ * - 'tab'：预览开成独立标签页（既有行为）
+ * - 'split'：预览与所属会话标签左右并排（组合标签分屏）
+ */
+export const previewOpenModeAtom = atom<PreviewOpenMode>(DEFAULT_PREVIEW_OPEN_MODE)
 
 // ===== 初始化 =====
 
@@ -53,14 +64,17 @@ export const composerCompactModeAtom = atom<ComposerCompactModeSettings>({
 export async function initializeUiPreferences(
   setShowCreditsInSidebar: (enabled: boolean) => void,
   setStickyUserMessageEnabled: (enabled: boolean) => void,
+  setUserMessagePosition: (position: UserMessagePosition) => void,
   setLongTextPasteAsAttachmentEnabled?: (enabled: boolean) => void,
   setRichTextRenderingEnabled?: (enabled: boolean) => void,
-  setComposerCompactMode?: (value: ComposerCompactModeSettings) => void
+  setComposerCompactMode?: (value: ComposerCompactModeSettings) => void,
+  setPreviewOpenMode?: (mode: PreviewOpenMode) => void
 ): Promise<void> {
   try {
     const settings = await window.electronAPI.getSettings()
     setShowCreditsInSidebar(settings.showCreditsInSidebar ?? true)
     setStickyUserMessageEnabled(settings.stickyUserMessageEnabled ?? true)
+    setUserMessagePosition(settings.userMessagePosition === 'left' ? 'left' : DEFAULT_USER_MESSAGE_POSITION)
     setLongTextPasteAsAttachmentEnabled?.(settings.longTextPasteAsAttachmentEnabled ?? false)
     setRichTextRenderingEnabled?.(settings.richTextRenderingEnabled ?? false)
     setComposerCompactMode?.({
@@ -68,6 +82,7 @@ export async function initializeUiPreferences(
       minHeight: normalizeCompactMinHeight(settings.inputCompactMinHeight),
       maxHeight: normalizeCompactMaxHeight(settings.inputCompactMaxHeight),
     })
+    setPreviewOpenMode?.(settings.previewModePreference === 'split' ? 'split' : DEFAULT_PREVIEW_OPEN_MODE)
   } catch (error) {
     console.error('[UI偏好] 初始化失败:', error)
   }
@@ -116,6 +131,17 @@ export async function updateRichTextRenderingEnabled(enabled: boolean): Promise<
     await window.electronAPI.updateSettings({ richTextRenderingEnabled: enabled })
   } catch (error) {
     console.error('[UI偏好] 更新输入框 Markdown 渲染设置失败:', error)
+  }
+}
+
+/**
+ * 更新文件预览打开方式并持久化
+ */
+export async function updatePreviewOpenMode(mode: PreviewOpenMode): Promise<void> {
+  try {
+    await window.electronAPI.updateSettings({ previewModePreference: mode })
+  } catch (error) {
+    console.error('[UI偏好] 更新文件预览打开方式失败:', error)
   }
 }
 

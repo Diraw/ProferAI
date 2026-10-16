@@ -249,7 +249,7 @@ describe('快照冻结与「一轮一份」', () => {
 describe('能力裁剪：工具组 / PPT / skill / MCP', () => {
   test('Given 预设禁用工具组与 allowSubagents=false When 解析快照 Then 与共享判定一致', () => {
     const snapshot = resolveAgentRuntimePolicySnapshot({
-      preset: preset({ disabledToolGroups: ['ppt-materials'], disabledTools: ['clipboard_read_text'], allowSubagents: false }),
+      preset: preset({ disabledToolGroups: ['ppt-materials'], allowSubagents: false }),
       presetReference: reference,
       runtimeSupportsSubagents: true,
     })
@@ -281,7 +281,7 @@ describe('能力裁剪：工具组 / PPT / skill / MCP', () => {
     const gatedNames = toolNames(gated)
     expect(fullNames).toContain('plan_ppt_visuals')
     expect(fullNames).toContain('BrowserNavigate')
-    expect(fullNames).toContain('clipboard_read_text')
+    expect(fullNames).not.toContain('clipboard_read_text')
     expect(gatedNames).not.toContain('plan_ppt_visuals')
     expect(gatedNames).not.toContain('BrowserNavigate')
     expect(gatedNames).not.toContain('clipboard_read_text')
@@ -367,7 +367,7 @@ describe('能力裁剪：工具组 / PPT / skill / MCP', () => {
       presetReference: reference,
     })
     const disallowed = collectPolicyDisallowedTools(snapshot)
-    expect(disallowed).toContain('clipboard_read_text')
+    expect(disallowed).not.toContain('clipboard_read_text')
     expect(disallowed).toContain('clipboard_write_text')
     expect(disallowed).toContain('search_memory')
     const clipboardGroup = AGENT_PRESET_CAPABILITY_GROUPS.find(group => group.id === 'clipboard')
