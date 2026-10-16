@@ -279,8 +279,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     const url = resolveOpenAIChatCompletionsUrl(input.baseUrl, this.providerType)
     const apiKey = this.providerType === 'ollama' ? (input.apiKey || 'ollama') : input.apiKey
     const modelId = input.modelId.toLowerCase()
-    const isDeepSeekV4 = this.providerType === 'deepseek'
-      && /^(?:deepseek-(?:v4-)?(?:flash|pro)|deepseek-v4)/.test(modelId)
+    const isDeepSeekV4 = /^(?:deepseek-(?:v4-)?(?:flash|pro)|deepseek-v4)/.test(modelId)
     const reasoningProfile = resolveReasoningProfile({ modelId, transport: 'openai-completions' })
     const isLikelyOpenAIReasoning = Boolean(reasoningProfile) || /^gpt-6(?:\.\d+)?(?:-|$)/.test(modelId)
 
