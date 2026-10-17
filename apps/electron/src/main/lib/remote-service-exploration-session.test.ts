@@ -28,6 +28,55 @@ function makeSession(overrides: Partial<AgentSessionMeta> = {}): AgentSessionMet
   }
 }
 
+describe('buildSessionItem：会话 UI 字段投影', () => {
+  test('返回预设、附件、思考档位、委派、自动化和中断状态', () => {
+    const item = buildSessionItem(makeSession({
+      presetId: 'preset-1',
+      presetReference: { presetId: 'preset-1', presetScope: 'workspace', workspaceSlug: 'project-a', presetVersion: '3' },
+      attachedDirectories: ['C:/extra'],
+      attachedFiles: ['C:/extra/file.txt'],
+      openAIThinkingLevel: 'high',
+      codexFastMode: true,
+      agentEffort: 'max',
+      completedButUnconfirmed: true,
+      delegationRole: 'research',
+      delegationStatus: 'running',
+      delegationDepth: 1,
+      sourceAutomationId: 'automation-1',
+      lastInterruptReason: 'stopped_by_user',
+      lastInterruptLabel: '用户停止',
+      lastInterruptAt: 42,
+    }))
+
+    expect(item.presetReference).toEqual({
+      presetId: 'preset-1',
+      presetScope: 'workspace',
+      workspaceSlug: 'project-a',
+      presetVersion: '3',
+    })
+    expect(item.attachedDirectories).toEqual(['C:/extra'])
+    expect(item.attachedFiles).toEqual(['C:/extra/file.txt'])
+    expect(item.openAIThinkingLevel).toBe('high')
+    expect(item.codexFastMode).toBe(true)
+    expect(item.agentEffort).toBe('max')
+    expect(item.completedButUnconfirmed).toBe(true)
+    expect(item.delegationStatus).toBe('running')
+    expect(item.sourceAutomationId).toBe('automation-1')
+    expect(item.lastInterruptReason).toBe('stopped_by_user')
+    expect(item.lastInterruptLabel).toBe('用户停止')
+    expect(item.lastInterruptAt).toBe(42)
+  })
+
+  test('旧会话缺失的 UI 状态按安全缺省值投影', () => {
+    const item = buildSessionItem(makeSession())
+    expect(item.presetReference).toBeNull()
+    expect(item.attachedDirectories).toEqual([])
+    expect(item.attachedFiles).toEqual([])
+    expect(item.agentEffort).toBeNull()
+    expect(item.completedButUnconfirmed).toBe(false)
+  })
+})
+
 describe('buildSessionItem：探索血缘字段透传', () => {
   test('探索分支的三个血缘字段一并下发', () => {
     const item = buildSessionItem(makeSession({

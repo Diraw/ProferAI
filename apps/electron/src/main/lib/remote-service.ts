@@ -31,7 +31,7 @@ import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import type { AddressInfo } from 'node:net'
 import { app, BrowserWindow } from 'electron'
 
-import { AGENT_IPC_CHANNELS, isChannelEnabledForRuntime, type AgentSessionMeta } from '@profer/shared'
+import { AGENT_IPC_CHANNELS, isChannelEnabledForRuntime, isProferPermissionMode, type AgentSessionMeta } from '@profer/shared'
 import { agentEventBus, runAgentHeadless, stopAgent, isAgentSessionActive, listActiveAgentRuntimeContexts, updateAgentPermissionMode, queueAgentMessage, beginAgentSessionDeletion, endAgentSessionDeletion, stopAgentAndWait, rewindAgentSession, regenerateAgentTitle } from './agent-service'
 import { publishAgentSessionProjection, setAgentSessionUnread, updateAgentSessionUiMeta } from './agent-session-ui-projection-publisher'
 import { buildArchiveToggleUpdates } from './agent-unread-policy'
@@ -616,7 +616,25 @@ export function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]
     channelId: s.channelId,
     modelId: s.modelId,
     presetId: s.presetId,
+    presetReference: s.presetReference ?? null,
     workspaceId: s.workspaceId,
+    attachedDirectories: s.attachedDirectories ?? [],
+    attachedFiles: s.attachedFiles ?? [],
+    openAIThinkingLevel: s.openAIThinkingLevel ?? null,
+    codexFastMode: s.codexFastMode ?? false,
+    agentEffort: s.agentEffort ?? null,
+    autoQueueSendEnabled: s.autoQueueSendEnabled ?? true,
+    completedButUnconfirmed: s.completedButUnconfirmed ?? false,
+    stoppedByUser: s.stoppedByUser ?? false,
+    lastInterruptReason: s.lastInterruptReason ?? null,
+    lastInterruptLabel: s.lastInterruptLabel ?? null,
+    lastInterruptAt: s.lastInterruptAt ?? null,
+    rootSessionId: s.rootSessionId,
+    delegationRole: s.delegationRole,
+    delegationStatus: s.delegationStatus,
+    delegationDepth: s.delegationDepth,
+    sourceAutomationId: s.sourceAutomationId,
+    automationGraduated: s.automationGraduated ?? false,
     // 与桌面 LeftSidebar 相同的父子 Agent 会话关联；仅用于树形导航，不暴露委派内容。
     parentSessionId: s.parentSessionId,
     sourceDelegationId: s.sourceDelegationId,
@@ -1189,11 +1207,25 @@ export async function handleRemoteCommand(
     case 'create_session': {
       const title = (parsed.title as string) || undefined
       const channelId = parsed.channelId as string | undefined
-      const workspaceId = parsed.workspaceId as string | undefined
-      const modelId = parsed.modelId as string | undefined
-      const meta = createAgentSession(title, channelId, workspaceId, modelId)
+      const workspaceId = typeof parsed.workspaceId === 'string' ? parsed.workspaceId : undefined
+      const modelId = typeof parsed.modelId === 'string' ? parsed.modelId : undefined
+      const requestedPresetId = typeof parsed.presetId === 'string' ? parsed.presetId : undefined
+      const workspaceSlug = workspaceId ? getAgentWorkspace(workspaceId)?.slug : undefined
+      const presetId = requestedPresetId ?? getDefaultPresetId(workspaceSlug)
+      let meta = createAgentSession(
+        title,
+        channelId,
+        workspaceId,
+        modelId,
+        getSettings().agentRuntime ?? 'claude',
+        false,
+        presetId,
+      )
+      if (typeof parsed.permissionMode === 'string' && isProferPermissionMode(parsed.permissionMode)) {
+        meta = updateAgentSessionMeta(meta.id, { permissionMode: parsed.permissionMode })
+      }
       publishSessionUpdated(meta)
-      return { ok: true, data: { sessionId: meta.id, title: meta.title } }
+      return { ok: true, data: { ...buildSessionItem(meta), sessionId: meta.id } }
     }
 
     // Chat 与 Agent 共用电脑端持久化目录，直接复用桌面迁移逻辑，避免移动端复制一份转换规则。

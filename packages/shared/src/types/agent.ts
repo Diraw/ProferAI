@@ -812,6 +812,9 @@ export interface AgentSessionUiProjection {
   openAIThinkingLevel: AgentThinkingLevel | null
   codexFastMode: boolean
   autoQueueSendEnabled: boolean
+  agentEffort: AgentEffort | null
+  attachedDirectories: string[]
+  attachedFiles: string[]
   workspaceId: string | null
   pinned: boolean
   archived: boolean
