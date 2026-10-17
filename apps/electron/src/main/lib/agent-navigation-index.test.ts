@@ -142,7 +142,7 @@ describe('会话导航索引', () => {
 })
 
 describe('会话导航索引 · 与渲染层一致性（真实会话文件）', () => {
-  const REAL = '/Users/mac/.profer/agent-sessions/74103cf3-db86-438e-a26a-14c1b18f8738.jsonl'
+  const REAL = '/Users/alice/.profer/agent-sessions/74103cf3-db86-438e-a26a-14c1b18f8738.jsonl'
 
   test('Given 真实会话 When 与渲染层分组对比 Then 行列一致', async () => {
     // 该会话带 3 条 interruption_record + 3 条 Goal 迭代：正是「折叠/中断不该影响计数」的现场。

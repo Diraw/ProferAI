@@ -6,7 +6,7 @@
  * 而非传输图像。
  *
  * 设计要点：
- *  1. 仅绑定 127.0.0.1（本机回环），外部设备通过电脑局域网 IP 访问；
+ *  1. 默认绑定 0.0.0.0 以便局域网设备接入，可用 PROFER_REMOTE_HOST=127.0.0.1 收紧到本机回环；
  *  2. 简单 token 鉴权，防止局域网内他人误连；
  *  3. 通过唯一的 agentEventBus（agent-service 单例）订阅 Agent 工作流事件，
  *     广播给所有已连接的移动端（Pocket）客户端 —— 对现有桌面版零侵入；
@@ -23,7 +23,7 @@
  */
 
 import { createServer, Server as HttpServer, IncomingMessage } from 'node:http'
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
@@ -463,6 +463,15 @@ function getTokenFilePath(): string {
   return join(getConfigDir(), 'remote-token.json')
 }
 
+/** 远程访问 token 等同局域网凭据：只允许当前用户读写，旧文件也要收紧权限。 */
+function writeTokenFile(path: string, payload: Record<string, unknown>): void {
+  mkdirSync(getConfigDir(), { recursive: true })
+  writeFileSync(path, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 })
+  if (process.platform !== 'win32') {
+    try { chmodSync(path, 0o600) } catch { /* 只读介质/网络盘等忽略 */ }
+  }
+}
+
 /** 加载或生成访问令牌 */
 function loadOrCreateToken(): string {
   if (process.env.PROFER_REMOTE_TOKEN) {
@@ -486,8 +495,7 @@ function loadOrCreateToken(): string {
       if (existsSync(legacyPath)) {
         const raw = JSON.parse(readFileSync(legacyPath, 'utf-8'))
         if (raw?.token) {
-          mkdirSync(getConfigDir(), { recursive: true })
-          writeFileSync(tokenPath, JSON.stringify({ token: raw.token, createdAt: raw.createdAt ?? Date.now(), migratedFrom: legacyPath }, null, 2), 'utf-8')
+          writeTokenFile(tokenPath, { token: raw.token, createdAt: raw.createdAt ?? Date.now(), migratedFrom: legacyPath })
           return raw.token
         }
       }
@@ -497,8 +505,7 @@ function loadOrCreateToken(): string {
   }
   const token = randomUUID().replace(/-/g, '')
   try {
-    mkdirSync(getConfigDir(), { recursive: true })
-    writeFileSync(tokenPath, JSON.stringify({ token, createdAt: Date.now() }, null, 2), 'utf-8')
+    writeTokenFile(tokenPath, { token, createdAt: Date.now() })
   } catch (e) {
     console.error('[Remote] 无法持久化 token:', e)
   }

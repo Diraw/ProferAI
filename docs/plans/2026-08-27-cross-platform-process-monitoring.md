@@ -135,8 +135,8 @@ Expected: typecheck and tests pass.
 ### Task 5: Verify and document the result
 
 **Files:**
-- Modify: `C:\Users\yuan\.profer\agent-workspaces\profer-dev\workspace-files\.context\profer-macos-windows-hardcode-audit-2026-08-27.md`
-- Modify: `C:\Users\yuan\.profer\agent-workspaces\profer-dev\7dd1fb2f-306e-4649-b06c-b733e9b6a1d6\.context\todo.md`
+- Modify: `C:\Users\alice\.profer\agent-workspaces\profer-dev\workspace-files\.context\profer-macos-windows-hardcode-audit-2026-08-27.md`
+- Modify: `C:\Users\alice\.profer\agent-workspaces\profer-dev\7dd1fb2f-306e-4649-b06c-b733e9b6a1d6\.context\todo.md`
 
 **Step 1: Run the complete relevant test subset**
 

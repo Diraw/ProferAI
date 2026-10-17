@@ -5,14 +5,14 @@ import type { AttachedDirectoryProjectCandidate } from './attached-directory-pro
 describe('buildPiAdditionalDirectoriesPrompt', () => {
   test('为 Pi 注入用户授权的绝对目录', () => {
     const prompt = buildPiAdditionalDirectoriesPrompt([
-      'C:\\Users\\yuan\\.profer\\agent-workspaces\\profer',
-      'C:\\Users\\yuan\\.profer\\agent-workspaces\\profer\\workspace-files',
+      'C:\\Users\\alice\\.profer\\agent-workspaces\\profer',
+      'C:\\Users\\alice\\.profer\\agent-workspaces\\profer\\workspace-files',
     ])
 
     expect(prompt).toContain('<attached_directories>')
     expect(prompt).toContain('请直接使用绝对路径')
-    expect(prompt).toContain('<directory index="1">C:\\Users\\yuan\\.profer\\agent-workspaces\\profer</directory>')
-    expect(prompt).toContain('<directory index="2">C:\\Users\\yuan\\.profer\\agent-workspaces\\profer\\workspace-files</directory>')
+    expect(prompt).toContain('<directory index="1">C:\\Users\\alice\\.profer\\agent-workspaces\\profer</directory>')
+    expect(prompt).toContain('<directory index="2">C:\\Users\\alice\\.profer\\agent-workspaces\\profer\\workspace-files</directory>')
   })
 
   test('检测到项目时注入候选与任务路由规则', () => {

@@ -6,7 +6,7 @@
  */
 
 import { join, basename, resolve, sep, relative } from 'node:path'
-import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, existsSync, cpSync, rmSync, readdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { RENAMED_DEFAULT_SKILLS } from './default-skill-slugs'
@@ -70,6 +70,9 @@ export function migrateFromProferIfNeeded(): void {
   }
 }
 
+/** 配置目录 0700 只需在进程内确认一次（避免每次路径解析都 chmod）。 */
+let securedConfigDir: string | null = null
+
 /**
  * 获取配置目录路径
  *
@@ -82,8 +85,14 @@ export function getConfigDir(): string {
   const configDir = override ? resolve(override) : join(homedir(), getConfigDirName())
 
   if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true })
+    // 配置目录里有令牌密文与 deviceId（AES 密钥派生源），仅当前用户可读写。
+    mkdirSync(configDir, { recursive: true, mode: 0o700 })
     console.log(`[配置] 已创建配置目录: ${configDir}`)
+  }
+  // 旧版本可能以 0755 创建过：每个目录首次访问时只收紧不放开（Windows 忽略权限位）。
+  if (securedConfigDir !== configDir && process.platform !== 'win32') {
+    securedConfigDir = configDir
+    try { chmodSync(configDir, 0o700) } catch { /* 只读介质/网络盘等忽略 */ }
   }
 
   return configDir

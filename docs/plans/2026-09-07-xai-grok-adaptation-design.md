@@ -1,7 +1,7 @@
 # Profer xAI / Grok 适配设计
 
 > 设计日期：2026-09-07（GMT+8）
-> 目标仓库：`/Users/mac/profer/profer-main`
+> 目标仓库：`/Users/alice/project`
 > 设计状态：已实现，xAI API Key 支持官方与 Responses 中转站
 
 ## 1. 目标与边界

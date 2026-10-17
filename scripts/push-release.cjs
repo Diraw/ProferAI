@@ -28,23 +28,52 @@ const ELECTRON = path.join(ROOT, 'apps/electron');
 const OUT = path.join(ELECTRON, 'out');
 const TAG = `v${VERSION}`;
 const GH_REPO = 'Yuan-lai-ru-ci/ProferAI';
-const HOST = process.env.PROFER_UPDATE_SSH_HOST || '45.114.127.232';
-const USER = process.env.PROFER_UPDATE_SSH_USER || 'root';
-const SSH_PORT = process.env.PROFER_UPDATE_SSH_PORT || '41235';
 const UPDATE_FEED_URL = 'https://updates.profer.cn/';
-const UPDATE_DIR = process.env.PROFER_UPDATE_DIR || '/var/www/updates.profer.cn';
-// 发布目标：新机为主；旧机（profer.cn/profer-updates/ 供数）在退役前保持双写，PROFER_UPDATE_SKIP_LEGACY=1 可关闭。
-const UPDATE_TARGETS = [
-  { host: HOST, user: USER, port: SSH_PORT, dir: UPDATE_DIR },
-];
-if (!process.env.PROFER_UPDATE_SKIP_LEGACY) {
-  UPDATE_TARGETS.push({
-    host: process.env.PROFER_UPDATE_LEGACY_SSH_HOST || '47.109.108.57',
-    user: process.env.PROFER_UPDATE_LEGACY_SSH_USER || 'ecs-user',
-    port: process.env.PROFER_UPDATE_LEGACY_SSH_PORT || '22',
-    dir: process.env.PROFER_UPDATE_LEGACY_DIR || '/usr/share/nginx/html/profer-updates',
-  });
+
+/**
+ * 生产主机、SSH 用户与端口一律由环境变量提供，仓库内不保存任何默认值。
+ * 首次发布前请先在 shell 里导出（或用本地 .env 注入，绝不入库）：
+ *   PROFER_UPDATE_SSH_HOST / _USER / _PORT / PROFER_UPDATE_DIR                 新机
+ *   PROFER_UPDATE_LEGACY_SSH_HOST / _USER / _PORT / PROFER_UPDATE_LEGACY_DIR   旧机（退役后设 PROFER_UPDATE_SKIP_LEGACY=1）
+ */
+function requireEnv(name, hint) {
+  const value = (process.env[name] || '').trim();
+  if (!value) throw new Error(`缺少环境变量 ${name}：${hint}`);
+  return value;
 }
+
+function assertSafeTarget(target) {
+  if (!/^[A-Za-z0-9.-]+$/.test(target.host)) throw new Error(`更新源主机非法: ${target.host}`);
+  if (!/^[A-Za-z0-9._-]+$/.test(target.user)) throw new Error(`更新源用户非法: ${target.user}`);
+  if (!/^\d{2,5}$/.test(String(target.port))) throw new Error(`更新源端口非法: ${target.port}`);
+  if (!/^[A-Za-z0-9._/-]+$/.test(target.dir)) throw new Error(`更新源目录非法: ${target.dir}`);
+  return target;
+}
+
+let updateTargetsCache = null;
+function getUpdateTargets() {
+  if (updateTargetsCache) return updateTargetsCache;
+  const targets = [assertSafeTarget({
+    label: '新机',
+    host: requireEnv('PROFER_UPDATE_SSH_HOST', '国内更新源主机'),
+    user: requireEnv('PROFER_UPDATE_SSH_USER', '国内更新源 SSH 用户'),
+    port: process.env.PROFER_UPDATE_SSH_PORT || '22',
+    dir: process.env.PROFER_UPDATE_DIR || '/var/www/updates.profer.cn',
+  })];
+  // 旧机（profer.cn/profer-updates/ 供数）在退役前保持双写，PROFER_UPDATE_SKIP_LEGACY=1 可关闭。
+  if (process.env.PROFER_UPDATE_SKIP_LEGACY !== '1') {
+    targets.push(assertSafeTarget({
+      label: '旧机',
+      host: requireEnv('PROFER_UPDATE_LEGACY_SSH_HOST', '旧更新源主机；已退役可设 PROFER_UPDATE_SKIP_LEGACY=1'),
+      user: requireEnv('PROFER_UPDATE_LEGACY_SSH_USER', '旧更新源 SSH 用户'),
+      port: process.env.PROFER_UPDATE_LEGACY_SSH_PORT || '22',
+      dir: process.env.PROFER_UPDATE_LEGACY_DIR || '/usr/share/nginx/html/profer-updates',
+    }));
+  }
+  updateTargetsCache = targets;
+  return targets;
+}
+
 const BASH = 'C:/Program Files/Git/usr/bin/bash.exe';
 const RELEASE_RETRY_DELAYS_MS = [0, 15_000, 45_000, 90_000];
 
@@ -101,10 +130,10 @@ async function retryGitHub(label, action, isRecovered = () => false) {
   throw new Error(`${label} 失败: ${lastError.slice(-500)}`);
 }
 
-function scp(local, remote, target = UPDATE_TARGETS[0]) {
+function scp(local, remote, target = getUpdateTargets()[0]) {
   return new Promise((resolve, reject) => {
     const src = local.replace(/\\/g, '/');
-    const process = spawn(BASH, ['-c', `scp -o StrictHostKeyChecking=no -P ${target.port} -q '${src.replace(/'/g, "'\\''")}' ${target.user}@${target.host}:${remote}`]);
+    const process = spawn(BASH, ['-c', `scp -o StrictHostKeyChecking=yes -P ${target.port} -q '${src.replace(/'/g, "'\\''")}' ${target.user}@${target.host}:${remote}`]);
     const timer = setTimeout(() => { try { process.kill(); } catch {} }, 600_000);
     process.on('close', (code) => {
       clearTimeout(timer);
@@ -113,9 +142,9 @@ function scp(local, remote, target = UPDATE_TARGETS[0]) {
   });
 }
 
-function ssh(command, timeout = 30_000, target = UPDATE_TARGETS[0]) {
+function ssh(command, timeout = 30_000, target = getUpdateTargets()[0]) {
   return new Promise((resolve, reject) => {
-    const process = spawn(BASH, ['-c', `ssh -o StrictHostKeyChecking=no -p ${target.port} ${target.user}@${target.host} '${command.replace(/'/g, "'\\''")}'`]);
+    const process = spawn(BASH, ['-c', `ssh -o StrictHostKeyChecking=yes -p ${target.port} ${target.user}@${target.host} '${command.replace(/'/g, "'\\''")}'`]);
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => { try { process.kill(); } catch {} }, timeout);
@@ -279,7 +308,7 @@ async function ensureGitHubRelease(assets) {
     size: installer.size,
     date: new Date().toISOString().split('T')[0],
   }));
-  for (const target of (GITHUB_ONLY ? [] : UPDATE_TARGETS)) {
+  for (const target of (GITHUB_ONLY ? [] : getUpdateTargets())) {
     const sudo = target.user === 'root' ? '' : 'sudo ';
     await scp(metadata.path, '/tmp/latest.yml', target);
     if (metadataSignature) await scp(metadataSignature.path, '/tmp/latest.yml.sig', target);

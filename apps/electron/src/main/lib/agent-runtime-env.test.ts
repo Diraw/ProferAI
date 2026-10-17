@@ -26,7 +26,7 @@ describe('Agent runtime CLI PATH', () => {
       processEnv: { PATH: '/usr/bin:/bin', SHELL: '/bin/zsh' },
       runtimeStatus: {
         node: { available: false, path: null, version: null, error: null },
-        bun: { available: true, path: '/Users/mac/.bun/bin/bun', version: '1.4.0', source: 'system', error: null },
+        bun: { available: true, path: '/Users/alice/.bun/bin/bun', version: '1.4.0', source: 'system', error: null },
         git: { available: true, path: '/usr/bin/git', version: '2.50.1', error: null },
         envLoaded: true,
         initializedAt: Date.now(),
@@ -34,7 +34,7 @@ describe('Agent runtime CLI PATH', () => {
     })
 
     expect(result.env.PATH).toBe([
-      '/Users/mac/.bun/bin',
+      '/Users/alice/.bun/bin',
       '/Applications/Profer.app/Contents/Resources/bin',
       '/usr/bin',
       '/bin',
@@ -63,7 +63,7 @@ describe('Agent runtime CLI PATH', () => {
     const result = buildAgentRuntimeEnv({
       platform: 'darwin',
       pathDelimiter: ':',
-      processEnv: { PATH: '/usr/bin', SHELL: '/Users/mac/.missing-shell' },
+      processEnv: { PATH: '/usr/bin', SHELL: '/Users/alice/.missing-shell' },
       pathExists: (path) => path === '/bin/bash',
     })
 

@@ -5,7 +5,7 @@
  * 令牌使用 Electron safeStorage 加密存储。
  *
  * 路由结构（nginx 反代 /proma/ → :3456/）：
- *   baseUrl = http://47.109.108.57/proma
+ *   baseUrl = https://profer.cn/proma
  *   login → POST {baseUrl}/v1/auth/login
  */
 

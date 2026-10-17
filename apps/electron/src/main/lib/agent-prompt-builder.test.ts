@@ -650,8 +650,8 @@ describe('buildSystemPrompt', () => {
       permissionMode: 'auto',
       platform: 'darwin',
       shellPath: '/bin/zsh',
-      agentCwd: '/Users/mac/.profer/agent-workspaces/profer/session-123',
-      projectCandidates: [{ rootPath: '/Users/mac/profer/profer-main', name: 'proma', type: 'git-repository' }],
+      agentCwd: '/Users/alice/.profer/agent-workspaces/profer/session-123',
+      projectCandidates: [{ rootPath: '/Users/alice/project', name: 'proma', type: 'git-repository' }],
       isPiRuntime: true,
       disabledToolGroups: ['clipboard'],
     })
@@ -670,7 +670,7 @@ describe('buildSystemPrompt', () => {
     expect(macPrompt).toContain('## 当前平台与项目路径（macOS）')
     expect(macPrompt).toContain('当前执行环境是 POSIX shell')
     expect(macPrompt).toContain('不要把其他操作系统的命令')
-    expect(macPrompt).toContain('/Users/mac/profer/profer-main')
+    expect(macPrompt).toContain('/Users/alice/project')
     expect(macPrompt).toContain('path + edits[].oldText/newText')
     expect(winPrompt).toContain('## 当前平台与项目路径（Windows）')
     expect(winPrompt).toContain('只使用运行时实际提供的 Windows shell 和路径格式')
@@ -685,7 +685,7 @@ describe('buildSystemPrompt', () => {
     })
     expect(taskPrompt).toContain('## 当前平台与项目路径（macOS）')
     expect(taskPrompt).toContain('/bin/zsh')
-    expect(taskPrompt).toContain('/Users/mac/profer/profer-main')
+    expect(taskPrompt).toContain('/Users/alice/project')
     expect(taskPrompt).toContain('## 当前预设已关闭的能力')
     expect(taskPrompt).toContain('clipboard')
     expect(taskPrompt).not.toContain('### Pi Runtime 与文件记忆')

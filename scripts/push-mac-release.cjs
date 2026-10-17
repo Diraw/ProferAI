@@ -33,23 +33,49 @@ const ELECTRON = path.join(ROOT, 'apps/electron')
 const OUT = path.join(ELECTRON, 'out')
 const TAG = `v${VERSION}`
 const GH_REPO = 'Yuan-lai-ru-ci/ProferAI'
-const HOST = process.env.PROFER_UPDATE_SSH_HOST || '45.114.127.232'
-const USER = process.env.PROFER_UPDATE_SSH_USER || 'root'
-const SSH_PORT = process.env.PROFER_UPDATE_SSH_PORT || '41235'
 const UPDATE_FEED_URL = 'https://updates.profer.cn/'
 const LEGACY_UPDATE_FEED_URL = 'https://profer.cn/profer-updates/'
-const UPDATE_DIR = process.env.PROFER_MAC_UPDATE_DIR || '/var/www/updates.profer.cn'
-// 发布目标：新机为主；旧机（profer.cn/profer-updates/ 供数）在退役前保持双写，PROFER_UPDATE_SKIP_LEGACY=1 可关闭。
-const UPDATE_TARGETS = [
-  { host: HOST, user: USER, port: SSH_PORT, dir: UPDATE_DIR },
-]
-if (!process.env.PROFER_UPDATE_SKIP_LEGACY) {
-  UPDATE_TARGETS.push({
-    host: process.env.PROFER_UPDATE_LEGACY_SSH_HOST || '47.109.108.57',
-    user: process.env.PROFER_UPDATE_LEGACY_SSH_USER || 'ecs-user',
-    port: process.env.PROFER_UPDATE_LEGACY_SSH_PORT || '22',
-    dir: process.env.PROFER_UPDATE_LEGACY_DIR || '/usr/share/nginx/html/profer-updates',
-  })
+
+/**
+ * 生产主机、SSH 用户与端口一律由环境变量提供，仓库内不保存任何默认值：
+ *   PROFER_UPDATE_SSH_HOST / _USER / _PORT / PROFER_MAC_UPDATE_DIR                 新机
+ *   PROFER_UPDATE_LEGACY_SSH_HOST / _USER / _PORT / PROFER_UPDATE_LEGACY_DIR       旧机
+ */
+function requireEnv(name, hint) {
+  const value = (process.env[name] || '').trim()
+  if (!value) throw new Error(`缺少环境变量 ${name}：${hint}`)
+  return value
+}
+
+function assertSafeTarget(target) {
+  if (!/^[A-Za-z0-9.-]+$/.test(target.host)) throw new Error(`更新源主机非法: ${target.host}`)
+  if (!/^[A-Za-z0-9._-]+$/.test(target.user)) throw new Error(`更新源用户非法: ${target.user}`)
+  if (!/^\d{2,5}$/.test(String(target.port))) throw new Error(`更新源端口非法: ${target.port}`)
+  if (!/^[A-Za-z0-9._/-]+$/.test(target.dir)) throw new Error(`更新源目录非法: ${target.dir}`)
+  return target
+}
+
+let updateTargetsCache = null
+function getUpdateTargets() {
+  if (updateTargetsCache) return updateTargetsCache
+  const targets = [assertSafeTarget({
+    label: '新机',
+    host: requireEnv('PROFER_UPDATE_SSH_HOST', '国内更新源主机'),
+    user: requireEnv('PROFER_UPDATE_SSH_USER', '国内更新源 SSH 用户'),
+    port: process.env.PROFER_UPDATE_SSH_PORT || '22',
+    dir: process.env.PROFER_MAC_UPDATE_DIR || '/var/www/updates.profer.cn',
+  })]
+  if (process.env.PROFER_UPDATE_SKIP_LEGACY !== '1') {
+    targets.push(assertSafeTarget({
+      label: '旧机',
+      host: requireEnv('PROFER_UPDATE_LEGACY_SSH_HOST', '旧更新源主机；已退役可设 PROFER_UPDATE_SKIP_LEGACY=1'),
+      user: requireEnv('PROFER_UPDATE_LEGACY_SSH_USER', '旧更新源 SSH 用户'),
+      port: process.env.PROFER_UPDATE_LEGACY_SSH_PORT || '22',
+      dir: process.env.PROFER_UPDATE_LEGACY_DIR || '/usr/share/nginx/html/profer-updates',
+    }))
+  }
+  updateTargetsCache = targets
+  return targets
 }
 const MAC_UPDATE_METADATA = 'latest-mac.yml'
 
@@ -60,8 +86,8 @@ function capture(command, cwd = ROOT) {
   return execSync(command, { cwd, encoding: 'utf8' }).trim()
 }
 function sha256(filePath) { return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex') }
-function remote(command, target = UPDATE_TARGETS[0]) { run(`ssh -o StrictHostKeyChecking=yes -p ${target.port} ${target.user}@${target.host} ${JSON.stringify(command)}`) }
-function upload(localPath, remotePath, target = UPDATE_TARGETS[0]) { run(`scp -o StrictHostKeyChecking=yes -P ${target.port} ${JSON.stringify(localPath)} ${target.user}@${target.host}:${JSON.stringify(remotePath)}`) }
+function remote(command, target = getUpdateTargets()[0]) { run(`ssh -o StrictHostKeyChecking=yes -p ${target.port} ${target.user}@${target.host} ${JSON.stringify(command)}`) }
+function upload(localPath, remotePath, target = getUpdateTargets()[0]) { run(`scp -o StrictHostKeyChecking=yes -P ${target.port} ${JSON.stringify(localPath)} ${target.user}@${target.host}:${JSON.stringify(remotePath)}`) }
 function assertExists(filePath) { if (!fs.existsSync(filePath)) throw new Error(`缺少发布资产: ${filePath}`) }
 
 function verifyPublicFeed(feedUrl, assetPaths) {
@@ -147,7 +173,7 @@ function ensureGitHubAssets(assetPaths) {
   assertWindowsReleaseReady(readReleaseAssets(), VERSION)
   console.log(`[1/2] 上传 macOS 更新资产到 ${UPDATE_FEED_URL}`)
   const uploadedNames = [metadata, zip, dmg, blockmap].map((filePath) => path.basename(filePath))
-  for (const target of UPDATE_TARGETS) {
+  for (const target of getUpdateTargets()) {
     const sudo = target.user === 'root' ? '' : 'sudo '
     for (const filePath of [metadata, zip, dmg, blockmap]) upload(filePath, `/tmp/${path.basename(filePath)}`, target)
     const copyCommands = uploadedNames.map((name) => `${sudo}cp /tmp/${name} ${target.dir}/`).join(' && ')
