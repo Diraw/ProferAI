@@ -217,11 +217,23 @@ export type MarkdownFontSize = 'small' | 'medium' | 'large'
 /** 默认 Markdown 字号档位 */
 export const DEFAULT_MARKDOWN_FONT_SIZE: MarkdownFontSize = 'medium'
 
+/** 用户消息所在侧 */
+export type UserMessagePosition = 'left' | 'right'
+
+/** 用户消息默认显示在右侧 */
+export const DEFAULT_USER_MESSAGE_POSITION: UserMessagePosition = 'right'
+
 /** 界面缩放档位（默认标准，见 atoms/ui-scale.ts） */
 export type UiScale = 'standard' | 'large' | 'xlarge' | 'huge' | 'massive' | 'max'
 
 /** 默认界面缩放档位 */
 export const DEFAULT_UI_SCALE: UiScale = 'standard'
+
+/** 文件预览打开方式：独立标签页 / 与所属会话分屏（左右并排） */
+export type PreviewOpenMode = 'tab' | 'split'
+
+/** 默认文件预览打开方式：独立标签页（保持既有行为） */
+export const DEFAULT_PREVIEW_OPEN_MODE: PreviewOpenMode = 'tab'
 
 /** 默认 Agent runtime：Pi 执行链路完成灰度前始终使用 Claude。 */
 export const DEFAULT_AGENT_RUNTIME: AgentRuntime = 'claude'
@@ -298,13 +310,15 @@ export interface AppSettings {
   showCreditsInSidebar?: boolean
   /** 是否显示用户消息悬浮置顶条（默认 true） */
   stickyUserMessageEnabled?: boolean
+  /** 用户消息与头像的显示位置（默认右侧） */
+  userMessagePosition?: UserMessagePosition
   /** 粘贴超过阈值的长文本时是否自动转为附件（默认 false） */
   longTextPasteAsAttachmentEnabled?: boolean
   /** 输入框是否渲染 Markdown 富文本格式（默认 false，关闭后为纯文本模式，仍保留 Mention 引用） */
   richTextRenderingEnabled?: boolean
   /** 窗口内高低于该值（px）时输入框进入紧凑档（默认 700；0 = 关闭，输入框高度恒定） */
   inputCompactViewportHeight?: number
-  /** 紧凑档下输入框最小高度（px，默认 60；决定空内容时变矮多少，常规为 101） */
+  /** 紧凑档下输入框最小高度（px，默认 60；决定空内容时变矮多少，常规为 81） */
   inputCompactMinHeight?: number
   /** 紧凑档下输入框最大高度（px，默认 140；展开档为该值 2 倍且不超过 500） */
   inputCompactMaxHeight?: number
@@ -312,8 +326,12 @@ export interface AppSettings {
   markdownFontSize?: MarkdownFontSize
   /** 界面缩放档位（默认 'standard' 100%） */
   uiScale?: UiScale
-  /** Agent 预览默认展开方式（默认 'tab'） */
-  previewModePreference?: 'tab' | 'split'
+  /**
+   * 文件预览打开方式（默认 'tab'）：
+   * - 'tab'：预览开成独立标签页（既有行为）
+   * - 'split'：预览与所属会话标签左右并排（组合标签分屏）
+   */
+  previewModePreference?: PreviewOpenMode
   /** 上次是否在 Scratch Pad 页（用于重启恢复） */
   scratchPadActive?: boolean
   /** 应用图标变体 ID（dock + window icon），'default' 或 logo 变体 id */
@@ -346,6 +364,20 @@ export interface AppSettings {
   pocketModePort?: number
   /** Windows Shell 环境偏好：'auto'（自动检测，优先 Git Bash）| 'git-bash' | 'wsl'（默认 'auto'） */
   agentShellPreference?: 'auto' | 'git-bash' | 'wsl'
+  /** 桌面输入工具栏的显示与排序偏好；移动端不读取此字段。 */
+  composerToolbarPreferences?: ComposerToolbarPreferences
+}
+
+/** 单个输入工具的桌面显示与排序偏好。 */
+export interface ComposerToolbarItemPreference {
+  visible: boolean
+  order: number
+}
+
+/** Chat/Agent 各自维护工具栏偏好，便于两个模式独立配置。 */
+export interface ComposerToolbarPreferences {
+  chat?: Record<string, ComposerToolbarItemPreference>
+  agent?: Record<string, ComposerToolbarItemPreference>
 }
 
 /** 主窗口大小、位置和最大化状态 */

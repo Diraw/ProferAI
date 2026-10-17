@@ -1,132 +1,159 @@
-import { describe, expect, mock, test } from 'bun:test'
-import type { ClaudeAgentQueryOptions } from './claude-agent-adapter'
+/**
+ * Electron 宿主侧集成测试。
+ *
+ * provider 自身的行为测试已迁到 packages/agent-provider-claude/src；
+ * 这里只验证宿主边界：兼容转发仍指同一实现、Electron 生命周期端口与后台任务记录可用、
+ * 以及宿主注入的应用版本让认证 env 与迁移前一致。
+ *
+ * SDK 与子进程都由测试内联替身提供，不启动真实 claude 进程、不发起网络请求。
+ */
+import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ClaudeAgentAdapter as ProviderClaudeAdapter, type ClaudeSdkModule } from '@profer/agent-provider-claude'
+import { BackgroundTaskManager } from '../background-task-manager'
+import { createElectronClaudeProcessLifecyclePort } from '../claude-process-lifecycle-port'
+import { applyAgentSdkAuthEnv } from '../agent-sdk-auth-env'
+import {
+  ClaudeAgentAdapter,
+  friendlyErrorMessage,
+  mapSDKErrorToTypedError,
+  scanAndKillOrphanedClaudeSubprocesses,
+  type ClaudeAgentQueryOptions,
+} from './claude-agent-adapter'
+import pkg from '../../../../package.json' with { type: 'json' }
 
-let capturedSdkQueryOptions: Record<string, unknown> | undefined
+interface FakeQuery {
+  options: Record<string, unknown>
+  stopTaskCalls: string[]
+}
 
-mock.module('@anthropic-ai/claude-agent-sdk', () => ({
-  query: ({ options }: { options: Record<string, unknown> }) => {
-    capturedSdkQueryOptions = options
-    return (async function* () {
-      yield { type: 'result', subtype: 'success', session_id: 'test-session', terminal_reason: 'completed' }
-    })()
-  },
-}))
+/** 最小 SDK 替身：只提供 adapter 实际调用的 query/close/stopTask。 */
+function createInlineSdkDouble(): { module: ClaudeSdkModule; state: FakeQuery; push: (message: unknown) => void } {
+  const queue: unknown[] = []
+  const waiters: Array<(value: unknown) => void> = []
+  const state: FakeQuery = { options: {}, stopTaskCalls: [] }
+  const iterator = {
+    async next() {
+      if (queue.length > 0) return { value: queue.shift(), done: false }
+      const value = await new Promise<unknown>((resolve) => waiters.push(resolve))
+      return { value, done: false }
+    },
+    async return() {
+      return { value: undefined, done: true }
+    },
+  }
+  const queryObject = {
+    [Symbol.asyncIterator]() {
+      return iterator
+    },
+    async close() {},
+    async stopTask(taskId: string) {
+      state.stopTaskCalls.push(taskId)
+    },
+  }
+  const module = {
+    query(input: { options: Record<string, unknown> }) {
+      state.options = input.options
+      return queryObject
+    },
+  } as unknown as ClaudeSdkModule
+  return {
+    module,
+    state,
+    push(message: unknown) {
+      const waiter = waiters.shift()
+      if (waiter) waiter(message)
+      else queue.push(message)
+    },
+  }
+}
 
-const { friendlyErrorMessage, getWindowsPowerShellPath, mapSDKErrorToTypedError, SDK_SETTING_SOURCES, ClaudeAgentAdapter } = await import('./claude-agent-adapter')
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('等待条件超时')
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+}
 
-describe('Claude 适配器 Skill 白名单最终透传', () => {
-  for (const { label, skills } of [
-    { label: '未指定白名单', skills: undefined },
-    { label: '空白名单', skills: [] },
-    { label: '非空白名单', skills: ['code-honor', 'plugin:review'] },
-  ]) {
-    test(`Given ${label} When 发起查询 Then sdk.query 收到原始白名单状态`, async () => {
-      capturedSdkQueryOptions = undefined
-      const adapter = new ClaudeAgentAdapter()
-      const input: ClaudeAgentQueryOptions = {
-        sessionId: `claude-skills-${label}`,
-        prompt: '检查白名单',
+describe('Electron 宿主：Claude 兼容转发', () => {
+  test('Given 旧入口 paths When 导入 Then 与 provider 包导出同一实现', () => {
+    expect(ClaudeAgentAdapter).toBe(ProviderClaudeAdapter)
+    expect(typeof scanAndKillOrphanedClaudeSubprocesses).toBe('function')
+    expect(typeof friendlyErrorMessage).toBe('function')
+    expect(typeof mapSDKErrorToTypedError).toBe('function')
+  })
+
+  test('Given 旧入口 When 构造 adapter Then 宿主仍可只注入 processLifecycle', () => {
+    const manager = new BackgroundTaskManager()
+    const adapter = new ClaudeAgentAdapter({ processLifecycle: createElectronClaudeProcessLifecyclePort(manager) })
+    try {
+      expect(adapter.getCapabilities()).toMatchObject({ supportsTaskOutput: true, supportsTaskStop: true })
+    } finally {
+      adapter.dispose()
+    }
+  })
+})
+
+describe('Electron 宿主：后台任务权威与 provider 集成', () => {
+  test('Given Electron 生命周期端口 When SDK 推送任务事件 Then 记录落在宿主 manager 且 provider 不双写', async () => {
+    const sessionId = 'electron-task-authority'
+    const manager = new BackgroundTaskManager()
+    const port = createElectronClaudeProcessLifecyclePort(manager)
+    const sdk = createInlineSdkDouble()
+    const adapter = new ClaudeAgentAdapter({ processLifecycle: port, sdkLoader: async () => sdk.module })
+    const dir = mkdtempSync(join(tmpdir(), 'electron-claude-task-'))
+    const outputFile = join(dir, 'output.txt')
+    writeFileSync(outputFile, 'host owned output')
+    try {
+      const queryInput: ClaudeAgentQueryOptions = {
+        sessionId,
+        prompt: 'fixture',
         sdkCliPath: '/unused/mock-claude',
         env: {},
         sdkPermissionMode: 'auto',
         allowDangerouslySkipPermissions: false,
         systemPrompt: 'test',
-        skills,
       }
-      try {
-        const messages = []
-        for await (const message of adapter.query(input)) messages.push(message)
-        expect(messages).toHaveLength(1)
-        expect(capturedSdkQueryOptions).toBeDefined()
-        if (skills === undefined) {
-          expect(capturedSdkQueryOptions).not.toHaveProperty('skills')
-        } else {
-          expect(capturedSdkQueryOptions).toHaveProperty('skills', skills)
-          expect(capturedSdkQueryOptions!.skills).not.toBe(skills)
-        }
-      } finally {
-        adapter.dispose()
-      }
-    })
-  }
-})
+      const stream = adapter.query(queryInput)[Symbol.asyncIterator]()
+      const first = stream.next()
+      await waitUntil(() => Object.keys(sdk.state.options).length > 0)
+      sdk.push({ type: 'system', subtype: 'task_started', task_id: 'task', task_type: 'local_bash' })
+      await first
+      const second = stream.next()
+      sdk.push({ type: 'system', subtype: 'task_progress', task_id: 'task', summary: 'working' })
+      await second
 
-describe('Claude 本轮工具装载', () => {
-  test('纯对话空工具数组透传，后续标准请求省略该覆盖', async () => {
-    const adapter = new ClaudeAgentAdapter()
-    const input: ClaudeAgentQueryOptions = {
-      sessionId: 'light-tools', prompt: '你好', sdkCliPath: '/unused/mock-claude', env: {},
-      sdkPermissionMode: 'auto', allowDangerouslySkipPermissions: false, systemPrompt: 'short prompt', tools: [],
+      expect(manager.get(sessionId, 'task')).toMatchObject({ status: 'running', type: 'shell', summary: 'working' })
+      expect(await adapter.getTaskOutput(sessionId, 'task', { block: false })).toMatchObject({ status: 'running' })
+      await expect(adapter.stopTask('foreign', 'task')).rejects.toThrow('不属于当前会话')
+      await adapter.stopTask(sessionId, 'task', 'shell')
+      expect(sdk.state.stopTaskCalls).toEqual(['task'])
+      expect(manager.get(sessionId, 'task')?.status).toBe('stopped')
+
+      const third = stream.next()
+      sdk.push({ type: 'system', subtype: 'task_notification', task_id: 'done', status: 'completed', output_file: outputFile })
+      await third
+      expect(await adapter.getTaskOutput(sessionId, 'done')).toMatchObject({ output: 'host owned output', status: 'completed' })
+
+      const fourth = stream.next()
+      sdk.push({ type: 'result', subtype: 'success', session_id: 's', terminal_reason: 'completed' })
+      await fourth
+      expect((await stream.next()).done).toBe(true)
+    } finally {
+      adapter.dispose()
+      rmSync(dir, { recursive: true, force: true })
     }
-    try {
-      for await (const _message of adapter.query(input)) { /* 消费 */ }
-      expect(capturedSdkQueryOptions?.tools).toEqual([])
-      const standardInput: ClaudeAgentQueryOptions = { ...input, tools: undefined }
-      for await (const _message of adapter.query(standardInput)) { /* 消费 */ }
-      expect(capturedSdkQueryOptions).not.toHaveProperty('tools')
-    } finally { adapter.dispose() }
   })
 })
 
-describe('Claude 适配器 Windows 清理命令', () => {
-  test('Given PowerShell 未加入 PATH 但系统组件存在 When 解析 Then 使用 SystemRoot 下的绝对路径', () => {
-    const path = getWindowsPowerShellPath(
-      { SystemRoot: 'C:\\Windows' },
-      (candidate) => candidate === 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    )
-    expect(path).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-  })
-
-  test('Given 系统组件不可用 When 解析 Then 安全降级为 null', () => {
-    expect(getWindowsPowerShellPath({ SystemRoot: 'C:\\Windows' }, () => false)).toBeNull()
-    expect(getWindowsPowerShellPath({}, () => true)).toBeNull()
-  })
-})
-
-describe('Claude 适配器 SDK 设置隔离', () => {
-  test('Given Profer Agent SDK 查询 When 配置设置来源 Then 不加载用户级 Claude 设置', () => {
-    expect(SDK_SETTING_SOURCES).toEqual(['project'])
-    expect(SDK_SETTING_SOURCES).not.toContain('user')
-  })
-})
-
-describe('Claude 适配器 Ollama 工具流错误', () => {
-  test('Given Ollama tool-result stream error When mapping Then do not classify as transient network retry', () => {
-    const message = 'API Error: 500 no user query found in messages'
-    const error = mapSDKErrorToTypedError('unknown', message, message)
-    expect(error.code).toBe('provider_error')
-    expect(error.title).toBe('Ollama 工具流兼容性错误')
-    expect(error.canRetry).toBe(false)
-    expect(friendlyErrorMessage(message)).toContain('Ollama')
-  })
-})
-
-describe('Claude 适配器 OpenAI 上游繁忙错误', () => {
-  test('Given OpenAI 官方上游请求量较大 When 映射错误 Then 使用统一文案并允许重试', () => {
-    const message = 'OpenAI 官方上游服务当前请求量较大，请稍后重试。'
-    const error = mapSDKErrorToTypedError('unknown', message, message)
-    expect(error.code).toBe('provider_error')
-    expect(error.title).toBe('OpenAI 官方服务繁忙')
-    expect(error.message).toContain('与您的账户及卡扣AI无关')
-    expect(error.canRetry).toBe(true)
-  })
-})
-
-describe('Claude 适配器上游额度错误', () => {
-  test('Given 独立上游 billing 页面 402 When 映射错误 Then 识别为不可自动重试的额度不足', () => {
-    const message = 'API Error: 402 Insufficient credit. Add funds at zyloo.io/dashboard/billing.'
-    const error = mapSDKErrorToTypedError('unknown', message, message)
-    expect(error.code).toBe('insufficient_credits')
-    expect(error.title).toBe('额度不足')
-    expect(error.canRetry).toBe(false)
-  })
-
-  test('Given 上游供应通道账户余额不足 When 映射错误 Then 不引导用户充值且可重试', () => {
-    const message = 'API Error: 403 {"error":"当前模型供应通道额度不足","code":"upstream_channel_insufficient"}'
-    const error = mapSDKErrorToTypedError('unknown', message, message)
-    expect(error.code).toBe('provider_error')
-    expect(error.title).toBe('模型供应通道暂不可用')
-    expect(error.canRetry).toBe(true)
-    expect(error.actions.some((action) => action.action === 'open_credits')).toBe(false)
+describe('Electron 宿主：认证 env 版本', () => {
+  test('Given Electron 应用版本 When 计划渠道认证 Then User-Agent 与迁移前一致', () => {
+    const env: Record<string, string | undefined> = {}
+    applyAgentSdkAuthEnv(env, 'kimi-coding', 'secret')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('secret')
+    expect(env.ANTHROPIC_CUSTOM_HEADERS).toContain(`Proma/${pkg.version}`)
   })
 })

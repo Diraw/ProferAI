@@ -18,12 +18,14 @@
  */
 
 import * as React from 'react'
+import { useAtomValue } from 'jotai'
 import Markdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { ChevronDown, ChevronUp, Paperclip, FileText, Sparkles, Server, Download, MessageSquareText, MessageSquarePlus, Link2, Copy, Check, ListChecks, X, Quote } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { userMessagePositionAtom } from '@/atoms/ui-preferences'
 import { normalizeLatexDelimiters } from '@/lib/normalize-latex'
 import { normalizeMarkdownEmphasisWhitespace } from '@/lib/normalize-markdown-emphasis'
 import { getFileBaseName } from '@/lib/file-utils'
@@ -70,11 +72,13 @@ interface MessageProps extends HTMLAttributes<HTMLDivElement> {
 
 /** 消息根容器，user 自动右对齐 */
 export function Message({ className, from, ...props }: MessageProps): React.ReactElement {
+  const userMessagePosition = useAtomValue(userMessagePositionAtom)
   return (
     <div
       className={cn(
         'message-item group flex w-full flex-col gap-0.5 rounded-[10px] px-2.5 py-2.5',
         from === 'user' ? 'is-user' : 'is-assistant',
+        from === 'user' && userMessagePosition === 'right' && 'user-message-right',
         className
       )}
       {...props}
@@ -107,6 +111,7 @@ export function MessageHeader({
       className={cn(
         'flex items-start gap-2.5 mb-2.5',
         'group-[.is-user]:hidden',
+        'group-[.user-message-right]:flex-row-reverse',
         className
       )}
       {...props}
@@ -144,6 +149,7 @@ export function MessageContent({
       className={cn(
         'message-content flex max-w-full min-w-0 flex-col gap-2 overflow-visible pl-[46px]',
         'group-[.is-user]:text-foreground group-[.is-user]:items-start',
+        'group-[.user-message-right]:pl-0 group-[.user-message-right]:pr-[46px] group-[.user-message-right]:items-end',
         'group-[.is-assistant]:w-full group-[.is-assistant]:text-foreground',
         className
       )}
@@ -156,18 +162,28 @@ export function MessageContent({
 
 // ===== MessageActions 操作按钮容器 =====
 
-type MessageActionsProps = ComponentProps<'div'>
+type MessageActionsProps = ComponentProps<'div'> & {
+  /**
+   * 默认隐藏、悬停整条消息时淡入（键盘聚焦同样可见）。
+   * 用于用户消息操作栏：常驻按钮会与消息正文抢注意力。
+   */
+  revealOnHover?: boolean
+}
 
 /** 操作按钮容器（复制、删除等），默认显示淡色，hover 时加深 */
 export function MessageActions({
   className,
   children,
+  revealOnHover = false,
   ...props
 }: MessageActionsProps): React.ReactElement {
   return (
     <div
       className={cn(
-        'message-actions flex items-center gap-2.5 text-muted-foreground/60 hover:text-muted-foreground/90 transition-colors duration-200',
+        'message-actions flex items-center gap-2.5 text-muted-foreground/60 hover:text-muted-foreground/90 transition-[color,opacity] duration-200',
+        'group-[.user-message-right]:justify-end group-[.user-message-right]:pl-0 group-[.user-message-right]:pr-[46px]',
+        // opacity 只影响可见性、不脱离布局，悬停出现时不会顶动消息
+        revealOnHover && 'opacity-0 group-hover:opacity-100 focus-within:opacity-100',
         className
       )}
       {...props}

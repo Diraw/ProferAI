@@ -1322,18 +1322,24 @@ export function useGlobalAgentListeners(): void {
     )
 
     window.electronAPI.restoreActiveAgentStreams()
-      .then((sessionIds) => {
+      .then((snapshots) => {
         store.set(agentStreamingStatesAtom, (prev) => {
           let next: Map<string, AgentStreamState> | null = null
-          for (const sessionId of sessionIds) {
+          for (const snapshot of snapshots) {
+            const sessionId = typeof snapshot === 'string' ? snapshot : snapshot.sessionId
             const current = (next ?? prev).get(sessionId)
             if (current?.running || current?.backgroundWaiting) continue
             if (!next) next = new Map(prev)
+            const restored = typeof snapshot === 'string' ? undefined : snapshot
             next.set(sessionId, {
               running: true,
               content: '',
               toolActivities: [],
               startedAt: undefined,
+              ...(restored?.contextWindow !== undefined ? {
+                contextWindow: restored.contextWindow,
+                usageUpdatedAt: restored.contextUpdatedAt ?? Date.now(),
+              } : {}),
             })
           }
           return next ?? prev

@@ -124,7 +124,7 @@ describe('渲染层自动清除点（R1–R10）一个都不能少', () => {
     {
       id: 'R10 个人工作区切换会话',
       file: 'src/renderer/components/app-shell/left-sidebar/use-left-sidebar.ts',
-      snippets: ['setCurrentAgentWorkspaceId(session.workspaceId)'],
+      snippets: ['setCurrentWorkspaceId(workspaceId)', 'setCurrentAgentSessionId(session.id)'],
     },
   ]
 

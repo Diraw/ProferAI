@@ -7,7 +7,7 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { getSettingsPath } from './config-paths'
-import { DEFAULT_AGENT_RUNTIME, DEFAULT_INTERFACE_VARIANT, DEFAULT_THEME_MODE } from '../../types'
+import { DEFAULT_AGENT_RUNTIME, DEFAULT_INTERFACE_VARIANT, DEFAULT_PREVIEW_OPEN_MODE, DEFAULT_THEME_MODE, DEFAULT_USER_MESSAGE_POSITION } from '../../types'
 import { normalizeAgentRuntime } from '@profer/shared'
 import type { AppSettings } from '../../types'
 
@@ -29,6 +29,8 @@ function getDefaultSettings(): AppSettings {
     environmentCheckSkipped: false,
     notificationsEnabled: true,
     showCreditsInSidebar: true,
+    userMessagePosition: DEFAULT_USER_MESSAGE_POSITION,
+    previewModePreference: DEFAULT_PREVIEW_OPEN_MODE,
     // 手动确认已读：默认关闭（关闭态行为与既有一致）
     manualReadConfirmEnabled: false,
     feishuSessionMirror: { mode: 'off' },
@@ -71,6 +73,9 @@ export function getSettings(): AppSettings {
       environmentCheckSkipped: data.environmentCheckSkipped ?? false,
       notificationsEnabled: data.notificationsEnabled ?? true,
       showCreditsInSidebar: data.showCreditsInSidebar !== false,
+      userMessagePosition: data.userMessagePosition === 'left' ? 'left' : DEFAULT_USER_MESSAGE_POSITION,
+      // 旧 settings.json 无该键时归一为 'tab'（独立标签页）；只有字面 'split' 才视为分屏
+      previewModePreference: data.previewModePreference === 'split' ? 'split' : DEFAULT_PREVIEW_OPEN_MODE,
       // 旧 settings.json 无该键时归一为 false；只有字面 true 才视为开启
       manualReadConfirmEnabled: data.manualReadConfirmEnabled === true,
       feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
@@ -103,6 +108,12 @@ export function updateSettings(updates: Partial<AppSettings>): AppSettings {
     ...(updates.developerModeEnabled === undefined && updates.pluginSystemEnabled !== undefined
       ? { developerModeEnabled: updates.pluginSystemEnabled }
       : {}),
+  }
+  if (updates.userMessagePosition !== undefined) {
+    normalizedUpdates.userMessagePosition = updates.userMessagePosition === 'left' ? 'left' : DEFAULT_USER_MESSAGE_POSITION
+  }
+  if (updates.previewModePreference !== undefined) {
+    normalizedUpdates.previewModePreference = updates.previewModePreference === 'split' ? 'split' : DEFAULT_PREVIEW_OPEN_MODE
   }
   delete normalizedUpdates.pluginSystemEnabled
   const developerModeEnabled = normalizedUpdates.developerModeEnabled

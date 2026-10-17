@@ -41,8 +41,34 @@ function assertPackagingHost(targetPlatform, hostPlatform = process.platform) {
   }
 }
 
+/**
+ * 目标平台是否纳入发布支持范围。
+ *
+ * Linux 当前**不支持**，原因（已核查，不能仅凭 electron-builder.yml 存在 linux 配置就当支持）：
+ * - `apps/electron/package.json` 的 optionalDependencies 只含 darwin-arm64 / darwin-x64 /
+ *   win32-x64 / win32-arm64，缺 `@anthropic-ai/claude-agent-sdk-linux-*`：
+ *   `resolveSDKCliPath()` 会解析出 `claude-agent-sdk-linux-<arch>/claude`，文件不存在，
+ *   Claude 内核运行必然失败（失败点在 run 时，App 仍能启动，因此容易漏验）；
+ * - CI（`.github/workflows`）只有 Windows Release Verification 与 macOS Package Verification，
+ *   没有任何 Linux 宿主验证；
+ * - `electron-builder.yml` 的 linux 段只有 extraResources，没有声明 target / arch。
+ *
+ * 因此构建入口显式拒绝，而不是产出一个「能装上但 Claude 必然失败」的包。
+ * 若要开始支持 Linux，需先补齐：linux x64/arm64 的 SDK 运行时资源与 optionalDependencies、
+ * linux target/arch 声明、以及一个最小 smoke 验证（在此之前不要声称支持）。
+ */
+const UNSUPPORTED_TARGETS = new Map([
+  ['linux', 'Linux 不是受支持的发布目标：缺少 Claude 原生二进制（optionalDependencies 无 claude-agent-sdk-linux-*），且没有 Linux 构建验证。如需支持，请先补齐 linux x64/arm64 runtime 资源与最小 smoke。'],
+])
+
+function assertSupportedPackagingTarget(targetPlatform) {
+  const reason = UNSUPPORTED_TARGETS.get(targetPlatform)
+  if (reason) throw new Error(reason)
+}
+
 function assertBuilderPackagingHost(args, hostPlatform = process.platform) {
   for (const targetPlatform of getRequestedPlatforms(args)) {
+    assertSupportedPackagingTarget(targetPlatform)
     assertPackagingHost(targetPlatform, hostPlatform)
   }
 }
@@ -50,6 +76,7 @@ function assertBuilderPackagingHost(args, hostPlatform = process.platform) {
 module.exports = {
   assertBuilderPackagingHost,
   assertPackagingHost,
+  assertSupportedPackagingTarget,
   getRequestedPlatform,
   getRequestedPlatforms,
 }
@@ -62,6 +89,7 @@ if (require.main === module) {
   }
 
   try {
+    assertSupportedPackagingTarget(targetPlatform)
     assertPackagingHost(targetPlatform)
     console.log(`[packaging-host] ${targetPlatform} 打包宿主检查通过（${process.platform}）。`)
   } catch (error) {

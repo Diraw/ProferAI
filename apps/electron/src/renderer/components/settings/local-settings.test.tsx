@@ -55,7 +55,7 @@ const { UsageSettings } = await import('./UsageSettings')
 const { userProfileAtom } = await import('../../atoms/user-profile')
 const { authStatusAtom } = await import('../../atoms/identity-atoms')
 const { promptConfigAtom, selectedPromptIdAtom } = await import('../../atoms/system-prompt-atoms')
-const { composerCompactModeAtom } = await import('../../atoms/ui-preferences')
+const { composerCompactModeAtom, previewOpenModeAtom } = await import('../../atoms/ui-preferences')
 const { customNotificationSoundsAtom, notificationSoundsAtom } = await import('../../atoms/notifications')
 const { chatToolsAtom } = await import('../../atoms/chat-tool-atoms')
 
@@ -428,6 +428,16 @@ describe('UsageSettings 低风险持久化与删除', () => {
       expect(host.field(label!).value).toBe(normalized)
     }
     expect(patches).toEqual([{ inputCompactViewportHeight: 0 }, { inputCompactMinHeight: 60 }, { inputCompactMaxHeight: 200 }])
+  })
+  test('预览打开方式切换即时生效并落盘', async () => {
+    const patches: unknown[] = []
+    api({ updateSettings: async (patch: unknown) => { patches.push(patch) } })
+    const host = mount(UsageSettings); await tick(); host.render()
+    expect(host.field('预览打开方式').value).toBe('tab')
+    ;(host.field('预览打开方式').onValueChange as (value: string) => void)('split'); host.render()
+    expect(store.get(previewOpenModeAtom)).toBe('split')
+    await tick()
+    expect(patches).toEqual([{ previewModePreference: 'split' }])
   })
   test('音效删除只在确认后写入，失败可重试', async () => {
     const sound = { id: 'custom-fixture', label: 'Fixture sound', fileName: 'fixture.mp3', addedAt: 1 }

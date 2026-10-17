@@ -56,10 +56,12 @@ import {
 } from './atoms/notifications'
 import {
   stickyUserMessageEnabledAtom,
+  userMessagePositionAtom,
   showCreditsInSidebarAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
   composerCompactModeAtom,
+  previewOpenModeAtom,
   initializeUiPreferences,
 } from './atoms/ui-preferences'
 import {
@@ -71,6 +73,7 @@ import {
   initializeUiScale,
 } from './atoms/ui-scale'
 import { installedPluginsAtom } from './atoms/plugin-system'
+import { composerToolbarPreferencesAtom, initializeComposerToolbarPreferences } from './atoms/composer-toolbar-preferences'
 import { developerModeEnabledAtom, openEpistemicModeEnabledAtom } from './atoms/developer-mode'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useBrowserLocalFileSelectionQuote } from './hooks/useBrowserLocalFileSelectionQuote'
@@ -496,19 +499,23 @@ function DockBadgeInitializer(): null {
 function UiPreferencesInitializer(): null {
   const setShowCreditsInSidebar = useSetAtom(showCreditsInSidebarAtom)
   const setStickyUserMessageEnabled = useSetAtom(stickyUserMessageEnabledAtom)
+  const setUserMessagePosition = useSetAtom(userMessagePositionAtom)
   const setLongTextPasteAsAttachmentEnabled = useSetAtom(longTextPasteAsAttachmentEnabledAtom)
   const setRichTextRenderingEnabled = useSetAtom(richTextRenderingEnabledAtom)
   const setComposerCompactMode = useSetAtom(composerCompactModeAtom)
+  const setPreviewOpenMode = useSetAtom(previewOpenModeAtom)
 
   useEffect(() => {
     initializeUiPreferences(
       setShowCreditsInSidebar,
       setStickyUserMessageEnabled,
+      setUserMessagePosition,
       setLongTextPasteAsAttachmentEnabled,
       setRichTextRenderingEnabled,
-      setComposerCompactMode
+      setComposerCompactMode,
+      setPreviewOpenMode
     )
-  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode])
+  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setUserMessagePosition, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode, setPreviewOpenMode])
 
   return null
 }
@@ -540,6 +547,16 @@ function UiScaleInitializer(): null {
   useEffect(() => {
     initializeUiScale(setUiScale)
   }, [setUiScale])
+
+  return null
+}
+
+function ComposerToolbarPreferencesInitializer(): null {
+  const setPreferences = useSetAtom(composerToolbarPreferencesAtom)
+
+  useEffect(() => {
+    void initializeComposerToolbarPreferences(setPreferences)
+  }, [setPreferences])
 
   return null
 }
@@ -1130,6 +1147,7 @@ if (isQuickTaskWindow) {
       <AgentUnreadSettingsInitializer />
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
+      <ComposerToolbarPreferencesInitializer />
       <MarkdownFontSizeInitializer />
       <UiScaleInitializer />
       <PluginSystemInitializer />

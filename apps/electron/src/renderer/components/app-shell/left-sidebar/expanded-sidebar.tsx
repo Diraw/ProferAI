@@ -108,11 +108,22 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     hasEnvironmentIssues,
   } = s
   const [sidebarSection, setSidebarSection] = React.useState<'pinned' | 'projects'>('projects')
-  const { requestClose: requestCloseTab } = useCloseTab()
+  const { requestClose: requestCloseTab, requestCloseMany: requestCloseTabs } = useCloseTab()
   const openSessionEntries = React.useMemo(
     () => getOpenSessionEntries(mode, tabs, conversations, agentSessions),
     [agentSessions, conversations, mode, tabs],
   )
+  // 「当前会话」区的左缩进：Chat 模式下与下面「对话」列表左边缘对齐（同一个对话在两处应看起来一致），
+  // Agent 模式的当前会话是独立的「打开入口」簇，保留额外缩进与项目树层级拉开差异。
+  const openSessionListIndentClass = mode === 'chat' ? '' : 'ml-4'
+  /** 关闭本区除 keepTabId 以外的入口（不删除会话数据）。 */
+  const closeOtherOpenSessions = React.useCallback((keepTabId: string) => {
+    requestCloseTabs(openSessionEntries.filter((entry) => entry.tab.id !== keepTabId).map((entry) => entry.tab.id))
+  }, [openSessionEntries, requestCloseTabs])
+  /** 关闭本区全部入口（不删除会话数据，关联的预览/浏览器 Tab 随会话一并关闭）。 */
+  const closeAllOpenSessions = React.useCallback(() => {
+    requestCloseTabs(openSessionEntries.map((entry) => entry.tab.id))
+  }, [openSessionEntries, requestCloseTabs])
   return (
     <div className="relative h-full flex flex-col overflow-hidden">
       <SidebarWindowDragStrip
@@ -196,7 +207,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
           <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-foreground/40">当前会话</span>
           <span className="text-[10px] tabular-nums text-foreground/30">{openSessionEntries.length}</span>
         </div>
-        <div className="sidebar-session-scroll ml-4 -mr-2 flex max-h-[144px] flex-col gap-0.5 overflow-y-auto pr-2 scrollbar-thin">
+        <div className={cn('sidebar-session-scroll -mr-2 flex max-h-[144px] flex-col gap-0.5 overflow-y-auto pr-2 scrollbar-thin', openSessionListIndentClass)}>
           {openSessionEntries.map((entry) => {
             const { tab } = entry
             const active = tab.sessionId === activeSessionId
@@ -219,6 +230,8 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   onTogglePin={handleTogglePin}
                   onToggleArchive={handleToggleArchive}
                   onCloseTab={() => requestCloseTab(tab.id)}
+                  onCloseOtherTabs={openSessionEntries.length > 1 ? () => closeOtherOpenSessions(tab.id) : undefined}
+                  onCloseAllTabs={closeAllOpenSessions}
                 />
               )
             }
@@ -243,6 +256,8 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                 onToggleArchive={handleToggleArchiveAgent}
                 onMarkUnread={handleToggleSessionUnread}
                 onCloseTab={() => requestCloseTab(tab.id)}
+                onCloseOtherTabs={openSessionEntries.length > 1 ? () => closeOtherOpenSessions(tab.id) : undefined}
+                onCloseAllTabs={closeAllOpenSessions}
               />
             )
           })}

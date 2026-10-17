@@ -18,15 +18,13 @@ import { CornerDownLeft, Square, Brain, Paperclip, Library, X } from 'lucide-rea
 import type { KnowledgeReference } from '@profer/shared'
 import { KnowledgeReferencePicker } from '@/components/knowledge-base/KnowledgeReferencePicker'
 import { openKnowledgePreview } from '@/components/knowledge-base/KnowledgePreviewPanel'
-import { ModelSelector } from './ModelSelector'
-import { ClearContextButton } from './ClearContextButton'
-import { ContextSettingsPopover } from './ContextSettingsPopover'
-import { ToolSelectorPopover } from './ToolSelectorPopover'
+import { createChatComposerToolbarItems } from './chat-composer-toolbar-config'
+import { composerToolbarPreferencesAtom } from '@/atoms/composer-toolbar-preferences'
 import { AttachmentPreviewItem } from './AttachmentPreviewItem'
 import { RichTextInput } from '@/components/ai-elements/rich-text-input'
-import { SpeechButton, useLoadVoiceDictationSettings } from '@/components/ai-elements/speech-button'
+import { useLoadVoiceDictationSettings } from '@/components/ai-elements/speech-button'
 import { voiceDictationEnabledAtom } from '@/atoms/voice-dictation-atoms'
-import { InputToolbarOverflow, type ToolbarItem } from '@/components/ai-elements/InputToolbarOverflow'
+import { ComposerToolbar } from '@/components/ai-elements/composer/ComposerToolbar'
 import { AgentComposerToolTrigger } from '@/components/ai-elements/composer/ComposerTool'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import {
@@ -43,6 +41,7 @@ import { MAX_ATTACHMENT_SIZE } from '@profer/shared'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { toast } from 'sonner'
 import { dedupPendingAgainst, formatDuplicateSummary } from './dedup-helpers'
+import { listComposerKnowledgeItems, openComposerFileDialog } from '@/domains/composer/composer-api'
 
 interface ChatInputProps {
   /** 当前对话 ID */
@@ -195,7 +194,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   /** 通过 IPC 打开文件选择对话框（race-free 去重） */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
     try {
-      const result = await window.electronAPI.openFileDialog()
+      const result = await openComposerFileDialog()
       const largeFiles = result.largeFiles ?? []
       const skippedFiles = result.skippedFiles ?? []
       if (result.files.length === 0 && largeFiles.length === 0 && skippedFiles.length === 0) return
@@ -327,43 +326,17 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
   }, [])
 
   const voiceDictationEnabled = useAtomValue(voiceDictationEnabledAtom)
+  const composerToolbarPreferences = useAtomValue(composerToolbarPreferencesAtom)
   useLoadVoiceDictationSettings()
-  const toolbarItems = React.useMemo<ToolbarItem[]>(() => [
-    // 模型选择是 Chat 的一级动作，固定放在最左侧；窄窗口时也优先保留。
-    { key: 'model', node: <ModelSelector composerTool /> },
-    // 资料库入口已暂时关闭，恢复时取消下面注释即可
-    /*
-    {
-      key: 'knowledge-library',
-      node: <Tooltip><TooltipTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-[36px] shrink-0 rounded-full text-primary hover:bg-primary/10 hover:text-primary" onClick={() => setKnowledgePickerOpen(true)}><Library className="size-5"/></Button></TooltipTrigger><TooltipContent side="top"><p>从资料库导入</p></TooltipContent></Tooltip>,
-    },
-    */
-    {
-      key: 'attach',
-      node: (
-        <AgentComposerToolTrigger label="添加附件" tooltip="添加附件" onClick={handleOpenFileDialog}>
-          <Paperclip className="size-5" />
-        </AgentComposerToolTrigger>
-      ),
-    },
-    {
-      key: 'thinking',
-      node: (
-        <AgentComposerToolTrigger
-          label={thinkingEnabled ? '关闭思考模式' : '开启思考模式'}
-          tooltip={thinkingEnabled ? '关闭思考模式' : '开启思考模式'}
-          state={thinkingEnabled ? 'active' : 'default'}
-          onClick={() => setThinkingEnabled(!thinkingEnabled)}
-        >
-          <Brain className="size-5" />
-        </AgentComposerToolTrigger>
-      ),
-    },
-    ...(voiceDictationEnabled ? [{ key: 'speech', node: <SpeechButton composerTool /> }] : []),
-    { key: 'tools', node: <ToolSelectorPopover composerTool /> },
-    { key: 'context', node: <ContextSettingsPopover composerTool /> },
-    { key: 'clear', node: <ClearContextButton composerTool onClick={onClearContext} /> },
-  ], [handleOpenFileDialog, thinkingEnabled, setThinkingEnabled, onClearContext, voiceDictationEnabled])
+  const toolbarItems = React.useMemo(() => createChatComposerToolbarItems({
+    thinkingEnabled,
+    voiceDictationEnabled,
+    onToggleThinking: () => setThinkingEnabled(!thinkingEnabled),
+    onOpenFileDialog: handleOpenFileDialog,
+    onClearContext,
+    toolbarPreferences: composerToolbarPreferences,
+  }), [composerToolbarPreferences, handleOpenFileDialog, onClearContext, setThinkingEnabled, thinkingEnabled, voiceDictationEnabled])
+
 
   const trailingNode = streaming ? (
     <AgentComposerToolTrigger
@@ -427,11 +400,11 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
           />
 
           {/* Footer 工具栏 — 容器变窄时尾部按钮自动折叠进「更多」Popover */}
-          <InputToolbarOverflow items={toolbarItems} trailing={trailingNode} />
+          <ComposerToolbar items={toolbarItems} trailing={trailingNode} />
         </div>
 
         <KnowledgeReferencePicker open={knowledgePickerOpen} onOpenChange={setKnowledgePickerOpen} onConfirm={async (itemIds) => {
-          const snapshot = await window.electronAPI.knowledge.listItems()
+          const snapshot = await listComposerKnowledgeItems()
           const itemsById = new Map(snapshot.map((item) => [item.id, item]))
           const additions = itemIds.map((itemId) => {
             const item = itemsById.get(itemId)

@@ -22,6 +22,7 @@ import {
 } from '@profer/ui/primitives/tooltip'
 import { cn } from '@/lib/utils'
 import { AgentComposerToolTrigger } from '@/components/ai-elements/composer/ComposerTool'
+import { listComposerTools, updateComposerToolState } from '@/domains/composer/composer-api'
 import { Wrench, Brain, Globe, Settings, ImagePlus } from 'lucide-react'
 import { chatToolsAtom, hasActiveToolsAtom } from '@/atoms/chat-tool-atoms'
 import { settingsTabAtom, settingsOpenAtom } from '@/atoms/settings-tab'
@@ -54,10 +55,10 @@ export function ToolSelectorPopover({ composerTool = false }: { composerTool?: b
     currentEnabled: boolean,
   ): Promise<void> => {
     try {
-      await window.electronAPI.updateChatToolState(toolId, {
+      await updateComposerToolState(toolId, {
         enabled: !currentEnabled,
       })
-      const updated = await window.electronAPI.getChatTools()
+      const updated = await listComposerTools()
       setChatTools(updated)
     } catch (err) {
       console.error('[ToolSelectorPopover] 切换工具失败:', err)

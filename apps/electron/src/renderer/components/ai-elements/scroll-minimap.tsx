@@ -105,6 +105,71 @@ function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+interface MinimapViewportState {
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  ids: Set<string>
+  keys: Set<string>
+  centerId?: string
+}
+
+function sameIds(previous: Set<string>, next: Set<string>): boolean {
+  return previous.size === next.size && [...next].every(id => previous.has(id))
+}
+
+/** 同一帧只测量一次；相同几何与高亮不提交 React 状态。 */
+export function observeMinimapViewport(
+  el: HTMLElement,
+  content: HTMLElement | null,
+  changed: (state: MinimapViewportState) => void,
+): () => void {
+  let frame: number | null = null
+  let previous: MinimapViewportState | undefined
+  const update = (): void => {
+    frame = null
+    const { scrollTop, scrollHeight, clientHeight } = el
+    const ids = new Set<string>()
+    const keys = new Set<string>()
+    const center = scrollTop + clientHeight / 2
+    let centerId: string | undefined
+    for (const node of el.querySelectorAll<HTMLElement>('[data-message-id], [data-message-nav-key]')) {
+      const top = getOffsetTopRelativeTo(node, el)
+      const bottom = top + node.offsetHeight
+      const id = node.getAttribute('data-message-id')
+      const key = node.getAttribute('data-message-nav-key')
+      if (bottom > scrollTop && top < scrollTop + clientHeight) {
+        if (id) ids.add(id)
+        if (key) keys.add(key)
+      }
+      if (centerId === undefined && id && top <= center && bottom > center) centerId = id
+    }
+    if (previous && previous.scrollTop === scrollTop && previous.scrollHeight === scrollHeight
+      && previous.clientHeight === clientHeight && previous.centerId === centerId
+      && sameIds(previous.ids, ids) && sameIds(previous.keys, keys)) return
+    const state = {
+      scrollTop, scrollHeight, clientHeight, centerId,
+      ids: previous && sameIds(previous.ids, ids) ? previous.ids : ids,
+      keys: previous && sameIds(previous.keys, keys) ? previous.keys : keys,
+    }
+    previous = state
+    changed(state)
+  }
+  const schedule = (): void => {
+    if (frame === null) frame = requestAnimationFrame(update)
+  }
+  schedule()
+  el.addEventListener('scroll', schedule, { passive: true })
+  const observer = new ResizeObserver(schedule)
+  observer.observe(el)
+  if (content) observer.observe(content)
+  return () => {
+    el.removeEventListener('scroll', schedule)
+    observer.disconnect()
+    if (frame !== null) cancelAnimationFrame(frame)
+  }
+}
+
 // ── 主组件 ──
 
 export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): React.ReactElement | null {
@@ -148,48 +213,14 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
     const el = scrollRef.current
     if (!el) return
 
-    const update = (): void => {
-      const { scrollTop, scrollHeight, clientHeight } = el
+    return observeMinimapViewport(el, contentRef.current, ({ scrollTop, scrollHeight, clientHeight, ids, keys, centerId }) => {
       setCanScroll(scrollHeight > clientHeight + 10)
-      setScrollMetrics({ scrollTop, scrollHeight, clientHeight })
-      if (scrollHeight <= 0) return
-
-      const viewportCenter = scrollTop + clientHeight / 2
-      const nodes = el.querySelectorAll<HTMLElement>('[data-message-id]')
-      const ids = new Set<string>()
-      let centerId: string | undefined
-      for (const node of nodes) {
-        const top = getOffsetTopRelativeTo(node, el)
-        const bottom = top + node.offsetHeight
-        if (bottom > scrollTop && top < scrollTop + clientHeight) {
-          const id = node.getAttribute('data-message-id')
-          if (id) ids.add(id)
-        }
-        if (centerId === undefined && top <= viewportCenter && bottom > viewportCenter) {
-          centerId = node.getAttribute('data-message-id') ?? undefined
-        }
-      }
-      setVisibleIds(ids)
+      setScrollMetrics(previous => previous.scrollTop === scrollTop && previous.scrollHeight === scrollHeight
+        && previous.clientHeight === clientHeight ? previous : { scrollTop, scrollHeight, clientHeight })
+      setVisibleIds(previous => sameIds(previous, ids) ? previous : ids)
+      setVisibleNavKeys(previous => sameIds(previous, keys) ? previous : keys)
       setCenterVisibleId(centerId)
-      // 无 uuid 的条目（如 interruption_record）也参与视口高亮。
-      const keys = new Set<string>()
-      for (const node of el.querySelectorAll<HTMLElement>('[data-message-nav-key]')) {
-        const key = node.getAttribute('data-message-nav-key')
-        if (key && isNodeInViewport(node, el, scrollTop, clientHeight)) keys.add(key)
-      }
-      setVisibleNavKeys(keys)
-    }
-
-    update()
-    el.addEventListener('scroll', update, { passive: true })
-    const observer = new ResizeObserver(update)
-    observer.observe(el)
-    if (contentRef.current) observer.observe(contentRef.current)
-
-    return () => {
-      el.removeEventListener('scroll', update)
-      observer.disconnect()
-    }
+    })
   }, [scrollRef, contentRef, items])
 
   // ── 面板打开时自动聚焦搜索框 ──

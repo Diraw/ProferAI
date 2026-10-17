@@ -17,9 +17,12 @@ import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { Bot, CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, GitBranch } from 'lucide-react'
+import { CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, GitBranch } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
+import { AgentRuntimeSelector } from './AgentRuntimeSelector'
 import { AgentHeader } from './AgentHeader'
+import { createAgentComposerToolbarItems } from './agent-composer-toolbar-config'
+import { composerToolbarPreferencesAtom } from '@/atoms/composer-toolbar-preferences'
 import { GoalStatusBar } from './GoalStatusBar'
 import { agentGoalAtomFamily, getGoalActions, GOAL_STATUS_LABELS, goalEditorAtomFamily, goalReplacementAtomFamily, startGoalWithReplacement } from '@/atoms/goal-atoms'
 import { ContextUsageBadge } from './ContextUsageBadge'
@@ -42,7 +45,7 @@ import { QuotedSelectionChip } from '@/components/diff/QuotedSelectionChip'
 import { RichTextInput, type RichTextInputHandle } from '@/components/ai-elements/rich-text-input'
 import { SpeechButton, useLoadVoiceDictationSettings } from '@/components/ai-elements/speech-button'
 import { voiceDictationEnabledAtom } from '@/atoms/voice-dictation-atoms'
-import { InputToolbarOverflow, type ToolbarItem } from '@/components/ai-elements/InputToolbarOverflow'
+import { ComposerToolbar, type ComposerToolbarItem } from '@/components/ai-elements/composer/ComposerToolbar'
 import {
   AgentComposerToolMenuItem,
   AgentComposerToolPopover,
@@ -64,9 +67,11 @@ import { ProjectGraphPanel } from './ProjectGraphPanel'
 import { cn } from '@/lib/utils'
 import { evaluateAutoSendTurn } from '@/lib/agent-autosend-turn'
 import { rollbackRejectedAgentRunState } from '@/lib/agent-stream-state-cleanup'
+import { countRunningDelegations } from '@/domains/agent-runtime/agent-runtime-display-policy'
+import { updateComposerEffort, updateComposerOpenAIThinkingLevel, updateComposerRuntime, updateComposerSettings, openComposerFileDialog, openComposerFolderDialog, updateAgentComposerModel, listComposerPresets, rebindComposerPreset, getComposerReasoningCapability, attachComposerDirectory } from '@/domains/composer/composer-api'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { registerShortcut } from '@/lib/shortcut-registry'
-import { autoPreviewEnabledAtom, previewFileMapAtom, quotedSelectionMapAtom, agentInterruptionMapAtom, getAgentInterruptionTone } from '@/atoms/preview-atoms'
+import { autoPreviewEnabledAtom, previewFileMapAtom, quotedSelectionMapAtom, agentInterruptionMapAtom } from '@/atoms/preview-atoms'
 import { openFilePreviewTabForSession } from '@/components/diff/preview-opener'
 import type { AgentInterruptionState } from '@/atoms/preview-atoms'
 import {
@@ -140,7 +145,7 @@ const AGENT_REFRESH_HEADROOM = 100
 /** 内存缓存只保留尾部窗口，防止随用户加载更多历史无限膨胀 */
 const AGENT_CACHE_WINDOW = DESKTOP_AGENT_PAGE_SIZE + AGENT_REFRESH_HEADROOM
 
-import { MAX_ATTACHMENT_SIZE, isAgentPresetToolGroupDisabled, parseGoalCommand } from '@profer/shared'
+import { canSelectAgentSessionRuntime, AGENT_SESSION_RUNTIME_LOCKED_MESSAGE, MAX_ATTACHMENT_SIZE, isAgentPresetToolGroupDisabled, parseGoalCommand } from '@profer/shared'
 import { fileToBase64, formatFileNames, getFileBaseName, getFileParentPath, isMissingAttachmentData } from '@/lib/file-utils'
 import { createClipboardPendingFile, createClipboardTextDraft, makeUniqueAttachmentName } from '@/lib/clipboard-text-attachment'
 import { AgentMessageQueue } from './AgentMessageQueue'
@@ -163,7 +168,20 @@ import type { AgentQueuedMessage, QueueDropPlacement } from '@/lib/agent-message
 import type { QuotedSelection } from '@/atoms/preview-atoms'
 import { longTextPasteAsAttachmentEnabledAtom } from '@/atoms/ui-preferences'
 import { resolveForkActionAvailability } from '@/lib/exploration-session'
-import { getUserTextFromSDKMessage, resolveRegenerateTarget } from '@/lib/agent-regenerate-anchor'
+import { getUserTextFromSDKMessage, resolveRegenerateTarget, resolveRewriteSubmitBlock, resolveRewriteTarget, type RewriteSubmitBlock } from '@/lib/agent-regenerate-anchor'
+import type { EditResendRequest } from './SDKMessageRenderer'
+
+/** 「修改重发」被拦下时的提示文案（文案属 UI，故不入纯逻辑模块）。 */
+const REWRITE_SUBMIT_BLOCK_MESSAGES: Record<RewriteSubmitBlock, { title: string; description: string }> = {
+  'session-active': {
+    title: '会话正在运行',
+    description: '请等待本轮结束或先停止后再修改重发。',
+  },
+  'history-boundary': {
+    title: '无法修改这条消息',
+    description: '更早的消息还没加载，请先加载更早的消息再修改重发。',
+  },
+}
 
 /** 稳定的空 SDKMessage 数组引用，避免 ?? [] 每次创建新引用 */
 const EMPTY_SDK_MESSAGES: SDKMessage[] = []
@@ -252,7 +270,7 @@ function AgentThinkingPopover({ agentThinking, onToggle, openAIConfig, sessionId
   const handleEffortChange = React.useCallback(async (v: string) => {
     const value = v as import('@profer/shared').AgentEffort
     try {
-      const updated = await window.electronAPI.updateSessionAgentEffort(sessionId, value)
+      const updated = await updateComposerEffort(sessionId, value)
       onAgentEffortUpdated?.(updated)
       toast.success(`思考强度已设为「${EFFORT_LABELS[value]}」，下一轮生效`)
     } catch (error) {
@@ -265,7 +283,7 @@ function AgentThinkingPopover({ agentThinking, onToggle, openAIConfig, sessionId
   const handleResetEffort = React.useCallback(async () => {
     if (!hasSessionEffortOverride) return
     try {
-      const updated = await window.electronAPI.updateSessionAgentEffort(sessionId, null)
+      const updated = await updateComposerEffort(sessionId, null)
       onAgentEffortUpdated?.(updated)
       toast.success('思考强度已恢复预设/全局默认')
     } catch (error) {
@@ -277,7 +295,7 @@ function AgentThinkingPopover({ agentThinking, onToggle, openAIConfig, sessionId
   const handleOpenAILevelChange = (level: string | null): void => {
     if (!openAIConfig) return
     setOpen(false)
-    window.electronAPI.updateSessionOpenAIThinkingLevel(
+    updateComposerOpenAIThinkingLevel(
       openAIConfig.sessionId,
       level as import('@profer/shared').AgentThinkingLevel | null,
     )
@@ -367,58 +385,6 @@ function AgentThinkingPopover({ agentThinking, onToggle, openAIConfig, sessionId
           </div>
         </div>
       )}
-    </AgentComposerToolPopover>
-  )
-}
-
-const AGENT_RUNTIME_OPTIONS: Array<{ value: AgentRuntime; label: string; description: string }> = [
-  { value: 'claude', label: 'Claude', description: '使用 Claude Agent SDK' },
-  { value: 'pi', label: 'Pi', description: '使用 Pi Agent SDK' },
-]
-
-function AgentRuntimeSelector({
-  runtime,
-  disabled,
-  onChange,
-}: {
-  runtime: AgentRuntime
-  disabled: boolean
-  onChange: (runtime: AgentRuntime) => void
-}): React.ReactElement {
-  const [open, setOpen] = React.useState(false)
-  const current = AGENT_RUNTIME_OPTIONS.find((option) => option.value === runtime) ?? AGENT_RUNTIME_OPTIONS[0]!
-
-  return (
-    <AgentComposerToolPopover
-      open={open}
-      onOpenChange={(nextOpen) => setOpen(disabled ? false : nextOpen)}
-      tooltip={disabled ? `Agent 运行中，完成后可切换内核（当前：${current.label}）` : `切换当前会话下一轮使用的 Agent 内核（当前：${current.label}）`}
-      align="start"
-      className="w-48"
-      trigger={
-        <AgentComposerToolTrigger
-          label={`Agent 内核：${current.label}`}
-          disabled={disabled}
-          // 与模型选择器等「带文字工具」共用同一壳层尺寸约定：
-          // 内核是会话级模式指示，必须能一眼分辨 Claude / Pi，不能只留图标。
-          className="flex w-auto items-center gap-1.5 px-2 text-xs"
-        >
-          <Bot className="size-5 shrink-0" />
-          <span className="truncate">{current.label}</span>
-        </AgentComposerToolTrigger>
-      }
-    >
-      {AGENT_RUNTIME_OPTIONS.map((option) => (
-        <AgentComposerToolMenuItem
-          key={option.value}
-          selected={option.value === runtime}
-          className="flex-col items-start px-2.5 py-2"
-          onClick={() => { onChange(option.value); setOpen(false) }}
-        >
-          <span className="text-xs font-medium">{option.label}</span>
-          <span className="mt-0.5 text-[11px] text-muted-foreground">{option.description}</span>
-        </AgentComposerToolMenuItem>
-      ))}
     </AgentComposerToolPopover>
   )
 }
@@ -623,6 +589,10 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const setActiveView = useSetAtom(activeViewAtom)
   const globalWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
   const sessions = useAtomValue(agentSessionsAtom)
+  const runningDelegationCount = React.useMemo(
+    () => countRunningDelegations(sessions, sessionId),
+    [sessions, sessionId],
+  )
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const agentPresetsMap = useAtomValue(agentPresetsAtom)
@@ -677,7 +647,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   // 订阅能力版本号：技能页增删改/导入预设后立即重拉，对齐 Skills 刷新机制。
   React.useEffect(() => {
     const slug = workspaces.find((w) => w.id === currentWorkspaceId)?.slug
-    void window.electronAPI.listAgentPresets(slug)
+    void listComposerPresets(slug)
       .then((list) => {
         const cacheKey = agentPresetCacheKey(slug)
         setAgentPresets((prev) => {
@@ -721,7 +691,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       return
     }
     let cancelled = false
-    window.electronAPI.getPiReasoningCapability(channel.provider, agentModelId, channel.baseUrl)
+    getComposerReasoningCapability(channel.provider, agentModelId, channel.baseUrl)
       .then((capability) => { if (!cancelled) setPiReasoningCapability(capability) })
       .catch(() => { if (!cancelled) setPiReasoningCapability(undefined) })
     return () => { cancelled = true }
@@ -764,7 +734,6 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const currentQuotedSelection = useAtomValue(quotedSelectionMapAtom).get(sessionId) ?? null
   const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
   const openPreview = useOpenPreview()
-  const currentAgentInterruption = useAtomValue(agentInterruptionMapAtom).get(sessionId) ?? null
   const richTextInputRef = React.useRef<RichTextInputHandle>(null)
 
   /** 移除当前引用选中文本 */
@@ -776,18 +745,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     })
   }, [sessionId, setQuotedSelectionMap])
 
-  /** 移除中断说明 chip（用户不想告知 Agent 时）：清 atom + 同步清 meta，保证重启不复活 */
-  const handleRemoveInterruption = React.useCallback(() => {
-    store.set(agentInterruptionMapAtom, (prev) => {
-      const map = new Map(prev)
-      map.delete(sessionId)
-      return map
-    })
-    window.electronAPI.updateAgentInterruptionState({ sessionId, state: null }).catch(console.error)
-  }, [sessionId, store])
-
   // 会话加载/重启恢复：meta 中仍有未消费的中断（lastInterruptReason 非 completed）且 atom 无值时，从 meta 填充。
-  // 消费/移除时 atom 清空且 meta 同步清除（clear-interruption-state IPC），故重启后不会复活已消费的 chip。
+  // 发送时仍会消费该状态并注入上下文，但不在输入区显示中断 Chip。
   React.useEffect(() => {
     const reason = sessionMeta?.lastInterruptReason
     if (reason && reason !== 'completed') {
@@ -842,6 +801,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   }, [sessionId, setDraftsMap])
   const inputHtmlContent = useAtomValue(agentSessionDraftHtmlAtomFamily(sessionId))
   const setDraftHtmlMap = useSetAtom(agentSessionDraftHtmlAtom)
+  /** 当前处于「修改重发」原地编辑态的用户消息 uuid（同一时刻只允许一条）。 */
+  const [editingUserMessageUuid, setEditingUserMessageUuid] = React.useState<string | null>(null)
   const setInputHtmlContent = React.useCallback((html: string) => {
     setDraftHtmlMap((prev) => {
       const map = new Map(prev)
@@ -946,7 +907,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     const fallback = workspacePresetList.find((preset) => preset.enabledInWorkspace !== false)
     if (!fallback) return
     const reference = referenceForSelectablePreset(fallback, workspaceSlug ?? undefined)
-    void window.electronAPI.rebindAgentSessionPresetReference(sessionId, reference)
+    void rebindComposerPreset(sessionId, reference)
       .then((updated) => setAgentSessions((previous) => previous.map((session) => session.id === sessionId ? updated : session)))
       .catch((error) => console.error('[Agent] 自动匹配预设失败:', error))
   }, [hasUsableSessionPreset, presetsLoaded, sessionId, sessionMeta, setAgentSessions, workspacePresetList, workspaceSlug])
@@ -1307,6 +1268,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   // 使用 queueMicrotask 延迟发送：避免 setState → 重渲染 → cleanup 取消 timer 的竞态。
   React.useEffect(() => {
     if (!messagesLoaded) return
+    if (runtimeSwitchInFlight || runtimeSwitchInFlightRef.current) return
     if (!pendingPrompt) return
     if (pendingPrompt.sessionId !== sessionId) return
     if (!agentChannelId || !hasAvailableModel || streaming) return
@@ -1377,7 +1339,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
         })
       })
     })
-  }, [messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, hasAvailableModel, currentWorkspaceId, sessionAgentRuntime, streaming, setPendingPrompt, setStreamingStates, permissionMode, attachedDirs, attachedFileDirectories, revealRendererDraft, requestFollow])
+  }, [runtimeSwitchInFlight, messagesLoaded, pendingPrompt, sessionId, agentChannelId, agentModelId, hasAvailableModel, currentWorkspaceId, sessionAgentRuntime, streaming, setPendingPrompt, setStreamingStates, permissionMode, attachedDirs, attachedFileDirectories, revealRendererDraft, requestFollow])
   // ===== 附件处理 =====
 
   /** 为文件生成唯一文件名（避免粘贴多张图片时文件名重复导致覆盖） */
@@ -1502,7 +1464,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   /** 打开文件选择对话框 */
   const handleOpenFileDialog = React.useCallback(async (): Promise<void> => {
     try {
-      const result = await window.electronAPI.openFileDialog()
+      const result = await openComposerFileDialog()
       const largeFiles = result.largeFiles ?? []
       const skippedFiles = result.skippedFiles ?? []
       if (result.files.length === 0 && largeFiles.length === 0 && skippedFiles.length === 0) return
@@ -1549,10 +1511,10 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   /** 附加文件夹（不复制，仅记录路径） */
   const handleAttachFolder = React.useCallback(async (): Promise<void> => {
     try {
-      const result = await window.electronAPI.openFolderDialog()
+      const result = await openComposerFolderDialog()
       if (!result) return
 
-      const updated = await window.electronAPI.attachDirectory({
+      const updated = await attachComposerDirectory({
         sessionId,
         directoryPath: result.path,
       })
@@ -1705,7 +1667,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
         // 拖拽的文件夹直接附加
         for (const dirPath of directories) {
           try {
-            const updated = await window.electronAPI.attachDirectory({
+            const updated = await attachComposerDirectory({
               sessionId,
               directoryPath: dirPath,
             })
@@ -1761,13 +1723,13 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     // 同时更新全局默认值（新会话继承）
     setDefaultChannelId(option.channelId)
     setDefaultModelId(option.modelId)
-    window.electronAPI.updateSettings({
+    updateComposerSettings({
       agentChannelId: option.channelId,
       agentModelId: option.modelId,
       agentChannelIds: updatedChannelIds,
     }).catch(console.error)
 
-    window.electronAPI.updateAgentSessionModel(sessionId, option.channelId, option.modelId)
+    updateAgentComposerModel(sessionId, option.channelId, option.modelId)
       .then((updated) => {
         setSessionChannelMap((prev) => {
           const map = new Map(prev)
@@ -1793,40 +1755,31 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       .catch((error) => console.error('[AgentView] 会话模型持久化失败:', error))
   }, [sessionId, streaming, backgroundWaiting, setSessionChannelMap, setSessionModelMap, setAgentSessions, setStreamingStates, setDefaultChannelId, setDefaultModelId, agentChannelIds, setAgentChannelIds, sessionAgentRuntime])
 
-  /** 空闲会话切换 runtime：跨 runtime 的 SDK session ID 由主进程原子清除。 */
+  /** 首次发送前选择 runtime；不乐观覆盖 session，避免迟到响应把已绑定会话还原。 */
   const handleAgentRuntimeChange = React.useCallback(async (runtime: AgentRuntime): Promise<void> => {
     if (runtime === sessionAgentRuntime) return
+    if (!canSelectAgentSessionRuntime(sessionMeta)) {
+      toast.info(AGENT_SESSION_RUNTIME_LOCKED_MESSAGE)
+      return
+    }
     if (streaming || backgroundWaiting) {
-      toast.info('Agent 运行中，完成后再切换内核')
+      toast.info('Agent 已开始运行，内核选择已固定')
       return
     }
     if (runtimeSwitchInFlightRef.current) return
 
-    const previousDefaultRuntime = agentRuntime
-    const previousSessionMeta = sessionMeta
     runtimeSwitchInFlightRef.current = true
     setRuntimeSwitchInFlight(true)
-    setAgentRuntime(runtime)
-    if (sessionMeta) {
-      setAgentSessions((previous) => previous.map((item) => (
-        item.id === sessionId
-          ? { ...item, agentRuntime: runtime, sdkSessionId: undefined, updatedAt: Date.now() }
-          : item
-      )))
-    }
 
     try {
       // 主进程在同一 IPC turn 内持久化 session runtime 与新会话默认 runtime。
-      const updated = await window.electronAPI.updateSessionAgentRuntime(sessionId, runtime)
-      // runtime 切换只改变 runtime。已有模型由 ModelSelector/启动前校验按新 runtime 处理，
-      // 不能因为当前 channel/model 不兼容而阻止用户切换内核。
-      setAgentSessions((previous) => previous.map((item) => item.id === sessionId ? updated : item))
+      const updated = await updateComposerRuntime(sessionId, runtime)
+      setAgentRuntime(runtime)
+      // 完成响应可能晚于 owner 锁定 projection；保留 revision 更新的会话快照。
+      setAgentSessions((previous) => previous.map((item) => item.id === sessionId
+        && (item.revision ?? 0) <= (updated.revision ?? 0) ? updated : item))
     } catch (error) {
       console.error('[AgentView] 切换 Agent Runtime 失败:', error)
-      setAgentRuntime(previousDefaultRuntime)
-      if (previousSessionMeta) {
-        setAgentSessions((previous) => previous.map((item) => item.id === sessionId ? previousSessionMeta : item))
-      }
       toast.error('Agent 内核切换失败', {
         description: error instanceof Error ? error.message : '未知错误',
       })
@@ -1835,7 +1788,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       setRuntimeSwitchInFlight(false)
       requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
     }
-  }, [agentRuntime, backgroundWaiting, sessionAgentRuntime, sessionId, sessionMeta, setAgentRuntime, setAgentSessions, streaming])
+  }, [backgroundWaiting, sessionAgentRuntime, sessionId, sessionMeta, setAgentRuntime, setAgentSessions, streaming])
 
   /** 构建 externalSelectedModel 给 ModelSelector */
   const computedSelectedModel = React.useMemo(() => {
@@ -1989,7 +1942,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       ? buildQuotedSelectionBlock(message.quotedSelection)
       : ''
     const payload = buildQueuedMessageSendPayload(message, quotedSelectionBlock)
-    if (!payload.rawText || !agentChannelId || !hasAvailableModel) return
+    if (runtimeSwitchInFlightRef.current || !payload.rawText || !agentChannelId || !hasAvailableModel) return
     if (initiator === 'user') requestFollow(sessionId)
 
     // 会话级「待注入」中断说明前缀：任何一次发送发生时，若存在未消费的中断说明则拼到该条消息前缀并消费（只注入一次）。
@@ -2077,6 +2030,10 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
 
   /** 发送消息 */
   const handleSend = React.useCallback(async (latestText = richTextInputRef.current?.getMarkdown() ?? inputContent): Promise<void> => {
+    if (runtimeSwitchInFlightRef.current) {
+      toast.info('内核选择正在保存，请稍候发送')
+      return
+    }
     const text = latestText.trim()
     const goalCommand = parseGoalCommand(text)
     if (goalCommand.type !== 'not_goal') {
@@ -2473,7 +2430,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     (allAskUserRequestsForQueue.get(sessionId)?.length ?? 0) > 0 ||
     (allExitPlanRequestsForQueue.get(sessionId)?.length ?? 0) > 0 ||
     (allPermissionRequestsForQueue.get(sessionId)?.length ?? 0) > 0
-  const canSendQueuedNow = messagesLoaded && !presetSelectionRequired && !!agentChannelId &&
+  const canSendQueuedNow = !runtimeSwitchInFlight && messagesLoaded && !presetSelectionRequired && !!agentChannelId &&
     hasAvailableModel && !hasBlockingRequests && !streamState?.stopping &&
     !streamState?.compactInFlight && !streamState?.isCompacting
 
@@ -2641,7 +2598,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const handleCompact = React.useCallback((): void => {
     // 防护：streaming（active turn 进行中）或 backgroundWaiting（后台任务等待态）
     // 都不允许发送 /compact，避免与活跃的 agent session 冲突导致卡死
-    if (!agentChannelId || !hasAvailableModel || streaming || backgroundWaiting) return
+    if (runtimeSwitchInFlightRef.current || !agentChannelId || !hasAvailableModel || streaming || backgroundWaiting) return
     // 防重入：压缩 run 在飞行中（乐观 isCompacting 尚未生效的毫秒级窗口 + 整个压缩 run 期间）
     // 拒绝第二次压缩指令，避免一次按压（touch + 合成 mouse 等）发出两条 /compact。
     if (compactInFlightRef.current) return
@@ -2743,8 +2700,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
    *
    * 只做渲染侧的副作用（跟随滚动、清错、置流式态）；消息本身由主进程持久化后回传。
    */
-  const sendUserMessageInCurrentSession = React.useCallback((userMessage: string): void => {
-    if (!agentChannelId || !hasAvailableModel || streaming || backgroundWaiting) return
+  const sendUserMessageInCurrentSession = React.useCallback((userMessage: string, draftOnFailure = userMessage, onFailure?: () => void): void => {
+    if (runtimeSwitchInFlightRef.current || !agentChannelId || !hasAvailableModel || streaming || backgroundWaiting) return
     requestFollow(sessionId)
 
     // 清除错误状态
@@ -2788,8 +2745,103 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       startedAt: streamStartedAt,
       uuid: messageUuid,
       permissionModeOverride: permissionMode,
-    }).catch(console.error)
-  }, [sessionId, agentChannelId, agentModelId, hasAvailableModel, currentWorkspaceId, sessionAgentRuntime, streaming, backgroundWaiting, setAgentStreamErrors, setStreamingStates, permissionMode, requestFollow, appendOptimisticPersistedMessage])
+    }).catch((error) => {
+      console.error('[AgentView] 重新发送消息失败:', error)
+      removeOptimisticPersistedMessage(messageUuid)
+      setInputContent(draftOnFailure)
+      setInputHtmlContent('')
+      onFailure?.()
+      setStreamingStates((prev) => {
+        const current = prev.get(sessionId)
+        if (!current) return prev
+        const map = new Map(prev)
+        map.set(sessionId, { ...current, running: false })
+        return map
+      })
+      toast.error('发送消息失败', { description: error instanceof Error ? error.message : String(error) })
+    })
+  }, [sessionId, agentChannelId, agentModelId, hasAvailableModel, currentWorkspaceId, sessionAgentRuntime, streaming, backgroundWaiting, setAgentStreamErrors, setStreamingStates, permissionMode, requestFollow, appendOptimisticPersistedMessage, removeOptimisticPersistedMessage, setInputContent, setInputHtmlContent])
+
+  /**
+   * 进入「修改重发」原地编辑态：编辑框就渲染在那条消息里（与 Chat 的「编辑后重发」同一位置）。
+   *
+   * 目标可以是任意用户消息（对齐 Chat 模式的「编辑后重发」），不只是最后一条。
+   */
+  const handleEditUserMessage = React.useCallback((userMessageUuid: string): void => {
+    if (streaming || backgroundWaiting || streamState?.stopping || runningDelegationCount > 0) return
+    setEditingUserMessageUuid(userMessageUuid)
+  }, [backgroundWaiting, runningDelegationCount, streaming, streamState?.stopping])
+
+  const handleCancelEditUserMessage = React.useCallback((): void => {
+    setEditingUserMessageUuid(null)
+  }, [])
+
+  /**
+   * 提交原地编辑：回退到该消息所在轮之前，再重发编辑后的正文。
+   *
+   * 任何被拦下的情况都保留编辑态（编辑框里的草稿不会丢）。
+   */
+  const handleSubmitEditUserMessage = React.useCallback(async (request: EditResendRequest): Promise<boolean> => {
+    if (!messagesLoaded || !agentChannelId || !hasAvailableModel || presetSelectionRequired) return false
+    const target = resolveRewriteTarget(persistedSDKMessages, request.userMessageUuid)
+    if (!target) {
+      toast.error('修改重发失败', { description: '在当前已加载的历史里找不到这条消息，请刷新会话后重试' })
+      return false
+    }
+    // 安全判据（会话空闲 / 历史窗口边界）见 resolveRewriteSubmitBlock
+    const blocked = resolveRewriteSubmitBlock({
+      sessionActive: runtimeSwitchInFlightRef.current || streaming || backgroundWaiting || Boolean(streamState?.stopping),
+      hasEarlierHistory: historyHasMoreRef.current,
+      target,
+    })
+    if (blocked) {
+      const message = REWRITE_SUBMIT_BLOCK_MESSAGES[blocked]
+      toast.error(message.title, { description: message.description })
+      return false
+    }
+    const finalMessage = `${request.preservedPrefix ? `${request.preservedPrefix}\n\n` : ''}${request.text.trim()}`.trim()
+    if (!finalMessage) return false
+
+    try {
+      const result = await window.electronAPI.rewindSession({
+        sessionId,
+        ...(target.kind === 'rewind' ? { assistantMessageUuid: target.rewindToAssistantUuid } : {}),
+      })
+      store.set(agentMessageRefreshAtom, (prev) => {
+        const map = new Map(prev)
+        map.set(sessionId, (prev.get(sessionId) ?? 0) + 1)
+        return map
+      })
+      store.set(agentDiffRefreshVersionAtom, (prev) => {
+        const map = new Map(prev)
+        map.set(sessionId, (prev.get(sessionId) ?? 0) + 1)
+        return map
+      })
+      const fileRewind = result.fileRewind
+      // 文件恢复可能因占用/基线不完整而降级；必须明确告知，否则用户会误以为工作区已回到该时刻
+      const warnings = [
+        ...(fileRewind && !fileRewind.canRewind && fileRewind.error ? [`文件未回退：${fileRewind.error}`] : []),
+        ...((fileRewind?.skippedFiles?.length ?? 0) > 0 ? [`${fileRewind!.skippedFiles!.length} 个文件被占用或过大而未回退`] : []),
+        ...(fileRewind?.incomplete ? ['基线不完整，未确认的新增文件已保留'] : []),
+      ]
+      if (warnings.length > 0) {
+        toast.warning('已重发修改后的消息，但文件未完全回退', { description: warnings.join('；') })
+      }
+      // 先清编辑态再发送（回退后这条消息已从历史里消失，编辑框不能再挂在那里）
+      setEditingUserMessageUuid(null)
+      sendUserMessageInCurrentSession(finalMessage, request.text.trim())
+      store.set(stoppedByUserSessionsAtom, (prev: Set<string>) => {
+        if (!prev.has(sessionId)) return prev
+        const next = new Set(prev)
+        next.delete(sessionId)
+        return next
+      })
+      return true
+    } catch (error) {
+      toast.error('修改重发失败', { description: error instanceof Error ? error.message : String(error) })
+      return false
+    }
+  }, [agentChannelId, backgroundWaiting, hasAvailableModel, messagesLoaded, persistedSDKMessages, presetSelectionRequired, sendUserMessageInCurrentSession, sessionId, store, streaming, streamState?.stopping])
 
   /** 重试：在当前会话中重新发送最后一条用户消息（不截断历史，追加新一轮） */
   const handleRetry = React.useCallback((): void => {
@@ -2954,7 +3006,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
    * 重新生成最后一轮：截断最后一轮（一问一答）后重发该用户消息；
    * 首轮就失败时没有锚点，改为清空整段对话后重发。
    *
-   * 两个入口共用它：最后一条用户消息下的重新生成按钮，以及最新一轮错误卡片的「重试」。
+   * 唯一入口是最新一轮错误卡片的「重试」（用户消息下的重新生成按钮已移除，改走「修改重发」）。
    * 复用回退能力完成截断（含文件快照恢复），所以需要确认弹窗。
    */
   const handleRegenerateLastTurn = React.useCallback((): void => {
@@ -3092,8 +3144,9 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
 
   const hasTextInput = hasInputDraft
   const isCompacting = contextStatus.isCompacting
-  const canSend = messagesLoaded && !presetSelectionRequired && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput) && !isCompacting && !streamState?.stopping
+  const canSend = !runtimeSwitchInFlight && messagesLoaded && !presetSelectionRequired && (hasTextInput || pendingFiles.length > 0 || !!suggestion) && agentChannelId !== null && hasAvailableModel && (!streaming || hasTextInput) && !isCompacting && !streamState?.stopping
   const voiceDictationEnabled = useAtomValue(voiceDictationEnabledAtom)
+  const composerToolbarPreferences = useAtomValue(composerToolbarPreferencesAtom)
   useLoadVoiceDictationSettings()
 
   const taskGraphEnabled = Boolean(
@@ -3102,8 +3155,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     && !isAgentPresetToolGroupDisabled(sessionBoundPreset.disabledToolGroups, 'task-graph'),
   )
 
-  const inputToolbarItems = React.useMemo<ToolbarItem[]>(() => {
-    const items: ToolbarItem[] = [
+  const inputToolbarItems = React.useMemo<ComposerToolbarItem[]>(() => {
+    const items: ComposerToolbarItem[] = [
     {
       key: 'model',
       node: (
@@ -3122,6 +3175,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       node: (
         <AgentRuntimeSelector
           runtime={sessionAgentRuntime}
+          locked={!canSelectAgentSessionRuntime(sessionMeta)}
           disabled={streaming || backgroundWaiting || runtimeSwitchInFlight}
           onChange={handleAgentRuntimeChange}
         />
@@ -3142,7 +3196,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
               ? { type: 'disabled' as const }
               : { type: 'adaptive' as const }
             setAgentThinking(next)
-            window.electronAPI.updateSettings({ agentThinking: next })
+            updateComposerSettings({ agentThinking: next })
           }}
           onAgentEffortUpdated={(updatedSession) => {
             setAgentSessions((sessions) => sessions.map((session) => (
@@ -3200,12 +3254,11 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       node: <ToolbarGraphButton sessionId={sessionId} onClick={() => { setGraphDialogOpen(true); setGraphRefreshVersion(v => v + 1) }} />,
     }] : []),
   ]
-    return items
+    return createAgentComposerToolbarItems(items, composerToolbarPreferences)
   }, [
     agentChannelIds,
     sessionAgentRuntime,
-    agentChannelId,
-    agentModelId,
+    externalSelectedModel,
     handleModelSelect,
     handleAgentRuntimeChange,
     sessionId,
@@ -3214,14 +3267,14 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     sessionMeta,
     setAgentThinking,
     handleOpenFileDialog,
-    agentChannelId,
     handleAttachFolder,
     contextStatus.inputTokens,
     contextStatus.outputTokens,
-    contextStatus.cacheReadTokens,
-    contextStatus.cacheCreationTokens,
     contextStatus.contextWindow,
     contextStatus.isCompacting,
+    contextStatus.cacheReadTokens,
+    contextStatus.cacheCreationTokens,
+    contextStatus.usageUpdatedAt,
     streaming,
     backgroundWaiting,
     runtimeSwitchInFlight,
@@ -3232,6 +3285,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     sessionBoundPreset,
     taskGraphEnabled,
     voiceDictationEnabled,
+    composerToolbarPreferences,
   ])
 
   const inputTrailingNode = (streaming || streamState?.stopping) ? (
@@ -3313,13 +3367,19 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
           persistedSDKMessages={persistedSDKMessages}
           streaming={streaming}
           streamState={streamState}
+          runningDelegationCount={runningDelegationCount}
           liveMessages={liveMessages}
           sessionPath={sessionPath}
           attachedDirs={allAttachedDirs}
           stoppedByUser={stoppedByUser}
+          streamError={agentError}
           onRetry={handleRetry}
           onRetryInNewSession={handleRetryInNewSession}
           onRegenerateLastTurn={canRegenerateLastTurn ? handleRegenerateLastTurn : undefined}
+          onEditUserMessage={handleEditUserMessage}
+          onSubmitEditUserMessage={handleSubmitEditUserMessage}
+          onCancelEditUserMessage={handleCancelEditUserMessage}
+          editingUserMessageUuid={editingUserMessageUuid}
           onFork={canFork ? handleFork : undefined}
           onExplore={canExplore ? handleExplore : undefined}
           onRewind={handleRewindRequest}
@@ -3374,8 +3434,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
               </div>
             )}
 
-            {/* 附件 + 引用选中文本 Chip + 中断说明 Chip（同排并排） */}
-            {(pendingFiles.length > 0 || currentQuotedSelection || (currentAgentInterruption && !streaming && !streamState?.stopping)) && (
+            {/* 附件 + 引用选中文本 Chip */}
+            {(pendingFiles.length > 0 || currentQuotedSelection) && (
               <div className="flex flex-wrap gap-2 px-3 pt-2.5 pb-1.5">
                 {pendingFiles.map((file) => (
                   <AttachmentPreviewItem
@@ -3392,17 +3452,6 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
                     text={currentQuotedSelection.text}
                     filePath={currentQuotedSelection.sourceLabel ?? currentQuotedSelection.filePath}
                     onRemove={handleRemoveQuotedSelection}
-                  />
-                )}
-                {currentAgentInterruption && !streaming && !streamState?.stopping && (
-                  <QuotedSelectionChip
-                    variant="interruption"
-                    interruptionTone={getAgentInterruptionTone(currentAgentInterruption.reason)}
-                    tooltip="中断原因"
-                    description="中断原因"
-                    text={currentAgentInterruption.label}
-                    filePath={currentAgentInterruption.label}
-                    onRemove={handleRemoveInterruption}
                   />
                 )}
               </div>
@@ -3496,7 +3545,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
             />
 
             {/* Footer 工具栏 — 容器变窄时尾部按钮自动折叠进「更多」Popover */}
-              <InputToolbarOverflow items={inputToolbarItems} trailing={inputTrailingNode} />
+              <ComposerToolbar items={inputToolbarItems} trailing={inputTrailingNode} />
             </div>
 
           </div>

@@ -188,19 +188,50 @@ export function normalizeOpenAIBaseUrlForSdk(baseUrl: string): string {
 }
 
 /**
+ * 取 URL 的 path（不含 query/hash）。
+ *
+ * 无法按 URL 解析时退化为字符串切分，与 mapUrlPath 的容错保持一致，
+ * 便于对 `host/v1` 这类缺 scheme 的输入做形态判断。
+ */
+function extractUrlPath(rawUrl: string): string {
+  const head = rawUrl.trim().split(/[?#]/, 1)[0] ?? ''
+  try {
+    return new URL(head).pathname
+  } catch {
+    return head.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '').replace(/^[^/]*/, '')
+  }
+}
+
+/**
  * 解析 OpenAI Chat Completions 请求地址。
  *
- * OpenAI 兼容格式（custom）要求用户直接填写完整请求端点。
- * 内置 OpenAI 协议供应商仍允许填写协议根地址，例如：
+ * 通用兼容渠道（custom）允许直接填写完整请求端点，此时原样使用。
+ * 但同一个 Base URL 还要供 Pi（Agent）消费，而 Pi 需要的是**协议根地址**
+ * （它自行拼接 /chat/completions，并在注册前剥掉用户误填的端点后缀），
+ * 因此用户把地址配成 `/v1` 这类协议根是常见且合理的写法。
+ * 而直接 POST 协议根会落到站点路由上：New API / one-api 等 Go 网关返回
+ * `404 page not found`，部分中转站直接返回站点首页 HTML。
+ * 所以这里只对**形态明确的协议根**补全端点，其它自定义路由一律不猜：
  * - "https://api.example.com/v1" → "https://api.example.com/v1/chat/completions"
- * - custom: "https://api.example.com/v1/chat/completions" → 原样使用
+ * - "https://api.example.com" → "https://api.example.com/v1/chat/completions"
+ * - "https://gateway.example.com/v1/proxy/chat" → 原样使用（商业代管 relay 等自定义路由）
+ * - custom 已填完整端点 → 原样使用（去尾斜杠）
  */
 export function resolveOpenAIChatCompletionsUrl(baseUrl: string, provider: ProviderType = 'openai'): string {
   if (provider === 'ollama') {
     return mapUrlPath(baseUrl, (path) => `${path.replace(/\/v1$/, '')}/v1/chat/completions`)
   }
   if (provider === 'custom') {
-    return trimTrailingUrlPathSlash(baseUrl)
+    const normalized = trimTrailingUrlPathSlash(baseUrl)
+    // 未配置地址的渠道保持空值语义，不凭空造出相对路径
+    if (!normalized) return normalized
+    if (hasPathSuffix(normalized, '/chat/completions')) return normalized
+    const path = extractUrlPath(normalized)
+    // 裸域名/站点根：按 OpenAI 兼容网关的通行约定补 /v1/chat/completions
+    if (path === '' || path === '/') return appendUrlPath(normalized, '/v1/chat/completions')
+    // 版本根（/v1、/api/v1 等）：只补端点后缀
+    if (/\/v\d+$/.test(path)) return appendUrlPath(normalized, '/chat/completions')
+    return normalized
   }
   if (hasPathSuffix(baseUrl, '/chat/completions')) {
     return trimTrailingUrlPathSlash(baseUrl)

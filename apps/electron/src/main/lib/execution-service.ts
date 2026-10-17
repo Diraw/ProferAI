@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import type { CommandExecutionCallbacks } from '@profer/agent-runtime'
 import type { AgentRuntimeEnv } from './agent-runtime-env'
-import { executeLocalBashCommand, executeWslBashCommand } from './adapters/pi-agent-adapter'
+import { executeLocalBashCommand, executeWslBashCommand } from './pi-shell-execution'
 import { executePowerShellCommand } from './adapters/pi-powershell-tool'
 import { createCommandExecutionFailure, type CommandExecutionResult, type StructuredExecRequest } from './command-execution'
 import type { ProcessHandle, ProcessHandleLauncher, ProcessHandleRuntime } from './process-handle'
@@ -11,6 +12,7 @@ export interface ExecutionRequest extends StructuredExecRequest {
   runtime?: ProcessHandleRuntime
   launcher?: ProcessHandleLauncher
   runtimeEnv?: AgentRuntimeEnv
+  callbacks?: CommandExecutionCallbacks
 }
 
 export interface ExecutionSnapshot {
@@ -30,6 +32,8 @@ interface ActiveExecution {
 }
 
 export interface PiExecutionServiceOptions {
+  /** 完成快照仅保留最近若干条，避免长会话累计全部 stdout/stderr。 */
+  maxCompletedExecutions?: number
   runtimeEnv?: AgentRuntimeEnv
   execute?: (request: ExecutionRequest, signal: AbortSignal, onSpawn: (pid: number) => void) => Promise<CommandExecutionResult>
 }
@@ -56,13 +60,16 @@ function createPiExecutor(options: PiExecutionServiceOptions): NonNullable<PiExe
         signal,
         executable: request.shell,
         onSpawn,
+        onStdout: request.callbacks?.onStdout,
+        onStderr: request.callbacks?.onStderr,
       })
       return result
     }
 
-    const useWsl = launcherFor(request) === 'wsl' || options.runtimeEnv?.shellKind === 'wsl'
+    const runtimeEnv = request.runtimeEnv ?? options.runtimeEnv
+    const useWsl = launcherFor(request) === 'wsl' || runtimeEnv?.shellKind === 'wsl'
     if (useWsl) {
-      if (!options.runtimeEnv) {
+      if (!runtimeEnv) {
         return createCommandExecutionFailure({
           shell: request.shell,
           cwd: request.cwd,
@@ -72,20 +79,21 @@ function createPiExecutor(options: PiExecutionServiceOptions): NonNullable<PiExe
         })
       }
       return executeWslBashCommand({
-        runtimeEnv: options.runtimeEnv,
+        runtimeEnv,
         command: request.command,
         cwd: request.cwd,
         env: request.env,
         timeoutMs: request.timeoutMs,
         signal,
         shell: request.shell,
-      }, { onSpawn })
+        maxOutputBytes: request.maxOutputBytes,
+      }, { ...request.callbacks, onSpawn })
     }
 
     return executeLocalBashCommand({
       ...request,
       signal,
-    }, { onSpawn })
+    }, { ...request.callbacks, onSpawn })
   }
 }
 
@@ -98,6 +106,7 @@ export function createExecutionService(options: PiExecutionServiceOptions = {}):
   const executeUnderlying = options.execute ?? createPiExecutor(options)
   const active = new Map<string, ActiveExecution>()
   const completed = new Map<string, ExecutionSnapshot>()
+  const maxCompleted = Math.max(0, Math.floor(options.maxCompletedExecutions ?? 32))
 
   return {
     async execute(request): Promise<CommandExecutionResult> {
@@ -118,11 +127,13 @@ export function createExecutionService(options: PiExecutionServiceOptions = {}):
       active.set(handleId, { controller, snapshot })
 
       const onAbort = (): void => controller.abort()
+      if (request.signal?.aborted) controller.abort()
       request.signal?.addEventListener('abort', onAbort, { once: true })
       try {
         const result = await executeUnderlying(request, controller.signal, (pid) => {
           handle.shellPid = pid
           handle.status = 'running'
+          request.callbacks?.onSpawn?.(pid)
         })
         snapshot.result = result
         handle.status = result.aborted || result.timedOut || result.signal ? 'killed' : result.errorKind ? 'failed' : 'exited'
@@ -146,7 +157,11 @@ export function createExecutionService(options: PiExecutionServiceOptions = {}):
       } finally {
         request.signal?.removeEventListener('abort', onAbort)
         active.delete(handleId)
-        completed.set(handleId, snapshot)
+        if (maxCompleted > 0) {
+          completed.delete(handleId)
+          completed.set(handleId, snapshot)
+          while (completed.size > maxCompleted) completed.delete(completed.keys().next().value!)
+        }
       }
     },
 

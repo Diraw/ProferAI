@@ -21,6 +21,7 @@ import {
   RECOMMENDATION_IPC_CHANNELS,
   AUTOMATION_DEFAULT_SESSION_MODE,
   type AgentRuntime,
+  type AgentSendInput,
   type Automation,
   type AutomationRun,
   normalizeAgentRuntime,
@@ -38,7 +39,7 @@ import { createAgentSession, updateAgentSessionMeta, getAgentSessionMeta } from 
 import { getAgentWorkspace } from './agent-workspace-manager'
 import { resolvePresetId, getDefaultPresetId } from './agent-preset-manager'
 import { getSessionContextUsageRatio } from './agent-session-usage'
-import { runAgentHeadless, isAgentSessionActive } from './agent-service'
+import { runAgentHeadless, runAgentRuntimeHeadless, isAgentSessionActive, peekAgentRunClaimFailureForSession, describeAgentRunRejection } from './agent-service'
 import { notifyAutomationRunFinished } from './automation-notification-service'
 
 /** tick 周期：每 30s 检查一次到期任务（短轮询，抗休眠漂移） */
@@ -146,7 +147,9 @@ export async function runAutomation(automation: Automation, manual = false): Pro
     if (lastSessionMeta?.automationGraduated) {
       console.log(`[定时任务] ${automation.name} 上次会话已被用户接管，本次自动开新会话`)
     }
-    if (automation.lastSessionId && lastSessionMeta && !lastSessionMeta.automationGraduated) {
+    // 任务改内核时另开会话；旧会话及其 transcript/检查点保留。
+    if (automation.lastSessionId && lastSessionMeta && !lastSessionMeta.automationGraduated
+      && normalizeAgentRuntime(lastSessionMeta.agentRuntime) === agentRuntime) {
       if (sessionMode === 'reuse') {
         reuseSessionId = automation.lastSessionId
       } else if (
@@ -189,13 +192,6 @@ export async function runAutomation(automation: Automation, manual = false): Pro
         updateAgentSessionMeta(targetSessionId, { presetId: resolvedPresetId })
         console.log(`[定时任务] ${automation.name} 已同步预设到复用会话: ${resolvedPresetId}`)
       }
-    }
-    const previousAgentRuntime: AgentRuntime = targetSessionMeta?.agentRuntime ?? 'claude'
-    if (targetSessionMeta && previousAgentRuntime !== agentRuntime) {
-      updateAgentSessionMeta(targetSessionId, {
-        agentRuntime,
-        sdkSessionId: undefined,
-      })
     }
 
     await new Promise<void>((resolveRun) => {
@@ -242,27 +238,51 @@ export async function runAutomation(automation: Automation, manual = false): Pro
         console.warn(`[定时任务] ${automation.name} 执行超时，强制结束`)
       }, RUN_TIMEOUT_MS)
 
-      runAgentHeadless(
-        {
+      const headlessInput: AgentSendInput = {
+        sessionId: targetSessionId,
+        userMessage: automation.prompt + '\n<!--PROMA_SCHEDULED_RUN-->',
+        automationContext: `这是 Profer 定时任务「${automation.name}」的自动执行（ID: ${automation.id}，${formatScheduleLabel(automation)}）。这本身就是定时任务，不要建议用户再创建定时任务。直接执行任务即可。如发现本任务连续失败、输出价值低、频率不合适或提示词不完整，可以使用 automation 工具读取并更新当前任务。`,
+        channelId: automation.channelId,
+        modelId: automation.modelId,
+        agentRuntime,
+        workspaceId: automation.workspaceId,
+        permissionModeOverride: automation.permissionMode ?? 'bypassPermissions',
+        triggeredBy: 'automation',
+        startedAt: runAt,
+      }
+      const callbacks = {
+        source: 'automation' as const,
+        onError: (error: string) => finish('error', error),
+        onComplete: () => finish('success'),
+        onTitleUpdated: () => { /* 子会话标题不需要特殊处理 */ },
+      }
+      // 开关只读一次：既保证「全仓只有本入口读它」的可审计性，也让预检与分支使用同一个值。
+      const useRuntimeAutomation = process.env.PROFER_RUNTIME_AUTOMATION === '1'
+      // 未取得执行权：按既有 skipped 语义记录，**不**写失败运行、**不**计连续失败。
+      // 预检与 runAgentRuntimeHeadless 之间全是同步语句，互斥由 coordinator 的 claim 最终保证。
+      const automationBlocked = useRuntimeAutomation
+        ? peekAgentRunClaimFailureForSession(targetSessionId, agentRuntime)
+        : undefined
+      if (automationBlocked) {
+        appendRun(automation.id, {
+          runAt,
           sessionId: targetSessionId,
-          userMessage: automation.prompt + '\n<!--PROMA_SCHEDULED_RUN-->',
-          automationContext: `这是 Profer 定时任务「${automation.name}」的自动执行（ID: ${automation.id}，${formatScheduleLabel(automation)}）。这本身就是定时任务，不要建议用户再创建定时任务。直接执行任务即可。如发现本任务连续失败、输出价值低、频率不合适或提示词不完整，可以使用 automation 工具读取并更新当前任务。`,
-          channelId: automation.channelId,
-          modelId: automation.modelId,
-          agentRuntime,
-          workspaceId: automation.workspaceId,
-          permissionModeOverride: automation.permissionMode ?? 'bypassPermissions',
-          triggeredBy: 'automation',
-          startedAt: runAt,
-        },
-        {
-          // 定时自动化：来源与 triggeredBy 一致标为 automation（旧实现误标成 'bridge'）。
-          source: 'automation',
-          onError: (error) => finish('error', error),
-          onComplete: () => finish('success'),
-          onTitleUpdated: () => { /* 子会话标题不需要特殊处理 */ },
-        },
-      ).catch((err) => {
+          status: 'skipped',
+          skipReason: describeAgentRunRejection(automationBlocked),
+        })
+        broadcastChanged()
+        resolveRun()
+        return
+      }
+      // 新旧两条分支共用同一组 callbacks：终态字段集不再随入口漂移（旧分支也是 onError/onComplete）。
+      // cwd 不再由入口覆写：统一 host/context 按会话级工作目录推导（与旧链同源）。
+      const runtimeRun = useRuntimeAutomation
+        ? runAgentRuntimeHeadless(
+            headlessInput,
+            callbacks,
+          )
+        : runAgentHeadless(headlessInput, callbacks)
+      runtimeRun.catch((err) => {
         finish('error', err instanceof Error ? err.message : '未知错误')
       })
     })

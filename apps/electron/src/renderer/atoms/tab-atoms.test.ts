@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { closeTab, createPluginTabId, getPersistableTabState, openPluginTab, openTab, selectSameModeCloseFallback, tabContextSessionId, type TabItem } from './tab-atoms'
+import { closeTab, closeTabs, createPluginTabId, getPersistableTabState, openPluginTab, openTab, selectSameModeCloseFallback, tabContextSessionId, type TabItem } from './tab-atoms'
 
 const tab = (id: string): TabItem => ({ id, type: 'agent', sessionId: id, title: id })
 
@@ -171,4 +171,44 @@ test('关闭回退：引擎结果已是同类/关闭工作 Tab/非激活关闭�
   expect(selectSameModeCloseFallback(remaining, preview, true, ['agent-b'], 'agent-b')).toBeNull()
   // 非激活关闭（active 没变）
   expect(selectSameModeCloseFallback(remaining, tab('agent-x'), false, ['chat-c'], 'chat-c')).toBeNull()
+})
+
+// ===== 批量关闭（侧边栏「当前会话」右键菜单的关闭其他 / 关闭所有）=====
+
+const SCRATCH: TabItem = { id: '__scratch-pad__', type: 'scratch', sessionId: '__scratch-pad__', title: 'Scratch Pad' }
+
+test('批量关闭全部入口：一次提交，活动入口回退 Scratch Pad，会话的工作 Tab 连带移除', () => {
+  const opened = openTab([tab('a')], { type: 'preview', sessionId: 'a', title: '预览：a.ts', filePath: '/w/a.ts' })
+  const tabs = [...opened.tabs, tab('b')]
+  const result = closeTabs(tabs, 'a', ['a', 'b'], ['b', 'a'])
+  expect(result.tabs.map((item) => item.id)).toEqual(['__scratch-pad__'])
+  expect(result.activeTabId).toBe('__scratch-pad__')
+  expect(result.closedTabs.map((item) => item.id)).toEqual(['a', 'b'])
+  expect(result.mru).toEqual([])
+})
+
+test('批量关闭其他入口：只关掉传入入口，当前入口及其工作 Tab 保留且活动不变', () => {
+  const opened = openTab([tab('a')], { type: 'preview', sessionId: 'a', title: '预览：a.ts', filePath: '/w/a.ts' })
+  const previewId = opened.tabs.find((item) => item.type === 'preview')!.id
+  const tabs = [...opened.tabs, tab('b')]
+  const result = closeTabs(tabs, 'a', ['b'], ['a', 'b'])
+  expect(result.tabs.map((item) => item.id)).toEqual(['__scratch-pad__', 'a', previewId])
+  expect(result.activeTabId).toBe('a')
+  expect(result.closedTabs.map((item) => item.id)).toEqual(['b'])
+})
+
+test('批量关闭跳过已被连带关闭的入口，不重复计入 closedTabs', () => {
+  const opened = openTab([tab('a')], { type: 'preview', sessionId: 'a', title: '预览：a.ts', filePath: '/w/a.ts' })
+  const previewId = opened.tabs.find((item) => item.type === 'preview')!.id
+  const result = closeTabs(opened.tabs, 'a', ['a', previewId], ['a'])
+  expect(result.closedTabs.map((item) => item.id)).toEqual(['a'])
+  expect(result.tabs.map((item) => item.id)).toEqual(['__scratch-pad__'])
+})
+
+test('Scratch Pad 不参与批量关闭，也不产生任何变更', () => {
+  const tabs = [SCRATCH, tab('a')]
+  const result = closeTabs(tabs, 'a', ['__scratch-pad__'], ['a'])
+  expect(result.closedTabs).toEqual([])
+  expect(result.tabs).toBe(tabs)
+  expect(result.activeTabId).toBe('a')
 })

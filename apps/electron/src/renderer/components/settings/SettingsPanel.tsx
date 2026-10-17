@@ -70,6 +70,7 @@ import { ProxySettings } from "./ProxySettings";
 import { PluginSettings } from "./PluginSettings";
 import { DeveloperSettings } from "./DeveloperSettings";
 import { DevicesSettings } from "./DevicesSettings";
+import { ComposerToolbarSettings } from "./ComposerToolbarSettings";
 import { matchesSettingsSearch } from "./settings-search";
 
 /** 设置 Tab 定义 */
@@ -107,6 +108,7 @@ const MODEL_GROUP_ITEMS: SettingsTabItem[] = [
 const EXPERIENCE_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "appearance", label: "外观设置", icon: <Palette size={16} />, searchTerms: ["主题", "深色", "浅色", "暗色", "亮色", "缩放", "字体", "字号", "皮肤", "Logo", "图标", "Dock"] },
   { id: "shortcuts", label: "快捷键管理", icon: <Keyboard size={16} />, searchTerms: ["快捷键", "键盘", "快捷方式", "录制"] },
+  { id: "composer-toolbar", label: "输入工具栏", icon: <SlidersHorizontal size={16} />, searchTerms: ["工具栏", "排序", "显示", "隐藏", "输入区", "Chat", "Agent"] },
 ];
 
 /** 连接：远程连接 / 代理 */
@@ -166,6 +168,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
       return <AgentSettings />;
     case "tools":
       return <ToolSettings />;
+    case "composer-toolbar":
+      return <ComposerToolbarSettings />;
     case "appearance":
       return <AppearanceSettings />;
     case "about":
@@ -285,7 +289,7 @@ export function SettingsPanel({
       : SYSTEM_GROUP_ITEMS
 
     const allGroups: SettingsTabGroup[] = [
-      { items: [{ id: "general", label: "通用", icon: <Settings size={16} />, searchTerms: ["语言", "启动", "开机启动", "Shell", "终端", "新标签页", "URL"] }, { id: "usage", label: "使用偏好", icon: <SlidersHorizontal size={16} />, searchTerms: ["通知", "声音", "归档", "会话", "对话", "输入框", "粘贴", "Markdown", "预览", "紧凑模式"] }] },
+      { items: [{ id: "general", label: "通用", icon: <Settings size={16} />, searchTerms: ["语言", "启动", "开机启动", "Shell", "终端", "新标签页", "URL"] }, { id: "usage", label: "使用偏好", icon: <SlidersHorizontal size={16} />, searchTerms: ["通知", "声音", "归档", "会话", "对话", "用户消息", "头像", "左右", "输入框", "粘贴", "Markdown", "预览", "紧凑模式"] }] },
       { title: "账户", items: ACCOUNT_GROUP_ITEMS },
       { title: "模型与能力", items: modelItems },
       { title: "体验", items: EXPERIENCE_GROUP_ITEMS },

@@ -1,6 +1,6 @@
 {
   "name": "@profer/electron",
-  "version": "0.16.2",
+  "version": "0.16.10",
   "description": "Profer",
   "main": "dist/main.cjs",
   "author": "Profer Team",
@@ -88,6 +88,9 @@
     "@emoji-mart/react": "^1.1.1",
     "@larksuiteoapi/node-sdk": "^1.65.0",
     "@profer/agent-fabric": "workspace:*",
+    "@profer/agent-provider-claude": "workspace:*",
+    "@profer/agent-provider-pi": "workspace:*",
+    "@profer/agent-runtime": "workspace:*",
     "@profer/core": "workspace:*",
     "@profer/plugin-api": "workspace:*",
     "@profer/project-core": "workspace:*",

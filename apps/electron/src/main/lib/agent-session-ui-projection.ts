@@ -1,6 +1,7 @@
 import {
   PROFER_DEFAULT_PERMISSION_MODE,
   normalizeAgentRuntime,
+  canSelectAgentSessionRuntime,
   type AgentSessionMeta,
   type AgentSessionUiProjection,
 } from '@profer/shared'
@@ -26,6 +27,7 @@ export function buildAgentSessionUiProjection(meta: AgentSessionMeta): AgentSess
     channelId: meta.channelId ?? null,
     modelId: meta.modelId ?? null,
     agentRuntime: normalizeAgentRuntime(meta.agentRuntime),
+    agentRuntimeLocked: !canSelectAgentSessionRuntime(meta),
     permissionMode: meta.permissionMode ?? PROFER_DEFAULT_PERMISSION_MODE,
     presetId: meta.presetId ?? null,
     presetReference,

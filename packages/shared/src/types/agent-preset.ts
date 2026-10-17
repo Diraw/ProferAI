@@ -228,9 +228,8 @@ export const AGENT_PRESET_CAPABILITY_GROUPS = [
     ],
   }),
   capabilityGroup({
-    id: 'clipboard', label: '系统剪贴板', hint: '读取和写入系统剪贴板文本',
+    id: 'clipboard', label: '系统剪贴板', hint: '写入系统剪贴板文本',
     tools: [
-      capabilityTool('clipboard_read_text', '读取剪贴板', '读取系统剪贴板文本'),
       capabilityTool('clipboard_write_text', '写入剪贴板', '写入系统剪贴板文本', 'write'),
     ],
   }),

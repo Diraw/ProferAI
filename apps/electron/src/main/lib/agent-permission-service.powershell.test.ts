@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { AgentPermissionService, type CanUseToolOptions } from './agent-permission-service'
+import { AgentPermissionService, type CanUseToolOptions, type PermissionUpdate } from './agent-permission-service'
 
 const OPTIONS: CanUseToolOptions = {
   signal: new AbortController().signal,
@@ -31,7 +31,30 @@ describe('AgentPermissionService PowerShell handling', () => {
     expect(request.command).toBe('Get-Content $HOME\\.ssh\\id_rsa')
     expect(request.description).toContain('执行 PowerShell')
     service.respondToPermission(request.requestId, 'deny', false)
-    expect((await pending).behavior).toBe('deny')
+    await expect(pending).resolves.toMatchObject({ behavior: 'deny', toolUseID: 'tool-use-id', decisionClassification: 'user_reject' })
+  })
+
+  test('Given SDK permission metadata When a user approves permanently Then request and result preserve correlation and permission updates', async () => {
+    const service = new AgentPermissionService()
+    const requests: Array<import('@profer/shared').PermissionRequest> = []
+    const suggestions: PermissionUpdate[] = [{ type: 'addRules', rules: [{ toolName: 'Write' }], behavior: 'allow', destination: 'session' }]
+    const pending = service.createCanUseTool('metadata-session', (request) => requests.push(request))('Write', { file_path: '/tmp/fixture' }, {
+      signal: new AbortController().signal,
+      toolUseID: 'tool-use-42',
+      suggestions: [...suggestions],
+      blockedPath: '/tmp/fixture',
+      decisionReason: 'classifier requested confirmation',
+      decisionReasonType: 'classifier',
+      classifierApprovable: true,
+      title: 'Write fixture',
+      displayName: 'Write',
+      description: 'Write fixture content',
+    })
+    expect(requests[0]).toMatchObject({ toolUseID: 'tool-use-42', blockedPath: '/tmp/fixture', decisionReasonType: 'classifier', suggestions })
+    service.respondToPermission(requests[0]!.requestId, 'allow', true)
+    await expect(pending).resolves.toMatchObject({ behavior: 'allow', toolUseID: 'tool-use-42', decisionClassification: 'user_permanent', updatedPermissions: suggestions })
+    service.clearSessionPending('metadata-session')
+    service.clearSessionWhitelist('metadata-session')
   })
 
   test('Given a worker PowerShell mutation When permission is checked Then it is rejected because workers cannot request interactive approval', async () => {
@@ -40,7 +63,7 @@ describe('AgentPermissionService PowerShell handling', () => {
       command: 'Remove-Item C:\\temp\\x',
     }, createWorkerOptions())
 
-    expect(result).toMatchObject({ behavior: 'deny', interrupt: true })
+    expect(result).toMatchObject({ behavior: 'deny', interrupt: true, toolUseID: 'tool-use-id' })
   })
 
   test('Given a worker read-only PowerShell query When permission is checked Then it remains allowed', async () => {
@@ -49,6 +72,6 @@ describe('AgentPermissionService PowerShell handling', () => {
       command: 'Get-Process -Name explorer',
     }, createWorkerOptions())
 
-    expect(result.behavior).toBe('allow')
+    expect(result).toMatchObject({ behavior: 'allow', toolUseID: 'tool-use-id' })
   })
 })

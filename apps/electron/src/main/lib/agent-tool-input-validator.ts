@@ -5,8 +5,11 @@
  * 返回描述性 deny message 引导模型重试。
  */
 
-import { statSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+/** 校验失败结果，与 PermissionResult deny 形状一致 */
+export interface ToolValidationFailure {
+  behavior: 'deny'
+  message: string
+}
 
 /** 已知工具的必需参数映射（使用权限层 canonical 字段名） */
 export const TOOL_REQUIRED_PARAMS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([
@@ -154,39 +157,19 @@ export function normalizeToolInputForValidation(
   }
 }
 
-/** 校验失败结果，与 PermissionResult deny 形状一致 */
-export interface ToolValidationFailure {
-  behavior: 'deny'
-  message: string
-}
-
 /**
- * Write 工具不能隐式创建父目录。Pi SDK 默认会对父目录执行 mkdir({ recursive: true })，
- * 所以必须在两套 runtime 的共享权限边界先拒绝不存在的父目录。
+ * Write 工具不能隐式创建父目录。
+ *
+ * 实现**只有一份**，位于 `@profer/agent-provider-claude/write-target-guard`（GAP-7 E2 去重）：
+ * - `packages/*` 不得反向导入 `apps/*`（check-boundaries R2），所以实现只能在包里；
+ * - 本函数使用 `node:fs.statSync` 与 `process.cwd()`，**不是纯函数**，不能下沉到
+ *   `@profer/agent-runtime` 的根入口（那会把文件系统行为带进宿主无关的 runtime 契约）；
+ * - 本文件只做兼容转发，与同目录 `agent-sdk-auth-env.ts` / `background-task-manager.ts` 同一模式。
+ *
+ * 注意：子路径 `@profer/agent-provider-claude/write-target-guard` 只依赖 node:fs / node:path，
+ * 不会把 Claude SDK 拉进 Pi 路径。
  */
-export function validateWriteTargetParent(
-  input: Record<string, unknown>,
-  cwd: string | undefined,
-  toolName = 'Write',
-): ToolValidationFailure | null {
-  if (toolName !== 'Write') return null
-
-  const rawPath = input.file_path ?? input.path
-  if (typeof rawPath !== 'string' || !rawPath.trim()) return null
-
-  const targetPath = resolve(cwd ?? process.cwd(), rawPath)
-  const parentPath = dirname(targetPath)
-  try {
-    if (statSync(parentPath).isDirectory()) return null
-  } catch {
-    // 统一返回“父目录不存在”，避免把 ENOENT/ENOTDIR 细节泄露给模型。
-  }
-
-  return {
-    behavior: 'deny',
-    message: `${toolName} target parent directory does not exist: ${parentPath}. Create the directory explicitly first, then retry the file write. Profer will not create parent directories implicitly.`,
-  }
-}
+export { validateWriteTargetParent } from '@profer/agent-provider-claude/write-target-guard'
 
 /** 校验工具调用的必需参数是否存在且非空。 */
 export function validateToolInput(

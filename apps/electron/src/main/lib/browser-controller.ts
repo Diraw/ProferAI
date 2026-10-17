@@ -635,6 +635,28 @@ export class BrowserController {
     }
   }
 
+  /**
+   * 按 webContents id 定位「持有该视图的会话 + 标签」。
+   *
+   * 不能先按 `record.browserSession === browserSession` 挑一个 record 再在它内部找标签：全局单一
+   * profile 下所有会话共用同一个 Electron Session 对象，该条件恒真，只会命中最早创建的那个
+   * record。后续会话的标签因此永远定位不到，子资源校验会退化成「一律拒绝」，页面只剩裸 HTML
+   * （CSS/图片/脚本全部加载失败，主文档却正常）。
+   */
+  private findTabEntryByWebContentsId(webContentsId: number | undefined): { sessionId: string; tab: BrowserTabRecord } | undefined {
+    if (typeof webContentsId !== 'number') return undefined
+    for (const [sessionId, record] of this.sessions.entries()) {
+      for (const tab of record.tabs.values()) {
+        try {
+          if (tab.view.webContents.id === webContentsId) return { sessionId, tab }
+        } catch {
+          // 视图已销毁：跳过它，但不能因此中断对其它标签的查找。
+        }
+      }
+    }
+    return undefined
+  }
+
   private installSessionGuards(browserSession: Session): void {
     if (this.guardedSessions.has(browserSession)) return
     this.guardedSessions.add(browserSession)
@@ -655,11 +677,10 @@ export class BrowserController {
         callback({ cancel: false })
         return
       }
-      const browserRecord = [...this.sessions.values()].find((record) => record.browserSession === browserSession)
-      const tab = browserRecord
-        ? [...browserRecord.tabs.values()].find((candidate) => candidate.view.webContents.id === details.webContentsId)
-        : undefined
-      const topLevelUrl = tab?.lastRequestedUrl ?? tab?.state.url ?? ''
+      const tab = this.findTabEntryByWebContentsId(details.webContentsId)?.tab
+      // 顶层 URL 决定「公网页面不得访问私网子资源」的判定基准。定位不到标签时传 null，
+      // 由校验函数退化为「只拦私网子资源」——绝不能在这里把整页子资源一律 cancel。
+      const topLevelUrl = tab?.lastRequestedUrl ?? tab?.state.url ?? null
       if (details.resourceType !== 'mainFrame') {
         // 本地开发顶层页面需要完整加载本地脚本、接口和 WebSocket；公网顶层页面则不能借此访问私网。
         void assertSafeBrowserSubresourceDestination(details.url, topLevelUrl)
@@ -671,12 +692,13 @@ export class BrowserController {
         .then(() => callback({ cancel: false }))
         .catch(() => callback({ cancel: true }))
     })
-    browserSession.on('will-download', (event, item) => {
+    browserSession.on('will-download', (event, item, webContents) => {
       // 安全边界：受管浏览器不向本地任意路径落盘。但用户点了下载链接不能无声无息，
       // 推送脱敏事件给面板，让用户知道被拦截，并可选择在系统浏览器打开。
       event.preventDefault()
       item.cancel()
-      const sessionId = [...this.sessions.entries()].find(([, record]) => record.browserSession === browserSession)?.[0]
+      const sessionId = this.findTabEntryByWebContentsId(webContents?.id)?.sessionId
+        ?? [...this.sessions.keys()][0]
       const url = (typeof item.getURL?.() === 'string' && item.getURL()) || (Array.isArray(item.getURLChain?.()) && item.getURLChain().find(Boolean)) || ''
       if (!sessionId || !this.owner || this.owner.isDestroyed()) return
       const payload: BrowserDownloadBlockedEvent = {

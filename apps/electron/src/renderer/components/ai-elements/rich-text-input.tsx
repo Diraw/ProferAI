@@ -307,7 +307,7 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
   const richTextEnabledRef = useRef(richTextEnabled)
   richTextEnabledRef.current = richTextEnabled
 
-  // 矮窗口压缩：阈值/高度来自设置（0 = 关闭），默认 < 700px 时输入框 101px → 60px、上限 200px → 140px
+  // 矮窗口压缩：阈值/高度来自设置（0 = 关闭），默认 < 700px 时输入框 81px → 60px、上限 200px → 140px
   const composerCompactMode = useAtomValue(composerCompactModeAtom)
   const viewportHeight = useWindowInnerHeight()
   const isCompactViewport = useCompactViewport(composerCompactMode.viewportHeight, viewportHeight)
@@ -857,7 +857,7 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
     compact: isCompactViewport,
     compactMaxHeight: composerCompactMode.maxHeight,
   })
-  // 编辑器 min-height：空内容时的可见高度，紧凑档下变矮（默认 101 → 60）
+  // 编辑器 min-height：空内容时的可见高度，紧凑档下变矮（默认 81 → 60）
   const composerMinHeight = resolveComposerMinHeight({
     compact: isCompactViewport,
     compactMinHeight: composerCompactMode.minHeight,
@@ -920,9 +920,9 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
         </Tooltip>
       )}
       <style>{`
-        /* 编辑器最小高度由 CSS 变量驱动：紧凑档下矮窗口把输入框压矮（默认 101 → 60）。 */
+        /* 编辑器最小高度由 CSS 变量驱动：紧凑档下矮窗口把输入框压矮（默认 81 → 60）。 */
         .rich-text-input .ProseMirror {
-          min-height: var(--composer-editor-min-height, 101px);
+          min-height: var(--composer-editor-min-height, 81px);
         }
         .ProseMirror {
           outline: none;

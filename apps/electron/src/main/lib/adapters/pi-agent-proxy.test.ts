@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test'
-import type { Dispatcher } from 'undici'
+import type { PiRequestProxyDispatcher as Dispatcher } from './pi-request-proxy'
 import { buildPiRemoteConnectionSettings, buildPiRetrySettings } from './pi-agent-adapter'
 import {
   getPiRequestProxyDispatcher,

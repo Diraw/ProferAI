@@ -99,6 +99,34 @@ describe('Conversation reading anchors', () => {
 })
 
 describe('Conversation scroll policy', () => {
+  test('到底后首个向上动作先于 scroll 通知遇到 resize 时不被旧锚点拉回', () => {
+    const { geometry, controller, drain } = setup()
+    controller.follow(false)
+    controller.scrolled()
+    controller.userInput()
+    controller.pause()
+    geometry.scrollTop = 1560
+    geometry.scrollHeight += 80
+    controller.resized()
+    controller.scrolled()
+    drain()
+    expect(geometry.scrollTop).toBe(1560)
+    expect(controller.following).toBe(false)
+  })
+
+  test('触控板不足一像素的向上动作也更新阅读位置', () => {
+    const { geometry, controller } = setup()
+    controller.follow(false)
+    controller.userInput()
+    controller.pause()
+    geometry.scrollTop = 1599.5
+    controller.scrolled()
+    geometry.scrollHeight += 80
+    controller.resized()
+    expect(geometry.scrollTop).toBe(1599.5)
+    expect(controller.following).toBe(false)
+  })
+
   test('viewport-only shrinking follows when pinned', () => {
     const { geometry, controller } = setup()
     geometry.scrollTop = 1600

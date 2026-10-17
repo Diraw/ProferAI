@@ -25,6 +25,27 @@ function slice(source: string, start: string, end: string): string {
   return source.slice(from, to)
 }
 
+describe('runtime headless routing guard', () => {
+  test('Given the runtime headless switch When a normal headless input arrives Then it routes through the runtime query adapter', async () => {
+    const source = await readAgentService()
+    const headlessBody = slice(source, 'export async function runAgentHeadless(', 'setHeadlessAgentRunner(')
+    expect(source).toContain("process.env.PROFER_RUNTIME_HEADLESS === '1'")
+    // 2026-10-16 集成会话：runtime headless 入口合并为一条（不再有 runAgentRuntimeHeadlessInput 包装）。
+    expect(headlessBody).toContain('runAgentRuntimeHeadless(input, callbacks)')
+    // query 构造（含策略快照与原生 session 回调）已收敛到 agent-runtime-entry.ts 的入口接线。
+    expect(source).not.toContain('createElectronAgentRuntimeQuery(input, {')
+  })
+
+  test('Given Goal-specific callbacks When runtime headless routing is considered Then the runtime coordinator is bypassed', async () => {
+    const source = await readAgentService()
+    const guard = slice(source, 'function canUseRuntimeHeadless(input: AgentSendInput): boolean {', '/**\n * 将完整 headless 输入')
+    expect(guard).toContain('!input.goalRunId')
+    expect(guard).toContain('!input.reportGoalResult')
+    expect(guard).toContain('!input.onRuntimeSessionId')
+    expect(guard).toContain('!input.onRuntimeMessage')
+  })
+})
+
 describe('D-2：关闭态清未读回到原 M1 的位置与原语义', () => {
   test('Given 关闭态需要逐点保真 When 检查 runAgent Then 在 orchestrator.sendMessage 之前按 auto 模式清未读', async () => {
     const source = await readAgentService()
@@ -82,14 +103,84 @@ describe('F-4：从未真正启动的请求不得写未读', () => {
     expect(forwardBlock).toContain('started: runStarted,')
   })
 
-  test('Given 终态策略有 4 个调用点（两个 onComplete + 两个异常兜底） When 逐个检查 Then 全部传 started', async () => {
+  test('Given 终态策略有 5 个调用点（三个 onComplete + 两个异常兜底） When 逐个检查 Then 全部传 started', async () => {
     const source = await readAgentService()
     const calls = [...source.matchAll(/applyCompletionUnreadPolicy\(\{/g)]
-    expect(calls).toHaveLength(4)
+    // 2026-10-16 集成会话：新增 runtime headless 入口（runAgentRuntimeHeadless）的终态未读调用，
+    // 使 manual 模式下经新入口完成的一轮也产生未读（原为缺口 B-5）。
+    expect(calls).toHaveLength(5)
     for (const call of calls) {
       const blockEnd = source.indexOf('})', call.index!)
       expect(blockEnd).toBeGreaterThan(call.index!)
       expect(source.slice(call.index!, blockEnd)).toContain('started: runStarted')
     }
+  })
+})
+
+describe('runtime coordinator stream restore ownership', () => {
+  test('Given runtime coordinator owns a session When restoring streams Then it is rebound and reported active', async () => {
+    const source = await readAgentService()
+    const restoreBody = slice(source, 'export function restoreActiveAgentStreams(', 'function isMainRendererWindow(')
+    expect(restoreBody).toContain('isAgentExecutionActive(sessionId)')
+    expect(restoreBody).toContain('registerWebContents(sessionId, webContents)')
+    expect(restoreBody).toContain('const active = isAgentExecutionActive(sessionId)')
+    expect(restoreBody).toContain('active,')
+  })
+
+  test('Given runtime lifecycle completion When preserving a backlog Then it is treated as terminal', async () => {
+    const source = await readAgentService()
+    const terminalPredicate = slice(source, 'function isTerminalBacklogEvent(', 'function preserveCompletedBacklog(')
+    expect(terminalPredicate).toContain("payload.event.type === 'run_completed'")
+    const headless = slice(source, 'export async function runAgentRuntimeHeadless(', 'export async function stopAgentRuntime(')
+    expect(headless).toContain('beginActiveStreamBacklog(input.sessionId)')
+    expect(headless).toContain('finishActiveStreamBacklog(input.sessionId)')
+  })
+})
+
+describe('runtime coordinator run-start projection', () => {
+  test('Given a runtime-owned headless run When onRunStarted fires Then service applies the same unread and draft projection path', async () => {
+    const source = await readAgentService()
+    const runtimeBody = slice(source, 'export async function runAgentRuntimeHeadless(', 'export async function stopAgentRuntime(')
+    expect(runtimeBody).toContain('const runtimeCallbacks: AgentRuntimeCallbacks')
+    expect(runtimeBody).toContain('onRunStarted: async (input, startedAt) => {')
+    expect(runtimeBody).toContain('applyRunStartUnreadPolicy(input.sessionId, input.initiator)')
+    expect(runtimeBody).toContain('updateAgentSessionMeta(input.sessionId, { draft: false })')
+    expect(runtimeBody).toContain('publishAgentSessionProjection(session)')
+  })
+  test('Given a runtime-owned headless terminal When the runtime settles Then the desktop renderer receives the legacy terminal channels too', async () => {
+    const source = await readAgentService()
+    const runtimeBody = slice(source, 'export async function runAgentRuntimeHeadless(', 'export async function stopAgentRuntime(')
+    expect(runtimeBody).toContain("eventBus.emit(input.sessionId, { kind: 'run_error', error })")
+    expect(runtimeBody).toContain("currentWc.send(AGENT_IPC_CHANNELS.STREAM_ERROR, { sessionId: input.sessionId, error })")
+    expect(runtimeBody).toContain("eventBus.emit(input.sessionId, { kind: 'run_complete', completion })")
+    expect(runtimeBody).toContain("currentWc.send(AGENT_IPC_CHANNELS.STREAM_COMPLETE, completion)")
+    expect(runtimeBody).toContain('resultErrors: fields.resultErrors ?? (runtimeError ? [runtimeError] : undefined)')
+    expect(runtimeBody).toContain('initiator,')
+  })
+})
+
+describe('IR-D1：桌面 runtime 链与旧链都在请求入口清未读', () => {
+  test('Given 桌面 runtime 入口 When 检查 runDesktopRuntimeAgent Then 在守卫与 claim 之前无条件清未读', async () => {
+    const source = (await Bun.file(join(import.meta.dir, 'agent-runtime-desktop-entry.ts')).text()).replace(/\r\n/g, '\n')
+    const body = source.slice(source.indexOf('export async function runDesktopRuntimeAgent('))
+    const registerAt = body.indexOf('host.registerWebContents(sessionId, host.sender)')
+    const clearAt = body.indexOf('host.clearUnreadOnRequestEntry(sessionId)')
+    const guardAt = body.indexOf('host.checkEntryGuards(sessionId)')
+    const claimAt = body.indexOf('await runRuntimeHeadlessEntry(')
+    expect(registerAt).toBeGreaterThan(-1)
+    expect(clearAt).toBeGreaterThan(registerAt)
+    expect(guardAt).toBeGreaterThan(clearAt)
+    expect(claimAt).toBeGreaterThan(guardAt)
+  })
+
+  test('Given runAgent 接线 When 检查桌面分支 Then 开关判定在任何 await 之前，旧链入口清未读仍在旧分支', async () => {
+    const source = await readAgentService()
+    const runAgentBody = slice(source, 'export async function runAgent(', 'export async function runAgentHeadless(')
+    const switchAt = runAgentBody.indexOf('resolveDesktopRunChain(input)')
+    const oldRegisterAt = runAgentBody.indexOf('registerWebContents(input.sessionId, webContents)')
+    expect(switchAt).toBeGreaterThan(-1)
+    expect(oldRegisterAt).toBeGreaterThan(switchAt)
+    expect(runAgentBody).toContain('clearUnreadOnRequestEntry: clearSessionUnreadOnRequestEntry,')
+    expect(runAgentBody).toContain('checkEntryGuards: (sessionId) => orchestrator.checkEntryGuards(sessionId),')
   })
 })
