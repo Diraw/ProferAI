@@ -17,6 +17,16 @@ function isPrivateAddress(hostname: string): boolean {
   return a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 0 || a >= 224
 }
 
+/** 从 URL 中安全取出 hostname；空值或非法 URL 返回 null（调用方据此走「顶层未知」分支）。 */
+function parseUrlHostname(input: string | null | undefined): string | null {
+  if (!input) return null
+  try {
+    return new URL(input).hostname
+  } catch {
+    return null
+  }
+}
+
 /**
  * 地址栏可直接输入域名或路径（例如 `example.com/docs`）；公网缺省按 HTTPS 打开，
  * 明确的本机/局域网开发地址缺省按 HTTP 打开。
@@ -76,12 +86,19 @@ export function isSafeBrowserSubresourceUrl(input: string): boolean {
  * 按顶层页面信任上下文校验子资源：本地开发页允许加载本地依赖；公网页面拒绝明显的私网目标。
  * 非私网公网资源不重复做 DNS 查询，完整的 DNS rebinding 防护仍应由受控 egress 层承担。
  */
-export async function assertSafeBrowserSubresourceDestination(input: string, topLevelUrl: string): Promise<string> {
+export async function assertSafeBrowserSubresourceDestination(input: string, topLevelUrl: string | null | undefined): Promise<string> {
   if (!isSafeBrowserSubresourceUrl(input)) throw new Error('受管浏览器不允许此子资源协议或认证信息。')
   const resource = new URL(input)
-  const topLevel = new URL(topLevelUrl)
   if (!['http:', 'https:', 'ws:', 'wss:'].includes(resource.protocol)) throw new Error('受管浏览器不允许此子资源协议。')
-  if (!isPrivateAddress(topLevel.hostname) && isPrivateAddress(resource.hostname)) {
+  const topLevelHostname = parseUrlHostname(topLevelUrl)
+  // 顶层页面未知（标签定位失败、地址尚未落定等）时，绝不能把整页子资源一律拒绝：
+  // 那会让页面只剩裸 HTML（CSS/图片/脚本全部加载失败，主文档却正常）。
+  // 这里退化为「只拦本机/私网子资源」，公网子资源照常放行。
+  if (!topLevelHostname) {
+    if (isPrivateAddress(resource.hostname)) throw new Error('无法确认顶层页面时，不允许加载本机或私网子资源。')
+    return resource.toString()
+  }
+  if (!isPrivateAddress(topLevelHostname) && isPrivateAddress(resource.hostname)) {
     throw new Error('公网页面不得访问本机或私网子资源。')
   }
   return resource.toString()

@@ -9,6 +9,7 @@
  * 可选参数：
  *   --probe-only  只跑解密环境自检，不发起模型调用
  *   --claude      把 Claude runtime 候选排在前面
+ *   --runtime-coordinator 仅使用 runtime coordinator + Pi provider bridge 跑真实 headless smoke
  *
  * 用法（apps/electron 目录下）：
  *   bunx esbuild scripts/agent-session-smoke.ts --bundle --platform=node --format=cjs \
@@ -24,10 +25,15 @@ import { getSettings } from '../src/main/lib/settings-service'
 import { getAgentWorkspace } from '../src/main/lib/agent-workspace-manager'
 import { createAgentSession, getAgentSessionMeta } from '../src/main/lib/agent-session-manager'
 import { createAgentPreset, listAgentPresets, deleteAgentPreset, getAgentPreset } from '../src/main/lib/agent-preset-manager'
-import { runAgentHeadless } from '../src/main/lib/agent-service'
+import { runAgentHeadless, runAgentRuntimeHeadless } from '../src/main/lib/agent-service'
+import { createElectronAgentRuntimeQuery } from '../src/main/lib/agent-runtime-host'
+import { listChannels } from '../src/main/lib/channel-manager'
+import { discoverSmokeCandidates, type SmokeCandidate } from './smoke-candidates'
+import type { AgentRuntimeQuery } from '@profer/agent-runtime'
 import { BUILTIN_AGENT_PRESETS } from '@profer/shared'
 import { readFileSync, existsSync, appendFileSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { getAgentWorkspacePath, getConfigDir, getSdkConfigDir } from '../src/main/lib/config-paths'
 
 // ===== 文件日志：electron.exe 为 GUI 子系统，控制台输出不可见，全部落盘 =====
 const LOG_FILE = join(__dirname, 'smoke.log')
@@ -43,20 +49,16 @@ process.on('exit', (code) => fileLog(`[冒烟] 进程退出 code=${code}`))
 
 const OVERALL_TIMEOUT_MS = 8 * 60 * 1000
 
-interface Candidate {
-  label: string
-  channelId: string
-  runtime: 'claude' | 'pi'
-  modelId: string
+/**
+ * 候选渠道**从当前配置动态发现**：不得依赖任何个人渠道 ID / 模型 ID。
+ *
+ * 发现规则在 `./smoke-candidates.ts`（纯函数，可单测）：默认渠道优先、只保留
+ * 「已启用 + 支持目标内核 + 至少一个启用模型」的渠道；找不到就回空数组，
+ * 调用方按 SKIP 处理（**不得**因为用户环境没有私有渠道就报代码失败）。
+ */
+function discoverCandidates(preferClaude: boolean): SmokeCandidate[] {
+  return discoverSmokeCandidates(listChannels(), getSettings(), preferClaude)
 }
-
-/** 默认渠道 key 失效时的候选（按概率排序：先 Pi 兼容的 deepseek/openai，最后 Claude runtime） */
-const FALLBACK_CANDIDATES: Candidate[] = [
-  { label: 'DeepSeek(已启用)', channelId: '17d5fd4c-4903-4c0a-8d82-d7ab24db871b', runtime: 'pi', modelId: 'deepseek-v4-flash' },
-  { label: 'GPT(newapi-8)', channelId: 'newapi-8', runtime: 'pi', modelId: 'gpt-5.6-terra' },
-  { label: 'GPT(newapi-5)', channelId: 'newapi-5', runtime: 'pi', modelId: 'gpt-5.6-terra' },
-  { label: 'Claude(特价)', channelId: 'newapi-7', runtime: 'claude', modelId: 'claude-opus-4-8' },
-]
 
 /** 等待一次 headless 运行结束；把最终助手文本与错误带出来 */
 function runTurn(input: Parameters<typeof runAgentHeadless>[0], label: string): Promise<{ finalText: string; error?: string }> {
@@ -81,6 +83,37 @@ function runTurn(input: Parameters<typeof runAgentHeadless>[0], label: string): 
       console.log(`[冒烟] ${label} 异常:`, err instanceof Error ? err.message : String(err))
       resolve({ finalText: '', error: err instanceof Error ? err.message : String(err) })
     })
+  })
+}
+
+
+/** opt-in runtime coordinator 冒烟：只验证真实 Pi provider stream/stop/terminal，不重建完整 AgentOrchestrator 工具策略。 */
+function runRuntimeTurn(input: AgentRuntimeQuery, label: string): Promise<{ finalText: string; error?: string }> {
+  return new Promise((resolve) => {
+    const texts: string[] = []
+    let settled = false
+    const settle = (result: { finalText: string; error?: string }) => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+    console.log(`\n[冒烟-runtime] ── ${label} 开始 ──`)
+    runAgentRuntimeHeadless(input, {
+      onMessage: (message) => {
+        if (message.type !== 'assistant') return
+        for (const block of message.message?.content ?? []) {
+          if (block.type === 'text' && typeof block.text === 'string') texts.push(block.text)
+        }
+      },
+      onError: (error) => {
+        console.log(`[冒烟-runtime] ${label} 错误: ${error instanceof Error ? error.message : String(error)}`)
+        settle({ finalText: texts.join(''), error: error instanceof Error ? error.message : String(error) })
+      },
+      onComplete: (outcome) => {
+        console.log(`[冒烟-runtime] ${label} 终态: ${outcome.status}`)
+        settle(outcome.status === 'failed' ? { finalText: texts.join(''), error: outcome.error } : { finalText: texts.join('') })
+      },
+    }).catch((error) => settle({ finalText: texts.join(''), error: error instanceof Error ? error.message : String(error) }))
   })
 }
 
@@ -119,22 +152,27 @@ function countToolUses(transcript: string): Record<string, number> {
 
 function readTranscript(sessionId: string): string {
   const meta = getAgentSessionMeta(sessionId)
-  // Pi 会话 transcript 记在 piSessionFile；Claude 会话走 SDK JSONL
-  const candidates = [meta?.piSessionFile, meta?.sdkSessionFile]
-  for (const file of candidates) {
-    if (file && existsSync(file)) return readFileSync(file, 'utf-8')
-  }
-  // 兜底：Pi transcript 目录 ~/.profer-dev/sdk-config/sessions/pi/，按 sdkSessionId 定位文件
-  const piDir = join(app.getPath('home'), '.profer-dev', 'sdk-config', 'sessions', 'pi')
+  // Pi 会话 transcript 精确路径记在 piSessionFile。
+  if (meta?.piSessionFile && existsSync(meta.piSessionFile)) return readFileSync(meta.piSessionFile, 'utf-8')
+  const sdkSessionId = meta?.sdkSessionId
+  if (!sdkSessionId) return ''
+  // 兜底 1：Pi transcript 目录（统一配置目录，不硬编码 .profer-dev）
+  const piDir = join(getSdkConfigDir(), 'sessions', 'pi')
   try {
-    if (meta?.sdkSessionId) {
-      const exact = join(piDir, `${meta.sdkSessionId}.jsonl`)
-      if (existsSync(exact)) return readFileSync(exact, 'utf-8')
-      for (const name of readdirSync(piDir)) {
-        if (!name.endsWith('.jsonl')) continue
-        const content = readFileSync(join(piDir, name), 'utf-8')
-        if (content.includes(meta.sdkSessionId)) return content
-      }
+    const exact = join(piDir, `${sdkSessionId}.jsonl`)
+    if (existsSync(exact)) return readFileSync(exact, 'utf-8')
+    for (const name of readdirSync(piDir)) {
+      if (!name.endsWith('.jsonl')) continue
+      const content = readFileSync(join(piDir, name), 'utf-8')
+      if (content.includes(sdkSessionId)) return content
+    }
+  } catch { /* 目录不存在等场景忽略 */ }
+  // 兜底 2：Claude SDK JSONL 在 <sdkConfigDir>/projects/<project-hash>/<sdkSessionId>.jsonl
+  const projectsDir = join(getSdkConfigDir(), 'projects')
+  try {
+    for (const dir of readdirSync(projectsDir)) {
+      const candidate = join(projectsDir, dir, `${sdkSessionId}.jsonl`)
+      if (existsSync(candidate)) return readFileSync(candidate, 'utf-8')
     }
   } catch { /* 目录不存在等场景忽略 */ }
   return ''
@@ -156,7 +194,7 @@ async function main(): Promise<void> {
   app.setName('profer-dev')
   app.setPath('userData', join(app.getPath('appData'), '@profer/electron-dev'))
   await app.whenReady()
-  console.log('[冒烟] Electron 就绪，配置目录为开发模式 ~/.profer-dev')
+  console.log(`[冒烟] Electron 就绪，配置目录为 ${getConfigDir()}`)
 
   // 密钥解密诊断：查清 app-bound 加密解不开的确切原因
   try {
@@ -200,18 +238,9 @@ async function main(): Promise<void> {
   const workspaceSlug = workspaceId ? getAgentWorkspace(workspaceId)?.slug : undefined
   console.log(`[冒烟] 工作区=${workspaceSlug ?? '(无)'}，默认渠道=${settings.agentChannelId} 模型=${settings.agentModelId} runtime=${settings.agentRuntime}`)
 
-  // 候选队列：默认渠道优先，失败后依次回退；--claude 强制 Claude runtime 候选前置
-  const candidates: Candidate[] = [
-    { label: `默认(${settings.agentChannelId})`, channelId: settings.agentChannelId, runtime: settings.agentRuntime ?? 'pi', modelId: settings.agentModelId },
-    ...FALLBACK_CANDIDATES,
-  ]
-    .filter((c) => Boolean(c.channelId && c.modelId))
-    .sort((a, b) => {
-      if (!process.argv.includes('--claude')) return 0
-      const aClaude = a.runtime === 'claude' ? 1 : 0
-      const bClaude = b.runtime === 'claude' ? 1 : 0
-      return bClaude - aClaude
-    })
+  // 候选队列：默认渠道优先，其余按当前配置动态发现；--claude 强制优先 Claude runtime 候选。
+  const candidates = discoverCandidates(process.argv.includes('--claude'))
+  console.log(`[冒烟] 候选渠道（来自当前配置）: ${candidates.map((c) => `${c.label}/${c.runtime}/${c.modelId}`).join(' | ') || '（无）'}`)
 
   // ① 用 manager 直接创建自定义预设（真实落盘链路）
   let smokePresetId: string | undefined
@@ -274,12 +303,73 @@ async function main(): Promise<void> {
     console.log(`[冒烟] 单工具裁剪自检异常: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  let working: Candidate | undefined
+  let working: SmokeCandidate | undefined
   let sessionId = ''
   let run1: { finalText: string; error?: string } | undefined
   const sessionIds: string[] = []
 
-  // ② 逐候选探测：首个认证通过的渠道继续跑完整流程
+  if (process.argv.includes('--runtime-coordinator')) {
+    console.log('[冒烟] runtime-coordinator 模式：仅尝试 Pi 候选，并通过 runtime coordinator 运行真实 provider stream')
+    if (candidates.length === 0) {
+      if (smokePresetId && workspaceSlug) {
+        try { deleteAgentPreset(workspaceSlug, smokePresetId) } catch { /* 清理失败不覆盖判定 */ }
+      }
+      console.log('[冒烟] ═══ 判定: SKIP（当前配置未发现可用渠道；不代表代码失败）═══')
+      app.exit(0)
+      return
+    }
+    for (const candidate of candidates.filter((item) => item.runtime === 'pi')) {
+      const session = createAgentSession('runtime coordinator 冒烟测试', candidate.channelId, workspaceId, candidate.modelId, 'pi', false, smokePresetId)
+      sessionIds.push(session.id)
+      sessionId = session.id
+      const runtimeInput = createElectronAgentRuntimeQuery({
+        sessionId: session.id,
+        userMessage: '只回复 runtime coordinator smoke ok，不调用工具。',
+        channelId: candidate.channelId,
+        modelId: candidate.modelId,
+        agentRuntime: 'pi',
+        permissionModeOverride: 'bypassPermissions',
+      }, {
+        runtime: 'pi',
+        cwd: workspaceSlug ? getAgentWorkspacePath(workspaceSlug) : process.cwd(),
+        providerInput: {
+          apiKey: '',
+          provider: 'custom',
+          baseUrl: undefined,
+          systemPrompt: '你是 runtime coordinator smoke provider。',
+          piAgentDir: getSdkConfigDir(),
+          piSessionDir: join(getSdkConfigDir(), 'sessions', 'pi'),
+          tools: [],
+        },
+      })
+      const result = await runRuntimeTurn(runtimeInput, candidate.label)
+      if (!result.error) {
+        working = candidate
+        run1 = result
+        console.log(`[冒烟] ✅ runtime coordinator 候选 ${candidate.label} 运行成功`)
+        break
+      }
+      console.log(`[冒烟] runtime coordinator 候选 ${candidate.label} 失败: ${result.error}`)
+    }
+    const ok = Boolean(working && run1 && !run1.error)
+    console.log(`[冒烟] runtime coordinator 判定: ${ok ? 'PASS ✅' : 'FAIL ❌'}`)
+    if (smokePresetId && workspaceSlug) {
+      try { deleteAgentPreset(workspaceSlug, smokePresetId) } catch { /* 清理失败不覆盖 smoke 结果 */ }
+    }
+    app.exit(ok ? 0 : 1)
+    return
+  }
+
+  if (candidates.length === 0) {
+    if (smokePresetId && workspaceSlug) {
+      try { deleteAgentPreset(workspaceSlug, smokePresetId) } catch { /* 清理失败不覆盖判定 */ }
+    }
+    console.log(`[冒烟] 本次创建的会话: ${sessionIds.join(', ') || '无'}`)
+    console.log('[冒烟] ═══ 判定: SKIP（当前配置未发现可用渠道；不代表代码失败）═══')
+    app.exit(0)
+    return
+  }
+
   for (const candidate of candidates) {
     console.log(`\n[冒烟] ── 尝试候选: ${candidate.label}（${candidate.runtime}）──`)
     const session = createAgentSession('冒烟测试', candidate.channelId, workspaceId, candidate.modelId, candidate.runtime, false, smokePresetId)

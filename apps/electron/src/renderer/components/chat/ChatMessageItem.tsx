@@ -190,9 +190,9 @@ export const ChatMessageItem = React.memo(function ChatMessageItem({
 
         {/* user 头像 + 用户名 + 时间 */}
         {message.role === 'user' && (
-          <div className="flex items-start gap-2.5 mb-2.5">
+          <div className="flex items-start gap-2.5 mb-2.5 group-[.user-message-right]:flex-row-reverse">
             <UserAvatar avatar={userProfile.avatar} size={35} />
-            <div className="flex flex-col justify-between h-[35px]">
+            <div className="flex flex-col justify-between h-[35px] group-[.user-message-right]:items-end">
               <span className="text-sm font-semibold text-foreground/60 leading-none">{userProfile.userName}</span>
               <span className="message-time text-[10px] text-foreground/[0.38] leading-none">{formatMessageTime(message.createdAt)}</span>
             </div>
@@ -273,9 +273,9 @@ export const ChatMessageItem = React.memo(function ChatMessageItem({
           )}
         </MessageContent>
 
-        {/* 操作按钮（非 streaming 时显示，hover 时可见） */}
+        {/* 操作按钮（非 streaming 时显示，悬停消息时可见） */}
         {(message.content || message.error || (message.attachments && message.attachments.length > 0)) && !isStreaming && !isInlineEditing && (
-          <MessageActions className="pl-[46px] mt-0.5 min-h-[28px]">
+          <MessageActions revealOnHover={message.role === 'user'} className="pl-[46px] mt-0.5 min-h-[28px] group-[.user-message-right]:pl-0 group-[.user-message-right]:pr-[46px]">
             {conversationId && <PluginMessageActions reference={{ kind: 'chat', sessionId: conversationId, messageId: message.id }} />}
             <CopyButton content={message.role === 'user' && parsedUserContent ? parsedUserContent.text : message.content} copyAsPlainText={message.role === 'user'} />
             {message.role === 'assistant' && conversationId && (

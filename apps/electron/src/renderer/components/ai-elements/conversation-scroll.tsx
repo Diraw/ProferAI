@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode, type MutableRefObject } from 'react'
+import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type MutableRefObject } from 'react'
 import { ConversationScrollController, type ReadingPosition } from './conversation-scroll-controller'
 
 export interface ConversationScrollActions {
@@ -123,7 +123,7 @@ export function ConversationScrollProvider({ children, smoothResize }: {
     restore: (position) => controller.current?.restore(position),
     snapshot: () => controller.current ? controller.current.snapshot() : (disposedSnapshot.current?.position ?? null),
   })
-  const context = { ...actions.current, following }
+  const context = useMemo(() => ({ ...actions.current, following }), [following])
   return <ScrollActionsContext.Provider value={context}>
     {typeof children === 'function' ? children(context) : children}
   </ScrollActionsContext.Provider>

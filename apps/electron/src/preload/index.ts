@@ -7,11 +7,12 @@ import type { ProferPluginPagePlacement, ProferPluginPagePlacementPreference, Pr
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, LARK_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, CHANGELOG_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, SYNC_IPC_CHANNELS, TEAM_IPC_CHANNELS, SKILL_MARKETPLACE_IPC_CHANNELS, SKILL_MASTER_IPC_CHANNELS, GLOBAL_SKILL_IPC_CHANNELS, TEAM_FILE_IPC_CHANNELS, TEAM_MEMORY_IPC_CHANNELS, SSE_IPC_CHANNELS, KNOWLEDGE_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, type Todo, type CalendarEvent, type TodoListQuery, type CalendarEventListQuery, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type PlanningAgentOperation, type PlanningChange, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type CreatePlanningTagInput, type UpdatePlanningTagInput, type SnoozePlanningReminderInput, type StartTodoAgentInput, type StartTodoAgentResult, type TodoAgentSessionActivation, type TeamMemoryApiResult, type TeamMemoryDocument, type TeamMemoryRevision, type ChangelogEntry, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult } from '@profer/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, LARK_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, CHANGELOG_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, FEISHU_IPC_CHANNELS, DINGTALK_IPC_CHANNELS, WECHAT_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, SKILL_MASTER_IPC_CHANNELS, GLOBAL_SKILL_IPC_CHANNELS, KNOWLEDGE_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, type Todo, type CalendarEvent, type TodoListQuery, type CalendarEventListQuery, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type PlanningAgentOperation, type PlanningChange, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type CreatePlanningTagInput, type UpdatePlanningTagInput, type SnoozePlanningReminderInput, type StartTodoAgentInput, type StartTodoAgentResult, type TodoAgentSessionActivation, type ChangelogEntry, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult } from '@profer/shared'
 import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS, SCRATCH_PAD_IPC_CHANNELS, APP_ICON_IPC_CHANNELS, DOCK_BADGE_IPC_CHANNELS, STORAGE_IPC_CHANNELS, NOTIFICATION_SOUND_IPC_CHANNELS, DESKTOP_NOTIFICATION_IPC_CHANNELS } from '../types'
 import { PROFER_PLUGIN_IPC_CHANNELS, type ProferInstalledPlugin, type ProferPluginOperationResult, type ProferPluginViewInstance, type ProferPluginViewLayout } from '@profer/plugin-api'
 import { VISUALIZATION_IPC, type VisualizationContent, type VisualizationRecord, type VisualizationViewState } from '@profer/shared'
 import type { CustomNotificationSound } from '../types'
+import type { AgentNavigationIndexEntry, AgentNavigationIndexPayload } from '@profer/shared'
 import type { PresetReference, PresetReferenceReport, PresetScopeRebindResult, LarkCliStatus, LarkCliOperationResult, LarkLoginStartResult, LarkLoginEvent, LarkMcpCredentialsInput, LarkMcpSetupResult, LarkMcpStatus } from '@profer/shared'
 import type {
   RuntimeStatus,
@@ -52,6 +53,7 @@ import type {
   AgentSendInput,
   AgentStreamEvent,
   AgentStreamCompletePayload,
+  AgentRuntimeRestoreSnapshot,
   UpdateAgentInterruptStateInput,
   AgentWorkspace,
   AgentGenerateTitleInput,
@@ -154,6 +156,7 @@ import type {
   TrayOpenAgentSessionData,
 } from '../types'
 import { QUICK_TASK_IPC_CHANNELS, TRAY_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS } from '../types'
+import { createComposerApi } from './composer-api'
 
 /**
  * 暴露给渲染进程的 API 接口定义
@@ -170,7 +173,40 @@ export interface ElectronAPI {
   /** 获取宿主操作系统和 CPU 架构，供安装包选择使用 */
   getPlatformInfo: () => { platform: NodeJS.Platform; arch: string }
 
-  // ===== 运行时相关 =====
+  /** 输入区工具栏按业务域收敛的宿主能力；底层仍复用现有 IPC channel。 */
+  composer: {
+    chat: {
+      updateModel: (id: string, modelId?: string, channelId?: string) => Promise<ConversationMeta>
+      openFileDialog: () => Promise<FileDialogResult>
+      listKnowledgeItems: () => Promise<KnowledgeItem[]>
+    }
+    agent: {
+      updateModel: (id: string, channelId?: string, modelId?: string) => Promise<AgentSessionMeta>
+      updatePermissionMode: (sessionId: string, mode: ProferPermissionMode, expectedRevision?: number) => Promise<AgentSessionMeta>
+      updateOpenAIThinkingLevel: (sessionId: string, level: AgentThinkingLevel | null) => Promise<AgentSessionMeta>
+      updateEffort: (sessionId: string, effort: AgentEffort | null) => Promise<AgentSessionMeta>
+      updateRuntime: (sessionId: string, runtime: AgentRuntime) => Promise<AgentSessionMeta>
+      listPresets: (workspaceSlug?: string, includeInactiveGlobal?: boolean) => Promise<AgentPreset[]>
+      rebindPreset: (sessionId: string, reference: PresetReference, expectedRevision?: number) => Promise<AgentSessionMeta>
+      openFileDialog: () => Promise<FileDialogResult>
+      openFolderDialog: () => Promise<{ path: string; name: string } | null>
+      getReasoningCapability: (provider: ProviderType, modelId: string | undefined, baseUrl?: string) => Promise<ReasoningCapability | undefined>
+      getGraphSummary: (sessionId: string) => Promise<import('@profer/project-core').GraphSummary>
+      attachDirectory: (input: AgentAttachDirectoryInput) => Promise<string[]>
+    }
+    tools: {
+      list: () => Promise<ChatToolInfo[]>
+      updateState: (toolId: string, state: ChatToolState) => Promise<void>
+    }
+    voice: {
+      getSettings: () => Promise<VoiceDictationSettings>
+      toggle: () => Promise<void>
+    }
+    settings: {
+      update: (updates: Partial<AppSettings>) => Promise<AppSettings>
+    }
+  }
+
 
   /**
    * 获取运行时状态
@@ -747,6 +783,9 @@ export interface ElectronAPI {
     (id: string, opts: { tail?: number; before?: number }): Promise<{ messages: SDKMessage[]; total: number; startIndex: number; endIndex: number; hasMore: boolean }>
   }
 
+  /** 获取会话「消息导航」全量轮次索引（一轮一行，覆盖整个会话；只读） */
+  getAgentNavigationIndex: (id: string) => Promise<AgentNavigationIndexPayload>
+
   /** 更新 Agent 会话标题 */
   updateAgentSessionTitle: (id: string, title: string) => Promise<AgentSessionMeta>
 
@@ -931,7 +970,7 @@ export interface ElectronAPI {
   renameSkillEntry: (workspaceSlug: string, skillSlug: string, fromRelative: string, toRelative: string) => Promise<void>
 
   /** 刷新 renderer 后重新绑定并回放仍在运行的 Agent 流 */
-  restoreActiveAgentStreams: () => Promise<string[]>
+  restoreActiveAgentStreams: () => Promise<AgentRuntimeRestoreSnapshot[]>
 
   /** 读取授权文件当前 SHA-256 revision，供正式 viewer 加载前后校验。 */
   getAgentFilePreviewRevision: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<string | null>
@@ -971,7 +1010,7 @@ export interface ElectronAPI {
   /** 查询某 Pi 模型可用的推理档位能力（renderer 思考档位菜单动态展示）。 */
   getPiReasoningCapability: (provider: ProviderType, modelId: string | undefined, baseUrl?: string) => Promise<ReasoningCapability | undefined>
 
-  /** 切换空闲会话的 Agent runtime；跨 runtime 时清除旧 SDK session ID。 */
+  /** 首次发送前选择 Agent runtime；已运行及历史会话永久绑定。 */
   updateSessionAgentRuntime: (sessionId: string, runtime: AgentRuntime) => Promise<AgentSessionMeta>
 
   /** 获取工作区记忆摘要 */
@@ -1566,60 +1605,6 @@ export interface ElectronAPI {
     getTeamAuth: () => Promise<{ baseUrl: string; token: string; teamEmail?: string; teamAccountId?: string } | null>
   }
 
-  // ===== 同步（Phase 1: 占位类型）=====
-  sync: {
-    getStatus: (workspaceId?: string) => Promise<{ workspaces: unknown[] }>
-    triggerSync: (workspaceId: string) => Promise<void>
-    getPendingChanges: (workspaceId: string) => Promise<unknown[]>
-    discardPendingChanges: (workspaceId: string) => Promise<void>
-    onStatusChanged: (callback: (data: unknown) => void) => () => void
-  }
-
-  // ===== 团队管理（Phase 1: 占位类型）=====
-  team: {
-    listWorkspaces: () => Promise<import('@profer/shared').AgentWorkspace[]>
-    onWorkspacesSynced: (callback: () => void) => () => void
-    createWorkspace: (name: string) => Promise<import('@profer/shared').AgentWorkspace>
-    deleteWorkspace: (workspaceId: string) => Promise<void>
-    getMembers: (workspaceId: string) => Promise<unknown[]>
-    createInvitation: (input: { workspaceId: string; email: string; role: string }) => Promise<unknown>
-    listInvitations: (workspaceId: string) => Promise<unknown[]>
-    cancelInvitation: (input: { workspaceId: string; invitationId: string }) => Promise<void>
-    getStats: (workspaceId: string) => Promise<{ totalSize: number; fileCount: number; dirCount: number; memberCount: number; onlineCount: number; pendingInvites: number } | null>
-    verifyInvitation: (token: string) => Promise<unknown>
-    acceptInvitation: (token: string) => Promise<import('@profer/shared').AgentWorkspace>
-    declineInvitation: (token: string) => Promise<void>
-    updateMemberRole: (input: { workspaceId: string; userId: string; role: string }) => Promise<void>
-    removeMember: (input: { workspaceId: string; userId: string }) => Promise<void>
-    leaveWorkspace: (workspaceId: string) => Promise<void>
-    transferOwnership: (input: { workspaceId: string; targetUserId: string }) => Promise<void>
-    restoreWorkspace: (workspaceId: string) => Promise<void>
-    getAuditLogs: (workspaceId: string, limit?: number, before?: number) => Promise<Array<{ action: string; user_email: string; entity_type: string; entity_id: string; detail: string; created_at: number }>>
-    getAnnouncements: (workspaceId: string) => Promise<Array<{ id: string; workspaceId: string; authorId: string; authorName: string; title: string; content: string; isPinned: boolean; createdAt: number; updatedAt: number }>>
-    createAnnouncement: (workspaceId: string, title: string, content: string, isPinned: boolean) => Promise<unknown>
-    deleteAnnouncement: (workspaceId: string, announcementId: string) => Promise<{ success: boolean }>
-    getNotificationSettings: () => Promise<{ enabled: boolean; fileUpload: boolean; fileDelete: boolean; memberJoin: boolean; memberLeave: boolean; invitation: boolean }>
-    updateNotificationSettings: (settings: { enabled?: boolean; fileUpload?: boolean; fileDelete?: boolean; memberJoin?: boolean; memberLeave?: boolean; invitation?: boolean }) => Promise<void>
-  }
-
-  // ===== SSE 实时事件 =====
-  sse: {
-    connect: (workspaceId: string) => Promise<void>
-    disconnect: (workspaceId: string) => Promise<void>
-    disconnectAll: () => Promise<void>
-    onEvent: (callback: (workspaceId: string, event: { type: string; data: unknown; workspaceId: string; timestamp: number }) => void) => () => void
-    onConnectionChanged: (callback: (status: { workspaceId: string; status: string }) => void) => () => void
-  }
-
-  // ===== 技能市场 =====
-  skillMarketplace: {
-    publish: (input: { workspaceId: string; workspaceSlug: string; skillSlug: string }) => Promise<{ success: boolean; skillSlug: string }>
-    unpublish: (input: { workspaceId: string; workspaceSlug: string; skillSlug: string }) => Promise<{ success: boolean; skillSlug: string }>
-    listTeamSkills: (workspaceId: string) => Promise<Array<{ slug: string; name: string; description: string; version: string; publishedBy: string; publishedAt: number }>>
-    installTeamSkill: (input: { workspaceId: string; skillSlug: string; targetWorkspaceSlug: string }) => Promise<{ success: boolean; skillSlug: string }>
-    checkForUpdates: (workspaceSlug: string) => Promise<Array<import('@profer/shared').SkillMeta>>
-  }
-
   // ===== 全局 Skill 体系 =====
   globalSkill: {
     list: (workspaceSlug?: string) => Promise<Array<import('@profer/shared').GlobalSkillMeta>>
@@ -1649,37 +1634,6 @@ export interface ElectronAPI {
     detectConflict: (workspaceSlug: string, skillSlug: string) => Promise<import('@profer/shared').SkillConflict>
   }
 
-  // ===== 团队共享知识记忆 =====
-  teamMemory: {
-    list: (workspaceId: string, includeArchived?: boolean) => Promise<TeamMemoryApiResult<Array<Omit<TeamMemoryDocument, 'content'>>>>
-    read: (workspaceId: string, memoryId: string) => Promise<TeamMemoryApiResult<TeamMemoryDocument>>
-    create: (workspaceId: string, input: { path: string; title: string; content: string; changeSummary?: string }) => Promise<TeamMemoryApiResult<TeamMemoryDocument>>
-    update: (workspaceId: string, memoryId: string, input: { expectedVersion: number; path?: string; title?: string; content?: string; changeSummary?: string }) => Promise<TeamMemoryApiResult<TeamMemoryDocument>>
-    listRevisions: (workspaceId: string, memoryId: string) => Promise<TeamMemoryApiResult<TeamMemoryRevision[]>>
-    archive: (workspaceId: string, memoryId: string) => Promise<TeamMemoryApiResult<TeamMemoryDocument>>
-    unarchive: (workspaceId: string, memoryId: string) => Promise<TeamMemoryApiResult<TeamMemoryDocument>>
-  }
-
-  // ===== 团队文件操作 =====
-  teamFile: {
-    upload: (input: { workspaceId: string; workspaceSlug: string; fileName: string; fileData: Uint8Array; sourcePath?: string }) => Promise<{ success: boolean; path: string; size: number; error?: string }>
-    download: (input: { workspaceId: string; workspaceSlug: string; filePath: string; uploadedBy?: string; sha256?: string }) => Promise<string | null>
-    delete: (input: { workspaceId: string; workspaceSlug: string; filePath: string }) => Promise<boolean>
-    getManifest: (workspaceId: string, workspaceSlug?: string) => Promise<Array<{ name: string; path: string; isDirectory: boolean; size: number; modifiedAt: number; sha256: string; fileId?: string; uploadedBy: string; uploadedByName: string; localExists?: boolean; syncStatus?: 'synced' | 'cloud-only' }> | null>
-    createDirectory: (input: { workspaceId: string; dirPath: string }) => Promise<boolean>
-    move: (input: { workspaceId: string; workspaceSlug: string; fromPath: string; toDir: string }) => Promise<{ success: boolean; fromPath: string; toPath?: string; error?: string }>
-    rename: (input: { workspaceId: string; workspaceSlug: string; path: string; newName: string }) => Promise<{ success: boolean; fromPath: string; toPath?: string; error?: string } | null>
-    search: (workspaceId: string, options: { q: string; page?: number; limit?: number }) => Promise<{ files: Array<{ name: string; path: string; isDirectory: boolean; size: number; modifiedAt: number; sha256: string; uploadedBy: string; uploadedByName: string }>; total: number; page: number; limit: number; totalPages: number } | null>
-    getMetadata: (workspaceId: string, fileId: string) => Promise<{ ok: boolean; status?: number; data?: unknown; error?: string }>
-    patchMetadata: (workspaceId: string, fileId: string, body: Record<string, unknown>) => Promise<{ ok: boolean; status?: number; data?: unknown; error?: string }>
-    getTags: (workspaceId: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>
-    getStatuses: (workspaceId: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>
-    setPreference: (workspaceId: string, fileId: string, body: Record<string, unknown>) => Promise<{ ok: boolean; status?: number; error?: string }>
-    getActivities: (workspaceId: string, fileId: string, cursor?: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>
-    listTrash: (workspaceId: string) => Promise<{ ok: boolean; status?: number; data?: import('@profer/shared').TeamTrashEntry[]; error?: string }>
-    restoreTrash: (workspaceId: string, entryId: string) => Promise<{ ok: boolean; status?: number; data?: { success: boolean; restoredPath: string }; error?: string }>
-    purgeTrash: (workspaceId: string, entryId: string) => Promise<{ ok: boolean; status?: number; data?: { success: boolean; state: string }; error?: string }>
-  }
 }
 
 interface MigrationExportResult {
@@ -1697,6 +1651,8 @@ let _settingsPromise: Promise<AppSettings> | null = null
 
 const electronAPI: ElectronAPI = {
   listVisualizations: (sessionId) => ipcRenderer.invoke(VISUALIZATION_IPC.LIST, sessionId),
+  composer: createComposerApi(ipcRenderer),
+
   readVisualization: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.READ, input),
   readVisualizationViewState: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.VIEW_STATE, input),
   saveVisualizationViewState: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.SAVE_VIEW_STATE, input),
@@ -2428,6 +2384,10 @@ const electronAPI: ElectronAPI = {
 
   getAgentSessionSDKMessages: (id: string, opts?: { tail?: number; before?: number }) => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SDK_MESSAGES, id, opts)
+  },
+
+  getAgentNavigationIndex: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_NAVIGATION_INDEX, id)
   },
 
   restoreActiveAgentStreams: () => {
@@ -3706,108 +3666,7 @@ const electronAPI: ElectronAPI = {
     getTeamAuth: () => ipcRenderer.invoke(AUTH_IPC_CHANNELS.GET_TEAM_AUTH) as Promise<{ baseUrl: string; token: string } | null>,
   },
 
-  // ===== 同步（Phase 1: 占位）=====
-  sync: {
-    getStatus: (workspaceId?: string) =>
-      ipcRenderer.invoke(SYNC_IPC_CHANNELS.GET_STATUS, workspaceId),
-    triggerSync: (workspaceId: string) =>
-      ipcRenderer.invoke(SYNC_IPC_CHANNELS.TRIGGER_SYNC, workspaceId),
-    getPendingChanges: (workspaceId: string) =>
-      ipcRenderer.invoke(SYNC_IPC_CHANNELS.GET_PENDING_CHANGES, workspaceId),
-    discardPendingChanges: (workspaceId: string) =>
-      ipcRenderer.invoke(SYNC_IPC_CHANNELS.DISCARD_PENDING_CHANGES, workspaceId),
-    onStatusChanged: (callback: (data: unknown) => void) => {
-      const listener = (_: unknown, data: unknown): void => callback(data)
-      ipcRenderer.on(SYNC_IPC_CHANNELS.STATUS_CHANGED, listener)
-      return () => { ipcRenderer.removeListener(SYNC_IPC_CHANNELS.STATUS_CHANGED, listener) }
-    },
-  },
-
-  // ===== 团队管理（Phase 1: 占位）=====
-  team: {
-    onWorkspacesSynced: (callback: () => void) => {
-      const listener = (): void => callback()
-      ipcRenderer.on('team:workspaces-synced', listener)
-      return () => { ipcRenderer.removeListener('team:workspaces-synced', listener) }
-    },
-    listWorkspaces: () => ipcRenderer.invoke(TEAM_IPC_CHANNELS.LIST_WORKSPACES),
-    createWorkspace: (name: string) => ipcRenderer.invoke(TEAM_IPC_CHANNELS.CREATE_WORKSPACE, name),
-    deleteWorkspace: (workspaceId: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.DELETE_WORKSPACE, workspaceId),
-    getMembers: (workspaceId: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.GET_MEMBERS, workspaceId),
-    createInvitation: (input: { workspaceId: string; email: string; role: string }) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.CREATE_INVITATION, input),
-    listInvitations: (workspaceId: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.LIST_INVITATIONS, workspaceId),
-    cancelInvitation: (input: { workspaceId: string; invitationId: string }) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.CANCEL_INVITATION, input),
-    getStats: (workspaceId: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.GET_STATS, workspaceId),
-    verifyInvitation: (token: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.VERIFY_INVITATION, token),
-    acceptInvitation: (token: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.ACCEPT_INVITATION, token),
-    declineInvitation: (token: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.DECLINE_INVITATION, token),
-    updateMemberRole: (input: { workspaceId: string; userId: string; role: string }) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.UPDATE_MEMBER_ROLE, input),
-    removeMember: (input: { workspaceId: string; userId: string }) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.REMOVE_MEMBER, input),
-    leaveWorkspace: (workspaceId: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.LEAVE_WORKSPACE, workspaceId),
-    transferOwnership: (input: { workspaceId: string; targetUserId: string }) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.TRANSFER_OWNERSHIP, input),
-    restoreWorkspace: (workspaceId: string) =>
-      ipcRenderer.invoke(TEAM_IPC_CHANNELS.RESTORE_WORKSPACE, workspaceId),
-    getAuditLogs: (workspaceId: string, limit?: number, before?: number) =>
-      ipcRenderer.invoke('team:get-audit-logs', workspaceId, limit, before),
-    getAnnouncements: (workspaceId: string) =>
-      ipcRenderer.invoke('team:get-announcements', workspaceId),
-    createAnnouncement: (workspaceId: string, title: string, content: string, isPinned: boolean) =>
-      ipcRenderer.invoke('team:create-announcement', workspaceId, title, content, isPinned),
-    deleteAnnouncement: (workspaceId: string, announcementId: string) =>
-      ipcRenderer.invoke('team:delete-announcement', workspaceId, announcementId),
-    getNotificationSettings: () =>
-      ipcRenderer.invoke('team:get-notification-settings'),
-    updateNotificationSettings: (settings: Record<string, unknown>) =>
-      ipcRenderer.invoke('team:update-notification-settings', settings),
-  },
-
-  // ===== SSE 实时事件 =====
-  sse: {
-    connect: (workspaceId: string) => ipcRenderer.invoke('sse:connect', workspaceId),
-    disconnect: (workspaceId: string) => ipcRenderer.invoke('sse:disconnect', workspaceId),
-    disconnectAll: () => ipcRenderer.invoke('sse:disconnect-all'),
-    onEvent: (callback: (workspaceId: string, event: { type: string; data: unknown; workspaceId: string; timestamp: number }) => void) => {
-      const listener = (_: unknown, event: unknown): void => {
-        const payload = event as { type: string; data: unknown; workspaceId: string; timestamp: number }
-        callback(payload.workspaceId, payload)
-      }
-      ipcRenderer.on(SSE_IPC_CHANNELS.EVENT, listener)
-      return () => { ipcRenderer.removeListener(SSE_IPC_CHANNELS.EVENT, listener) }
-    },
-    onConnectionChanged: (callback: (status: { workspaceId: string; status: string }) => void) => {
-      const listener = (_: unknown, status: unknown): void => callback(status as { workspaceId: string; status: string })
-      ipcRenderer.on(SSE_IPC_CHANNELS.CONNECTION_CHANGED, listener)
-      return () => { ipcRenderer.removeListener(SSE_IPC_CHANNELS.CONNECTION_CHANGED, listener) }
-    },
-  },
-
-  // ===== 技能市场 =====
-  skillMarketplace: {
-    publish: (input: { workspaceId: string; workspaceSlug: string; skillSlug: string }) =>
-      ipcRenderer.invoke(SKILL_MARKETPLACE_IPC_CHANNELS.PUBLISH, input),
-    unpublish: (input: { workspaceId: string; workspaceSlug: string; skillSlug: string }) =>
-      ipcRenderer.invoke(SKILL_MARKETPLACE_IPC_CHANNELS.UNPUBLISH, input),
-    listTeamSkills: (workspaceId: string) =>
-      ipcRenderer.invoke(SKILL_MARKETPLACE_IPC_CHANNELS.LIST_TEAM_SKILLS, workspaceId),
-    installTeamSkill: (input: { workspaceId: string; skillSlug: string; targetWorkspaceSlug: string }) =>
-      ipcRenderer.invoke(SKILL_MARKETPLACE_IPC_CHANNELS.INSTALL_TEAM_SKILL, input),
-    checkForUpdates: (workspaceSlug: string) =>
-      ipcRenderer.invoke(SKILL_MARKETPLACE_IPC_CHANNELS.CHECK_FOR_UPDATES, workspaceSlug),
-  },
-
+  // ===== 全局 Skill 体系 =====
   // ===== 全局 Skill 体系 =====
   globalSkill: {
     list: (workspaceSlug?: string) => ipcRenderer.invoke(GLOBAL_SKILL_IPC_CHANNELS.LIST, workspaceSlug),
@@ -3845,45 +3704,6 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke(SKILL_MASTER_IPC_CHANNELS.DETECT_CONFLICT, workspaceSlug, skillSlug),
   },
 
-  // ===== 团队共享知识记忆 =====
-  teamMemory: {
-    list: (workspaceId: string, includeArchived?: boolean) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.LIST, workspaceId, includeArchived),
-    read: (workspaceId: string, memoryId: string) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.READ, workspaceId, memoryId),
-    create: (workspaceId: string, input: { path: string; title: string; content: string; changeSummary?: string }) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.CREATE, workspaceId, input),
-    update: (workspaceId: string, memoryId: string, input: { expectedVersion: number; path?: string; title?: string; content?: string; changeSummary?: string }) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.UPDATE, workspaceId, memoryId, input),
-    listRevisions: (workspaceId: string, memoryId: string) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.LIST_REVISIONS, workspaceId, memoryId),
-    archive: (workspaceId: string, memoryId: string) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.ARCHIVE, workspaceId, memoryId),
-    unarchive: (workspaceId: string, memoryId: string) => ipcRenderer.invoke(TEAM_MEMORY_IPC_CHANNELS.UNARCHIVE, workspaceId, memoryId),
-  },
-
-  // ===== 团队文件操作 =====
-  teamFile: {
-    upload: (input: { workspaceId: string; workspaceSlug: string; fileName: string; fileData: Uint8Array; sourcePath?: string }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.UPLOAD, input),
-    download: (input: { workspaceId: string; workspaceSlug: string; filePath: string; uploadedBy?: string; sha256?: string }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.DOWNLOAD, input),
-    delete: (input: { workspaceId: string; workspaceSlug: string; filePath: string }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.DELETE, input),
-    getManifest: (workspaceId: string, workspaceSlug?: string) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.GET_MANIFEST, workspaceId, workspaceSlug),
-    createDirectory: (input: { workspaceId: string; dirPath: string }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.CREATE_DIRECTORY, input),
-    move: (input: { workspaceId: string; workspaceSlug: string; fromPath: string; toDir: string }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.MOVE, input),
-    rename: (input: { workspaceId: string; workspaceSlug: string; path: string; newName: string }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.RENAME, input),
-    search: (workspaceId: string, options: { q: string; page?: number; limit?: number }) =>
-      ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.SEARCH, workspaceId, options),
-    getMetadata: (workspaceId: string, fileId: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.GET_METADATA, workspaceId, fileId),
-    patchMetadata: (workspaceId: string, fileId: string, body: Record<string, unknown>) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.PATCH_METADATA, workspaceId, fileId, body),
-    getTags: (workspaceId: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.GET_TAGS, workspaceId),
-    getStatuses: (workspaceId: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.GET_STATUSES, workspaceId),
-    setPreference: (workspaceId: string, fileId: string, body: Record<string, unknown>) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.SET_PREFERENCE, workspaceId, fileId, body),
-    getActivities: (workspaceId: string, fileId: string, cursor?: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.GET_ACTIVITIES, workspaceId, fileId, cursor),
-    listTrash: (workspaceId: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.LIST_TRASH, workspaceId),
-    restoreTrash: (workspaceId: string, entryId: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.RESTORE_TRASH, workspaceId, entryId),
-    purgeTrash: (workspaceId: string, entryId: string) => ipcRenderer.invoke(TEAM_FILE_IPC_CHANNELS.PURGE_TRASH, workspaceId, entryId),
-  },
 }
 
 // 将 API 暴露到渲染进程的 window 对象上

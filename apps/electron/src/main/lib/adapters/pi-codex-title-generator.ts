@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto'
 import type { CodexOAuthCredentials } from '@profer/shared'
 import type { AssistantMessage, Context, Model, OpenAICodexResponsesOptions } from '@earendil-works/pi-ai/compat'
-import type { Dispatcher } from 'undici'
+import type { PiRequestProxyDispatcher as Dispatcher } from './pi-request-proxy'
 import { buildCodexModel } from './pi-model-registry'
 import {
   closePiRequestProxyDispatcher,

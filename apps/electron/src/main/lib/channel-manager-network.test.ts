@@ -233,6 +233,22 @@ describe('F15：严格模型目录与完整分页', () => {
   })
 })
 
+describe('Claude-only 渠道目录拉取', () => {
+  test('Given Claude-only 且配置了 Claude 端点 When 拉取目录 Then 请求 Claude 端点而非主地址', async () => {
+    responder = async () => json(valid('anthropic'))
+    const result = await fetchModels(input('openai', { runtime: 'claude', agentBaseUrl: 'https://fixture.invalid/anthropic' }))
+    expect(result.success).toBe(true)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toMatch(/^https:\/\/fixture\.invalid\/anthropic\/models/)
+  })
+
+  test('Given Claude 端点无法推导 When 拉取目录 Then 明确失败且不发送请求', async () => {
+    const result = await fetchModels(input('xai', { runtime: 'claude' }))
+    expect(result).toMatchObject({ success: false, models: [] })
+    expect(requests).toHaveLength(0)
+  })
+})
+
 describe('F20：测试/发现 URL 一致', () => {
   test('Given OpenAI 完整端点/base query/hash When 目录测试及发现 Then 相同 /models URL', async () => {
     for (const path of ['/v1/chat/completions/', '/v1/responses/', '/v1/']) {

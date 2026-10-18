@@ -28,7 +28,7 @@ import {
 } from '@profer/shared'
 
 /** SDK PermissionBehavior */
-type PermissionBehavior = 'allow' | 'deny'
+type PermissionBehavior = 'allow' | 'deny' | 'ask'
 
 /** SDK PermissionUpdateDestination */
 type PermissionUpdateDestination = 'userSettings' | 'projectSettings' | 'localSettings' | 'session' | 'cliArg'
@@ -81,7 +81,7 @@ export interface CanUseToolOptions {
   decisionReason?: string
   decisionReasonType?: string
   classifierApprovable?: boolean
-  toolUseID: string
+  toolUseID?: string
   agentID?: string
   title?: string
   displayName?: string
@@ -92,6 +92,7 @@ export interface CanUseToolOptions {
 interface PendingPermission {
   resolve: (result: PermissionResult) => void
   request: PermissionRequest
+  metadata: Pick<CanUseToolOptions, 'toolUseID' | 'agentID' | 'suggestions'>
 }
 
 /** 会话级白名单 */
@@ -132,7 +133,11 @@ export class AgentPermissionService {
         return askUserHandler(sessionId, input, options.signal, sendAskUserToRenderer)
       }
 
-      const allow = (): PermissionResult => ({ behavior: 'allow' as const, updatedInput: input })
+      const allow = (): PermissionResult => ({
+        behavior: 'allow' as const,
+        updatedInput: input,
+        ...(options.toolUseID ? { toolUseID: options.toolUseID } : {}),
+      })
 
       // Worker（子代理）的工具调用基本安全审查
       // 避免 UI 等待导致超时死锁，但仍需拦截明确的危险操作
@@ -142,12 +147,12 @@ export class AgentPermissionService {
         if (toolName === 'PowerShell') {
           const command = typeof input.command === 'string' ? input.command : ''
           if (!isSafePowerShellCommand(command)) {
-            return { behavior: 'deny' as const, message: '子代理仅允许执行只读 PowerShell 查询', interrupt: true }
+            return { behavior: 'deny' as const, message: '子代理仅允许执行只读 PowerShell 查询', interrupt: true, ...(options.toolUseID ? { toolUseID: options.toolUseID } : {}) }
           }
         } else if (toolName === 'Bash') {
           const command = typeof input.command === 'string' ? input.command : ''
           if (isDangerousCommand(command) || hasDangerousStructure(command)) {
-            return { behavior: 'deny' as const, message: '子代理不允许执行危险命令', interrupt: true }
+            return { behavior: 'deny' as const, message: '子代理不允许执行危险命令', interrupt: true, ...(options.toolUseID ? { toolUseID: options.toolUseID } : {}) }
           }
         }
         return allow()
@@ -166,13 +171,17 @@ export class AgentPermissionService {
       sendToRenderer(request)
 
       return new Promise<PermissionResult>((resolve) => {
-        this.pendingPermissions.set(request.requestId, { resolve, request })
+        this.pendingPermissions.set(request.requestId, {
+          resolve,
+          request,
+          metadata: { toolUseID: options.toolUseID, agentID: options.agentID, suggestions: options.suggestions },
+        })
 
         // 如果 signal 被中止，自动拒绝
         options.signal.addEventListener('abort', () => {
           if (this.pendingPermissions.has(request.requestId)) {
             this.pendingPermissions.delete(request.requestId)
-            resolve({ behavior: 'deny' as const, message: '操作已中止' })
+            resolve({ behavior: 'deny' as const, message: '操作已中止', ...(options.toolUseID ? { toolUseID: options.toolUseID } : {}) })
           }
         }, { once: true })
       })
@@ -197,8 +206,19 @@ export class AgentPermissionService {
 
     pending.resolve(
       behavior === 'allow'
-        ? { behavior: 'allow' as const, updatedInput: pending.request.toolInput }
-        : { behavior: 'deny' as const, message: '用户拒绝了此操作' }
+        ? {
+            behavior: 'allow' as const,
+            updatedInput: pending.request.toolInput,
+            ...(pending.metadata.toolUseID ? { toolUseID: pending.metadata.toolUseID } : {}),
+            decisionClassification: alwaysAllow ? 'user_permanent' : 'user_temporary',
+            ...(alwaysAllow && pending.metadata.suggestions ? { updatedPermissions: pending.metadata.suggestions } : {}),
+          }
+        : {
+            behavior: 'deny' as const,
+            message: '用户拒绝了此操作',
+            ...(pending.metadata.toolUseID ? { toolUseID: pending.metadata.toolUseID } : {}),
+            decisionClassification: 'user_reject',
+          },
     )
     this.pendingPermissions.delete(requestId)
     return sessionId
@@ -210,7 +230,7 @@ export class AgentPermissionService {
   clearSessionPending(sessionId: string): void {
     for (const [requestId, pending] of this.pendingPermissions) {
       if (pending.request.sessionId === sessionId) {
-        pending.resolve({ behavior: 'deny' as const, message: '会话已结束' })
+        pending.resolve({ behavior: 'deny' as const, message: '会话已结束', ...(pending.metadata.toolUseID ? { toolUseID: pending.metadata.toolUseID } : {}) })
         this.pendingPermissions.delete(requestId)
       }
     }
@@ -339,6 +359,10 @@ export class AgentPermissionService {
       description: this.buildDescription(toolName, input),
       command,
       dangerLevel: this.assessDangerLevel(toolName, input),
+      toolUseID: options.toolUseID,
+      agentID: options.agentID,
+      suggestions: options.suggestions,
+      blockedPath: options.blockedPath,
       decisionReason: options.decisionReason,
       decisionReasonType: options.decisionReasonType,
       classifierApprovable: options.classifierApprovable,

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleX, History, Pause, Pencil, Play, Square, Target } from 'lucide-react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { applyGoalLimitsPatch, getGoalBudgetExhaustedReasons, GOAL_REASON_LABELS, isGoalResumableByMessage, normalizeGoalReason, parseGoalLimitsInput } from '@profer/shared'
+import { applyGoalLimitsPatch, getGoalBudgetExhaustedReasons, GOAL_REASON_LABELS, normalizeGoalReason, parseGoalLimitsInput } from '@profer/shared'
 import type { AgentGoalReasonCode, AgentGoalState } from '@profer/shared'
 import {
   agentGoalAtomFamily, getGoalActions, GOAL_STATUS_LABELS,
@@ -14,6 +14,7 @@ import { Textarea } from '@profer/ui/primitives/textarea'
 import { toast } from 'sonner'
 import { allPendingAskUserRequestsAtom, allPendingPermissionRequestsAtom } from '@/atoms/agent-atoms'
 import { cn } from '@/lib/utils'
+import { getGoalElapsed, formatGoalBudget, formatGoalElapsed, getGoalStatusLabel, isGoalRunning } from '@/domains/goal/goal-display-policy'
 import { formatTokens } from '@/lib/format-tokens'
 
 type Props = { sessionId: string }
@@ -44,45 +45,21 @@ function useNow(enabled: boolean): number {
   return now
 }
 
-/** 只在明确存在 Goal run owner 时累加，暂停与启动水合不计墙钟时间。 */
-function isGoalRunning(goal: AgentGoalState | undefined): boolean {
-  return (goal?.status === 'active' || goal?.status === 'stopping') && Boolean(goal.activeRunId)
-}
-
 function goalElapsed(goal: AgentGoalState, now: number): number {
-  return Math.max(0, goal.elapsedMs ?? 0) + (isGoalRunning(goal) ? Math.max(0, now - goal.updatedAt) : 0)
+  return getGoalElapsed(goal, now)
 }
 
 function formatElapsed(ms: number): string {
-  const seconds = Math.floor(ms / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m${seconds % 60 > 0 ? `${seconds % 60}s` : ''}`
-  return `${Math.floor(minutes / 60)}h${minutes % 60 > 0 ? `${minutes % 60}m` : ''}`
+  return formatGoalElapsed(ms)
 }
 
 function formatBudget(limits: AgentGoalState['limits']): string {
-  const parts = [
-    limits.maxIterations === undefined ? '' : `${limits.maxIterations} 轮`,
-    limits.maxDurationMs === undefined ? '' : formatElapsed(limits.maxDurationMs),
-    limits.maxTokens === undefined ? '' : `${limits.maxTokens.toLocaleString()} tokens`,
-  ].filter(Boolean)
-  return `${parts.length ? parts.join(' · ') : '不限'}（连续 ${limits.maxConsecutiveFailures} 轮无进展时停止）`
+  return formatGoalBudget(limits)
 }
 
 /** active 期间区分真实运行与各种等待，非 active 时补充可操作提示。 */
 function goalStatusLabel(goal: AgentGoalState, waits: { askUser: number; permission: number }, now: number): string {
-  if (goal.status === 'active') {
-    if (waits.askUser > 0) return '等待你的回答'
-    if (waits.permission > 0) return '等待审批'
-    if (goal.waiting === 'plan_mode') return '计划模式中，切换为可执行模式后自动继续'
-    if (goal.retry && !goal.activeRunId) return `运行出错，${formatElapsed(Math.max(0, goal.retry.nextAt - now))}后第 ${goal.retry.attempt} 次重试`
-    return goal.activeRunId ? GOAL_STATUS_LABELS.active : '等待会话空闲'
-  }
-  if (isGoalResumableByMessage(goal)) return `${GOAL_STATUS_LABELS[goal.status]} · ${goal.status === 'blocked' ? '发消息补充后自动继续' : '发消息即可继续'}`
-  // 旧数据只有 stopReason，按共享规则归一化。
-  if ((goal.reasonCode ?? normalizeGoalReason(goal.stopReason)) === 'app_restart') return `${GOAL_STATUS_LABELS[goal.status]} · 重启后待恢复`
-  return GOAL_STATUS_LABELS[goal.status]
+  return getGoalStatusLabel(goal, waits, now)
 }
 
 function DetailRow({ label, value }: { label: string; value: string }): React.ReactElement {

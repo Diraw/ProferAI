@@ -191,8 +191,42 @@ describe('resolveOpenAIChatCompletionsUrl', () => {
     )
   })
 
-  test('custom 不向用户填写的地址追加后缀', () => {
-    expect(resolveOpenAIChatCompletionsUrl('https://api.example.com/v1', 'custom')).toBe('https://api.example.com/v1')
+  test('custom 协议根地址按形态补全 /chat/completions', () => {
+    // 同一个 Base URL 还要供 Pi（Agent）消费，而 Pi 需要协议根地址，
+    // 所以用户把 custom 渠道填成 /v1 是常见写法；直接 POST /v1 会落到站点路由（Go 网关返回 404 page not found）。
+    expect(resolveOpenAIChatCompletionsUrl('https://api.example.com/v1', 'custom')).toBe(
+      'https://api.example.com/v1/chat/completions',
+    )
+    expect(resolveOpenAIChatCompletionsUrl('https://api.example.com/api/v1/', 'custom')).toBe(
+      'https://api.example.com/api/v1/chat/completions',
+    )
+  })
+
+  test('custom 裸域名按 OpenAI 兼容约定补 /v1/chat/completions', () => {
+    expect(resolveOpenAIChatCompletionsUrl('http://192.168.1.10:7863', 'custom')).toBe(
+      'http://192.168.1.10:7863/v1/chat/completions',
+    )
+  })
+
+  test('custom 自定义路由原样请求，不猜用户路径', () => {
+    // 商业代管 relay 与 Responses 端点不能被子串匹配误改。
+    expect(resolveOpenAIChatCompletionsUrl('https://gateway.example.com/v1/proxy/chat', 'custom')).toBe(
+      'https://gateway.example.com/v1/proxy/chat',
+    )
+    expect(resolveOpenAIChatCompletionsUrl('https://gateway.example.com/v1/responses', 'custom')).toBe(
+      'https://gateway.example.com/v1/responses',
+    )
+  })
+
+  test('custom 未配置地址保持空值语义', () => {
+    expect(resolveOpenAIChatCompletionsUrl('', 'custom')).toBe('')
+  })
+
+  test('custom 补全后的端点经 Pi 归一化仍还原为协议根（Chat 与 Agent 互不影响）', () => {
+    const root = 'https://api.example.com/v1'
+    expect(normalizeOpenAIBaseUrlForSdk(resolveOpenAIChatCompletionsUrl(root, 'custom'))).toBe(
+      normalizeOpenAIBaseUrlForSdk(root),
+    )
   })
 
   test('内置 openai 协议根地址补全 /chat/completions', () => {

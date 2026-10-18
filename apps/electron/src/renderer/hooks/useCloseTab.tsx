@@ -17,11 +17,11 @@ import { useStore } from 'jotai'
 import {
   tabsAtom,
   activeTabIdAtom,
-  closeTab,
+  closeTabs,
   isBrowserTab,
   isPreviewTab,
-  selectSameModeCloseFallback,
   tabMruAtom,
+  type TabItem,
 } from '@/atoms/tab-atoms'
 import { browserPanelDismissedSessionIdsAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
 import { previewFilesByTabAtom } from '@/atoms/preview-atoms'
@@ -42,6 +42,8 @@ interface UseCloseTabReturn {
   requestClose: (tabId: string) => void
   /** 直接执行关闭 */
   executeClose: (tabId: string) => void
+  /** 批量关闭多个当前会话入口（「关闭其他 / 关闭所有」），一次提交，避免逐次读到过期快照 */
+  requestCloseMany: (tabIds: readonly string[]) => void
 }
 
 export function useCloseTab(): UseCloseTabReturn {
@@ -85,48 +87,24 @@ export function useCloseTab(): UseCloseTabReturn {
     })
   }, [store, setAgentSessions, setUnviewedCompleted, manualReadConfirmEnabled])
 
-  const executeClose = React.useCallback((tabId: string) => {
-    const closingTab = tabs.find((t) => t.id === tabId)
-    const result = closeTab(tabs, activeTabId, tabId, tabMru)
-    // 关闭会话入口后的回退选择：同类会话优先（MRU），同类关完回 Scratch Pad，不跨模式跳转。
-    const fallbackTabId = selectSameModeCloseFallback(
-      result.tabs,
-      closingTab,
-      result.activeTabId !== activeTabId,
-      tabMru,
-      result.activeTabId,
-    )
-    const nextActiveTabId = fallbackTabId ?? result.activeTabId
-    const nextResult = nextActiveTabId === result.activeTabId
-      ? result
-      : { ...result, activeTabId: nextActiveTabId }
-    const wasActive = nextResult.activeTabId !== activeTabId
-    // 原生插件 View 位于 renderer DOM 之上，先收起/销毁再切换 Tab，避免关闭瞬间
-    // 仍有不可见的 native View 覆盖新激活内容。
-    const removedPluginTabs = tabs.filter((tab) => tab.type === 'plugin' && !nextResult.tabs.some((remaining) => remaining.id === tab.id))
-    for (const removed of removedPluginTabs) {
-      if (!removed.pluginId || !removed.pluginPageId) continue
-      void window.electronAPI.closePluginView(removed.pluginId, removed.pluginPageId, removed.pluginScope === 'session' ? { kind: 'tab', sessionId: removed.sessionId } : { kind: 'tab' }).catch(() => undefined)
-    }
-    if (closingTab?.type === 'plugin' && closingTab.pluginId && closingTab.pluginPageId) {
-      void window.electronAPI.closePluginView(closingTab.pluginId, closingTab.pluginPageId, closingTab.pluginScope === 'session' ? { kind: 'tab', sessionId: closingTab.sessionId } : { kind: 'tab' }).catch(() => undefined)
-    }
-    setTabs(nextResult.tabs)
-    setActiveTabId(nextResult.activeTabId)
-    setTabMru(result.mru)
-
-    // 同步工作 Tab 的附属状态：
-    // - 关闭预览 Tab → 清理其文件元数据条目
-    // - 关闭浏览器 Tab → 记入 dismissed（浏览器进程保留在后台，推送不再自动重开）
-    // - 关闭会话 Tab（连带其工作 Tab）→ 清理该会话全部工作 Tab 元数据
-    if (closingTab && isPreviewTab(closingTab)) {
+  /**
+   * 单个已关闭 Tab 的附属状态清理：
+   * - 关闭预览 Tab → 清理其文件元数据条目
+   * - 关闭浏览器 Tab → 记入 dismissed（浏览器进程保留在后台，推送不再自动重开）
+   * - 关闭会话 Tab（连带其工作 Tab）→ 清理该会话全部工作 Tab 元数据
+   * - 关闭 Agent Tab → 释放可从磁盘/实时消息重建的重型缓存
+   * 单 Tab 与批量关闭共用，保证「关闭其他 / 关闭所有」不会漏掉逐 Tab 清理。
+   */
+  const applyClosedTabSideEffects = React.useCallback((closingTab: TabItem, remainingTabs: readonly TabItem[]) => {
+    if (isPreviewTab(closingTab)) {
+      const closingTabId = closingTab.id
       setPreviewFilesByTab((prev) => {
-        if (!prev.has(tabId)) return prev
+        if (!prev.has(closingTabId)) return prev
         const next = new Map(prev)
-        next.delete(tabId)
+        next.delete(closingTabId)
         return next
       })
-    } else if (closingTab && isBrowserTab(closingTab)) {
+    } else if (isBrowserTab(closingTab)) {
       // 关闭顶栏 Tab = 关闭对应网页（每页一个 Tab）；主进程关到 0 页时销毁会话（返回 null），
       // 此时清掉状态镜像，reconcile 后续会移除同会话残留的浏览器 Tab。
       const browserSessionId = closingTab.sessionId
@@ -145,7 +123,7 @@ export function useCloseTab(): UseCloseTabReturn {
           .catch(() => undefined)
       }
       // 用户关掉该会话最后一个浏览器页 Tab：记入 dismissed，推送不再自动重开
-      const remainingBrowserTabs = nextResult.tabs.filter((tab) => isBrowserTab(tab) && tab.sessionId === browserSessionId)
+      const remainingBrowserTabs = remainingTabs.filter((tab) => isBrowserTab(tab) && tab.sessionId === browserSessionId)
       if (remainingBrowserTabs.length === 0) {
         void (window.electronAPI as Partial<typeof window.electronAPI>).hideAgentBrowser?.(browserSessionId)
         setBrowserDismissed((prev) => {
@@ -155,12 +133,13 @@ export function useCloseTab(): UseCloseTabReturn {
           return next
         })
       }
-    } else if (closingTab?.type === 'agent' || closingTab?.type === 'chat') {
+    } else if (closingTab.type === 'agent' || closingTab.type === 'chat') {
+      const closingSessionId = closingTab.sessionId
       setPreviewFilesByTab((prev) => {
         const next = new Map(prev)
         let changed = false
         for (const key of next.keys()) {
-          if (key.startsWith(`__preview__:${closingTab.sessionId}:`)) {
+          if (key.startsWith(`__preview__:${closingSessionId}:`)) {
             next.delete(key)
             changed = true
           }
@@ -169,26 +148,70 @@ export function useCloseTab(): UseCloseTabReturn {
       })
     }
 
-    if (wasActive) {
-      const newActiveTab = nextResult.activeTabId
-        ? nextResult.tabs.find((t) => t.id === nextResult.activeTabId) ?? null
-        : null
-      syncActiveTabSideEffects(newActiveTab)
-    }
-
     // 关闭 Agent Tab 不停止后台 Agent，但要释放可从磁盘/实时消息重建的重型缓存。
     // 否则会话虽从界面关闭，完整消息数组和用户主动加载的全文 blob 仍一直驻留到进程重启。
-    if (closingTab && closingTab.type === 'agent') {
+    if (closingTab.type === 'agent') {
       const sessionId = closingTab.sessionId
       setAgentMessagesCache((prev) => deleteSessionMapEntry(prev, sessionId))
       setResolvedBlobMessages((prev) => deleteSessionMapEntry(prev, sessionId))
       clearIdleAgentCompletionNotice(sessionId)
     }
-  }, [tabs, activeTabId, tabMru, setTabs, setActiveTabId, setTabMru, setPreviewFilesByTab, setBrowserDismissed, setAgentMessagesCache, setResolvedBlobMessages, syncActiveTabSideEffects, clearIdleAgentCompletionNotice])
+  }, [setPreviewFilesByTab, setBrowserDismissed, store, setAgentMessagesCache, setResolvedBlobMessages, clearIdleAgentCompletionNotice])
+
+  /** 提交一次关闭结果：插件原生 View 先销毁，再提交 tabs 状态，最后逐个同步被关闭 Tab 的附属状态。 */
+  const commitClose = React.useCallback((
+    previousTabs: readonly TabItem[],
+    closingTabs: readonly TabItem[],
+    nextTabs: TabItem[],
+    nextActiveTabId: string | null,
+    nextMru: string[],
+  ) => {
+    // 原生插件 View 位于 renderer DOM 之上，先收起/销毁再切换 Tab，避免关闭瞬间
+    // 仍有不可见的 native View 覆盖新激活内容。
+    const removedPluginTabs = previousTabs.filter((tab) => tab.type === 'plugin' && !nextTabs.some((remaining) => remaining.id === tab.id))
+    for (const removed of removedPluginTabs) {
+      if (!removed.pluginId || !removed.pluginPageId) continue
+      void window.electronAPI.closePluginView(removed.pluginId, removed.pluginPageId, removed.pluginScope === 'session' ? { kind: 'tab', sessionId: removed.sessionId } : { kind: 'tab' }).catch(() => undefined)
+    }
+    setTabs(nextTabs)
+    setActiveTabId(nextActiveTabId)
+    setTabMru(nextMru)
+
+    for (const closingTab of closingTabs) {
+      applyClosedTabSideEffects(closingTab, nextTabs)
+    }
+
+    if (nextActiveTabId !== activeTabId) {
+      const newActiveTab = nextActiveTabId
+        ? nextTabs.find((t) => t.id === nextActiveTabId) ?? null
+        : null
+      syncActiveTabSideEffects(newActiveTab)
+    }
+  }, [activeTabId, setTabs, setActiveTabId, setTabMru, applyClosedTabSideEffects, syncActiveTabSideEffects])
+
+  /**
+   * 关闭一组当前会话入口。
+   *
+   * 逐次调用单 Tab 关闭会各自读到同一份过期 `tabs` 快照（最后一次提交覆盖前面所有结果），
+   * 因此这里在同一份工作副本上按传入顺序串行推进，结束时只提交一次。
+   */
+  const executeCloseMany = React.useCallback((tabIds: readonly string[]) => {
+    const result = closeTabs(tabs, activeTabId, tabIds, tabMru)
+    if (result.closedTabs.length === 0) return
+    commitClose(tabs, result.closedTabs, result.tabs, result.activeTabId, result.mru)
+  }, [tabs, activeTabId, tabMru, commitClose])
+
+  const executeClose = React.useCallback((tabId: string) => {
+    executeCloseMany([tabId])
+  }, [executeCloseMany])
 
   const requestClose = React.useCallback((tabId: string) => {
     executeClose(tabId)
   }, [executeClose])
 
-  return { requestClose, executeClose }
+  const requestCloseMany = React.useCallback((tabIds: readonly string[]) => {
+    executeCloseMany(tabIds)
+  }, [executeCloseMany])
+
+  return { requestClose, executeClose, requestCloseMany }
 }

@@ -25,7 +25,7 @@ import {
   type CreateAutomationInput,
   type UpdateAutomationInput,
 } from '@profer/shared'
-import { presetReferenceForId } from './agent-preset-manager'
+import { presetReferenceForId, resolvePresetReference } from './agent-preset-manager'
 
 /** 索引文件格式 */
 interface AutomationsIndex {
@@ -35,10 +35,19 @@ interface AutomationsIndex {
 
 const INDEX_VERSION = 3
 
+/**
+ * 把自动任务的预设 ID 解析为引用，并拒绝停用或不存在的预设。
+ * 创建与更新共用此入口：界面过滤不能替代主进程校验，绕过界面的调用也不能写入停用预设。
+ */
 function presetReferenceForAutomation(workspaceId: string | undefined, presetId: string) {
   const { getAgentWorkspace } = require('./agent-workspace-manager') as typeof import('./agent-workspace-manager')
   const workspaceSlug = workspaceId ? getAgentWorkspace(workspaceId)?.slug : undefined
-  return presetReferenceForId(workspaceSlug, presetId)
+  // 停用是按工作区判定的：没有工作区上下文时无法确认预设可用，草稿也不能携带未校验的预设引用
+  if (!workspaceSlug) throw new Error('指定预设前需要先选择工作区')
+  const reference = presetReferenceForId(workspaceSlug, presetId)
+  // 严格解析会对停用（含已解除生效范围）的预设抛错，阻止写入不可运行的引用
+  resolvePresetReference(reference, workspaceSlug)
+  return reference
 }
 
 /**

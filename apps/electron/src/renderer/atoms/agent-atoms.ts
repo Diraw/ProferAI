@@ -12,13 +12,9 @@ import { PROFER_DEFAULT_PERMISSION_MODE } from '@profer/shared'
 import { manualReadConfirmEnabledAtom } from './agent-unread-settings'
 import { deriveUnreadIdsFromSessions } from '@/lib/agent-unread-derive'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
+import { deriveAgentRuntimeDisplay } from '@/domains/agent-runtime/agent-runtime-display-policy'
 import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
 import type { SessionFileChange } from '@/lib/session-file-changes'
-import {
-  DEFAULT_TEAM_WORKSPACE_LAYOUT_MODE,
-  TEAM_WORKSPACE_LAYOUT_MODE_STORAGE_KEY,
-  type TeamWorkspaceLayoutMode,
-} from '@/lib/team-layout-mode'
 
 /** 活动状态 */
 export type ActivityStatus = 'pending' | 'running' | 'completed' | 'error' | 'backgrounded'
@@ -365,15 +361,6 @@ export const agentSidePanelOpenAtom = atomWithStorage<boolean>('profer-agent-sid
 /** 侧面板宽度（全局共享，用户拖拽后持久化） */
 export const agentSidePanelWidthAtom = atomWithStorage<number>('profer-agent-sidepanel-width', 280)
 
-/** 团队工作区 Agent 侧栏宽度（用户拖拽后持久化） */
-export const teamAgentPanelWidthAtom = atomWithStorage<number>('profer-team-agent-panel-width', 360)
-
-/** 团队工作区主布局（文件 / 对话），用户选择后持久化 */
-export const teamWorkspaceLayoutModeAtom = atomWithStorage<TeamWorkspaceLayoutMode>(
-  TEAM_WORKSPACE_LAYOUT_MODE_STORAGE_KEY,
-  DEFAULT_TEAM_WORKSPACE_LAYOUT_MODE,
-)
-
 /** @deprecated 保留以兼容旧代码，但实际所有 session 都读全局 atom */
 export const agentSidePanelOpenMapAtom = atom<Map<string, boolean>>(new Map())
 
@@ -690,11 +677,17 @@ export const agentSessionIndicatorMapAtom = atom<Map<string, SessionIndicatorSta
   const map = new Map<string, SessionIndicatorStatus>()
 
   for (const [id, state] of streamStates) {
-    if (!state.running) continue
+    const isActive = state.running || state.stopping === true || state.backgroundWaiting === true
+    if (!isActive) continue
+    const display = deriveAgentRuntimeDisplay({
+      running: state.running,
+      stopping: state.stopping,
+      backgroundWaiting: state.backgroundWaiting,
+    })
     const hasBlock = (pendingPerms.get(id)?.length ?? 0) > 0
       || (pendingAskUser.get(id)?.length ?? 0) > 0
       || (pendingExitPlan.get(id)?.length ?? 0) > 0
-    map.set(id, hasBlock ? 'blocked' : 'running')
+    map.set(id, hasBlock ? 'blocked' : display.active ? 'running' : 'idle')
   }
 
   for (const id of unviewedCompleted) {

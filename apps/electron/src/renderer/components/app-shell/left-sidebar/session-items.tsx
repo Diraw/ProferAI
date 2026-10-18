@@ -12,7 +12,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, Cloud, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X,
+  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X, XCircle, XSquare,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useShortcut } from '@/hooks/useShortcut'
@@ -418,6 +418,41 @@ export function SessionItemActions({
 
 // ===== 对话列表项 =====
 
+/**
+ * 「当前会话」区的关闭菜单组。
+ *
+ * 只在传入 `onCloseTab`（即该行是顶部「当前会话」入口）时渲染：关闭入口只收起 Tab、
+ * 不删除会话数据；「关闭其他 / 关闭所有」的范围由调用方限定为本区入口。
+ */
+function renderCloseMenuGroup(
+  MenuItem: typeof ContextMenuItem | typeof DropdownMenuItem,
+  MenuSeparator: typeof ContextMenuSeparator | typeof DropdownMenuSeparator,
+  handlers: { onCloseTab?: () => void; onCloseOtherTabs?: () => void; onCloseAllTabs?: () => void },
+): React.ReactNode {
+  if (!handlers.onCloseTab) return null
+  return (
+    <>
+      <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={handlers.onCloseTab}>
+        <X size={14} />
+        关闭
+      </MenuItem>
+      {handlers.onCloseOtherTabs && (
+        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={handlers.onCloseOtherTabs}>
+          <XCircle size={14} />
+          关闭其他
+        </MenuItem>
+      )}
+      {handlers.onCloseAllTabs && (
+        <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={handlers.onCloseAllTabs}>
+          <XSquare size={14} />
+          关闭所有
+        </MenuItem>
+      )}
+      <MenuSeparator className="my-0.5" />
+    </>
+  )
+}
+
 interface ConversationItemProps {
   conversation: ConversationMeta
   active: boolean
@@ -438,6 +473,10 @@ interface ConversationItemProps {
   regeneratingTitle?: boolean
   /** 仅当前会话 Tab 区使用：关闭入口，不删除会话数据。 */
   onCloseTab?: () => void
+  /** 仅当前会话 Tab 区使用：关闭本区其他入口。 */
+  onCloseOtherTabs?: () => void
+  /** 仅当前会话 Tab 区使用：关闭本区全部入口。 */
+  onCloseAllTabs?: () => void
 }
 
 export const ConversationItem = React.memo(function ConversationItem({
@@ -455,6 +494,8 @@ export const ConversationItem = React.memo(function ConversationItem({
   onRegenerateTitle,
   regeneratingTitle,
   onCloseTab,
+  onCloseOtherTabs,
+  onCloseAllTabs,
 }: ConversationItemProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
@@ -514,6 +555,7 @@ export const ConversationItem = React.memo(function ConversationItem({
     MenuSeparator: typeof ContextMenuSeparator | typeof DropdownMenuSeparator,
   ) => (
     <>
+      {renderCloseMenuGroup(MenuItem, MenuSeparator, { onCloseTab, onCloseOtherTabs, onCloseAllTabs })}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onTogglePin(conversation.id)}>
         {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
         {isPinned ? '取消置顶' : '置顶对话'}
@@ -574,7 +616,7 @@ export const ConversationItem = React.memo(function ConversationItem({
             startEdit()
           }}
           className={cn(
-            'group relative w-full flex items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 transition-colors duration-100 titlebar-no-drag text-left',
+            'group relative w-full flex items-center gap-1.5 rounded-md py-[5px] pl-2.5 pr-1.5 transition-colors duration-100 titlebar-no-drag text-left',
             active && 'session-item-selected',
             streaming
               ? 'text-foreground font-medium hover:bg-foreground/[0.03]'
@@ -723,6 +765,10 @@ interface AgentSessionItemProps {
   regeneratingTitle?: boolean
   /** 仅当前会话 Tab 区使用：关闭入口，不删除会话数据。 */
   onCloseTab?: () => void
+  /** 仅当前会话 Tab 区使用：关闭本区其他入口。 */
+  onCloseOtherTabs?: () => void
+  /** 仅当前会话 Tab 区使用：关闭本区全部入口。 */
+  onCloseAllTabs?: () => void
 }
 
 export const AgentSessionItem = React.memo(function AgentSessionItem({
@@ -746,6 +792,8 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
   onRegenerateTitle,
   regeneratingTitle,
   onCloseTab,
+  onCloseOtherTabs,
+  onCloseAllTabs,
 }: AgentSessionItemProps): React.ReactElement {
   const interfaceVariant = useAtomValue(interfaceVariantAtom)
   const isClassic = interfaceVariant === 'classic'
@@ -818,6 +866,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
     MenuSeparator: typeof ContextMenuSeparator | typeof DropdownMenuSeparator,
   ) => (
     <>
+      {renderCloseMenuGroup(MenuItem, MenuSeparator, { onCloseTab, onCloseOtherTabs, onCloseAllTabs })}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onTogglePin(session.id)}>
         {session.pinned ? <PinOff size={14} /> : <Pin size={14} />}
         {session.pinned ? '取消置顶' : '置顶会话'}
@@ -901,7 +950,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
             startEdit()
           }}
           className={cn(
-            'group relative w-full flex items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 transition-colors duration-100 titlebar-no-drag text-left',
+            'group relative w-full flex items-center gap-1.5 rounded-md py-[5px] pl-2.5 pr-1.5 transition-colors duration-100 titlebar-no-drag text-left',
             active && 'agent-session-item-active',
             leftAccent
               ? SESSION_ACCENT_ROW_CLASS[leftAccent]
@@ -1178,11 +1227,8 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   const isCurrent = group.workspace.id === currentWorkspaceId
   /** 最近 1.2 秒内切换到此工作区时，短暂高亮 */
   const justSwitchedTo = isCurrent && workspaceSwitchTs > 0 && Date.now() - workspaceSwitchTs < 1200
-  const isTeamWorkspace = group.workspace.type === 'team'
   const renderWorkspaceIcon = (size: number, className: string) =>
-    isTeamWorkspace
-      ? <Cloud size={size} className={className} />
-      : <FolderOpen size={size} className={className} />
+    <FolderOpen size={size} className={className} />
 
   const [renamingWorkspace, setRenamingWorkspace] = React.useState(false)
   const [workspaceEditName, setWorkspaceEditName] = React.useState('')

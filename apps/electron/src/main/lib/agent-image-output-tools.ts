@@ -6,7 +6,7 @@ type ToolResult = { content: Array<{ type: 'text'; text: string }>; details?: un
 function result(payload: Awaited<ReturnType<typeof sendAgentLocalImage>>): ToolResult {
   return {
     content: [{
-      text: `图片已安全复制到当前会话，并会自动显示在回复中。文件相对路径：${payload.image.relativePath}。如需将图片用于皮肤壁纸等后续文件工作流，请使用该相对路径；不要输出任何内部图片协议标记。`,
+      text: `图片已复制到当前会话并自动附加到回复。相对路径：${payload.image.relativePath}。`,
       type: 'text',
     }],
     // 结构化 details 由 Profer UI 直接消费；不再要求模型回显 marker。
@@ -30,10 +30,9 @@ export async function injectAgentImageOutputMcpServer(
     tools: filterDisabledTools([
       sdk.tool(
         'send_local_image',
-        'Send an existing local PNG/JPEG/GIF/WebP as an image in the final Agent response. The path must be inside the current session workspace or an explicitly authorized attached directory. Profer automatically attaches the verified image to the conversation; do not output internal image protocol markers. This tool does not generate or edit images.',
+        'Send an existing local PNG/JPEG/GIF/WebP into the final reply. Relative paths resolve from the session cwd; absolute paths must be inside the session cwd or an authorized attached directory. Profer attaches the verified image automatically. Does not generate or edit images.',
         {
           path: z.string().min(1).max(4096),
-          caption: z.string().max(500).optional(),
         },
         async (args) => result(await sendAgentLocalImage(args, context)),
       ),

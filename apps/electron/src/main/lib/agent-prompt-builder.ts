@@ -43,10 +43,6 @@ export interface SystemPromptContext {
   deepSeekSubagentModel?: string
   /** 当前 runtime 是否为 Pi（影响记忆/文件提示词） */
   isPiRuntime?: boolean
-  /** 当前工作区是否为团队工作区 */
-  isTeamWorkspace?: boolean
-  /** 仅当团队记忆工具实际注册时才注入团队记忆说明。 */
-  teamMemoryAvailable?: boolean
   /** 预设硬禁用的能力组；组内工具与对应 SOP 均不可用。 */
   disabledToolGroups?: readonly AgentPresetToolGroup[]
   /** 仅当 PPT 能力已通过会话级 gate 激活时才注入对应 SOP。 */
@@ -240,19 +236,6 @@ Pi 没有 Claude Agent SDK 的自动记忆后台机制，但 Profer 已为 Pi �
 - 按用户指定位置优先；恢复时先列出两个目录；只读取**实际存在且与当前任务相关**的文件。不得默认创建或读取 \`note.md\`、\`todo.md\`；为空或无关直接跳过。`)
   }
 
-  if (ctx.isTeamWorkspace && ctx.teamMemoryAvailable !== false && !suppress.has('memory')) {
-    // 团队记忆工具名按 runtime 适配：Claude 走 in-process MCP 裸名，Pi 带 mcp__team-memory__ 前缀
-    const teamMemoryPrefix = ctx.isPiRuntime ? 'mcp__team-memory__' : ''
-    sections.push(`## 团队共享知识记忆
-
-当前会话属于团队工作区。团队共享知识记忆独立于用户项目指令与个人 Auto Memory，所有团队成员和团队 Agent 共同可见。
-- 先用 \`${teamMemoryPrefix}list_team_memories\` 或 \`${teamMemoryPrefix}search_team_memories\` 按需查找，再用 \`${teamMemoryPrefix}read_team_memory\` 读取相关项目背景、决策、规范和经验；不要假定每轮都会自动注入全部记忆。
-- 只有用户明确确认、且结论能跨成员复用时，才创建或更新团队记忆；写入前说明目标文档、原因与影响。
-- 团队记忆绝不写入个人偏好、私人路径、凭据、未经确认的猜测或完整聊天记录。
-- 更新前必须先读取当前版本并传 expectedVersion。若工具返回版本冲突，保留双方内容并向用户说明，绝不自动重试覆盖。
-- Agent 不可归档、恢复历史版本或强制覆盖团队记忆；这些治理操作只由团队管理员在界面完成。`)
-  }
-
   // 不确定性处理策略
   sections.push(`## 不确定性处理
 
@@ -317,16 +300,15 @@ Pi 没有 Claude Agent SDK 的自动记忆后台机制，但 Profer 已为 Pi �
   const canGenerateImage = imageGroupEnabled && !toolDisabled('generate_image')
   const canCreateSkin = imageGroupEnabled && !toolDisabled('create_skin') && !!ctx.workspaceSlug && !!ctx.agentCwd
   if (canSendLocalImage) {
-    sections.push(`8. **发送既有本地图片**：当用户要求把已有本地 PNG/JPEG/GIF/WebP 图片放入本轮 Agent 回复，且 \`send_local_image\` 工具可用时，使用该工具。仅可发送当前会话工作目录或用户已授权附加目录中的既有图片。Profer 会自动把校验后的图片附加到当前回复；不要输出、复制或解释任何内部图片协议标记，不要手写本地图片 Markdown、\`file://\` 链接或 HTML img 标签。不可自行构造标记、绕过路径限制或发送 SVG/未知格式。`)
+    sections.push(`8. **发送既有本地图片**：用户要求把已有的 PNG/JPEG/GIF/WebP 图片放入本轮回复，且 \`send_local_image\` 可用时调用该工具。\`path\` 可用相对当前会话工作目录的路径或绝对路径，但必须位于会话工作目录或用户已授权附加目录内。Profer 自动附加图片；不要手写图片 Markdown、\`file://\` 链接或 HTML img 标签，不要发送 SVG 或未知格式，也不要构造路径绕过限制。`)
   }
   if (canGenerateImage) {
-    sections.push(`9. **AI 生图**：当实际工具列表包含 \`generate_image\` 时，用户要求画画、生成图片、P 图、修图等应直接调用该工具；需要编辑时仅可传入当前会话工作目录或用户已授权附加目录内的本地 PNG/JPEG/GIF/WebP 路径。用户说“修改上一张图”时，使用 \`useLastGeneratedImage: true\`，它只指本当前会话中最近一张成功的 Agent 生成图，不能与 \`referenceImagePaths\` 同时传入，也不适用于用户上传图、\`send_local_image\` 或其他会话的图片。工具结果会返回生成文件相对当前会话 cwd 的路径；后续文件工作（例如制作皮肤壁纸）必须使用该路径读取或复制，不要猜测文件名。制作 Profer 皮肤壁纸时必须把图片复制到皮肤包的 \`assets/\`，并在 \`skin.css\` 中仅使用 \`url("assets/<小写文件名>.png|jpg|jpeg|webp|svg")\`；不要引用会话输出目录、绝对路径、\`file:\`、\`data:\` 或外链。单张 assets 图片不得超过 4 MB，完整皮肤包不得超过 5 MB；生成图过大时先用系统已有图片工具压缩/转换，再安装皮肤。壁纸规则写在 \`.shell-bg\` 上即可，公共默认规则不会覆盖后注入的 \`background\` / \`background-image\`。${canCreateSkin ? '制作 Profer 皮肤时，安装校验由 \`create_skin\` 完成：它会复制壁纸进 \`assets/\`、校验 manifest/skin.css/资源大小，并返回确定性的 \`installedPath\`；不要再手工用 find/递归扫描去定位皮肤目录做二次校验。' : '完成后必须检查图片文件真实存在、CSS 引用与文件名一致，并执行一次皮肤导入/刷新或等价静态校验。'}Profer 会自动把生成结果附加到当前回复；不要输出任何内部图片协议标记。不要尝试用代码、ASCII art 等伪造图片。`)
+    sections.push(`9. **AI 生图**：当实际工具列表包含 \`generate_image\` 时，用户要求画画、生成图片、P 图、修图等应直接调用该工具；需要编辑时仅可传入当前会话工作目录或用户已授权附加目录内的本地 PNG/JPEG/GIF/WebP 路径。用户说“修改上一张图”时，使用 \`useLastGeneratedImage: true\`，它只指本当前会话中最近一张成功的 Agent 生成图，不能与 \`referenceImagePaths\` 同时传入，也不适用于用户上传图、\`send_local_image\` 或其他会话的图片。工具结果会返回生成文件相对当前会话 cwd 的路径；后续文件工作（例如制作皮肤壁纸）必须使用该路径读取或复制，不要猜测文件名。制作皮肤相关的图片与 CSS 规则见 \`profer-theme-authoring\` skill。Profer 会自动把生成结果附加到当前回复；不要输出任何内部图片协议标记。不要尝试用代码、ASCII art 等伪造图片。`)
   }
   if (canCreateSkin) {
     // 用户皮肤目录固定且在工作区之外；不给模型确定性路径，它就会用 find 从工作区一路递归搜到
     // 家目录，遍历 ~/Music、~/Pictures、~/Documents 等受保护目录时触发 macOS TCC 隐私弹窗。
-    const userSkinDir = `~/${getConfigDirName()}/skins/`
-    sections.push(`10. **创建 Profer 皮肤**：用户明确要求制作、创建、应用或修改 Profer 皮肤时，不要只给方案、只生成图片或让用户手动复制文件；必须调用 \`create_skin\` 完成落地。先按需调用 \`generate_image\`，再把工具返回的真实相对路径作为 \`wallpaperPath\` 传给 \`create_skin\`；由该工具将壁纸复制到用户皮肤包的 \`assets/\`、校验 manifest/skin.css/资源大小并安装。\`skinCss\` 必须是完整 CSS，至少包含 \`:root\` token 表；壁纸引用必须写成 \`url(\"assets/<小写文件名>\")\`。工具成功后皮肤库会自动刷新，安装位置固定为 \`${userSkinDir}<skin-id>/\`，结果中的 \`installedPath\` 会直接给出该路径。**最终回复直接引用 \`installedPath\` 即可；不要用递归或全盘文件搜索去定位皮肤目录（\`find\`、\`ls -R\`、\`Get-ChildItem -Recurse\`、\`dir /s\` 等一律不用），也不要重复做文件系统校验——安装校验工具已经完成。** 工具会在未提供 \`previewPath\` 时自动从壁纸派生皮肤库缩略图（\`preview.jpg\`），因此卡片不会出现空白灰条；需要自定义缩略图时传 \`previewPath\`（授权目录内的图片，不超过 2 MB），并用 \`previewScale\`（> 0）/ \`previewPosition\` 调整卡片取景。需要参考现有皮肤的 token 写法时，只读工作区内已有的皮肤目录或 \`${userSkinDir}\` 这一个固定目录，不要递归扫描家目录或整个磁盘。只有用户明确要求覆盖已有皮肤时才传 \`replace: true\`。`)
+    sections.push(`10. **创建 Profer 皮肤**：用户明确要求制作、创建、应用或修改 Profer 皮肤时，加载 \`profer-theme-authoring\` skill 并按其流程用 \`create_skin\` 落地；不要只给方案、只生成图片或让用户手动复制文件。安装位置以 \`create_skin\` 返回的 \`installedPath\` 为准，不要用 find、\`ls -R\`、\`Get-ChildItem -Recurse\` 等递归或全盘搜索定位皮肤目录。`)
   }
 
   const browserToolNames = AGENT_PRESET_CAPABILITY_GROUPS.find((group) => group.id === 'browser')?.toolNames ?? []

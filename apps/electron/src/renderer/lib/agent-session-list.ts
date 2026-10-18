@@ -49,6 +49,8 @@ export function replaceAgentSessionInFreshnessOrder(
   sessions: readonly AgentSessionMeta[],
   updated: AgentSessionMeta,
 ): AgentSessionMeta[] {
+  const existing = sessions.find((session) => session.id === updated.id)
+  if (existing && (updated.revision ?? 0) < (existing.revision ?? 0)) return [...sessions]
   const others = sessions.filter((session) => session.id !== updated.id)
   return sortAgentSessionsByUpdatedAtDesc([updated, ...others])
 }
@@ -76,6 +78,7 @@ export function upsertAgentSessionProjection(
     channelId: projection.channelId ?? undefined,
     modelId: projection.modelId ?? undefined,
     agentRuntime: projection.agentRuntime,
+    agentRuntimeLocked: projection.agentRuntimeLocked !== false,
     permissionMode: projection.permissionMode,
     presetId: projection.presetId ?? undefined,
     presetReference: projection.presetReference ?? undefined,
@@ -112,6 +115,7 @@ export function upsertAgentSession(
   incoming: AgentSessionMeta,
 ): AgentSessionMeta[] {
   const existing = sessions.find((session) => session.id === incoming.id)
+  if (existing && (incoming.revision ?? 0) < (existing.revision ?? 0)) return [...sessions]
   const merged: AgentSessionMeta = existing
     ? { ...existing, ...incoming }
     : incoming
@@ -137,6 +141,11 @@ export function mergeFetchedAgentSessions(
   fetched: readonly AgentSessionMeta[],
 ): AgentSessionMeta[] {
   const fetchedIds = new Set(fetched.map((session) => session.id))
+  const localById = new Map(prev.map((session) => [session.id, session]))
+  const acceptedFetched = fetched.map((session) => {
+    const local = localById.get(session.id)
+    return local && (session.revision ?? 0) < (local.revision ?? 0) ? local : session
+  })
   const snapshotWatermark = fetched.reduce(
     (max, session) => Math.max(max, session.updatedAt),
     0,
@@ -145,5 +154,5 @@ export function mergeFetchedAgentSessions(
     (session) =>
       !fetchedIds.has(session.id) && session.updatedAt >= snapshotWatermark,
   )
-  return sortAgentSessionsByUpdatedAtDesc([...fetched, ...survivingLocalOnly])
+  return sortAgentSessionsByUpdatedAtDesc([...acceptedFetched, ...survivingLocalOnly])
 }

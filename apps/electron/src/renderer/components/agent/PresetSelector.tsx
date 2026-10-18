@@ -17,8 +17,9 @@ import { agentPresetCacheKey, agentPresetsLoadedAtom, workspacePresetsAtom } fro
 import { agentSessionsAtom, workspaceCapabilitiesVersionAtom } from '@/atoms/agent-atoms'
 import type { AgentEffort, AgentPreset, PresetReference, ProferPermissionMode } from '@profer/shared'
 import { cn } from '@/lib/utils'
-import { referenceForSelectablePreset, selectablePresetMatchesReference } from './preset-selector-utils'
+import { referenceForSelectablePreset, selectableAgentPresets, selectablePresetMatchesReference } from './preset-selector-utils'
 import { useSessionSettingMutation } from '@/lib/use-session-setting-mutation'
+import { listComposerPresets, rebindComposerPreset } from '@/domains/composer/composer-api'
 
 /** 预设特性 badge 的中文短标签 */
 const EFFORT_LABEL: Record<AgentEffort, string> = { low: '低', medium: '中', high: '高', max: '最大' }
@@ -77,7 +78,7 @@ export function PresetSelector({ sessionId, persistedPresetId, persistedPresetRe
   const capabilitiesVersion = useAtomValue(workspaceCapabilitiesVersionAtom)
 
   React.useEffect(() => {
-    void window.electronAPI.listAgentPresets(workspaceSlug)
+    void listComposerPresets(workspaceSlug)
       .then((list) => {
         setPresets(list)
         setLoadedPresetCaches((prev) => new Set(prev).add(agentPresetCacheKey(workspaceSlug)))
@@ -87,7 +88,7 @@ export function PresetSelector({ sessionId, persistedPresetId, persistedPresetRe
 
   // Manager 返回当前工作区可见预设；明确停用项不能出现在菜单中（含元预设）。
   const availablePresets = React.useMemo(
-    () => presets.filter((preset) => preset.enabledInWorkspace !== false),
+    () => selectableAgentPresets(presets),
     [presets],
   )
   const current = persistedPresetReference
@@ -120,7 +121,7 @@ export function PresetSelector({ sessionId, persistedPresetId, persistedPresetRe
     setSwitchingReference(reference)
     try {
       await mutate({
-      execute: () => window.electronAPI.rebindAgentSessionPresetReference(sessionId, reference, persistedRevision),
+      execute: () => rebindComposerPreset(sessionId, reference, persistedRevision),
       applyAuthoritative: (updated) => {
         setAgentSessions((prev) => prev.map((session) => (session.id === sessionId ? updated : session)))
         closeMenu()
@@ -146,7 +147,7 @@ export function PresetSelector({ sessionId, persistedPresetId, persistedPresetRe
           onOpenChange?.(nextOpen)
           // 打开时刷新，保证技能页导入/编辑后的最新预设可见
           if (nextOpen) {
-            void window.electronAPI.listAgentPresets(workspaceSlug)
+            void listComposerPresets(workspaceSlug)
               .then(setPresets)
               .catch((error) => console.error('[PresetSelector] 刷新工作区预设失败:', error))
           }

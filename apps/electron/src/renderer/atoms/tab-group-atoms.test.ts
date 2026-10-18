@@ -8,6 +8,7 @@
 
 import { expect, test } from 'bun:test'
 import {
+  GROUP_MIN_ADJUSTABLE_BAND,
   GROUP_MIN_PANE_WIDTH,
   resolveGroupDropSide,
   emptyGroupSide,
@@ -28,6 +29,7 @@ import {
   isSessionConsistentGroup,
   planAutoGroupWorkTab,
   planFollowWorkTab,
+  planPreviewSplit,
   planGroupDrop,
   reconcileGroup,
   reconcileTabGroups,
@@ -292,22 +294,35 @@ test('几何：比例受两栏最小宽度约束后回调', () => {
   expect(geometry.ratio).toBeCloseTo(972 / 1392, 5)
 })
 
-test('几何：两栏宽度之和 + 分栏缝 = 容器宽度，且都不小于最小宽', () => {
+test('几何：两栏宽度之和 + 分栏缝 = 容器宽度；够宽时都不小于最小宽，偏窄时让位给保底可调区间', () => {
   const EPSILON = 1e-6
+  const floorShare = (1 - GROUP_MIN_ADJUSTABLE_BAND) / 2
   for (const containerWidth of [1000, 1200, 1440, 1920]) {
     for (const ratio of [0.25, 0.4, 0.5, 0.62, 0.75]) {
       const geometry = resolveGroupSplitGeometry(containerWidth, ratio, { gap: 8, minPaneWidth: 420 })
-      expect(geometry.leftWidth + geometry.rightWidth).toBeCloseTo(containerWidth - 8, 5)
-      expect(geometry.leftWidth).toBeGreaterThanOrEqual(420 - EPSILON)
-      expect(geometry.rightWidth).toBeGreaterThanOrEqual(420 - EPSILON)
+      const available = containerWidth - 8
+      expect(geometry.leftWidth + geometry.rightWidth).toBeCloseTo(available, 5)
+      // 420 是首选下限；只有当它会把可调区间挤到保底值以下时，才放宽到保底占比。
+      const floor = Math.min(420, available * floorShare)
+      expect(geometry.leftWidth).toBeGreaterThanOrEqual(floor - EPSILON)
+      expect(geometry.rightWidth).toBeGreaterThanOrEqual(floor - EPSILON)
     }
   }
 })
 
-test('几何：容器装不下两个最小宽时等分，容器为 0 时输出 0', () => {
+test('几何：容器偏窄时不再等分锁死，分栏缝保留保底可调区间；容器为 0 时输出 0', () => {
+  // 862 ≈ 1510 窗口 + 侧栏 300 + 文件面板 300 时的主区容器宽：
+  // 两栏各 420px 只剩 ±7px 可调（旧实现等分后完全拖不动），这里要求仍能横跨保底区间。
+  const containerWidth = 862
+  const available = containerWidth - 8
+  const leftMost = resolveGroupSplitGeometry(containerWidth, 0.25, { gap: 8 })
+  const rightMost = resolveGroupSplitGeometry(containerWidth, 0.75, { gap: 8 })
+  expect(rightMost.rightWidth - leftMost.rightWidth).toBeCloseTo(available * GROUP_MIN_ADJUSTABLE_BAND, 5)
+  expect(leftMost.leftWidth + leftMost.rightWidth).toBeCloseTo(available, 5)
+
   const narrow = resolveGroupSplitGeometry(GROUP_MIN_PANE_WIDTH + 100, 0.75, { gap: 8 })
-  expect(narrow.ratio).toBe(0.5)
-  expect(narrow.leftWidth).toBeCloseTo(narrow.rightWidth, 5)
+  expect(narrow.ratio).toBeCloseTo((1 + GROUP_MIN_ADJUSTABLE_BAND) / 2, 6)
+  expect(narrow.leftWidth + narrow.rightWidth).toBeCloseTo(GROUP_MIN_PANE_WIDTH + 100 - 8, 5)
 
   expect(resolveGroupSplitGeometry(0, 0.5)).toEqual({ rightWidth: 0, leftWidth: 0, ratio: 0.5 })
   expect(resolveGroupSplitGeometry(-100, 0.5)).toEqual({ rightWidth: 0, leftWidth: 0, ratio: 0.5 })
@@ -540,6 +555,54 @@ test('planFollowWorkTab：对话+同会话预览组合跟随最新文件，焦�
   })
   expect(next).toHaveLength(1)
   expect(next![0]).toEqual({ leftTabId: 's1', rightTabId: '__preview__:s1:b', focusedTabId: 's1' })
+})
+
+test('planPreviewSplit：无组合时把会话与预览摆成左右两栏，焦点按参数', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: '__preview__:s1:a', type: 'preview', sessionId: 's1', title: 'a', filePath: '/w/a' },
+  ] as const
+  const next = planPreviewSplit({ groups: [], tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })
+  expect(next!.focusedTabId).toBe('__preview__:s1:a')
+  expect(next!.groups).toEqual([{ leftTabId: 's1', rightTabId: '__preview__:s1:a', focusedTabId: '__preview__:s1:a' }])
+  // 不要求用户此刻正看着该会话（与 planFollowWorkTab 的关键区别）
+  const focusedAgent = planPreviewSplit({ groups: [], tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'agent' })
+  expect(focusedAgent!.focusedTabId).toBe('s1')
+})
+
+test('planPreviewSplit：会话已在右栏时预览补左栏，不改变用户摆的左右顺序', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: '__preview__:s1:a', type: 'preview', sessionId: 's1', title: 'a', filePath: '/w/a' },
+  ] as const
+  const groups = [{ leftTabId: null, rightTabId: 's1', focusedTabId: 's1' }] as const
+  const next = planPreviewSplit({ groups: [...groups], tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })
+  expect(next!.groups[0]).toEqual({ leftTabId: '__preview__:s1:a', rightTabId: 's1', focusedTabId: '__preview__:s1:a' })
+})
+
+test('planPreviewSplit：对侧是浏览器/其他会话内容时不改写用户布局', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: '__browser__:s1', type: 'browser', sessionId: 's1', title: '浏览器' },
+  ] as const
+  const groups = [{ leftTabId: 's1', rightTabId: '__browser__:s1', focusedTabId: 's1' }]
+  expect(planPreviewSplit({ groups, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })).toBeNull()
+})
+
+test('planPreviewSplit：预览已入别的组合时不抢，同一组合内则只切焦点', () => {
+  const tabs = [
+    { id: 's1', type: 'agent', sessionId: 's1', title: 's1' },
+    { id: 's2', type: 'agent', sessionId: 's2', title: 's2' },
+    { id: '__preview__:s1:a', type: 'preview', sessionId: 's1', title: 'a', filePath: '/w/a' },
+  ] as const
+  // 预览被用户编进了「s2 + 预览」的组合：不抢
+  const otherGroup = [{ leftTabId: 's2', rightTabId: '__preview__:s1:a', focusedTabId: 's2' }]
+  expect(planPreviewSplit({ groups: otherGroup, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })).toBeNull()
+  // 会话与预览已在同一组合：仅切焦点，组合不变
+  const sameGroup = [{ leftTabId: 's1', rightTabId: '__preview__:s1:a', focusedTabId: 's1' }]
+  const next = planPreviewSplit({ groups: sameGroup, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })
+  expect(next!.groups).toBe(sameGroup)
+  expect(next!.focusedTabId).toBe('__preview__:s1:a')
 })
 
 test('planFollowWorkTab：右栏是浏览器/其他会话内容时不改写用户布局', () => {

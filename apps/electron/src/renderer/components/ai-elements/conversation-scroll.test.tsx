@@ -59,6 +59,14 @@ function harness() {
       if (!(index in slots)) slots[index] = initial
       return [slots[index] as T, (value) => { slots[index] = value }]
     },
+    useMemo<T>(create: () => T, deps: readonly unknown[]): T {
+      const index = cursor++
+      const previous = slots[index] as { value: T; deps: readonly unknown[] } | undefined
+      if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) {
+        slots[index] = { value: create(), deps }
+      }
+      return (slots[index] as { value: T }).value
+    },
     useLayoutEffect(create: () => (() => void) | void) { setupEffect = create },
   }
   const render = () => {
@@ -102,6 +110,21 @@ function run(fn: (h: ReturnType<typeof harness>) => void) {
 }
 
 describe('Conversation provider接线', () => {
+  test('正文更新保持 context 引用，只有跟随状态变化才通知消费者', () => run(h => {
+    const following = h.render()
+    expect(h.render()).toBe(following)
+    h.viewport.scrollHeight += 120
+    h.observers[0]!.callback()
+    h.drain()
+    expect(h.render()).toBe(following)
+    h.actions.pause()
+    const reading = h.render()
+    expect(reading).not.toBe(following)
+    expect(reading.following).toBe(false)
+    expect(reading.follow).toBe(following.follow)
+    expect(h.render()).toBe(reading)
+  }))
+
   test('文本选择与按钮使用同一following状态，随后内容增长仍保持阅读', () => run(h => {
     expect(h.render().following).toBe(true)
     h.select()

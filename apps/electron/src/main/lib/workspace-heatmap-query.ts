@@ -8,7 +8,7 @@ import { getWorkspaceHeatmapDaily, type HeatmapDailyEntry } from './workspace-he
  */
 export function loadWorkspaceHeatmapDaily(workspaceId: string): HeatmapDailyEntry[] {
   const workspace = getAgentWorkspace(workspaceId)
-  if (!workspace || workspace.type === 'team') return []
+  if (!workspace || (workspace as { type?: string }).type === 'team') return []
 
   const sessions = listAgentSessions(true)
     .filter((session) => session.workspaceId === workspaceId)

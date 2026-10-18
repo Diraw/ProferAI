@@ -24,6 +24,25 @@ describe('createSessionUpdateBatcher', () => {
     ])
   })
 
+  test('默认调度使用定时器，不依赖 requestAnimationFrame', async () => {
+    const flushed: Array<[string, readonly string[]]> = []
+    const previousRequestAnimationFrame = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (() => {
+      throw new Error('后台窗口不应依赖 requestAnimationFrame')
+    }) as typeof requestAnimationFrame
+
+    try {
+      const batcher = createSessionUpdateBatcher<string>(
+        (sessionId, updates) => flushed.push([sessionId, updates]),
+      )
+      batcher.enqueue('background-session', 'mobile-message')
+
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(flushed).toEqual([['background-session', ['mobile-message']]])
+    } finally {
+      globalThis.requestAnimationFrame = previousRequestAnimationFrame
+    }
+  })
   test('flush 会在终态前提交最后一批，cancel 会丢弃过期 session 更新', () => {
     const callbacks: Array<() => void> = []
     const flushed: Array<[string, readonly string[]]> = []

@@ -52,6 +52,9 @@ function buildPreviewGuideline(
 
   if (availablePreviewTools.has('inspect_preview')) {
     parts.push('Markdown、HTML、SVG、图片、PDF、DOCX、XLSX 等通用文件可按需使用 `inspect_preview`')
+    // 现场教训：模型复述附件路径时会混拼 UUID，造出不存在目录，再把工具的
+    // 「路径不存在」误判成「授权目录读不到附件」。强制逐字复制并禁止据此宣称读不到。
+    parts.push('附件文件必须逐字复制 `<attached_files>` 给出的绝对路径，不要自己拼写或改写目录；若返回「路径不存在」应该核对并重试，不得据此声称附件不在授权目录或无法读取')
   }
 
   if (availablePreviewTools.has('open_file_preview') && availablePreviewTools.has('inspect_file_preview')) {

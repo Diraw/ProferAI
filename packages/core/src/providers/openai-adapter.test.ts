@@ -43,6 +43,19 @@ describe('OpenAIAdapter Ollama Chat', () => {
     })
   })
 
+  test('通过 OpenAI 兼容渠道接入的 DeepSeek V4 标题请求也显式关闭推理', () => {
+    const request = new OpenAIAdapter('openai').buildTitleRequest({
+      baseUrl: 'https://fixture.invalid/v1',
+      apiKey: 'key',
+      modelId: 'deepseek-v4.1-flash',
+      prompt: 'title',
+    })
+    expect(JSON.parse(request.body)).toMatchObject({
+      max_tokens: 128,
+      thinking: { type: 'disabled' },
+    })
+  })
+
   test('GPT-6 系列标题请求显式关闭 reasoning', () => {
     const request = new OpenAIAdapter('custom').buildTitleRequest({
       baseUrl: 'https://fixture.invalid/v1',

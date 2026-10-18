@@ -17,13 +17,18 @@
  * bun run scripts/dist.ts --current-arch --verbose   # 当前架构 + 详细日志
  * bun run scripts/dist.ts --current-arch --dmg       # 当前架构 + 只构建 DMG
  * bun run scripts/dist.ts --mac --current-arch --no-sign # Apple Silicon 本地 macOS 包
+ *
+ * 未显式指定平台时按宿主推导（darwin→mac / win32→win / linux→linux）。
+ * 注意：Linux 当前不是受支持的发布目标（缺少 Claude 原生二进制与 Linux 构建验证），
+ * 因此 --linux 会被 packaging-host 门禁显式拒绝，而不是产出一个 Claude 必然失败的包。
  */
 
 import { spawnSync } from 'child_process'
 import { delimiter, dirname, join } from 'path'
 
-const { assertPackagingHost } = require('./packaging-host.cjs') as {
+const { assertPackagingHost, assertSupportedPackagingTarget } = require('./packaging-host.cjs') as {
   assertPackagingHost: (targetPlatform: 'mac' | 'win' | 'linux', hostPlatform?: string) => void
+  assertSupportedPackagingTarget: (targetPlatform: 'mac' | 'win' | 'linux') => void
 }
 
 // ============================================
@@ -145,8 +150,40 @@ function runStep(
 // 主流程
 // ============================================
 
-function parseArgs(): DistOptions {
-  const args = process.argv.slice(2)
+/**
+ * 默认目标平台：按宿主推导。
+ *
+ * `dist:fast` / `dist:debug` 的语义是「当前宿主的快速打包」（见 AGENTS.md），
+ * 因此未显式指定平台时必须跟随宿主，而不是固定 win：固定 win 会让 macOS 上的
+ * `bun run dist:fast` 被 Windows 宿主门禁直接拒绝。
+ *
+ * 未知宿主返回 undefined：由调用方报错退出，不静默伪造任何一个平台。
+ */
+export function defaultPlatformForHost(
+  hostPlatform: NodeJS.Platform,
+): DistOptions['platform'] | undefined {
+  if (hostPlatform === 'darwin') return 'mac'
+  if (hostPlatform === 'win32') return 'win'
+  if (hostPlatform === 'linux') return 'linux'
+  return undefined
+}
+
+/** 参数解析（宿主平台与 argv 可注入，便于跨平台解析测试）。 */
+export function parseArgs(
+  args: readonly string[] = process.argv.slice(2),
+  hostPlatform: NodeJS.Platform = process.platform,
+): DistOptions {
+  const explicitPlatform = args.includes('--mac')
+    ? 'mac' as const
+    : args.includes('--win')
+      ? 'win' as const
+      : args.includes('--linux')
+        ? 'linux' as const
+        : undefined
+  const platform = explicitPlatform ?? defaultPlatformForHost(hostPlatform)
+  if (!platform) {
+    throw new Error(`不支持在 ${hostPlatform} 宿主上打包；请显式选择 --mac / --win / --linux。`)
+  }
   return {
     currentArch: args.includes('--current-arch'),
     verbose: args.includes('--verbose'),
@@ -158,22 +195,24 @@ function parseArgs(): DistOptions {
         : args.includes('--dir')
           ? 'dir'
           : 'all',
-    platform: args.includes('--mac')
-      ? 'mac'
-      : args.includes('--win')
-        ? 'win'
-        : args.includes('--linux')
-          ? 'linux'
-          : 'win', // 默认 Windows；macOS 必须显式选择。
+    platform,
   }
 }
 
 function main(): void {
-  const opts = parseArgs()
+  let opts: DistOptions
+  try {
+    opts = parseArgs()
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(2)
+  }
   const arch = process.arch // arm64 或 x64
   const results: StepResult[] = []
 
   try {
+    // 目标平台支持门禁（当前 Linux 未纳入发布目标，原因见 packaging-host.cjs 注释）。
+    assertSupportedPackagingTarget(opts.platform)
     assertPackagingHost(opts.platform, process.platform)
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
@@ -355,4 +394,5 @@ function printSummary(results: StepResult[]): void {
   process.exit(allSuccess ? 0 : 1)
 }
 
-main()
+// 直接执行时才跑主流程；被测试 import 时不产生副作用。
+if (import.meta.main) main()

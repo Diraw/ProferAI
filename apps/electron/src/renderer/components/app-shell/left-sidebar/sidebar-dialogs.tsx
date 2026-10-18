@@ -35,11 +35,6 @@ export function SidebarDialogs({ s }: { s: SidebarModel }): React.ReactElement {
     currentWorkspaceId,
     workspaces,
     handleSessionMoved,
-    showJoinDialog,
-    setShowJoinDialog,
-    inviteCode,
-    setInviteCode,
-    handleJoinWorkspace,
   } = s
 
   return (
@@ -122,33 +117,6 @@ export function SidebarDialogs({ s }: { s: SidebarModel }): React.ReactElement {
         onMoved={handleSessionMoved}
       />
 
-      {/* 加入团队工作区对话框 */}
-      {showJoinDialog && (
-        <AlertDialog open={showJoinDialog} onOpenChange={setShowJoinDialog}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>加入团队工作区</AlertDialogTitle>
-              <AlertDialogDescription>
-                输入管理员分享的邀请码，加入团队工作区
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <input
-              value={inviteCode}
-              onChange={(e) => setInviteCode(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleJoinWorkspace() }}
-              placeholder="粘贴邀请码..."
-              className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm text-foreground outline-none focus:ring-2 focus:ring-primary/30"
-              autoFocus
-            />
-            <AlertDialogFooter>
-              <AlertDialogCancel onClick={() => setShowJoinDialog(false)}>取消</AlertDialogCancel>
-              <AlertDialogAction onClick={handleJoinWorkspace} disabled={!inviteCode.trim()}>
-                加入
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      )}
     </>
   )
 }

@@ -5,7 +5,6 @@ import { toast } from 'sonner'
 import type { ActivePlanningReminder } from '@profer/shared'
 import { activePlanningRemindersAtom, planningSelectedTodoIdAtom, planningTabAtom } from '@/atoms/planning-atoms'
 import { activeViewAtom } from '@/atoms/active-view'
-import { agentWorkspacesAtom, currentAgentWorkspaceIdAtom } from '@/atoms/agent-atoms'
 import { notificationsEnabledAtom, notificationSoundEnabledAtom, notificationSoundsAtom, playNotificationSoundForType } from '@/atoms/notifications'
 import { Button } from '@profer/ui/primitives/button'
 
@@ -24,9 +23,6 @@ function mergeReminders(current: ActivePlanningReminder[], incoming: ActivePlann
 /** 全局常驻提醒条。未确认提醒从 SQLite 恢复，不依赖一次性 toast 生命周期。 */
 export function PlanningReminderRail({ playSound = true }: { playSound?: boolean } = {}): React.ReactElement | null {
   const [reminders, setReminders] = useAtom(activePlanningRemindersAtom)
-  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
-  const workspaces = useAtomValue(agentWorkspacesAtom)
-  const teamWorkspaceId = workspaces.find((workspace) => workspace.id === currentWorkspaceId)?.type === 'team' ? currentWorkspaceId ?? undefined : undefined
   const setActiveView = useSetAtom(activeViewAtom)
   const setPlanningTab = useSetAtom(planningTabAtom)
   const setSelectedTodoId = useSetAtom(planningSelectedTodoIdAtom)
@@ -36,11 +32,11 @@ export function PlanningReminderRail({ playSound = true }: { playSound?: boolean
 
   const load = React.useCallback(async () => {
     try {
-      setReminders(await window.electronAPI.listActivePlanningReminders(teamWorkspaceId))
+      setReminders(await window.electronAPI.listActivePlanningReminders())
     } catch (error) {
       console.error('[任务/日程] 加载常驻提醒失败:', error)
     }
-  }, [setReminders, teamWorkspaceId])
+  }, [setReminders])
 
   React.useEffect(() => {
     void load()
@@ -53,15 +49,12 @@ export function PlanningReminderRail({ playSound = true }: { playSound?: boolean
     const unsubscribeChanged = window.electronAPI.onPlanningChanged((change) => {
       if (change.resources.includes('reminders')) void load()
     })
-    const unsubscribeSse = window.electronAPI.sse.onEvent((workspaceId, event) => {
-      if (workspaceId === teamWorkspaceId && (event.type === 'planning_reminder_due' || event.type === 'planning_changed')) void load()
-    })
-    return () => { unsubscribeDue(); unsubscribeChanged(); unsubscribeSse() }
-  }, [load, notificationsEnabled, playSound, setReminders, soundEnabled, sounds, teamWorkspaceId])
+    return () => { unsubscribeDue(); unsubscribeChanged() }
+  }, [load, notificationsEnabled, playSound, setReminders, soundEnabled, sounds])
 
   const acknowledge = async (id: string) => {
     try {
-      await window.electronAPI.acknowledgePlanningReminder(id, teamWorkspaceId)
+      await window.electronAPI.acknowledgePlanningReminder(id)
     } catch (error) {
       console.error('[任务/日程] 确认提醒失败:', error)
       toast.error('确认提醒失败')
@@ -82,7 +75,7 @@ export function PlanningReminderRail({ playSound = true }: { playSound?: boolean
   }
   const snooze = async (id: string, minutes: number) => {
     try {
-      await window.electronAPI.snoozePlanningReminder({ id, minutes }, teamWorkspaceId)
+      await window.electronAPI.snoozePlanningReminder({ id, minutes })
     } catch (error) {
       console.error('[任务/日程] 推迟提醒失败:', error)
       toast.error('推迟提醒失败')

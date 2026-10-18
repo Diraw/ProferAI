@@ -31,12 +31,13 @@ import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import type { AddressInfo } from 'node:net'
 import { app, BrowserWindow } from 'electron'
 
-import { AGENT_IPC_CHANNELS, isChannelEnabledForRuntime, isProferPermissionMode, type AgentSessionMeta } from '@profer/shared'
-import { agentEventBus, runAgentHeadless, stopAgent, isAgentSessionActive, listActiveAgentRuntimeContexts, updateAgentPermissionMode, queueAgentMessage, beginAgentSessionDeletion, endAgentSessionDeletion, stopAgentAndWait, rewindAgentSession, regenerateAgentTitle } from './agent-service'
+import { AGENT_IPC_CHANNELS, canSelectAgentSessionRuntime, AGENT_SESSION_RUNTIME_LOCKED_MESSAGE, normalizeAgentRuntime, isChannelEnabledForRuntime, isProferPermissionMode, type AgentSessionMeta } from '@profer/shared'
+import type { AgentSendInput } from '@profer/shared'
+import { agentEventBus, runAgentHeadless, runAgentRuntimeHeadless, peekAgentRunClaimFailureForSession, describeAgentRunRejection, stopAgent, isAgentSessionActive, listActiveAgentRuntimeContexts, updateAgentPermissionMode, queueAgentMessage, beginAgentSessionDeletion, endAgentSessionDeletion, stopAgentAndWait, rewindAgentSession, regenerateAgentTitle } from './agent-service'
 import { publishAgentSessionProjection, setAgentSessionUnread, updateAgentSessionUiMeta } from './agent-session-ui-projection-publisher'
 import { buildArchiveToggleUpdates } from './agent-unread-policy'
-import { getAgentUnreadPolicyMode } from './agent-unread-mode'
 import { getUserProfile } from './user-profile-service'
+import { getAgentUnreadPolicyMode } from './agent-unread-mode'
 import {
   listAgentSessions,
   getAgentSessionMeta,
@@ -55,6 +56,7 @@ import {
 } from './agent-session-manager'
 import { getAgentSessionsDir, getConfigDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
 import { getSettings } from './settings-service'
+import { projectAgentPayloadForPocket, projectSdkMessageForPocket } from './pocket-agent-projection'
 import {
   listAgentWorkspaces,
   createAgentWorkspace,
@@ -105,6 +107,7 @@ import { resolveAndReadFile, readFileAsDataUrl } from './file-preview-service'
 import { resolveAuthorizedRemoteFilePath } from './remote-file-access'
 import { loadWorkspaceHeatmapDaily } from './workspace-heatmap-query'
 import { RemoteAgentEventLog, type RemoteAgentEventRecord } from './remote-agent-event-log'
+import { RemoteAgentReplayRegistry, type RemoteReplayRecord } from './remote-agent-replay-registry'
 import { RemoteRelayClient, type RemoteRelaySink } from './remote-relay-client'
 
 /** 正式版默认监听端口 */
@@ -138,8 +141,18 @@ let listenAddress: string | null = null
 /** 服务实例 ID：Pocket 发现主进程重启后清除旧 cursor，改走快照恢复。 */
 let serverInstanceId = randomUUID()
 const remoteAgentEventLog = new RemoteAgentEventLog()
+/**
+ * remote（Pocket）侧的会话绑定与回放登记（GAP-3）。
+ *
+ * 与 `RemoteAgentEventLog` 分工不同：事件日志提供**游标补发**（客户端必须自己记住 cursor），
+ * 本登记提供**会话级重建**（刷新后拿不到 cursor 也能拿到正在飞 / 刚结束的一轮）。
+ * 两者都不复制桌面的 webContents backlog 机制。
+ */
+const remoteAgentReplayRegistry = new RemoteAgentReplayRegistry()
 
 type AgentReplayState = {
+  /** 本连接的客户端标识：绑定 / 回放登记按它归属，多客户端互不干扰。 */
+  clientKey: string
   replaying: boolean
   queuedLiveFrames: RemoteAgentEventRecord[]
   lastSentEventId: number
@@ -192,7 +205,9 @@ function isPartialSdkPayload(payload: unknown): boolean {
 
 /** 真正把一条 agent_event 帧广播给所有已连接移动端客户端。 */
 function broadcastAgentFrame(sessionId: string, payload: import('@profer/shared').AgentStreamPayload): void {
-  const record = remoteAgentEventLog.append(sessionId, payload)
+  const record = remoteAgentEventLog.append(sessionId, projectAgentPayloadForPocket(payload))
+  // 同一份记录进入会话级回放登记：刷新后的 Pocket 即使没有游标也能重建在飞的一轮。
+  remoteAgentReplayRegistry.observe(record)
   const frame = JSON.stringify({
     kind: 'agent_event',
     eventId: record.eventId,
@@ -295,6 +310,107 @@ function replayAgentEvents(client: WebSocket, requestId: unknown, cursor: unknow
   replayState.queuedLiveFrames = []
   replayState.replaying = false
   sendAgentReplayResult(client, requestId, replay)
+}
+
+/**
+ * 纯函数：根据会话级登记算出「要补发的记录 + 结果帧」。
+ *
+ * 抽出来的目的：让「刷新回放 / 重连幂等」可以在不启动 WS 的前提下被真实驱动
+ * （不重复 registry 逻辑，也不复制连接状态机）。
+ *
+ * 去重口径：实际下界取 `max(sinceEventId, lastSentEventId)` —— 客户端声明的游标
+ * 与本连接已经发出去的最大 eventId 取大值，因此重复调用本命令第二次只会补增量。
+ */
+export function planAgentStreamsRestore(
+  registry: RemoteAgentReplayRegistry,
+  clientKey: string,
+  request: {
+    sessionIds?: readonly string[]
+    sinceEventId?: number | null
+    lastSentEventId: number
+    requestId?: unknown
+  },
+): { records: RemoteReplayRecord[]; requiresSnapshot: boolean; frame: Record<string, unknown> } {
+  const requested = typeof request.sinceEventId === 'number' ? request.sinceEventId : null
+  const sinceEventId = requested === null
+    ? (request.lastSentEventId || null)
+    : Math.max(requested, request.lastSentEventId)
+  const batch = registry.replayFor(clientKey, {
+    ...(request.sessionIds ? { sessionIds: request.sessionIds } : {}),
+    sinceEventId,
+  })
+  const records = batch.requiresSnapshot
+    ? []
+    : batch.records.filter((record) => record.eventId > request.lastSentEventId)
+  return {
+    records,
+    requiresSnapshot: batch.requiresSnapshot,
+    frame: {
+      kind: 'agent_streams_restored',
+      requestId: request.requestId ?? null,
+      sessions: batch.sessions,
+      replayed: records.length,
+      requiresSnapshot: batch.requiresSnapshot,
+      oldestEventId: batch.oldestEventId,
+      latestEventId: batch.latestEventId,
+    },
+  }
+}
+
+/**
+ * Pocket 刷新 / 重连后的**会话级回放**：把当前活跃或刚落终态的一轮事件按序补发。
+ *
+ * 与 `resume_agent_events`（游标补发）的区别：客户端**不需要**记住 cursor。
+ * 刷新后的 Pocket 内存状态已丢，旧 cursor 不可用，但通过本命令仍能重建在飞的一轮。
+ *
+ * 幂等保证：
+ * - 事件按 eventId 升序发送，已发送过的 eventId（含回放期间排队的新帧）一律跳过；
+ * - 登记不完整（本轮早期事件被容量上限丢弃）时不发送半段事件，只回 `requiresSnapshot: true`；
+ * - 重复调用本命令（弱网重连重放）第二次只补增量，不会重复消息或重复终态。
+ */
+function restoreAgentStreams(
+  client: WebSocket,
+  requestId: unknown,
+  request: { sessionIds?: unknown; sinceEventId?: unknown },
+): void {
+  const replayState = agentReplayStates.get(client)
+  if (!replayState || client.readyState !== WebSocket.OPEN) return
+  if (replayState.fallbackTimer) {
+    clearTimeout(replayState.fallbackTimer)
+    replayState.fallbackTimer = null
+  }
+
+  const sessionIds = Array.isArray(request.sessionIds)
+    ? request.sessionIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : undefined
+  if (sessionIds) {
+    for (const sessionId of sessionIds) remoteAgentReplayRegistry.bindClient(replayState.clientKey, sessionId)
+  }
+
+  const plan = planAgentStreamsRestore(remoteAgentReplayRegistry, replayState.clientKey, {
+    ...(sessionIds ? { sessionIds } : {}),
+    sinceEventId: typeof request.sinceEventId === 'number' ? request.sinceEventId : null,
+    lastSentEventId: replayState.lastSentEventId,
+    requestId,
+  })
+
+  const replayedIds = new Set<number>()
+  if (!plan.requiresSnapshot) {
+    for (const record of plan.records) {
+      if (record.eventId <= replayState.lastSentEventId) continue
+      sendAgentEventRecord(client, record)
+      replayedIds.add(record.eventId)
+    }
+    // 回放期间排队的新帧：按 eventId 补发，已回放过的跳过。
+    for (const record of replayState.queuedLiveFrames.sort((a, b) => a.eventId - b.eventId)) {
+      if (record.eventId <= replayState.lastSentEventId || replayedIds.has(record.eventId)) continue
+      sendAgentEventRecord(client, record)
+    }
+  }
+  replayState.queuedLiveFrames = []
+  replayState.replaying = false
+
+  client.send(JSON.stringify(plan.frame))
 }
 
 /**
@@ -645,6 +761,7 @@ export function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]
     explorationSourceMessageId: s.explorationSourceMessageId,
     explorationSourceLabel: s.explorationSourceLabel,
     agentRuntime: s.agentRuntime,
+    agentRuntimeLocked: !canSelectAgentSessionRuntime(s),
     permissionMode: s.permissionMode,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
@@ -797,6 +914,8 @@ export async function handleRemoteCommand(
           },
           deleteSession: deleteAgentSession,
         })
+        // 会话已删：同时释放它的回放登记，避免刷新后的 Pocket 拿到已删会话的在飞事件。
+        remoteAgentReplayRegistry.clearSession(sessionId)
         publishSessionDeleted(sessionId)
         return { ok: true, data: { sessionId } }
       } catch (err) {
@@ -903,14 +1022,20 @@ export async function handleRemoteCommand(
         parsed.before !== undefined ||
         parsed.targetMessages !== undefined
       if (!wantsPaged) {
-        // 返回原始 SDKMessage 数组，供桌面式 AgentMessages 渲染（与持久化格式一致）
-        return { ok: true, data: messages }
+        // Pocket 只接收正文、工具名称和必要 usage，不接收思考正文、工具入参或工具结果。
+        return { ok: true, data: messages.map(projectSdkMessageForPocket) }
       }
       const page = paginateSDKMessages(messages, {
         before: typeof parsed.before === 'number' ? parsed.before : undefined,
         targetMessages: typeof parsed.targetMessages === 'number' ? parsed.targetMessages : undefined,
       })
-      return { ok: true, data: page }
+      return {
+        ok: true,
+        data: {
+          ...page,
+          messages: page.messages.map(projectSdkMessageForPocket),
+        },
+      }
     }
 
     case 'session_detail': {
@@ -1009,9 +1134,11 @@ export async function handleRemoteCommand(
       if (!sessionId || !runtime) return { ok: false, error: '缺少有效 sessionId 或 runtime' }
       const runtimeRevisionError = validateExpectedRevision(parsed, sessionId)
       if (runtimeRevisionError) return runtimeRevisionError
-      if (isAgentSessionActive(sessionId)) return { ok: false, error: 'Agent 正在运行，完成后再切换内核' }
       const meta = getAgentSessionMeta(sessionId)
       if (!meta) return { ok: false, error: '会话不存在' }
+      if (normalizeAgentRuntime(meta.agentRuntime) === runtime) return { ok: true, data: buildSessionItem(meta) }
+      if (!canSelectAgentSessionRuntime(meta)) return { ok: false, error: AGENT_SESSION_RUNTIME_LOCKED_MESSAGE }
+      if (isAgentSessionActive(sessionId)) return { ok: false, error: 'Agent 已开始运行，内核选择已固定' }
       const updated = updateAgentSessionUiMeta(sessionId, { agentRuntime: runtime })
       return { ok: true, data: buildSessionItem(updated) }
     }
@@ -1288,45 +1415,48 @@ export async function handleRemoteCommand(
       // run 失败原因：orchestrator / agent-service 的 onError 一定先于 onComplete 触发，
       // 这里暂存并并入 completion 的 resultErrors，让 Pocket 能看到真实错误文案（而非只有「执行出错」）。
       let runErrorMessage: string | null = null
-      void runAgentHeadless(
-        {
-          sessionId, userMessage, channelId, modelId, workspaceId, startedAt,
-          // Pocket 是用户在自己手机上发的新消息：显式标为用户发起（清未读），
-          // 不能靠 `source: 'bridge'` 反推 —— 按 resolveRunInitiator 的优先级，headless source
-          // 会把它解析成 'external'，导致用户自己的新一轮不清未读。
-          initiator: 'user',
-          ...(uuid ? { uuid } : {}),
-        },
-        {
-          source: 'bridge',
-          onError: (error) => {
-            // 此前此处完全静默：run 失败在服务端零日志、Pocket 端零提示
-            // （Pocket 没有桌面那条 IPC STREAM_ERROR 通道，失败信息只能靠 run_completed 携带）。
-            runErrorMessage = error
-            console.error('[Remote] send_message 运行失败:', error)
-          },
-          onComplete: (_messages, opts) => {
-            agentEventBus.emit(sessionId, {
-              kind: 'profer_event',
-              event: {
-                type: 'run_completed',
-                sessionId,
-                stoppedByUser: opts?.stoppedByUser ?? false,
-                startedAt: opts?.startedAt ?? startedAt,
-                resultSubtype: opts?.resultSubtype,
-                resultErrors: opts?.resultErrors ?? (runErrorMessage ? [runErrorMessage] : undefined),
-                backgroundTasksPending: opts?.backgroundTasksPending ?? false,
-                // 透传 orchestrator 已归一化的 endReason / label：Pocket 据此置位中断 chip + toast。
-                endReason: opts?.endReason,
-                endReasonLabel: opts?.endReasonLabel,
+      // runtime coordinator opt-in：默认仍保留旧 headless 路径，便于逐步迁移和回退。
+      // 开关只读一次：既保证「全仓只有本入口读它」的可审计性，也让预检与分支使用同一个值。
+      const useRuntimeRemote = process.env.PROFER_RUNTIME_REMOTE === '1'
+      const headlessInput: AgentSendInput = {
+        sessionId, userMessage, channelId, modelId, workspaceId, startedAt,
+        initiator: 'user',
+        ...(uuid ? { uuid } : {}),
+      }
+      // 取得执行权之前不做任何副作用：被拒绝的请求不是一次运行，失败必须同步返回，
+      // 否则客户端已经收到 `accepted: true` 却永远等不到 `run_completed`。
+      // 预检与 runAgentRuntimeHeadless 之间全是同步语句，互斥由 coordinator 的 claim 最终保证。
+      const remoteBlocked = useRuntimeRemote
+        ? peekAgentRunClaimFailureForSession(sessionId, normalizeAgentRuntime(getAgentSessionMeta(sessionId)?.agentRuntime))
+        : undefined
+      if (remoteBlocked) return { ok: false, error: describeAgentRunRejection(remoteBlocked) }
+      // cwd 不再由入口覆写：统一 host/context 按 `getAgentSessionWorkspacePath(workspaceSlug, sessionId)`
+      // 推导（与旧链同源），否则多个 remote session 会共享 workspace 根 cwd 与 Pi checkpoint。
+      const runtimeRun = useRuntimeRemote
+        ? runAgentRuntimeHeadless(
+            headlessInput,
+            {
+              source: 'bridge',
+              onError: error => {
+                runErrorMessage = error
+                console.error('[Remote] runtime send_message 运行失败:', runErrorMessage)
               },
-            })
-          },
-          onTitleUpdated: () => {},
-        },
-      ).catch((e) => {
-        console.error('[Remote] send_message 执行异常:', e)
-      })
+              onComplete: () => {},
+              onTitleUpdated: () => {},
+            },
+          )
+        : runAgentHeadless(headlessInput, {
+            source: 'bridge',
+            onError: error => {
+              runErrorMessage = error
+              console.error('[Remote] send_message 运行失败:', error)
+            },
+            onComplete: (_messages, opts) => {
+              agentEventBus.emit(sessionId, { kind: 'profer_event', event: { type: 'run_completed', sessionId, stoppedByUser: opts?.stoppedByUser ?? false, startedAt: opts?.startedAt ?? startedAt, resultSubtype: opts?.resultSubtype, resultErrors: opts?.resultErrors ?? (runErrorMessage ? [runErrorMessage] : undefined), backgroundTasksPending: opts?.backgroundTasksPending ?? false, endReason: opts?.endReason, endReasonLabel: opts?.endReasonLabel } })
+            },
+            onTitleUpdated: () => {},
+          })
+      void runtimeRun.catch((e) => console.error('[Remote] send_message 执行异常:', e))
       return { ok: true, data: { accepted: true } }
     }
 
@@ -1877,6 +2007,7 @@ export function startRemoteService(): string | null {
     ;(ws as WebSocket & { __lastAlive?: number }).__lastAlive = Date.now()
     const commandContext: RemoteCommandContext = {}
     const replayState: AgentReplayState = {
+      clientKey: randomUUID(),
       replaying: true,
       queuedLiveFrames: [],
       lastSentEventId: 0,
@@ -1919,6 +2050,19 @@ export function startRemoteService(): string | null {
         return
       }
 
+      // 刷新后的会话级回放（不依赖 cursor）。同时把本连接绑定到请求的会话，
+      // 之后的实时帧与后续回放都按这个绑定归属。
+      if (parsedRaw?.type === 'restore_agent_streams') {
+        restoreAgentStreams(ws, reqId, parsedRaw as { sessionIds?: unknown; sinceEventId?: unknown })
+        return
+      }
+
+      // 任何带 sessionId 的会话级命令都顺带声明关注：绑定是幂等的。
+      const scopedSessionId = (parsedRaw as { sessionId?: unknown } | null)?.sessionId
+      if (typeof scopedSessionId === 'string' && scopedSessionId.length > 0) {
+        remoteAgentReplayRegistry.bindClient(replayState.clientKey, scopedSessionId)
+      }
+
       void handleRemoteCommand(body, reqId, commandContext).then((result) => {
         // commandId 与 requestId 同源：新客户端按 commandId 幂等，旧客户端继续读取 requestId。
         const commandId = typeof reqId === 'string' && reqId.length > 0 ? reqId : randomUUID()
@@ -1931,6 +2075,7 @@ export function startRemoteService(): string | null {
     ws.on('close', () => {
       const replayState = agentReplayStates.get(ws)
       if (replayState?.fallbackTimer) clearTimeout(replayState.fallbackTimer)
+      if (replayState) remoteAgentReplayRegistry.unbindClient(replayState.clientKey)
       agentReplayStates.delete(ws)
       console.log('[Remote] 移动端客户端断开')
     })
@@ -2002,6 +2147,19 @@ export function startRemoteService(): string | null {
             kind: 'agent_events_resumed',
             requestId: parsed._cmdId ?? parsed.requestId ?? null,
             requiresSnapshot: true,
+            latestEventId: remoteAgentEventLog.getLatestEventId(),
+          }))
+          return
+        }
+        if (parsed.type === 'restore_agent_streams') {
+          // 同理：relay 背后可能是多个 viewer，不在透明层做会话级回放，一律要求取快照。
+          sink.send(JSON.stringify({
+            kind: 'agent_streams_restored',
+            requestId: parsed._cmdId ?? parsed.requestId ?? null,
+            sessions: [],
+            replayed: 0,
+            requiresSnapshot: true,
+            oldestEventId: remoteAgentEventLog.getOldestEventId(),
             latestEventId: remoteAgentEventLog.getLatestEventId(),
           }))
           return

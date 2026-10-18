@@ -166,6 +166,15 @@ describe('upsertAgentSessionProjection', () => {
     expect(result[0]).toMatchObject({ revision: 3, permissionMode: 'plan' })
   })
 
+  test('首次发送锁定 projection 可刷新恢复，迟到的未锁 projection 不回退', () => {
+    const empty = upsertAgentSessionProjection([], projection(1, { agentRuntime: 'pi', agentRuntimeLocked: false }))
+    const locked = upsertAgentSessionProjection(empty, projection(2, { agentRuntime: 'pi', agentRuntimeLocked: true }))
+    const delayed = upsertAgentSessionProjection(locked, projection(1, { agentRuntime: 'claude', agentRuntimeLocked: false }))
+    expect(delayed[0]).toMatchObject({ revision: 2, agentRuntime: 'pi', agentRuntimeLocked: true })
+    expect(upsertAgentSessionProjection([], projection(2, { agentRuntime: 'pi', agentRuntimeLocked: true }))[0]).toMatchObject({ agentRuntime: 'pi', agentRuntimeLocked: true })
+    expect(upsertAgentSessionProjection([], projection(1))[0]?.agentRuntimeLocked).toBe(true)
+  })
+
   test('普通会话投影不伪造探索血缘', () => {
     const result = upsertAgentSessionProjection([], projection(1))
     expect(result[0]?.explorationParentSessionId).toBeUndefined()
@@ -206,6 +215,14 @@ describe('mergeFetchedAgentSessions', () => {
     const result = mergeFetchedAgentSessions(prev, fetched)
     expect(result.some((s) => s.id === 'old')).toBe(false)
     expect(result.some((s) => s.id === 'keep')).toBe(true)
+  })
+
+  test('低 revision 全量快照不能覆盖刚绑定的会话', () => {
+    const locked = makeSession('a', 10, { revision: 3, agentRuntime: 'pi', agentRuntimeLocked: true })
+    const stale = makeSession('a', 9, { revision: 2, agentRuntime: 'claude', agentRuntimeLocked: false })
+    expect(mergeFetchedAgentSessions([locked], [stale])[0]).toEqual(locked)
+    expect(upsertAgentSession([locked], stale)[0]).toEqual(locked)
+    expect(replaceAgentSessionInFreshnessOrder([locked], stale)[0]).toEqual(locked)
   })
 
   test('幂等：prev 与 fetched 完全一致 When 合并 Then 内容不变', () => {

@@ -144,8 +144,16 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
   }
   // 通用兼容渠道填写完整请求端点，与真实 adapter 共用 URL 解析。
   if (provider === 'custom') {
-    // 只填站点根地址时，拼接后的端点会落到站点页面而不是 API，这里给出显式提示。
-    return `${resolveOpenAIChatCompletionsUrl(baseUrl, provider)}；请填写完整 /chat/completions 请求端点`
+    const resolved = resolveOpenAIChatCompletionsUrl(baseUrl, provider)
+    const trimmed = baseUrl.trim().replace(/\/+$/, '')
+    // 地址本身就是 Responses / Anthropic 端点时，Chat 的 OpenAI 兼容协议用不了，必须换渠道类型。
+    if (/\/(responses|messages)$/i.test(resolved)) {
+      return `${resolved}；这不是 OpenAI Chat Completions 端点，Chat 请改用「OpenAI Responses 格式」或「Anthropic 兼容格式」渠道`
+    }
+    // 协议根地址（/v1、裸域名）会被 adapter 自动补全；其它自定义路径原样请求，需用户自行确认。
+    return resolved === trimmed
+      ? `${resolved}；按原地址请求，请确认它是完整请求端点`
+      : `${resolved}；已按协议根地址补全 /chat/completions`
   }
   if (provider === 'deepseek') {
     // DeepSeek 的协议跟随端点形态：官方/`/anthropic` 走 Anthropic，
@@ -587,11 +595,14 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     if (!options?.keepPreviousResult) setFetchResult(null)
 
     try {
+      // 只配置 Claude 的渠道按 Claude 端点拉取目录；混合或 Pi 渠道保持主地址。
+      const claudeOnly = agentRuntimes.length === 1 && agentRuntimes[0] === 'claude'
       const result = await window.electronAPI.fetchModels({
         requestId: networkId,
         provider,
         baseUrl,
         apiKey,
+        ...(claudeOnly ? { runtime: 'claude' as const, agentBaseUrl } : {}),
       })
 
       if (!mountedRef.current || !isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) return
@@ -608,7 +619,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       activeNetworkRequestsRef.current.delete(networkId)
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) setFetchingModels(false)
     }
-  }, [canDiscoverModels, provider, baseUrl, apiKey])
+  }, [canDiscoverModels, provider, baseUrl, apiKey, agentRuntimes, agentBaseUrl])
 
   /** 手动「从供应商获取」：覆盖上一次结果提示，并记下尝试键避免与自动发现重复请求 */
   const handleFetchModels = (): void => {

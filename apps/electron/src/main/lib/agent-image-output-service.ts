@@ -123,7 +123,7 @@ export async function writeAgentImageOutput(
 
 /** Safely copy an existing image from one authorized location into this session output. */
 export async function sendAgentLocalImage(
-  input: { path: string; caption?: string },
+  input: { path: string },
   context: AgentImageOutputContext,
 ): Promise<AgentImageOutputResult> {
   const source = await readAuthorizedAgentImage(input.path, context)

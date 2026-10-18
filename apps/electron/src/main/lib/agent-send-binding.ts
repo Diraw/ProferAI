@@ -22,7 +22,7 @@ export function validateAgentSendBinding(
   }
   // runtime 是会话元数据的归属，不允许过期 renderer / 延迟请求越过切换结果。
   if (input.agentRuntime !== undefined && input.agentRuntime !== normalizeAgentRuntime(session.agentRuntime)) {
-    return { ok: false, code: 'AGENT_SESSION_RUNTIME_MISMATCH', message: 'Agent 会话内核已切换，请重新发送消息' }
+    return { ok: false, code: 'AGENT_SESSION_RUNTIME_MISMATCH', message: '请求内核与会话绑定不一致，请使用对应内核的新会话' }
   }
   if (session.workspaceId && !workspaceExists) {
     return { ok: false, code: 'AGENT_WORKSPACE_NOT_FOUND', message: 'Agent 会话所属工作区不存在' }

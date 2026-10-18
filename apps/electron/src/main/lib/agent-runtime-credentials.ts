@@ -1,9 +1,8 @@
 import type { AgentRuntime, Channel, CodexOAuthCredentials, ProviderType, XaiOAuthCredentials } from '@profer/shared'
 import { PROVIDER_DEFAULT_URLS, resolveXaiCredentialMode } from '@profer/shared'
 import { getTeamAuthWithRefresh } from './auth-service'
-import { decryptApiKey, isCommercialMode, persistCodexOAuthCredentials, persistXaiOAuthCredentials, resolveChannelAgentBaseUrl, resolveCodexOAuthCredentials, resolveXaiOAuthCredentials } from './channel-manager'
-import { isCommercialBuild } from './build-target'
-import { isOfficialManagedChannel } from './official-channel'
+import { decryptApiKey, persistCodexOAuthCredentials, persistXaiOAuthCredentials, resolveChannelAgentBaseUrl, resolveCodexOAuthCredentials, resolveXaiOAuthCredentials } from './channel-manager'
+import { shouldUseCommercialBearerAuth } from './commercial-routing-policy'
 import { normalizePiApi } from './adapters/pi-model-registry'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 
@@ -46,8 +45,7 @@ export async function resolveRuntimeCredentials(
   channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode' | 'directDataPlane'>,
   runtime: AgentRuntime = 'claude',
 ): Promise<ResolveRuntimeCredentialsResult> {
-  const isOfficialChannel = isOfficialManagedChannel(channel)
-  const forceBearerAuth = (isCommercialBuild() || isCommercialMode()) && isOfficialChannel
+  const forceBearerAuth = shouldUseCommercialBearerAuth(channel)
 
   const useDirectDataPlane = forceBearerAuth && channel.directDataPlane === true
   const baseUrl = resolveRuntimeBaseUrl(channel, runtime)

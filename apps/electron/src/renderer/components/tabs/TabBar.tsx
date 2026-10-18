@@ -85,9 +85,7 @@ import {
   TOPBAR_HEIGHT,
 } from "./topbar-layout";
 
-export function TabBar({
-  teamMode = false,
-}: { teamMode?: boolean } = {}): React.ReactElement {
+export function TabBar(): React.ReactElement {
   const tabs = useAtomValue(tabsAtom);
   const setTabs = useSetAtom(tabsAtom);
   const [activeTabId, setActiveTabId] = useAtom(activeTabIdAtom);
@@ -322,11 +320,7 @@ export function TabBar({
       } else if (tab.type === "scratch" || tab.type === "tutorial") {
         setCurrentConversationId(null);
         // 个人 Agent 模式下保留 appMode，避免切到 Scratch 时收起右侧文件面板；
-        // 团队模式必须退出 TeamWorkspaceView，否则草稿/教程标签会被团队文件页遮住。
-        if (teamMode) {
-          setAppMode("scratch");
-          setCurrentAgentSessionId(null);
-        } else if (appMode !== "agent") {
+        if (appMode !== "agent") {
           setCurrentAgentSessionId(null);
         }
       }
@@ -339,7 +333,6 @@ export function TabBar({
       agentSessions,
       agentWorkspaces,
       appMode,
-      teamMode,
       setAppMode,
       setCurrentConversationId,
       setCurrentAgentSessionId,
@@ -566,7 +559,6 @@ export function TabBar({
         onClose={requestClose}
         onDragStart={handleDragStart}
         onCancelSort={() => sortCancelRef.current?.()}
-        teamMode={teamMode}
       />
     </>
   );
@@ -584,7 +576,6 @@ function TabBarInner({
   onClose,
   onDragStart,
   onCancelSort,
-  teamMode,
 }: {
   tabs: TabItem[];
   activeTabId: string | null;
@@ -597,7 +588,6 @@ function TabBarInner({
   onDragStart: (tabId: string, e: React.PointerEvent) => void;
   /** 取消进行中的标签排序（合并手势中途接管时调用） */
   onCancelSort: () => void;
-  teamMode: boolean;
 }): React.ReactElement {
   const agentSessions = useAtomValue(agentSessionsAtom);
   const browserStateMap = useAtomValue(browserStateMapAtom);
@@ -676,7 +666,7 @@ function TabBarInner({
   // 窗口按钮和顶栏入口共用同一块弹性操作面板；窗口按钮被右侧面板接管时，
   // 面板只保留工具入口，不再预留固定的 132px 空洞。
   const showTabBarWindowControls =
-    isWindows && !teamMode && !hasRightSideContent;
+    isWindows && !hasRightSideContent;
   const togglePanel = React.useCallback(() => {
     if (!activeAgentSessionId) return;
     if (isPanelOpen) {
@@ -764,7 +754,7 @@ function TabBarInner({
     {
       id: "managed-browser",
       // 工具优先于标签：浏览器分栏压窄会话区时仍保留完整入口，标签区自行滚动压缩。
-      visible: !teamMode && showBrowserButton,
+      visible: showBrowserButton,
       label: "打开受管浏览器",
       tooltip: "打开受管浏览器",
       icon: <Globe2 className="size-3.5" />,
@@ -774,7 +764,7 @@ function TabBarInner({
     },
     {
       id: "file-panel",
-      visible: !teamMode && showOpenPanelButton,
+      visible: showOpenPanelButton,
       label: "打开文件面板",
       tooltip: `打开文件面板 (${navigator.platform.includes("Mac") ? "⌘⇧B" : "Ctrl+Shift+B"})`,
       icon: <PanelRight className="size-3.5" />,
@@ -786,7 +776,7 @@ function TabBarInner({
     },
     {
       id: "plugin-pages",
-      visible: !teamMode && activeSessionId !== null && hasPluginPages,
+      visible: activeSessionId !== null && hasPluginPages,
       label: "打开插件页面",
       tooltip: "打开插件页面",
       icon: <Blocks className="size-3.5" />,
@@ -794,7 +784,7 @@ function TabBarInner({
     },
     {
       id: "coach-tour",
-      visible: !teamMode,
+      visible: true,
       label: "界面引导",
       tooltip: "播放界面引导（Esc 退出）",
       icon: <Compass className="size-3.5" />,
@@ -807,7 +797,7 @@ function TabBarInner({
     {
       id: "tab-group",
       // 只在左右双栏（组合）状态下出现：常态不提供入口按钮，创建入口只有"把标签向下拖"手势。
-      visible: !teamMode && !!activeGroup,
+      visible: !!activeGroup,
       label: "解散组合",
       tooltip: "解散当前组合（两个标签都保留）",
       icon: <Ungroup className="size-3.5" />,

@@ -122,9 +122,9 @@ describe('渲染层自动清除点（R1–R10）一个都不能少', () => {
       snippets: ['setUnviewedCompleted((previous) => {', 'next.delete(id)'],
     },
     {
-      id: 'R10 团队工作区切换会话',
-      file: 'src/renderer/components/agent/TeamWorkspaceView.tsx',
-      snippets: ['setUnviewedCompleted((prev) => {', 'next.delete(sessionId)'],
+      id: 'R10 个人工作区切换会话',
+      file: 'src/renderer/components/app-shell/left-sidebar/use-left-sidebar.ts',
+      snippets: ['setCurrentWorkspaceId(workspaceId)', 'setCurrentAgentSessionId(session.id)'],
     },
   ]
 

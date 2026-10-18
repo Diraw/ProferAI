@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs'
 import type { AgentSessionMeta } from '@profer/shared'
-import { normalizeAgentRuntime } from '@profer/shared'
+import { normalizeSessionIndexData } from '@profer/session-core'
 import { readJsonFileSafe, writeJsonFileAtomic } from './safe-file'
 
 export interface AgentSessionsIndex {
@@ -43,17 +43,6 @@ export function createAgentSessionIndexStore(getPath: () => string): AgentSessio
     }
   }
 
-  const normalizeSessionRuntime = (session: AgentSessionMeta): AgentSessionMeta => {
-    const agentRuntime = normalizeAgentRuntime(session.agentRuntime)
-    return session.agentRuntime === agentRuntime ? session : { ...session, agentRuntime }
-  }
-
-  const removeLegacyAgentKnowledgeReferences = (session: AgentSessionMeta): AgentSessionMeta => {
-    if (!Object.prototype.hasOwnProperty.call(session, 'knowledgeReferences')) return session
-    const { knowledgeReferences: _removed, ...withoutKnowledgeReferences } = session as AgentSessionMeta & { knowledgeReferences?: unknown }
-    return withoutKnowledgeReferences
-  }
-
   const read = (): AgentSessionsIndex => {
     if (cache) {
       try {
@@ -67,16 +56,7 @@ export function createAgentSessionIndexStore(getPath: () => string): AgentSessio
     const data = readJsonFileSafe<AgentSessionsIndex>(getPath())
     if (!data) return { version: INDEX_VERSION, sessions: [] }
 
-    let removedLegacyKnowledgeReferences = false
-    const sessions = Array.isArray(data.sessions)
-      ? data.sessions.map((session) => {
-          const normalized = normalizeSessionRuntime(session)
-          const cleaned = removeLegacyAgentKnowledgeReferences(normalized)
-          if (cleaned !== normalized) removedLegacyKnowledgeReferences = true
-          return cleaned
-        })
-      : []
-    const normalized: AgentSessionsIndex = { ...data, sessions }
+    const { index: normalized, removedLegacyKnowledgeReferences } = normalizeSessionIndexData(data)
     let cacheNormalized = true
     if (removedLegacyKnowledgeReferences) {
       try {

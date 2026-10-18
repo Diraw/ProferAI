@@ -25,7 +25,7 @@ import {
   detectInsufficientCredits,
 } from '@profer/core'
 import type { ImageAttachmentData, ContinuationMessage } from '@profer/core'
-import { listChannels, decryptApiKey, isCommercialMode, canSelfConfig } from './channel-manager'
+import { listChannels, decryptApiKey, canSelfConfig } from './channel-manager'
 import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
 import { appendMessage, appendBranchTail, updateConversationMeta, getConversationBranch, getConversationMeta, DEFAULT_CONVERSATION_TITLE } from './conversation-manager'
 import { readAttachmentAsBase64, isImageAttachment } from './attachment-service'
@@ -34,11 +34,10 @@ import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { getEnabledTools } from './chat-tool-registry'
 import { executeToolCalls } from './chat-tool-executor'
-import { isCommercialBuild } from './build-target'
-import { isOfficialManagedChannel } from './official-channel'
+import { shouldUseManagedCommercialRoute } from './commercial-routing-policy'
 import { searchKnowledgeItemsForChat } from './knowledge-item-service'
 import { prepareChatKnowledgeRequest } from './chat-knowledge-request'
-import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, createFallbackTitle, createWindowFallbackTitle, mergeTitleRefineAttempts, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
+import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, mergeTitleRefineAttempts, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
 import { normalizeChatStreamError } from './chat-error-utils'
 
 /** 单个对话的活跃 Chat run。`settled` 在该 run 完成落盘与事件收尾后 resolve。 */
@@ -279,11 +278,8 @@ export async function sendMessage(
 
   let apiKey: string
   let proxyBaseUrl = ''
-  // 代管模式判定：商业构建 或 服务端标记代管，且用户无自配权限
-  // 自配用户(canSelfConfigApi=true)可用自己配的渠道直连，不强制走统一 proxy
-  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode())
-    && isOfficialManagedChannel(channel)
-    && channel.directDataPlane !== true
+  // 代管模式判定集中由商业旁侧策略提供；自配渠道继续走直连。
+  const shouldUseCommercialProxy = shouldUseManagedCommercialRoute(channel, { respectDirectDataPlane: true })
 
   if (shouldUseCommercialProxy) {
     const auth = await getTeamAuthWithRefresh()
@@ -751,9 +747,6 @@ export function stopAllGenerations(): void {
  */
 export async function generateTitle(input: GenerateTitleInput): Promise<string | null> {
   const { userMessage, channelId, modelId, contextMessages } = input
-  const localFallbackTitle = contextMessages && contextMessages.length > 0
-    ? createWindowFallbackTitle(contextMessages)
-    : createFallbackTitle(userMessage)
   console.log('[标题生成] 开始生成标题:', { channelId, modelId, sourceCount: contextMessages?.length ?? 1, userMessage: userMessage.slice(0, 50) })
 
   // 即使是本地短标题，也先确认原绑定仍是启用且可用于 Chat 的模型。
@@ -780,28 +773,26 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
   try {
     const storedSecret = decryptApiKey(channelId)
     if (channel.provider === 'xai' && resolveXaiCredentialMode(channel.credentialMode, storedSecret) === 'oauth') {
-      console.info('[标题生成] xAI 订阅 OAuth 不走 Chat API Key 标题生成，使用本地兜底')
-      return localFallbackTitle
+      console.info('[标题生成] xAI 订阅 OAuth 不走 Chat API Key 标题生成')
+      return null
     }
   } catch {
-    console.warn('[标题生成] 解密 API Key 失败，使用本地兜底')
-    return localFallbackTitle
+    console.warn('[标题生成] 解密 API Key 失败')
+    return null
   }
 
   let apiKey: string
   let proxyBaseUrl = ''
-  const shouldUseCommercialProxy = (isCommercialBuild() || isCommercialMode())
-    && isOfficialManagedChannel(channel)
-    && channel.directDataPlane !== true
+  const shouldUseCommercialProxy = shouldUseManagedCommercialRoute(channel, { respectDirectDataPlane: true })
 
   if (shouldUseCommercialProxy) {
     const auth = await getTeamAuthWithRefresh().catch((error) => {
-      console.warn('[标题生成] 获取团队认证失败，使用本地兜底:', error)
+      console.warn('[标题生成] 获取团队认证失败:', error)
       return null
     })
     if (!auth) {
-      console.warn('[标题生成] 团队账号登录已过期，使用本地兜底')
-      return localFallbackTitle
+      console.warn('[标题生成] 团队账号登录已过期，跳过 AI 标题生成')
+      return null
     }
     const proxyPath = ANTHROPIC_PROXY_PROVIDERS.has(channel.provider) ? '/v1/proxy/messages' : '/v1/proxy/chat'
     proxyBaseUrl = `${auth.baseUrl}${proxyPath}`
@@ -810,8 +801,8 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     try {
       apiKey = decryptApiKey(channelId)
     } catch {
-      console.warn('[标题生成] 解密 API Key 失败，使用本地兜底')
-      return localFallbackTitle
+      console.warn('[标题生成] 解密 API Key 失败')
+      return null
     }
   }
 
@@ -830,21 +821,21 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     const fetchFn = getFetchFn(proxyUrl)
     const title = await fetchTitle(request, adapter, fetchFn)
     if (!title) {
-      console.warn('[标题生成] API 返回空标题，使用本地兜底')
-      return localFallbackTitle
+      console.warn('[标题生成] API 返回空标题')
+      return null
     }
 
     // 清洗引号/书名号并截断；兼容部分端点把 content 返回为内容块数组的情况
     const result = sanitizeGeneratedTitle(title)
     if (!result) {
-      console.warn('[标题生成] 标题清洗后为空，使用本地兜底')
-      return localFallbackTitle
+      console.warn('[标题生成] 标题清洗后为空')
+      return null
     }
     console.log('[标题生成] 成功生成标题:', result)
     return result
   } catch (error) {
-    console.warn('[标题生成] 请求失败，使用本地兜底:', error)
-    return localFallbackTitle
+    console.warn('[标题生成] 请求失败:', error)
+    return null
   }
 }
 
@@ -966,14 +957,12 @@ export async function regenerateConversationTitle(
   const resolvedChannelId = channelId || meta.channelId
   const resolvedModelId = modelId || meta.modelId
   if (!resolvedChannelId || !resolvedModelId) {
-    console.warn('[聊天服务] 重新生成标题缺少可用渠道/模型:', { conversationId })
-    return null
+    throw new Error('重新生成标题失败：当前对话没有可用渠道或模型')
   }
 
   const sources = collectConversationTitleSources(conversationId)
   if (sources.length === 0) {
-    console.log('[聊天服务] 重新生成标题：没有有效来源')
-    return null
+    throw new Error('重新生成标题失败：当前对话没有可用于生成标题的有效用户消息')
   }
 
   const title = await generateTitle({
@@ -982,12 +971,11 @@ export async function regenerateConversationTitle(
     modelId: resolvedModelId,
     contextMessages: sources,
   })
-  if (!title) return null
+  if (!title) throw new Error('重新生成标题失败：标题模型没有返回可用结果')
 
   const latest = getConversationMeta(conversationId)
   if (!latest || latest.updatedAt !== requestUpdatedAt) {
-    console.warn('[聊天服务] 手动重新生成标题结果已过期，跳过写入:', { conversationId })
-    return null
+    throw new Error('重新生成标题失败：生成期间对话状态已变化，请重试')
   }
   return updateConversationMeta(conversationId, {
     title,

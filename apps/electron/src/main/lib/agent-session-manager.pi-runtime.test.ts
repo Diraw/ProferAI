@@ -199,58 +199,89 @@ describe('Pi runtime 会话持久化隔离', () => {
     })
   })
 
-  test('Given a Claude session changes to Pi When updating runtime Then clears all Claude-only resume metadata', () => {
-    const meta = sessions.createAgentSession('runtime switch')
+  test('Given Claude 原生恢复资产 When 请求 Pi Then 拒绝且索引与历史逐字不变', () => {
+    const meta = sessions.createAgentSession('Claude keep')
     sessions.updateAgentSessionMeta(meta.id, {
-      sdkSessionId: 'claude-session',
-      forkSourceSdkSessionId: 'claude-source',
-      forkSourceDir: 'C:/source',
-      resumeAtMessageUuid: 'assistant-uuid',
+      sdkSessionId: 'claude-session', forkSourceSdkSessionId: 'claude-source',
+      forkSourceDir: '/source', resumeAtMessageUuid: 'assistant-uuid', codexFastMode: true,
     })
-
-    const updated = sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'pi' })
-
-    expect(updated.agentRuntime).toBe('pi')
-    expect(updated.sdkSessionId).toBeUndefined()
-    expect(updated.forkSourceSdkSessionId).toBeUndefined()
-    expect(updated.forkSourceDir).toBeUndefined()
-    expect(updated.resumeAtMessageUuid).toBeUndefined()
+    sessions.appendSDKMessages(meta.id, [{ type: 'user', uuid: 'keep-user', message: { content: [{ type: 'text', text: 'keep' }] }, parent_tool_use_id: null }])
+    const indexBefore = readFileSync(configPaths.getAgentSessionsIndexPath(), 'utf8')
+    const historyBefore = readFileSync(configPaths.getAgentSessionMessagesPath(meta.id), 'utf8')
+    expect(() => sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'pi', sdkSessionId: undefined })).toThrow('内核已固定')
+    expect(readFileSync(configPaths.getAgentSessionsIndexPath(), 'utf8')).toBe(indexBefore)
+    expect(readFileSync(configPaths.getAgentSessionMessagesPath(meta.id), 'utf8')).toBe(historyBefore)
+    expect(sessions.getAgentSessionMeta(meta.id)).toMatchObject({ agentRuntime: 'claude', sdkSessionId: 'claude-session', resumeAtMessageUuid: 'assistant-uuid' })
   })
 
-  test('Given updateSettings fails after runtime switch When restoring snapshot Then SDK/fork/resume metadata survives rollback', () => {
-    const meta = sessions.createAgentSession('runtime rollback')
-    sessions.updateAgentSessionMeta(meta.id, {
-      agentRuntime: 'claude',
-      codexFastMode: true,
-      sdkSessionId: 'claude-session',
-      forkSourceSdkSessionId: 'claude-source',
-      forkSourceDir: 'C:/source',
-      resumeAtMessageUuid: 'assistant-uuid',
-    })
-
-    const snapshot = sessions.snapshotAgentRuntimeMeta(sessions.getAgentSessionMeta(meta.id)!)
-    sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'pi' })
+  test('Given 空会话选择 Pi 后设置保存失败 When 回滚 Then 保留空会话可选状态与模型', () => {
+    const meta = sessions.createAgentSession('empty rollback', 'channel', undefined, 'model')
+    const snapshot = sessions.snapshotAgentRuntimeMeta(meta)
+    const selected = sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'pi' })
+    expect(selected.agentRuntimeLocked).toBe(false)
     const restored = sessions.restoreAgentRuntimeMeta(meta.id, snapshot)
-
-    expect(restored.agentRuntime).toBe('claude')
-    expect(restored.codexFastMode).toBe(true)
-    expect(restored.sdkSessionId).toBe('claude-session')
-    expect(restored.forkSourceSdkSessionId).toBe('claude-source')
-    expect(restored.forkSourceDir).toBe('C:/source')
-    expect(restored.resumeAtMessageUuid).toBe('assistant-uuid')
+    expect(restored).toMatchObject({ agentRuntime: 'claude', agentRuntimeLocked: false, channelId: 'channel', modelId: 'model' })
+    expect(restored.revision).toBeGreaterThan(selected.revision!)
   })
 
-  test('Given a Pi session changes runtime When updating Then checkpoint bindings are cleared and snapshots are reclaimed', () => {
-    const meta = sessions.createAgentSession('runtime checkpoint cleanup', undefined, undefined, undefined, 'pi')
+  test('Given Pi 原生 session 与检查点 When 请求 Claude Then 拒绝且文件和绑定保持不变', () => {
+    const meta = sessions.createAgentSession('Pi keep', undefined, undefined, undefined, 'pi')
     const cwd = join(root, 'cwd')
     mkdirSync(cwd)
     writeFileSync(join(cwd, 'file.txt'), 'baseline')
     const checkpoint = createPiFileCheckpoint(meta.id, cwd, configPaths.getPiCheckpointsDir())
-    sessions.updateAgentSessionMeta(meta.id, { piFileCheckpoints: { 'entry-1': checkpoint.path } })
+    const transcript = writePiTranscript('pi-keep-runtime')
+    sessions.updateAgentSessionMeta(meta.id, { sdkSessionId: 'pi-keep-runtime', piSessionFile: transcript, piEntryBindings: { message: 'entry-1' }, piFileCheckpoints: { 'entry-1': checkpoint.path } })
+    const before = sessions.getAgentSessionMeta(meta.id)
+    const indexBefore = readFileSync(configPaths.getAgentSessionsIndexPath(), 'utf8')
+    const transcriptBefore = readFileSync(transcript, 'utf8')
+    const checkpointBefore = readFileSync(checkpoint.path, 'utf8')
+    expect(() => sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'claude' })).toThrow('内核已固定')
+    expect(sessions.getAgentSessionMeta(meta.id)).toEqual(before)
+    expect(readFileSync(configPaths.getAgentSessionsIndexPath(), 'utf8')).toBe(indexBefore)
+    expect(readFileSync(transcript, 'utf8')).toBe(transcriptBefore)
+    expect(readFileSync(checkpoint.path, 'utf8')).toBe(checkpointBefore)
+  })
 
-    const switched = sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'claude' })
-    expect(switched.piFileCheckpoints).toBeUndefined()
-    expect(existsSync(checkpoint.path)).toBe(false)
+  test.each(['claude', 'pi'] as const)('Given 新 %s 会话 When 首次请求绑定后停止或重开草稿 Then 永久固定且同内核写入正常', (runtime) => {
+    const meta = sessions.createAgentSession('lock', undefined, undefined, undefined, runtime)
+    const other = runtime === 'pi' ? 'claude' : 'pi'
+    const snapshot = sessions.snapshotAgentRuntimeMeta(meta)
+    expect(meta.agentRuntimeLocked).toBe(false)
+    sessions.lockAgentSessionRuntime(meta.id, runtime)
+    sessions.updateAgentSessionMeta(meta.id, { agentRuntimeLocked: false, draft: true, sdkSessionId: undefined })
+    expect(sessions.getAgentSessionMeta(meta.id)?.agentRuntimeLocked).toBe(true)
+    expect(() => sessions.updateAgentSessionMeta(meta.id, { agentRuntime: other, agentRuntimeLocked: false })).toThrow('内核已固定')
+    expect(() => sessions.restoreAgentRuntimeMeta(meta.id, { ...snapshot, agentRuntime: other })).toThrow('不能回滚')
+    expect(sessions.updateAgentSessionMeta(meta.id, { agentRuntime: runtime, channelId: 'new-channel', modelId: 'new-model', sdkSessionId: 'same-native' })).toMatchObject({ agentRuntime: runtime, sdkSessionId: 'same-native', modelId: 'new-model' })
+  })
+
+  test('Given 旧索引缺省锁字段 When 读取或拒绝换内核 Then 不迁移或修改旧文件', () => {
+    const indexPath = configPaths.getAgentSessionsIndexPath()
+    const old = { version: 1, sessions: [{ id: 'legacy', title: 'old', createdAt: 1, updatedAt: 2, sdkSessionId: 'claude-resume' }] }
+    const bytes = JSON.stringify(old)
+    writeFileSync(indexPath, bytes)
+    expect(sessions.getAgentSessionMeta('legacy')?.agentRuntime).toBe('claude')
+    expect(() => sessions.updateAgentSessionMeta('legacy', { agentRuntime: 'pi' })).toThrow('内核已固定')
+    expect(readFileSync(indexPath, 'utf8')).toBe(bytes)
+  })
+
+  test('Given 旧空草稿 When 选择内核 Then 仍可选择；有用户历史的草稿禁止切换', () => {
+    const path = configPaths.getAgentSessionsIndexPath()
+    writeFileSync(path, JSON.stringify({ version: 1, sessions: [{ id: 'draft', title: 'draft', draft: true, createdAt: 1, updatedAt: 2 }] }))
+    expect(sessions.updateAgentSessionMeta('draft', { agentRuntime: 'pi' }).agentRuntimeLocked).toBe(false)
+    sessions.appendSDKMessages('draft', [{ type: 'user', message: { content: [{ type: 'text', text: 'sent' }] }, parent_tool_use_id: null }])
+    expect(sessions.getAgentSessionMeta('draft')?.agentRuntimeLocked).toBe(true)
+    expect(() => sessions.updateAgentSessionMeta('draft', { agentRuntime: 'claude' })).toThrow('内核已固定')
+  })
+
+  test('Given 新会话处于运行或分叉准备 When 内部写入口切换 Then 拒绝且不改变绑定', () => {
+    const meta = sessions.createAgentSession('active lock')
+    sessions.setAgentSessionActiveChecker(() => true)
+    try {
+      expect(() => sessions.updateAgentSessionMeta(meta.id, { agentRuntime: 'pi' })).toThrow('内核已固定')
+    } finally { sessions.setAgentSessionActiveChecker(undefined) }
+    expect(sessions.getAgentSessionMeta(meta.id)?.agentRuntime).toBe('claude')
   })
 
   test('Given a legacy fork still references source checkpoints When deleting source Then references are migrated before source cleanup', () => {

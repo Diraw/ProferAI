@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path'
-import { readFile, realpath, stat } from 'node:fs/promises'
+import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 import type {
   AgentPreviewFileKind,
   AgentPreviewImage,
@@ -68,31 +68,78 @@ async function realDirectory(path: string): Promise<string | null> {
   }
 }
 
-async function resolveAuthorizedFile(filePath: string, context: PreviewInspectionContext): Promise<string | InspectPreviewError> {
+interface ResolvedAuthorizedFile {
+  filePath: string
+  /**
+   * 非空表示模型给的路径不存在、已按会话目录内 basename 唯一匹配纠正到真实文件。
+   * 用于回执给模型自纠，避免它把「这个路径不存在」误读成「授权目录读不到附件」。
+   */
+  correction?: { requested: string; resolved: string }
+}
+
+/**
+ * 在会话工作目录内按 basename 找真实文件，用于纠正模型写错的附件路径。
+ *
+ * 背景：模型复述附件绝对路径时会把会话 ID 与任务 ID 等 UUID 混拼，造出形状正确、
+ * 实际不存在的目录名（例如 `…-32ed-4974-b7e1-…`）。附件本身规范落盘在会话目录里，
+ * 只是路径被写错。这里只查 `agentCwd` 一层、且要求唯一同名，不做跨目录猜测。
+ */
+async function findUniqueBasenameCandidate(name: string, agentCwd: string): Promise<string | null> {
+  if (!name || !agentCwd.trim()) return null
+  let entries: string[]
+  try {
+    entries = await readdir(agentCwd)
+  } catch {
+    return null
+  }
+  // readdir 同名条目唯一，只需确认它是真实普通文件。
+  if (!entries.includes(name)) return null
+  try {
+    const candidate = resolve(agentCwd, name)
+    return (await stat(candidate)).isFile() ? await realpath(candidate) : null
+  } catch {
+    return null
+  }
+}
+
+async function resolveAuthorizedFile(filePath: string, context: PreviewInspectionContext): Promise<ResolvedAuthorizedFile | InspectPreviewError> {
   if (typeof filePath !== 'string' || !filePath.trim()) return error('invalid_input', 'filePath 必须是非空字符串')
   // 非工作区会话可以拥有显式附加目录，但不应把 home 当作默认 cwd/授权根。
   if (!isAbsolute(filePath) && !context.agentCwd.trim()) return error('unauthorized_path', '当前会话没有可解析相对路径的 Agent 工作目录')
 
-  const requested = isAbsolute(filePath) ? filePath : resolve(context.agentCwd, filePath)
-  let target: string
+  const requested = isAbsolute(filePath) ? resolve(filePath) : resolve(context.agentCwd, filePath)
+  // 报错必须回显模型请求的完整路径：只回 basename 会让模型无法发现写错了目录，
+  // 从而把工具的「该路径不存在」误判成「附件不在授权目录、读不到」。回显的是模型
+  // 自己传入的路径，不是新泄露的信息。
+  const notFound = () => error('file_not_found', `文件不存在或无法访问：${requested}`)
+
+  let target: string | undefined
   try {
     target = await realpath(requested)
   } catch {
-    return error('file_not_found', `文件不存在或无法访问: ${basename(filePath)}`)
+    target = undefined
+  }
+
+  let correction: ResolvedAuthorizedFile['correction']
+  if (target === undefined) {
+    const fallback = await findUniqueBasenameCandidate(basename(filePath), context.agentCwd)
+    if (!fallback) return notFound()
+    target = fallback
+    correction = { requested, resolved: fallback }
   }
 
   let targetStat
   try {
     targetStat = await stat(target)
   } catch {
-    return error('file_not_found', `文件不存在或无法访问: ${basename(filePath)}`)
+    return notFound()
   }
   if (!targetStat.isFile()) return error('unsupported_file_type', '预览路径必须指向普通文件')
 
   const roots = await Promise.all([context.agentCwd, ...context.allowedRoots].filter(Boolean).map(realDirectory))
   const authorizedRoots = roots.filter((root): root is string => root !== null)
   if (!authorizedRoots.some((root) => isInside(root, target))) return error('unauthorized_path', '文件不在当前 Agent 已授权的目录内')
-  return target
+  return { filePath: target, correction }
 }
 
 function kindFromPath(filePath: string): AgentPreviewFileKind {
@@ -169,8 +216,11 @@ export async function inspectPreview(
   if (invalid) return invalid
 
   const resolved = await resolveAuthorizedFile(input.filePath, context)
-  if (typeof resolved !== 'string') return resolved
-  const filePath = resolved
+  if ('error' in resolved) return resolved
+  const filePath = resolved.filePath
+  const correctionWarnings = resolved.correction
+    ? [`模型给出的路径不存在（${resolved.correction.requested}）；已按当前会话目录内唯一同名文件纠正为 ${resolved.correction.resolved}。后续请直接逐字复制 <attached_files> 给出的路径。`]
+    : []
   const kind = kindFromPath(filePath)
   if (kind === 'unknown') return error('unsupported_file_type', `暂不支持预览此文件类型: ${basename(filePath)}`)
 
@@ -229,6 +279,7 @@ export async function inspectPreview(
 
     const after = await hashFile(filePath)
     if (after.revision !== before.revision) return error('file_changed_during_inspection', '文件在检查期间发生变化，请重新调用 inspect_preview', true)
+    if (correctionWarnings.length) result.warnings = [...(result.warnings ?? []), ...correctionWarnings]
     return result
   } catch (caught) {
     if (caught instanceof Error && caught.message.includes('超过')) return error('render_budget_exceeded', caught.message)

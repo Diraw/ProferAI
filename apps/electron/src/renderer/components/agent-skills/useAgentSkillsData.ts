@@ -15,6 +15,7 @@ import {
   workspaceCapabilitiesVersionAtom,
 } from '@/atoms/agent-atoms'
 import type { SkillMeta, WorkspaceMcpConfig } from '@profer/shared'
+import { isWorkspaceLocalSkill, skillListKey } from './skillListSections'
 
 export interface AgentSkillsData {
   /** 当前工作区（未选中时为 null） */
@@ -28,7 +29,7 @@ export interface AgentSkillsData {
   mcpConfig: WorkspaceMcpConfig
   updatingSkill: string | null
   toggleSkill: (slug: string, enabled: boolean, sourceSkillId?: string) => Promise<void>
-  deleteSkill: (slug: string, name: string) => Promise<boolean>
+  deleteSkill: (slug: string, name: string, workspaceSkillId?: string) => Promise<boolean>
   updateSkill: (slug: string) => Promise<void>
   toggleMcp: (name: string, enabled: boolean) => Promise<void>
   deleteMcp: (name: string) => Promise<void>
@@ -86,25 +87,63 @@ export function useAgentSkillsData(): AgentSkillsData {
     return () => { cancelled = true }
   }, [loadData, capabilitiesVersion])
 
+  /**
+   * 乐观更新按身份定位目标行，不能只按 slug：
+   * - 工作区副本（含已关闭、位于 skills-inactive/ 的）用 workspaceSkillId 识别；
+   *   用 `!sourceSkillId` 会把同名全局定义当成副本，改错行的开关状态。
+   * - 与主进程的三态路由保持一致：非空 ID = 全局定义；'' = 明确本地；未传 = 本地优先、否则回退全局。
+   */
+  const resolveToggleTargetKey = React.useCallback(
+    (slug: string, sourceSkillId: string | undefined, rows: SkillMeta[]): string | null => {
+      if (sourceSkillId) return `global:${sourceSkillId}`
+      const local = rows.find((s) => s.slug === slug && isWorkspaceLocalSkill(s))
+      if (local) return skillListKey(local)
+      if (sourceSkillId === undefined) {
+        const global = rows.find((s) => s.slug === slug && !isWorkspaceLocalSkill(s))
+        if (global) return skillListKey(global)
+      }
+      return null
+    },
+    [],
+  )
+
   const toggleSkill = React.useCallback(async (slug: string, enabled: boolean, sourceSkillId?: string) => {
     if (enabled) {
-      const duplicate = skills.find((skill) => skill.slug === slug && skill.enabled && (sourceSkillId ? skill.actualSource === 'workspace' : Boolean(skill.sourceSkillId)))
+      const targetKey = resolveToggleTargetKey(slug, sourceSkillId, skills)
+      const duplicate = skills.find(
+        (skill) => skill.slug === slug && skill.enabled && skillListKey(skill) !== targetKey,
+      )
       if (duplicate && typeof window !== 'undefined' && !window.confirm('当前工作区同时存在该 Skill 的工作区副本与全局/元 Skill，同时启用可能导致能力重复或行为冲突，不推荐这样使用。是否仍要继续启用？')) return
     }
     try {
       await window.electronAPI.toggleWorkspaceSkill(workspaceSlug, slug, enabled, sourceSkillId)
-      setSkills((prev) => prev.map((s) => (s.slug === slug && (sourceSkillId ? s.sourceSkillId === sourceSkillId : !s.sourceSkillId) ? { ...s, enabled } : s)))
+      setSkills((prev) => {
+        const targetKey = resolveToggleTargetKey(slug, sourceSkillId, prev)
+        return prev.map((s) =>
+          targetKey !== null && skillListKey(s) === targetKey ? { ...s, enabled } : s,
+        )
+      })
       bumpCapabilitiesVersion((v) => v + 1)
     } catch (error) {
       console.error('[Agent 技能] 切换 Skill 状态失败:', error)
       toast.error('切换 Skill 状态失败')
     }
-  }, [skills, workspaceSlug, bumpCapabilitiesVersion])
+  }, [skills, workspaceSlug, bumpCapabilitiesVersion, resolveToggleTargetKey])
 
-  const deleteSkill = React.useCallback(async (slug: string, name: string): Promise<boolean> => {
+  /**
+   * 删除只对工作区副本生效；同名全局定义是另一行，不能一起从列表里抹掉，
+   * 否则要等到下次重新拉取才会恢复。优先按 workspaceSkillId 精确命中。
+   */
+  const deleteSkill = React.useCallback(async (slug: string, name: string, workspaceSkillId?: string): Promise<boolean> => {
     try {
       await window.electronAPI.deleteWorkspaceSkill(workspaceSlug, slug)
-      setSkills((prev) => prev.filter((s) => s.slug !== slug))
+      setSkills((prev) =>
+        prev.filter((s) =>
+          workspaceSkillId
+            ? s.workspaceSkillId !== workspaceSkillId
+            : !(s.slug === slug && isWorkspaceLocalSkill(s)),
+        ),
+      )
       bumpCapabilitiesVersion((v) => v + 1)
       toast.success(`已删除 Skill：${name}`)
       return true

@@ -59,9 +59,10 @@ describe('F14：渠道网络请求隔离', () => {
 })
 
 test('F14：执行真实 IPC/preload 注册片段，cancel 只取消发起窗口的当前 requestId', async () => {
-  const source = readFileSync(new URL('../ipc.ts', import.meta.url), 'utf8')
-  const start = source.indexOf('  // 直接测试连接（无需已保存渠道，传入明文凭证）')
-  const end = source.indexOf('  // 查询订阅 Plan 额度', start)
+  // 渠道注册已迁至 channel-ipc.ts（阶段 3），切片目标随之移动。
+  const source = readFileSync(new URL('./channel-ipc.ts', import.meta.url), 'utf8')
+  const start = source.indexOf('  ipcMain.handle(CHANNEL_IPC_CHANNELS.TEST_DIRECT,')
+  const end = source.indexOf('  ipcMain.handle(CHANNEL_IPC_CHANNELS.GET_PLAN_QUOTA,', start)
   expect(start).toBeGreaterThan(0)
   expect(end).toBeGreaterThan(start)
   const js = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(start, end))
@@ -69,9 +70,9 @@ test('F14：执行真实 IPC/preload 注册片段，cancel 只取消发起窗口
   const scope = new ChannelNetworkRequests()
   const signals: AbortSignal[] = []
   const service = async (_input: unknown, signal: AbortSignal) => { signals.push(signal); return wait(signal) }
-  new Function('deps', `const { ipcMain, CHANNEL_IPC_CHANNELS, channelNetworkRequests, testChannelDirect, fetchModels } = deps; ${js}`)({
+  new Function('deps', `const { ipcMain, CHANNEL_IPC_CHANNELS, context, testChannelDirect, fetchModels } = deps; ${js}`)({
     ipcMain: { handle: (name: string, handler: (event: { sender: FixtureSender }, input: unknown) => Promise<unknown>) => handlers.set(name, handler) },
-    CHANNEL_IPC_CHANNELS, channelNetworkRequests: scope, testChannelDirect: service, fetchModels: service,
+    CHANNEL_IPC_CHANNELS, context: { channelNetworkRequests: scope }, testChannelDirect: service, fetchModels: service,
   })
   const preload = readFileSync(new URL('../../preload/index.ts', import.meta.url), 'utf8')
   const preloadStart = preload.lastIndexOf('  testChannelDirect: (input:')

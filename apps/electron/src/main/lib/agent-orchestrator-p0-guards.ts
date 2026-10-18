@@ -4,15 +4,14 @@ import { isChannelEnabledForRuntime, canonicalAgentToolName } from '@profer/shar
 import { normalizeAnthropicBaseUrlForSdk } from '@profer/core'
 import { applyAgentSdkAuthEnv } from './agent-sdk-auth-env'
 
-/** 本次发送未获得运行所有权；它不是 owner run 的流式错误或终态。 */
-export class AgentRunAlreadyActiveError extends Error {
-  readonly code = 'AGENT_RUN_ALREADY_ACTIVE'
-
-  constructor(readonly stopping: boolean) {
-    super(`AGENT_RUN_ALREADY_ACTIVE: ${stopping ? 'Agent 正在停止，请稍候再试' : '上一条消息仍在处理中，请稍候再试'}`)
-    this.name = 'AgentRunAlreadyActiveError'
-  }
-}
+/**
+ * 本次发送未获得运行所有权；它不是 owner run 的流式错误或终态。
+ *
+ * 类型定义在 `@profer/shared`（与 `AgentSessionRuntimeMismatchError` 同处），因为新旧两条
+ * 执行链都要抛它、宿主入口都要按 `instanceof` 识别它。这里只做转发，不再本地定义，
+ * 避免出现两个同名类导致 runtime 抛出的错误无法被入口 `instanceof` 识别。
+ */
+export { AgentRunAlreadyActiveError } from '@profer/shared'
 
 /** 在任意 await 前原子占用会话；false 表示已有同 session 运行。 */
 export function tryAcquireActiveSession(activeSessions: Map<string, string>, sessionId: string, runToken: string): boolean {

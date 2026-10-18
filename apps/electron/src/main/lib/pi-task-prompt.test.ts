@@ -15,9 +15,6 @@ PI_MEMORY_RULES
 ## 用户信息
 USER
 
-## 团队共享知识记忆
-TEAM_MEMORY_RULES
-
 ## 不确定性处理
 UNCERTAINTY
 
@@ -48,7 +45,6 @@ const ALL_TOOLS = [
   'mcp__automation__create_automation',
   'mcp__collaboration__delegate_agent',
   'mcp__memory-archive__search_memory',
-  'mcp__team-memory__search_team_memories',
   'send_local_image',
   'generate_image',
   'create_skin',
@@ -198,6 +194,20 @@ ALWAYS_PRESENT_RULES`
     })
 
     expect(prompt).toContain('AUTOMATION_RULES')
+  })
+
+  test('浏览器段关闭时仍能裁掉图片交付 SOP，并保留其后的能力边界段', () => {
+    const basePrompt = BASE_PROMPT.replace('## Profer 受管浏览器\nBROWSER_RULES', '## 当前预设已关闭的能力\nDISABLED_CAPABILITY_RULES')
+
+    const ordinary = buildPiTaskPrompt({ basePrompt, userMessage: '检查类型错误。', toolNames: ALL_TOOLS })
+    expect(ordinary).not.toContain('LOCAL_IMAGE_RULES')
+    expect(ordinary).not.toContain('IMAGE_GENERATION_RULES')
+    expect(ordinary).not.toContain('PPT_VISUAL_GATE')
+    expect(ordinary).toContain('DISABLED_CAPABILITY_RULES')
+
+    const withImage = buildPiTaskPrompt({ basePrompt, userMessage: '把这张本地图片发送到回复里。', toolNames: ['send_local_image'] })
+    expect(withImage).toContain('LOCAL_IMAGE_RULES')
+    expect(withImage).toContain('DISABLED_CAPABILITY_RULES')
   })
 
   test('语义命中但能力未注册时，不注入会暗示不存在工具的 SOP', () => {

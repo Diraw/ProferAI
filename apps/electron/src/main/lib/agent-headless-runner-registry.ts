@@ -50,14 +50,42 @@ export function getAgentStopCompletionOptions(source: AgentStopSource | undefine
  * headless completion 的单一路由：先告知调用方做协作记录收尾，再无条件转发同一完整 payload。
  * 调用方即使因 delegation 已预标终态而跳过自身收尾，也不能阻断 renderer completion。
  */
-export function forwardHeadlessAgentCompletion(input: {
+export interface ForwardHeadlessAgentCompletionInput {
   callbacks: HeadlessAgentRunCallbacks
   messages?: AgentMessage[]
   opts?: HeadlessAgentCompletionOptions
   forwardToRenderer: (messages?: AgentMessage[], opts?: HeadlessAgentCompletionOptions) => void
-}): void {
+}
+
+export function forwardHeadlessAgentCompletion(input: ForwardHeadlessAgentCompletionInput): void {
   input.callbacks.onComplete(input.messages, input.opts)
   input.forwardToRenderer(input.messages, input.opts)
+}
+
+/**
+ * 终态转发的幂等闸门：同一轮 run 的**真实终态**只转发一次。
+ *
+ * 为什么不能简单地对 `forwardHeadlessAgentCompletion` 去重：
+ * `backgroundTasksPending: true` 的「轻量完成」（编排层 `idleComplete`）会在同一轮内
+ * 多次到达，它**不是**终态——UI 靠它进入「空闲可输入」态，去重会把后续续轮信号吞掉。
+ * 因此这里只对**非后台任务**的终态做一次性保护：真实终态最多一次，轻量完成不限次。
+ *
+ * 复用 `forwardHeadlessAgentCompletion` 的既有 payload 语义，不改变其行为；
+ * 返回 `false` 表示这次终态是重复投递，已被忽略。
+ */
+export function createHeadlessCompletionForwarder(): (
+  input: ForwardHeadlessAgentCompletionInput,
+) => boolean {
+  let terminalDelivered = false
+  return (input) => {
+    const backgroundTasksPending = input.opts?.backgroundTasksPending === true
+    if (!backgroundTasksPending) {
+      if (terminalDelivered) return false
+      terminalDelivered = true
+    }
+    forwardHeadlessAgentCompletion(input)
+    return true
+  }
 }
 
 let headlessRunner: HeadlessAgentRunner | null = null

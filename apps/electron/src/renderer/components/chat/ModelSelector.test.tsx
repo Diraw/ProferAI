@@ -51,7 +51,14 @@ function mount(channels = [fixture], conversation = meta) {
     listChannels: async () => { lists += 1; return channels },
     updateConversationModel: () => { const request = deferred<ConversationMeta>(); requests.push(request); return request.promise },
   }
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: { electronAPI: api } })
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    electronAPI: {
+      ...api,
+      composer: {
+        chat: { updateModel: api.updateConversationModel },
+      },
+    },
+  } })
   const slots: Slot[] = []
   let index = 0
   let changed = false
