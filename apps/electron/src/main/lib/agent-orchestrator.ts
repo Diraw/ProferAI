@@ -3061,13 +3061,15 @@ export class AgentOrchestrator {
           this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
 
           if (!wasStoppedByUser && !capturedResultErrors?.length) {
-            await this.autoGenerateTitle(
-              sessionId,
-              input.titleSourceText ?? userMessage,
-              channelId,
-              resolvedModel,
-              callbacks,
-            )
+            // 自动命名是增强能力，不能占用终态路径：标题模型偶发慢请求/重试时，
+            // 文本早已停止而 UI 仍显示「Agent Running」。这里推迟到下一轮事件循环，
+            // 让 completeRun → owner finally → STREAM_COMPLETE 先走完；标题生成完成后
+            // 仍通过 onTitleUpdated 正常投影。
+            const titleSource = input.titleSourceText ?? userMessage
+            const titleModelId = resolvedModel
+            setImmediate(() => {
+              void this.autoGenerateTitle(sessionId, titleSource, channelId, titleModelId, callbacks)
+            })
           }
 
           try {
