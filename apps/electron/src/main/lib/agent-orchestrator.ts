@@ -1119,6 +1119,10 @@ export class AgentOrchestrator {
         _createdAt: Date.now(),
       } as unknown as SDKMessage
       this.sessionPort.appendMessages(sessionId, [userSDKMsg])
+      // 运行中的用户输入只有本地乐观气泡是不够的：手机端（Pocket）没有这份本地状态，
+      // 只能靠事件流看到电脑端发起的指令。桌面渲染层不消费 user 文本事件、乐观气泡
+      // 按 uuid 去重，因此这里广播不会在电脑上产生重复气泡。
+      this.eventPort.emit(sessionId, { kind: 'sdk_message', message: userSDKMsg })
     }
     await callbacks.onRunStarted?.({ startedAt: streamStartedAt })
       const completeRun = (messages?: AgentMessage[], opts?: CompleteOptions): void => {
@@ -3845,6 +3849,8 @@ export class AgentOrchestrator {
       } as unknown as SDKMessage
       try {
         this.sessionPort.appendMessages(sessionId, [persistMsg])
+        // 追加消息同样要进事件流：手机端要靠它看到电脑端在运行中补发的指令。
+        this.eventPort.emit(sessionId, { kind: 'sdk_message', message: persistMsg })
       } catch (persistError) {
         // 注入已成功，uuid 必须保留（幂等短路），否则重试会重复注入；JSONL 缺口由会话文件后续 append 兜底。
         console.error(`[Agent 编排] 已注入消息持久化失败 (uuid=${uuid}, sessionId=${sessionId}):`, persistError)

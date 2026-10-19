@@ -15,6 +15,8 @@ import {
   chatStreamErrorCodesAtom,
   conversationsAtom,
   chatMessageRefreshAtom,
+  chatExternalUserMessagesAtom,
+  CHAT_EXTERNAL_USER_MESSAGE_LIMIT,
   pendingAgentRecommendationAtom,
 } from '@/atoms/chat-atoms'
 import { tabsAtom, updateTabTitle } from '@/atoms/tab-atoms'
@@ -27,6 +29,7 @@ import type {
   StreamCompleteEvent,
   StreamErrorEvent,
   StreamToolActivityEvent,
+  StreamUserEvent,
   GenerateTitleInput,
 } from '@profer/shared'
 
@@ -256,12 +259,28 @@ export function useGlobalChatListeners(): void {
       },
     )
 
+    // ===== 6. 用户消息公告（桌面/移动端任一端发送） =====
+    // 不依赖重新打开会话：按 id 合并，本地乐观消息原位换成真实消息。
+    const cleanupUser = window.electronAPI.onStreamUser(
+      (event: StreamUserEvent) => {
+        store.set(chatExternalUserMessagesAtom, (prev) => {
+          const current = prev.get(event.conversationId) ?? []
+          if (current.some((message) => message.id === event.message.id)) return prev
+          const next = [...current, event.message].slice(-CHAT_EXTERNAL_USER_MESSAGE_LIMIT)
+          const map = new Map(prev)
+          map.set(event.conversationId, next)
+          return map
+        })
+      },
+    )
+
     return () => {
       cleanupChunk()
       cleanupReasoning()
       cleanupComplete()
       cleanupError()
       cleanupToolActivity()
+      cleanupUser()
     }
   }, [store]) // store 引用稳定，effect 只执行一次
 }

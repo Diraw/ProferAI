@@ -33,6 +33,7 @@ import type {
   StreamCompleteEvent,
   StreamErrorEvent,
   StreamToolActivityEvent,
+  StreamUserEvent,
   AttachmentSaveInput,
   AttachmentSaveResult,
   FileDialogResult,
@@ -704,6 +705,9 @@ export interface ElectronAPI {
 
   /** 订阅流式工具活动事件 */
   onStreamToolActivity: (callback: (event: StreamToolActivityEvent) => void) => () => void
+
+  /** 订阅用户消息已持久化事件（桌面/移动端发送的公告） */
+  onStreamUser: (callback: (event: StreamUserEvent) => void) => () => void
 
   // ===== Agent 会话管理相关 =====
 
@@ -2300,6 +2304,12 @@ const electronAPI: ElectronAPI = {
     const listener = (_: unknown, event: StreamToolActivityEvent): void => callback(event)
     ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, listener)
     return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, listener) }
+  },
+
+  onStreamUser: (callback: (event: StreamUserEvent) => void) => {
+    const listener = (_: unknown, event: StreamUserEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_USER, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_USER, listener) }
   },
 
   // Agent 会话管理

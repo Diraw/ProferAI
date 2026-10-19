@@ -351,11 +351,17 @@ export async function sendMessage(
   // 4. 追加用户消息到 JSONL（用 appendBranchTail 自动按 activePath 接链 + 字段 parentId）
   //    重发 / 编辑后重发：user 节点已由 forkBranchAt 创建，这里不能再追加，否则会多出一条重复的 user 消息。
   if (!pendingUserMessageId) {
-    appendBranchTail(conversationId, {
+    const persistedUserMessage = appendBranchTail(conversationId, {
       role: 'user',
       content: userMessage,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
       knowledgeReferences: knowledgeReferences && knowledgeReferences.length > 0 ? knowledgeReferences : undefined,
+    })
+    // 持久化即广播：桌面端发起的消息也要进入事件流，否则移动端实时视图里只剩助手回复。
+    // 携带真实 id，客户端按 id 合并，本地乐观副本自动让位。
+    pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_USER, {
+      conversationId,
+      message: persistedUserMessage,
     })
   }
 

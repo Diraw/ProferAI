@@ -1,5 +1,14 @@
 import type { AgentStreamPayload, SDKMessage } from '@profer/shared'
 
+/** 只保留上下文用量需要的四个 token 计数，避免把完整 usage 形状带进 WS。 */
+function projectUsageForPocket(usage: Record<string, unknown>): Record<string, number> {
+  const projected: Record<string, number> = {}
+  for (const key of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+    if (typeof usage[key] === 'number') projected[key] = usage[key] as number
+  }
+  return projected
+}
+
 /**
  * Pocket 只需要渲染正文和工具活动摘要，不需要模型思考、工具入参/结果或 SDK 内部字段。
  * 该投影在远程出口使用，避免完整 SDK 消息进入 WebSocket、重放日志和移动端缓存。
@@ -19,7 +28,16 @@ export function projectSdkMessageForPocket(message: SDKMessage): SDKMessage {
       const item = block as Record<string, unknown>
       if (item.type === 'text' && typeof item.text === 'string') return [{ type: 'text', text: item.text }]
       if (item.type === 'tool_use' && typeof item.id === 'string' && typeof item.name === 'string') {
-        return [{ type: 'tool_use', id: item.id, name: item.name, input: {} }]
+        // 入参只透传文件路径：移动端需要在正文/回合末尾渲染文件 chip，
+        // 但不应该把完整工具参数（命令、补丁、搜索结果）带进 WebSocket。
+        const input = item.input && typeof item.input === 'object' ? item.input as Record<string, unknown> : {}
+        const filePath = input.file_path ?? input.filePath ?? input.path ?? input.notebook_path
+        return [{
+          type: 'tool_use',
+          id: item.id,
+          name: item.name,
+          input: typeof filePath === 'string' ? { file_path: filePath } : {},
+        }]
       }
       return []
     })
@@ -28,6 +46,9 @@ export function projectSdkMessageForPocket(message: SDKMessage): SDKMessage {
       content: projectedContent,
       ...(typeof inner.model === 'string' ? { model: inner.model } : {}),
       ...(inner.stop_reason !== undefined ? { stop_reason: inner.stop_reason } : {}),
+      // 上下文用量：移动端用 assistant 消息的 usage 计算「已用 / 窗口」，
+      // 不能用 result.usage（整轮累计求和，会虚高）。只透传四个 token 数字。
+      ...(inner.usage && typeof inner.usage === 'object' ? { usage: projectUsageForPocket(inner.usage as Record<string, unknown>) } : {}),
     }
     if (record.error && typeof record.error === 'object') base.error = record.error
     return base as SDKMessage

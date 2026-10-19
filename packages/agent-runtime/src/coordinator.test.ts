@@ -157,6 +157,26 @@ describe('AgentRuntimeCoordinator headless host', () => {
     expect(order).toEqual(['lock', 'append', 'provider'])
     expect(messages).toEqual([persistedUserMessage])
   })
+  test('Given a persisted user message When the run starts Then the user bubble is forwarded on the event stream for remote clients', async () => {
+    // Pocket 没有本地乐观气泡：电脑端发起的指令只能靠这条事件进入手机端。
+    const events: AgentRuntimeEvent[] = []
+    const persistedUserMessage = { type: 'user', uuid: 'user-1', message: { content: [{ type: 'text', text: '来自电脑的指令' }] }, parent_tool_use_id: null } as never
+    const coordinator = new AgentRuntimeCoordinator({
+      adapters: { pi: adapter(async () => ({ status: 'completed' })) },
+      ports: {
+        sessions: { getMeta: () => undefined, appendMessages: () => undefined, updateMeta: () => undefined },
+        host: { emit: event => { events.push(event) } },
+      },
+    })
+    await expect(coordinator.run({ ...query, persistedUserMessage }).promise).resolves.toEqual({ status: 'completed' })
+    const messageEvents = events.filter((event): event is Extract<AgentRuntimeEvent, { type: 'message' }> => event.type === 'message')
+    expect(messageEvents).toHaveLength(1)
+    expect(messageEvents[0]!.sessionId).toBe(query.sessionId)
+    expect(messageEvents[0]!.message).toEqual(persistedUserMessage)
+    // 必须先于「运行开始」公告，手机端才能先看到指令再看到输出。
+    expect(events.findIndex(event => event.type === 'message'))
+      .toBeLessThan(events.findIndex(event => event.type === 'runtime_started'))
+  })
   test('Given a persisted user message When runtime starts Then preparation precedes the user transcript and the run-start announcement', async () => {
     // 2026-10-16 继承会话的行为变更（原断言为 lock → append → runtime_started → onRunStarted → preparation）：
     // 用户消息与「真正运行开始」都后移到准备成功之后、provider 启动之前，与旧编排器同序：

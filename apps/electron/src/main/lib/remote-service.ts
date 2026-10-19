@@ -33,7 +33,7 @@ import { app, BrowserWindow } from 'electron'
 
 import { AGENT_IPC_CHANNELS, canSelectAgentSessionRuntime, AGENT_SESSION_RUNTIME_LOCKED_MESSAGE, normalizeAgentRuntime, isChannelEnabledForRuntime, type AgentSessionMeta } from '@profer/shared'
 import type { AgentSendInput } from '@profer/shared'
-import { agentEventBus, runAgentHeadless, runAgentRuntimeHeadless, peekAgentRunClaimFailureForSession, describeAgentRunRejection, stopAgent, isAgentSessionActive, listActiveAgentRuntimeContexts, updateAgentPermissionMode, queueAgentMessage, beginAgentSessionDeletion, endAgentSessionDeletion, stopAgentAndWait, rewindAgentSession, regenerateAgentTitle } from './agent-service'
+import { agentEventBus, runAgentHeadless, runAgentRuntimeHeadless, peekAgentRunClaimFailureForSession, describeAgentRunRejection, stopAgent, isAgentSessionActive, listActiveAgentRuntimeContexts, updateAgentPermissionMode, queueAgentMessage, beginAgentSessionDeletion, endAgentSessionDeletion, stopAgentAndWait, rewindAgentSession, regenerateAgentTitle, saveFilesToAgentSession } from './agent-service'
 import { publishAgentSessionProjection, setAgentSessionUnread, updateAgentSessionUiMeta } from './agent-session-ui-projection-publisher'
 import { buildArchiveToggleUpdates } from './agent-unread-policy'
 import { getUserProfile } from './user-profile-service'
@@ -106,6 +106,8 @@ import { chatEventBus } from './chat-stream-bus'
 import { resolveAndReadFile, readFileAsDataUrl } from './file-preview-service'
 import { resolveAuthorizedRemoteFilePath } from './remote-file-access'
 import { loadWorkspaceHeatmapDaily } from './workspace-heatmap-query'
+import { getAllToolInfos } from './chat-tool-registry'
+import { updateToolState } from './chat-tool-config'
 import { RemoteAgentEventLog, type RemoteAgentEventRecord } from './remote-agent-event-log'
 import { RemoteAgentReplayRegistry, type RemoteReplayRecord } from './remote-agent-replay-registry'
 import { RemoteRelayClient, type RemoteRelaySink } from './remote-relay-client'
@@ -757,13 +759,30 @@ export function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]
     pinned: s.pinned,
     archived: s.archived,
     draft: s.draft,
+    // 未读的事实源：list_sessions 是移动端冷启动/重连后的唯一全量快照，
+    // 缺这个字段会让 Pocket 的未读点在重启后全部消失（projection 只在变化时广播）。
+    completedButUnconfirmed: s.completedButUnconfirmed ?? false,
     active: isAgentSessionActive(s.id),
   }
 }
 
-/** 会话列表（脱敏，仅暴露移动端需要的字段） */
+/**
+ * 会话列表（脱敏，仅暴露移动端需要的字段）。
+ *
+ * 归档是电脑端的整理动作：Pocket 不展示归档会话，也不传输它们，
+ * 避免手机在 800+ 会话里背负一份永远用不到的归档目录。
+ * `buildSessionItem` 仍保留 archived 字段，供 projection 表达「刚被归档」。
+ */
 function buildSessionList() {
-  return listAgentSessions(true).map(buildSessionItem)
+  // 归档项目整体收纳：项目行不下发，项目里的会话也不下发（避免它们掉进「未归入项目」）。
+  const archivedWorkspaceIds = new Set(
+    listAgentWorkspaces()
+      .filter((workspace) => workspace.archived)
+      .map((workspace) => workspace.id),
+  )
+  return listAgentSessions(false)
+    .filter((session) => !session.workspaceId || !archivedWorkspaceIds.has(session.workspaceId))
+    .map(buildSessionItem)
 }
 
 /**
@@ -791,7 +810,9 @@ function publishSessionDeleted(sessionId: string): void {
 
 /** 工作区（项目）列表（脱敏，仅暴露移动端侧栏渲染需要的字段；与桌面 AgentWorkspace 形状兼容） */
 function buildWorkspaceList() {
-  return listAgentWorkspaces().map((w) => ({
+  return listAgentWorkspaces()
+    .filter((w) => !w.archived)
+    .map((w) => ({
     id: w.id,
     name: w.name,
     slug: w.slug,
@@ -833,6 +854,22 @@ function buildChannelList() {
       multiplier: m.multiplier,
       source: m.source,
     })),
+  }))
+}
+
+/**
+ * Chat 工具列表（脱敏）：移动端只需要「开关 + 名称 + 说明」。
+ * 不下发 params / httpConfig / systemPromptAppend：自定义工具的 headers 可能带 API Key。
+ */
+function buildChatToolList() {
+  return getAllToolInfos().map((info) => ({
+    id: info.meta.id,
+    name: info.meta.name,
+    description: info.meta.description,
+    icon: info.meta.icon,
+    category: info.meta.category,
+    enabled: info.enabled,
+    available: info.available,
   }))
 }
 
@@ -955,6 +992,26 @@ export async function handleRemoteCommand(
       return { ok: true, data: buildChannelList() }
     }
 
+    // Chat 工具（function calling）：与桌面共用 ~/.profer/chat-tools.json 的开关。
+    // 移动端只读展示与切换开关，不接触工具凭据、HTTP 执行器配置或系统提示词。
+    case 'list_chat_tools': {
+      return { ok: true, data: buildChatToolList() }
+    }
+
+    case 'update_chat_tool': {
+      const toolId = typeof parsed.toolId === 'string' ? parsed.toolId : ''
+      const enabled = parsed.enabled === true
+      if (!toolId) return { ok: false, error: '缺少 toolId' }
+      const known = getAllToolInfos().some((info) => info.meta.id === toolId)
+      if (!known) return { ok: false, error: `工具不存在: ${toolId}` }
+      try {
+        updateToolState(toolId, { enabled })
+        return { ok: true, data: buildChatToolList() }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : '更新工具开关失败' }
+      }
+    }
+
     case 'get_pending_interactions': {
       const sessionId = parsed.sessionId as string | undefined
       const belongsToSession = (request: { sessionId: string }) => !sessionId || request.sessionId === sessionId
@@ -1038,11 +1095,19 @@ export async function handleRemoteCommand(
         data: {
           meta: {
             id: meta.id,
+            revision: meta.revision ?? 0,
             title: meta.title,
             channelId: meta.channelId,
             modelId: meta.modelId,
+            workspaceId: meta.workspaceId,
             agentRuntime: meta.agentRuntime,
             permissionMode: meta.permissionMode,
+            pinned: meta.pinned ?? false,
+            archived: meta.archived ?? false,
+            draft: meta.draft ?? false,
+            completedButUnconfirmed: meta.completedButUnconfirmed ?? false,
+            createdAt: meta.createdAt,
+            updatedAt: meta.updatedAt,
             active: isAgentSessionActive(id),
           },
           messages: sdkMessagesToViewMessages(messages as unknown as Array<Record<string, unknown>>),
@@ -1262,6 +1327,32 @@ export async function handleRemoteCommand(
       return { ok: true, data: { filename, path: targetPath, size: bytes.length } }
     }
 
+    // 移动端图片附件：保存到会话工作目录（与桌面 saveFilesToAgentSession 同源），
+    // 由客户端在消息前拼 <attached_files>，Agent 通过 Read 直接读图。
+    // 不把 base64 塞进消息体，避免 WS 与 JSONL 体积膨胀。
+    case 'save_agent_attachment': {
+      const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : ''
+      const filename = typeof parsed.filename === 'string' ? basename(parsed.filename).replace(/[\\/]/g, '_') : ''
+      const base64 = typeof parsed.base64 === 'string' ? parsed.base64 : ''
+      if (!sessionId || !filename || !base64) return { ok: false, error: '缺少有效附件数据' }
+      const session = getAgentSessionMeta(sessionId)
+      if (!session) return { ok: false, error: '会话不存在' }
+      if (!session.workspaceId) return { ok: false, error: '会话未绑定工作区' }
+      const workspace = getAgentWorkspace(session.workspaceId)
+      if (!workspace) return { ok: false, error: '会话工作区不存在' }
+      const bytes = Buffer.from(base64, 'base64')
+      if (bytes.length === 0) return { ok: false, error: '附件数据为空' }
+      if (bytes.length > 10 * 1024 * 1024) return { ok: false, error: '附件不能超过 10 MB' }
+      const saved = saveFilesToAgentSession({
+        workspaceSlug: workspace.slug,
+        sessionId,
+        files: [{ filename, data: base64 }],
+      })
+      const file = saved[0]
+      if (!file) return { ok: false, error: '附件保存失败' }
+      return { ok: true, data: { filename: file.filename, path: file.targetPath, size: bytes.length } }
+    }
+
     case 'rename_session': {
       const sessionId = parsed.sessionId as string
       const title = typeof parsed.title === 'string' ? parsed.title.trim() : ''
@@ -1327,7 +1418,11 @@ export async function handleRemoteCommand(
       const modelId = parsed.modelId as string | undefined
       const meta = createAgentSession(title, channelId, workspaceId, modelId)
       publishSessionUpdated(meta)
-      return { ok: true, data: { sessionId: meta.id, title: meta.title } }
+      // 完整 item 让移动端无需再拉一次 800+ 会话的全量列表；sessionId/title 保留给旧客户端。
+      return {
+        ok: true,
+        data: { ...buildSessionItem(meta), sessionId: meta.id, title: meta.title },
+      }
     }
 
     // Chat 与 Agent 共用电脑端持久化目录，直接复用桌面迁移逻辑，避免移动端复制一份转换规则。
@@ -1360,7 +1455,11 @@ export async function handleRemoteCommand(
         getSettings().agentRuntime ?? 'claude',
       )
       publishSessionUpdated(meta)
-      return { ok: true, data: { sessionId: meta.id, title: meta.title, draft: meta.draft ?? true } }
+      // 与 create_session 同一形状；draft 仍显式保留，旧客户端依赖该字段判断草稿复用。
+      return {
+        ok: true,
+        data: { ...buildSessionItem(meta), sessionId: meta.id, title: meta.title, draft: meta.draft ?? true },
+      }
     }
 
     case 'send_message': {

@@ -31,6 +31,7 @@ import {
   chatStreamErrorsAtom,
   chatStreamErrorCodesAtom,
   chatMessageRefreshAtom,
+  chatExternalUserMessagesAtom,
   pendingAgentRecommendationAtom,
   conversationModelAtomFamily,
   chatPendingMessageAtom,
@@ -63,6 +64,9 @@ import type {
 interface ChatViewProps {
   conversationId: string
 }
+
+/** 稳定空数组引用，避免每次渲染生成新数组触发 effect 重跑 */
+const EMPTY_CHAT_MESSAGES: ChatMessage[] = []
 
 export function ChatView({ conversationId }: ChatViewProps): React.ReactElement {
   return (
@@ -196,6 +200,49 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
       })
       .catch(console.error)
   }, [conversationId, refreshVersion, setStreamingStates])
+
+  // ===== 外部用户消息公告（桌面/移动端任一端发送） =====
+  // 主进程在用户消息落盘后广播 STREAM_USER；这里按 id 合并，不触发全量重载：
+  // - 本端乐观 temp- 消息原位换成真实消息；
+  // - 另一端发起的消息直接追加。
+  const externalUserMessages =
+    useAtomValue(chatExternalUserMessagesAtom).get(conversationId) ?? EMPTY_CHAT_MESSAGES
+  const consumedExternalUserIdsRef = React.useRef<{ conversationId: string; ids: Set<string> }>({
+    conversationId,
+    ids: new Set(),
+  })
+  React.useEffect(() => {
+    if (consumedExternalUserIdsRef.current.conversationId !== conversationId) {
+      consumedExternalUserIdsRef.current = { conversationId, ids: new Set() }
+    }
+    if (!messagesLoaded || externalUserMessages.length === 0) return
+    const consumed = consumedExternalUserIdsRef.current.ids
+    setMessages((prev) => {
+      let changed = false
+      const next = [...prev]
+      for (const incoming of externalUserMessages) {
+        if (consumed.has(incoming.id)) continue
+        if (next.some((message) => message.id === incoming.id)) {
+          consumed.add(incoming.id)
+          continue
+        }
+        const optimisticIndex = next.findIndex(
+          (message) =>
+            message.id.startsWith('temp-') &&
+            message.role === 'user' &&
+            message.content === incoming.content,
+        )
+        if (optimisticIndex >= 0) {
+          next[optimisticIndex] = incoming
+        } else {
+          next.push(incoming)
+        }
+        consumed.add(incoming.id)
+        changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [conversationId, externalUserMessages, messagesLoaded])
 
   // 从对话元数据加载分隔线
   React.useEffect(() => {

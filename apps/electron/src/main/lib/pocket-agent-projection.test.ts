@@ -23,6 +23,31 @@ describe('Pocket 远程 Agent 投影', () => {
     expect(JSON.stringify(projected)).not.toContain(large)
   })
 
+  test('assistant 只透传上下文用量需要的四个 token 计数', () => {
+    const projected = projectSdkMessageForPocket({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'ok' }],
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 80,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 40,
+          service_tier: 'standard',
+          server_tool_use: { web_search_requests: 2 },
+        },
+      },
+      parent_tool_use_id: null,
+    }) as never as { message: { usage?: Record<string, unknown> } }
+    expect(projected.message.usage).toEqual({
+      input_tokens: 1200,
+      output_tokens: 80,
+      cache_read_input_tokens: 300,
+      cache_creation_input_tokens: 40,
+    })
+    expect(JSON.stringify(projected)).not.toContain('service_tier')
+  })
+
   test('非 SDK 事件保持原样，SDK 事件经过投影', () => {
     const proferEvent = { kind: 'profer_event', event: { type: 'run_resumed' } } as never
     expect(projectAgentPayloadForPocket(proferEvent)).toBe(proferEvent)
