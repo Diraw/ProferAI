@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
-import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, sanitizePiContextMessages, stripErrorFromContentMessage } from './message-adapter'
+import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, OMITTED_TOOL_IMAGE_TEXT, sanitizePiContextMessages, stripErrorFromContentMessage, TOOL_RESULT_BUDGET_MARKER } from './message-adapter'
 import { createAgentRuntimeGuard } from '@profer/agent-runtime/runtime-guards'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 
@@ -263,6 +263,69 @@ describe('sanitizePiContextMessages', () => {
 
     expect(result).toBe(messages)
     expect(result[0]).toBe(validImage)
+  })
+
+  test('旧工具结果超预算时保留头尾并插入说明，最近两条保持完整', () => {
+    const long = 'A'.repeat(20_000)
+    const messages = Array.from({ length: 3 }, (_, index) => ({
+      role: 'toolResult',
+      toolCallId: `call-old-${index}`,
+      toolName: 'bash',
+      isError: false,
+      content: [{ type: 'text', text: long }],
+    })) as unknown as AgentMessage[]
+
+    const result = sanitizePiContextMessages(messages)
+    const firstContent = result[0] as unknown as { content: Array<Record<string, unknown>> }
+    const firstText = String(firstContent.content[0]!.text)
+
+    expect(firstText.length).toBeLessThan(9_000)
+    expect(firstText).toContain(TOOL_RESULT_BUDGET_MARKER)
+    expect(firstText.startsWith('A')).toBe(true)
+    expect(firstText.endsWith('A')).toBe(true)
+    expect((result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+    expect((result[2] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+  })
+
+  test('全局只保留最近 6 张工具图片，旧图片替换为一条说明', () => {
+    const messages = Array.from({ length: 8 }, (_, index) => ({
+      role: 'toolResult',
+      toolCallId: `call-image-${index}`,
+      toolName: 'inspect_preview',
+      isError: false,
+      content: [
+        { type: 'text', text: 'ok' },
+        { type: 'image', data: 'a', mimeType: 'image/png' },
+      ],
+    })) as unknown as AgentMessage[]
+
+    const result = sanitizePiContextMessages(messages)
+    const images = result.reduce((count, message) => {
+      const content = (message as unknown as { content: Array<Record<string, unknown>> }).content
+      return count + content.filter((block) => block.type === 'image').length
+    }, 0)
+
+    expect(images).toBe(6)
+    const firstContent = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(firstContent.some((block) => block.type === 'text' && String(block.text).includes(OMITTED_TOOL_IMAGE_TEXT))).toBe(true)
+    const lastContent = (result[7] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(lastContent.some((block) => block.type === 'image')).toBe(true)
+  })
+
+  test('预算处理可重复执行，不会重复插入省略说明', () => {
+    const long = 'B'.repeat(20_000)
+    const messages = Array.from({ length: 3 }, (_, index) => ({
+      role: 'toolResult',
+      toolCallId: `call-idem-${index}`,
+      toolName: 'bash',
+      isError: false,
+      content: [{ type: 'text', text: long }],
+    })) as unknown as AgentMessage[]
+
+    const once = sanitizePiContextMessages(messages)
+    const twice = sanitizePiContextMessages(once)
+
+    expect(twice).toEqual(once)
   })
 })
 

@@ -127,6 +127,137 @@ export function restorePiInput(
 
 export const EMPTY_IMAGE_PLACEHOLDER_TEXT = '[图像内容不可用：工具返回了空图像数据，已从发送给模型的上下文中移除。请改用文本方式获取信息（例如 BrowserObserve）。]'
 
+/**
+ * 工具结果上下文预算。
+ *
+ * 审计依据（2026-10-19，近 14 天 349 个 Pi 会话、30,716 次模型调用）：
+ * 工具结果占上下文字符的 88%，其中 bash/read/grep 是文本大头，inspect_preview
+ * 的截图是图片大头。Pi SDK 已按 50KB/2000 行截断单次工具输出，但旧结果会在
+ * 后续每次请求里重复进入上下文，长会话因此膨胀到 9 万 token/次以上。
+ *
+ * 策略：最近 2 条工具结果保持完整；更早的文本压到 8k 字符（保留头尾），
+ * 全局只保留最近 6 张图片。旧内容可随时重新读取/重跑工具，不改变工具本身语义。
+ */
+const KEEP_RECENT_TOOL_RESULTS = 2
+const MAX_OLD_TOOL_RESULT_TEXT_CHARS = 8_000
+const MAX_CONTEXT_IMAGES = 6
+
+export const TOOL_RESULT_BUDGET_MARKER = '[Profer context budget:'
+export const OMITTED_TOOL_IMAGE_TEXT = '[Profer context budget: 已省略较早的工具图片以节省上下文；如需查看，请重新调用对应工具。]'
+
+function truncateToolResultText(text: string, maxChars: number): string {
+  if (text.length <= maxChars || text.includes(TOOL_RESULT_BUDGET_MARKER)) return text
+  const headChars = Math.floor(maxChars * 0.6)
+  const tailChars = maxChars - headChars
+  const omitted = text.length - maxChars
+  return `${text.slice(0, headChars)}\n\n${TOOL_RESULT_BUDGET_MARKER} 已省略 ${omitted} 个字符以节省上下文；如仍需完整内容，请重新调用工具或分页读取。]\n\n${text.slice(-tailChars)}`
+}
+
+function budgetToolResultContent(
+  content: unknown,
+  options: { maxTextChars: number | null; keepImages: number },
+): unknown | null {
+  const { maxTextChars, keepImages } = options
+
+  if (typeof content === 'string') {
+    if (maxTextChars === null) return null
+    const truncated = truncateToolResultText(content, maxTextChars)
+    return truncated === content ? null : truncated
+  }
+
+  if (!Array.isArray(content)) return null
+
+  let nextBlocks = content as Array<Record<string, unknown>>
+  let changed = false
+
+  // 文本：同一结果里的多个 text block 合并后压缩，避免每块各自未超限但总和更大。
+  if (maxTextChars !== null) {
+    const textBlocks = nextBlocks.filter((block) => block.type === 'text' && typeof block.text === 'string')
+    const totalTextChars = textBlocks.reduce((total, block) => total + String(block.text).length, 0)
+    if (totalTextChars > maxTextChars) {
+      const combined = textBlocks.map((block) => String(block.text)).join('\n')
+      const truncated = truncateToolResultText(combined, maxTextChars)
+      const firstTextIndex = nextBlocks.findIndex((block) => block.type === 'text')
+      if (firstTextIndex < 0) {
+        nextBlocks = [...nextBlocks, { type: 'text', text: truncated }]
+      } else {
+        const before = nextBlocks.slice(0, firstTextIndex).filter((block) => block.type !== 'text')
+        const after = nextBlocks.slice(firstTextIndex + 1).filter((block) => block.type !== 'text')
+        nextBlocks = [...before, { type: 'text', text: truncated }, ...after]
+      }
+      changed = true
+    }
+  }
+
+  // 图片：只保留预算内的图片，超出的替换成一条说明，避免重复说明撑大上下文。
+  const imageCount = nextBlocks.reduce((count, block) => count + (block.type === 'image' ? 1 : 0), 0)
+  if (imageCount > keepImages) {
+    const omitted = imageCount - keepImages
+    let keptImages = 0
+    let insertedNote = false
+    const output: Array<Record<string, unknown>> = []
+    for (const block of nextBlocks) {
+      if (block.type !== 'image') {
+        output.push(block)
+        continue
+      }
+      if (keptImages < keepImages) {
+        output.push(block)
+        keptImages += 1
+      } else if (!insertedNote) {
+        output.push({ type: 'text', text: `${OMITTED_TOOL_IMAGE_TEXT}（${omitted} 张）` })
+        insertedNote = true
+      }
+    }
+    nextBlocks = output
+    changed = true
+  }
+
+  return changed ? nextBlocks : null
+}
+
+function toolResultImageCount(message: AgentMessage): number {
+  const content = (message as ToolResultMessage).content as unknown
+  if (!Array.isArray(content)) return 0
+  return content.reduce((count, block) => {
+    return count + (block && typeof block === 'object' && (block as Record<string, unknown>).type === 'image' ? 1 : 0)
+  }, 0)
+}
+
+/** 从旧到新分配文本/图片预算；最新 KEEP_RECENT_TOOL_RESULTS 条工具结果不压缩文本。 */
+export function budgetPiToolResults(messages: AgentMessage[]): AgentMessage[] {
+  const toolResultIndices: number[] = []
+  for (let index = 0; index < messages.length; index += 1) {
+    if ((messages[index] as { role?: unknown } | undefined)?.role === 'toolResult') toolResultIndices.push(index)
+  }
+  if (toolResultIndices.length === 0) return messages
+
+  let remainingImages = MAX_CONTEXT_IMAGES
+  let changed = false
+  const next = [...messages]
+
+  // 从最新到最旧分配图片预算；最近两条工具结果保持完整文本，避免影响当前推理。
+  for (let order = toolResultIndices.length - 1; order >= 0; order -= 1) {
+    const index = toolResultIndices[order]
+    if (index === undefined) continue
+    const message = messages[index] as ToolResultMessage
+    const isRecent = order >= toolResultIndices.length - KEEP_RECENT_TOOL_RESULTS
+    const imageCount = toolResultImageCount(message)
+    const keepImages = Math.min(imageCount, remainingImages)
+    remainingImages -= keepImages
+
+    const budgeted = budgetToolResultContent(message.content, {
+      maxTextChars: isRecent ? null : MAX_OLD_TOOL_RESULT_TEXT_CHARS,
+      keepImages,
+    })
+    if (budgeted === null) continue
+    changed = true
+    next[index] = { ...message, content: budgeted as ToolResultMessage['content'] } as unknown as AgentMessage
+  }
+
+  return changed ? next : messages
+}
+
 function isEmptyImageBlock(block: unknown): boolean {
   if (!block || typeof block !== 'object') return false
   const record = block as Record<string, unknown>
@@ -134,13 +265,7 @@ function isEmptyImageBlock(block: unknown): boolean {
   return typeof record.data !== 'string' || record.data.length === 0
 }
 
-/**
- * 请求前历史消毒：工具若把空图像块（例如视图不可见时 capturePage 返回的空截图）写进会话历史，
- * 部分模型上游收到带空 data 的 image part 会挂起直到客户端超时（实测 kimi-k3 每次 ~105s 无响应
- * 后被自动重试，表现为“模型连不上”式死循环）。每轮构建请求前把空图像块替换为文本说明，
- * 既保护新写入的历史，也让已被污染的既有会话恢复可用。无空图时原样返回（不复制数组）。
- */
-export function sanitizePiContextMessages(messages: AgentMessage[]): AgentMessage[] {
+function replaceEmptyImageBlocks(messages: AgentMessage[]): AgentMessage[] {
   let changed = false
   const next = messages.map((message) => {
     if (!message || typeof message !== 'object' || (message as { role?: unknown }).role !== 'toolResult') return message
@@ -154,6 +279,16 @@ export function sanitizePiContextMessages(messages: AgentMessage[]): AgentMessag
     } as unknown as AgentMessage
   })
   return changed ? next : messages
+}
+
+/**
+ * 请求前历史消毒：工具若把空图像块（例如视图不可见时 capturePage 返回的空截图）写进会话历史，
+ * 部分模型上游收到带空 data 的 image part 会挂起直到客户端超时（实测 kimi-k3 每次 ~105s 无响应
+ * 后被自动重试，表现为“模型连不上”式死循环）。每轮构建请求前把空图像块替换为文本说明，
+ * 既保护新写入的历史，也让已被污染的既有会话恢复可用。无空图时原样返回（不复制数组）。
+ */
+export function sanitizePiContextMessages(messages: AgentMessage[]): AgentMessage[] {
+  return budgetPiToolResults(replaceEmptyImageBlocks(messages))
 }
 
 function normalizeToolResultContent(content: unknown): unknown {
