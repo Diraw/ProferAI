@@ -1,9 +1,9 @@
 /**
  * ScrollMinimap — 消息导航迷你地图 + 滚动进度条
  *
- * 在消息区域右侧显示：
- * 1. 短横杠代表每条消息的位置（迷你地图），悬浮时弹出消息预览列表
- * 2. 可拖拽的滚动进度条，提供丝滑的滚动体验
+ * 在消息区域左侧显示：
+ * 1. 短横杠代表**一轮对话**（用户提问 + 助手回复）的位置（迷你地图），悬浮时弹出该轮预览
+ * 2. 右侧可拖拽的滚动进度条
  * 必须放在 StickToBottom（Conversation）内部使用。
  */
 
@@ -18,7 +18,7 @@ import { getModelLogo, resolveModelProvider } from '@/lib/model-logo'
 import { channelsAtom } from '@/atoms/chat-atoms'
 import { useShortcut } from '@/hooks/useShortcut'
 import { cn } from '@/lib/utils'
-import { navigationItemKey } from '@/lib/navigation-item-key'
+import { groupNavigationTurns, type NavigationTurn } from '@/lib/navigation-turns'
 
 export interface MinimapItem {
   /** 滚动锚点 id（消息 uuid）；无 uuid 时为 null，需用 matchKey 在本地 DOM 里回退匹配 */
@@ -43,7 +43,7 @@ interface ScrollMinimapProps {
   onRequestEarlier?: () => void
 }
 
-/** 最少消息数才显示迷你地图 */
+/** 最少轮数才显示迷你地图 */
 const MIN_ITEMS = 1
 /** 迷你地图最多渲染的横杠数 */
 const MAX_BARS = 20
@@ -55,6 +55,15 @@ const MAX_BARS = 20
  * 这里只渲染最近的 N 行，总数仍显示真实值（不随窗口/折叠/截断变化）。
  */
 const MAX_LIST_ITEMS = 200
+/** 横杠静止宽度（px） */
+const REST_WIDTH = 6
+/** 被悬停那根的宽度（px） */
+const PEAK_WIDTH = 22
+/**
+ * 悬停时的邻域衰减：下标 = 与指针所在刻度的距离，值 = 伸长比例。
+ * 自己吃满，上下邻条依次减弱，形成一道跟着指针走的起伏，而不是孤零零一根长杠。
+ */
+const WAVE_FALLOFF = [1, 0.45, 0.22] as const
 
 // ── 辅助函数 ──
 
@@ -174,8 +183,10 @@ export function observeMinimapViewport(
 
 export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): React.ReactElement | null {
   const { scrollRef, contentRef, pause, navigate, beginLayout } = useConversationScroll()
-  const [hovered, setHovered] = React.useState(false)
-  const [isLeaving, setIsLeaving] = React.useState(false)
+  /** 面板是否打开 —— 只由「右键轨道」或 ⌘F 打开，不再由悬停触发 */
+  const [panelOpen, setPanelOpen] = React.useState(false)
+  /** 当前悬停的横杠下标（该横杠代表的一轮预览）；null = 不在轨道上 */
+  const [hoveredBar, setHoveredBar] = React.useState<number | null>(null)
   const [visibleIds, setVisibleIds] = React.useState<Set<string>>(new Set())
   /** 视口内无 uuid 条目的匹配键（用于高亮），与 visibleIds 同时机更新 */
   const [visibleNavKeys, setVisibleNavKeys] = React.useState<Set<string>>(new Set())
@@ -190,22 +201,20 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
   const [searchQuery, setSearchQuery] = React.useState('')
   const [isDragging, setIsDragging] = React.useState(false)
   const [scrollMetrics, setScrollMetrics] = React.useState({ scrollTop: 0, scrollHeight: 1, clientHeight: 1 })
-  const closeTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
-  const fadeTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
-  const openTimerRef = React.useRef<ReturnType<typeof setTimeout>>()
+  const panelRef = React.useRef<HTMLDivElement>(null)
+  /** 轨道本体：右键入口与「点外面关闭」的边界都挂在它上面 */
+  const railRef = React.useRef<HTMLDivElement>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
   const trackRef = React.useRef<HTMLDivElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
 
-  // ── 组件卸载时清理计时器 ──
-
-  React.useEffect(() => {
-    return () => {
-      if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
-      if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current)
-      if (openTimerRef.current) clearTimeout(openTimerRef.current)
-    }
-  }, [])
+  /**
+   * 一轮 = 一条用户消息 + 它的回复（见 lib/navigation-turns）。
+   *
+   * 人找东西时想的是「我问了什么、它答了什么」，不是「第 17 条消息」，
+   * 所以刻度、预览、面板列表全部以轮为单位。
+   */
+  const turns = React.useMemo(() => groupNavigationTurns(items), [items])
 
   // ── 可见消息 + 滚动指标追踪 ──
 
@@ -226,16 +235,16 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
   // ── 面板打开时自动聚焦搜索框 ──
 
   React.useEffect(() => {
-    if (hovered && searchInputRef.current) {
+    if (panelOpen && searchInputRef.current) {
       const timer = setTimeout(() => searchInputRef.current?.focus(), 80)
       return () => clearTimeout(timer)
     }
-  }, [hovered])
+  }, [panelOpen])
 
   // ── 面板打开时把当前可见消息滚到列表中间，避免每次都从顶部开始 ──
 
   React.useEffect(() => {
-    if (!hovered) return
+    if (!panelOpen) return
     const timer = setTimeout(() => {
       const list = listRef.current
       if (!list) return
@@ -250,13 +259,13 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
       list.scrollTo({ top: Math.max(0, offset), behavior: 'auto' })
     }, 0)
     return () => clearTimeout(timer)
-  }, [hovered])
+  }, [panelOpen])
 
   // ── 面板关闭时清空搜索 ──
 
   React.useEffect(() => {
-    if (!hovered) setSearchQuery('')
-  }, [hovered])
+    if (!panelOpen) setSearchQuery('')
+  }, [panelOpen])
 
   // ── “已加载于本地 DOM”快照 ──
   //
@@ -265,7 +274,7 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
   // 只在面板打开时扫一次，不挂到滚动热路径上。
 
   React.useEffect(() => {
-    if (!hovered) {
+    if (!panelOpen) {
       setLoadedIds(new Set())
       setLoadedNavKeys(new Set())
       return
@@ -284,59 +293,85 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
     }
     setLoadedIds(ids)
     setLoadedNavKeys(keys)
-  }, [hovered, scrollRef, items])
+  }, [panelOpen, scrollRef, items])
 
   // ── Cmd+F / Ctrl+F 快捷键：打开面板并聚焦搜索 ──
 
+  /**
+   * 打开 / 关闭都是瞬时的：面板不做入场动画。
+   *
+   * 那层 zoom-in/fade-in 在反复开关、沿着轨道滑动时只会拖慢手感——
+   * 要的是指针一停就看到内容，不是等一个过渡跑完。
+   */
+  const closePanel = React.useCallback(() => setPanelOpen(false), [])
+
   const handleShortcutOpen = React.useCallback(() => {
-    if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
-    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current)
-    if (openTimerRef.current) { clearTimeout(openTimerRef.current); openTimerRef.current = undefined }
-    setIsLeaving(false)
-    setHovered(true)
+    // 面板和悬停预览共用左侧空间，开面板时先收起预览，否则会浮在面板上
+    setHoveredBar(null)
+    setPanelOpen(true)
   }, [])
 
-  useShortcut('file-find', handleShortcutOpen, items.length >= MIN_ITEMS && canScroll)
+  useShortcut('file-find', handleShortcutOpen, turns.length >= MIN_ITEMS && canScroll)
 
-  // ── 鼠标进出控制（仅迷你地图区域） ──
+  // ── 点击面板外部 / Esc 关闭 ──
+  //
+  // 面板只由「右键轨道」或 ⌘F 打开，必须显式提供关闭路径：
+  // 否则用户把鼠标移开去读正文时，面板还挡在那里。
 
-  /** 鼠标进入后需停留此时间（ms）才展开面板，防止掠过时闪烁 */
-  const OPEN_DELAY = 180
-
-  const handleMouseEnter = (): void => {
-    if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
-    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current)
-    setIsLeaving(false)
-
-    // 面板已打开则无需重复触发
-    if (hovered) return
-
-    // 延迟打开：鼠标需在触发条上停留足够时间
-    if (!openTimerRef.current) {
-      openTimerRef.current = setTimeout(() => {
-        setHovered(true)
-        openTimerRef.current = undefined
-      }, OPEN_DELAY)
+  React.useEffect(() => {
+    if (!panelOpen) return
+    const onPointerDown = (event: MouseEvent): void => {
+      // 只处理左键：右键是轨道的开关手势，别让「点外面关闭」先把它关掉再重新打开
+      if (event.button !== 0) return
+      const target = event.target as Node
+      if (panelRef.current?.contains(target)) return
+      if (railRef.current?.contains(target)) return
+      closePanel()
     }
-  }
-
-  const handleMouseLeave = (): void => {
-    // 尚未打开就离开了 → 取消打开定时器
-    if (openTimerRef.current) {
-      clearTimeout(openTimerRef.current)
-      openTimerRef.current = undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') closePanel()
     }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [panelOpen, closePanel])
 
-    if (!hovered) return
+  // ── 轨道悬停：只给单条预览，不弹面板 ──
 
-    closeTimerRef.current = setTimeout(() => {
-      setIsLeaving(true)
-      fadeTimerRef.current = setTimeout(() => {
-        setHovered(false)
-        setIsLeaving(false)
-      }, 80)
-    }, 40)
-  }
+  /**
+   * 沿轨道滑动时预览即时跟随，不设延迟。
+   *
+   * 旧实现要等 120ms 才出气泡，快速划过时既看不到内容，又有明显的迟滞感；
+   * 气泡里只有纯文本（不做 markdown 解析），逐格切换不会卡。
+   */
+  const handleBarEnter = React.useCallback((index: number) => {
+    // 面板打开时不再出预览：两者占同一块左侧空间
+    if (panelOpen) return
+    setHoveredBar(index)
+  }, [panelOpen])
+
+  /** 离开整条轨道才收起预览：横杠之间移动不经过这里，不会闪 */
+  const handleRailLeave = React.useCallback(() => setHoveredBar(null), [])
+
+  /**
+   * 右键轨道 = 打开/关闭消息导航面板。
+   *
+   * 轨道顶部原本有一个独立的导航按钮，但它在 36px 宽的刻度列里是孤零零一个图标，
+   * 和刻度不是同一套东西。右键本来就是「对这块区域做点别的」的语义，把入口并进来：
+   * 顶部只剩刻度，左键仍然只负责「跳到那一条」，键盘路径保留 ⌘F。
+   */
+  const handleRailContextMenu = React.useCallback((event: React.MouseEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (panelOpen) {
+      closePanel()
+      return
+    }
+    handleShortcutOpen()
+  }, [panelOpen, closePanel, handleShortcutOpen])
 
   // ── 跳转到指定消息（直接操作 scrollTop，绕过 scrollIntoView） ──
   //
@@ -366,13 +401,10 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
       : offsetTop - 32
     navigate(Math.max(0, scrollTarget))
 
-    setHovered(false)
-  }, [scrollRef, contentRef, navigate, onRequestEarlier, beginLayout])
+    closePanel()
+  }, [scrollRef, contentRef, navigate, onRequestEarlier, beginLayout, closePanel])
 
-  // ── 搜索过滤 ──
-
-  /** 导航条目的唯一键：有 uuid 用 uuid，无 uuid 用匹配键 */
-  const navKeyOf = navigationItemKey
+  // ── 按轮分组后的派生数据 ──
 
   /**
    * 该条目是否已在本会话的 DOM 里。
@@ -395,41 +427,51 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
     [visibleIds, visibleNavKeys],
   )
 
-  const filteredItems = React.useMemo(() => {
-    if (!searchQuery.trim()) return items
-    const q = searchQuery.toLowerCase()
-    return items.filter((item) => item.preview.toLowerCase().includes(q))
-  }, [items, searchQuery])
+  /** 这一轮是否在视口内：任一条目在视口即可（长回复跨屏时也不会漏高亮）。 */
+  const isTurnOnScreen = React.useCallback(
+    (turn: NavigationTurn<MinimapItem>): boolean => turn.items.some(isOnScreen),
+    [isOnScreen],
+  )
 
-  const loadedCount = React.useMemo(() => items.filter(isLoaded).length, [items, isLoaded])
+  /** 搜索：一轮里任何一条（提问 / 回复 / 中断记录）命中都算命中。 */
+  const filteredTurns = React.useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return turns
+    return turns.filter((turn) => turn.items.some((item) => item.preview.toLowerCase().includes(q)))
+  }, [turns, searchQuery])
 
-  /** 列表居中锚点：优先用主区视口中心对应的消息；该消息被搜索过滤掉时退回第一条可见消息 */
+  /** 已加载的轮数：锚点在 DOM 里才算点得动。 */
+  const loadedCount = React.useMemo(
+    () => turns.filter((turn) => isLoaded(turn.anchor)).length,
+    [turns, isLoaded],
+  )
+
+  /** 列表居中锚点：优先用主区视口中心所在的那一轮；被搜索过滤掉时退回第一条可见轮。 */
   const anchorKey = React.useMemo(() => {
-    const centerItem = centerVisibleId
-      ? filteredItems.find((item) => item.id === centerVisibleId)
+    const centerTurn = centerVisibleId
+      ? filteredTurns.find((turn) => turn.items.some((item) => item.id === centerVisibleId))
       : undefined
-    const onScreenItem = centerItem ?? filteredItems.find(isOnScreen)
-    return onScreenItem ? navigationItemKey(onScreenItem) : undefined
-  }, [centerVisibleId, filteredItems, isOnScreen])
+    const onScreenTurn = centerTurn ?? filteredTurns.find(isTurnOnScreen)
+    return onScreenTurn?.key
+  }, [centerVisibleId, filteredTurns, isTurnOnScreen])
 
-  /** 当前阅读位置（1 基）。找不到可见条目时为 0，面板显示为「—」。
-   *  语义是“当前在全部轮次里的第几条”，不再用旧实现那种“可见/总数”的双重含义。 */
+  /** 当前阅读位置（1 基，按轮计）。找不到可见轮时为 0，面板显示为「—」。 */
   const anchorIndex = React.useMemo(() => {
     if (!anchorKey) return 0
-    return filteredItems.findIndex((item) => navigationItemKey(item) === anchorKey) + 1
-  }, [anchorKey, filteredItems])
+    return filteredTurns.findIndex((turn) => turn.key === anchorKey) + 1
+  }, [anchorKey, filteredTurns])
 
   //
   // 只渲染列表窗口（见 MAX_LIST_ITEMS）；窗口围绕当前阅读位置，而不是固定取尾部：
   // 否则用户上滚阅读时，面板里的高亮行会被挤出窗口，看不到自己读到哪。
-  // 计数/位置指示仍用全量 filteredItems。
-  const listItems = React.useMemo(() => {
-    if (filteredItems.length <= MAX_LIST_ITEMS) return filteredItems
-    if (anchorIndex <= 0) return filteredItems.slice(-MAX_LIST_ITEMS)
+  // 计数/位置指示仍用全量 filteredTurns。
+  const listTurns = React.useMemo(() => {
+    if (filteredTurns.length <= MAX_LIST_ITEMS) return filteredTurns
+    if (anchorIndex <= 0) return filteredTurns.slice(-MAX_LIST_ITEMS)
     const half = Math.floor(MAX_LIST_ITEMS / 2)
-    const start = Math.max(0, Math.min(anchorIndex - 1 - half, filteredItems.length - MAX_LIST_ITEMS))
-    return filteredItems.slice(start, start + MAX_LIST_ITEMS)
-  }, [filteredItems, anchorIndex])
+    const start = Math.max(0, Math.min(anchorIndex - 1 - half, filteredTurns.length - MAX_LIST_ITEMS))
+    return filteredTurns.slice(start, start + MAX_LIST_ITEMS)
+  }, [filteredTurns, anchorIndex])
 
   // ── 滚动条滑块拖拽 ──
 
@@ -489,11 +531,15 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
     navigate(Math.max(0, targetTop))
   }, [scrollRef, navigate])
 
-  if (items.length < MIN_ITEMS || !canScroll) return null
+  if (turns.length < MIN_ITEMS || !canScroll) return null
 
   // ── 迷你地图条纹 ──
 
-  const barCount = Math.min(items.length, MAX_BARS)
+  const barCount = Math.min(turns.length, MAX_BARS)
+
+  /** 悬停中的横杠所代表的那一轮（横杠按区间分桶，取桶内第一轮） */
+  const hoveredBarIndex = hoveredBar === null ? -1 : Math.floor((hoveredBar * turns.length) / barCount)
+  const hoveredTurn = hoveredBar === null ? undefined : turns[hoveredBarIndex]
 
   // ── 滚动条滑块尺寸计算 ──
 
@@ -503,33 +549,127 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
   const thumbHeightPct = Math.max(10, thumbRatio * 100)
   const thumbTopPct = scrollRange > 0 ? (scrollTop / scrollRange) * (100 - thumbHeightPct) : 0
 
+  // ── 轨道刻度 ──
+  //
+  // 一轮一根等长短杠，不编码任何数据；长短只回应指针。当前视口用浅色标出，
+  // 回答“我读到哪了”——这是它作为导航的全部职责，其余交给预览与面板。
+  const railBars = Array.from({ length: barCount }, (_, i) => {
+    const start = Math.floor((i * turns.length) / barCount)
+    const end = Math.floor(((i + 1) * turns.length) / barCount)
+    const group = turns.slice(start, end)
+    return {
+      first: group[0],
+      firstIndex: start,
+      isVisible: group.some(isTurnOnScreen),
+      hasAnswer: group.some((turn) => Boolean(turn.assistant)),
+      loaded: group.some((turn) => isLoaded(turn.anchor)),
+    }
+  })
+
+  // 悬停时按距离衰减：自己最长，上下邻居依次变短（见 WAVE_FALLOFF）
+  const waveWidth = (index: number): number => {
+    if (hoveredBar === null) return REST_WIDTH
+    const factor = WAVE_FALLOFF[Math.abs(index - hoveredBar)] ?? 0
+    return Math.round(REST_WIDTH + (PEAK_WIDTH - REST_WIDTH) * factor)
+  }
+
   return (
-    <div className="absolute right-1 top-0 bottom-0 z-30 flex pointer-events-none">
-      {/* ── 迷你地图悬停区域（面板 + 横杠） ── */}
-      <div className="flex items-start h-full">
-        {/* 展开面板 */}
-        {hovered && (
+    <>
+      {/* ── 左中轨道 ──
+          放在正文左侧、纵向居中：它是一份目录刻度，不是贴边的滚动条。
+          指针压到某一根时，它自己和上下邻居按距离衰减伸长，滑动时就是一道跟着走的起伏。 */}
+      <div className="absolute left-1 top-1/2 z-30 -translate-y-1/2 pointer-events-none">
+        <div
+          ref={railRef}
+          role="group"
+          aria-label="消息导航（右键打开）"
+          className="flex flex-col items-start pointer-events-auto"
+          onMouseLeave={handleRailLeave}
+          onContextMenu={handleRailContextMenu}
+        >
+          {railBars.map(({ first, firstIndex, isVisible, hasAnswer, loaded }, i) => {
+            const isHovered = hoveredBar === i
+            return (
+              <button
+                key={i}
+                type="button"
+                tabIndex={-1}
+                aria-label={first ? `跳转到第 ${firstIndex + 1} 轮：${first.preview.slice(0, 40)}` : '跳转到对话'}
+                onMouseEnter={() => handleBarEnter(i)}
+                onClick={() => first && scrollToMessage(first.anchor.id, first.anchor.matchKey)}
+                className="relative flex h-2 w-9 items-center focus:outline-none"
+              >
+                <span
+                  className={cn(
+                    // 150ms 的跟随：沿轨道滑动时，起伏是一道跟着指针走的波，而不是逐格硬跳
+                    'block h-[3px] rounded-full transition-[width,background-color] duration-150 ease-out',
+                    isVisible
+                      ? 'bg-foreground/70 dark:bg-foreground/75 minimap-visible-indicator'
+                      : hasAnswer
+                        ? 'bg-foreground/40 dark:bg-foreground/40'
+                        : 'bg-foreground/20 dark:bg-foreground/25',
+                    !loaded && 'opacity-40',
+                    isHovered && 'bg-foreground dark:bg-foreground'
+                  )}
+                  style={{ width: waveWidth(i) }}
+                />
+
+                {/* 悬停预览：一轮 = 提问 + 回复，贴着被悬停的那一根向右展开。
+                    不做入场动画、不延迟：沿轨道滑动时内容直接跟着换，才跟得上指针。 */}
+                {isHovered && !panelOpen && hoveredTurn && (
+                  <div className="pointer-events-none absolute left-full top-1/2 z-40 ml-4 w-[280px] -translate-y-1/2 overflow-hidden rounded-lg border bg-popover shadow-lg">
+                    <div className="flex items-center gap-1.5 border-b px-2.5 py-1.5">
+                      <ItemIcon item={hoveredTurn.user ?? hoveredTurn.anchor} />
+                      <span className="text-[11px] font-medium text-popover-foreground/75">
+                        {hoveredTurn.user ? '你问' : '助手'}
+                      </span>
+                      <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
+                        第 {hoveredBarIndex + 1} / {turns.length} 轮
+                      </span>
+                    </div>
+                    <p className="px-2.5 py-1.5 text-xs leading-relaxed text-popover-foreground/85 line-clamp-2">
+                      {hoveredTurn.preview || '(空消息)'}
+                    </p>
+                    {hoveredTurn.assistant && (
+                      <div className="flex items-start gap-1.5 border-t px-2.5 py-1.5">
+                        <ItemIcon item={hoveredTurn.assistant} />
+                        <p className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground/80">
+                          {hoveredTurn.assistant.preview || '(空回复)'}
+                        </p>
+                      </div>
+                    )}
+                    {!hoveredTurn.assistant && hoveredTurn.status && (
+                      <div className="flex items-start gap-1.5 border-t px-2.5 py-1.5 text-destructive/80">
+                        <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                        <p className="line-clamp-2 text-[11px] leading-relaxed">{hoveredTurn.status.preview}</p>
+                      </div>
+                    )}
+                    {/* 右键入口没有可见按钮，借这条预览把手势教给用户（跟着气泡一起消失，不常驻） */}
+                    <p className="border-t px-2.5 py-1 text-[10px] leading-none text-muted-foreground/70">
+                      右键轨道打开消息导航 · ⌘F
+                    </p>
+                  </div>
+                )}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* 展开面板：从左侧轨道向右弹开（无入场动画，打开即到位） */}
+        {panelOpen && (
           <div
-            className={cn(
-              'mr-1 w-[280px] rounded-lg border bg-popover shadow-xl origin-top-right flex flex-col overflow-hidden pointer-events-auto',
-              isLeaving
-                ? 'animate-out fade-out-0 zoom-out-95 duration-75'
-                : 'animate-in fade-in-0 zoom-in-95 duration-150'
-            )}
-            style={{ maxHeight: 'min(420px, 60vh)', marginTop: 12 }}
-            onMouseEnter={handleMouseEnter}
-            onMouseLeave={handleMouseLeave}
+            ref={panelRef}
+            className="absolute left-full top-1/2 ml-4 w-[300px] -translate-y-1/2 rounded-lg border bg-popover shadow-xl flex flex-col overflow-hidden pointer-events-auto"
+            style={{ maxHeight: 'min(460px, 70vh)' }}
           >
             {/* 标题栏 */}
             <div className="flex items-center justify-between px-3 py-2 border-b shrink-0">
               <span className="text-xs font-medium text-popover-foreground/70">消息导航</span>
-              {/* 位置指示（当前阅读位置 / 全会话总数）。总数来自主进程的全量轮次索引，
-                  不随渲染窗口、分页或折叠变化；加载历史不会把分母改小。 */}
               <span
                 className="text-[11px] text-muted-foreground tabular-nums"
-                title={`已加载 ${loadedCount}/${items.length} 条`}
+                title={`已加载 ${loadedCount}/${turns.length} 轮`}
               >
-                {anchorIndex > 0 ? `${anchorIndex}/${items.length}` : `—/${items.length}`}
+                {anchorIndex > 0 ? `第 ${anchorIndex} 轮 / 共 ${turns.length} 轮` : `— / 共 ${turns.length} 轮`}
               </span>
             </div>
 
@@ -539,33 +679,28 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/50" />
                 <Input
                   ref={searchInputRef}
-                  placeholder="搜索消息..."
+                  placeholder="搜索对话..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  onFocus={() => {
-                    if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
-                    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current)
-                    setIsLeaving(false)
-                  }}
                   className="h-7 text-xs pl-7"
                 />
               </div>
             </div>
 
-            {/* 消息列表 */}
+            {/* 对话列表（一轮一行） */}
             <div ref={listRef} className="overflow-y-auto flex-1 p-1.5 space-y-0.5 scrollbar-thin">
-              {filteredItems.length === 0 ? (
+              {filteredTurns.length === 0 ? (
                 <div className="py-6 text-center text-xs text-muted-foreground">
-                  未找到匹配消息
+                  未找到匹配对话
                 </div>
               ) : (
-                listItems.map((item) => (
-                  <MinimapRow
-                    key={navKeyOf(item)}
-                    item={item}
-                    isAnchor={navKeyOf(item) === anchorKey}
-                    loaded={isLoaded(item)}
-                    onScreen={isOnScreen(item)}
+                listTurns.map((turn) => (
+                  <TurnRow
+                    key={turn.key}
+                    turn={turn}
+                    isAnchor={turn.key === anchorKey}
+                    loaded={isLoaded(turn.anchor)}
+                    onScreen={isTurnOnScreen(turn)}
                     query={searchQuery}
                     onSelect={scrollToMessage}
                   />
@@ -574,47 +709,14 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
             </div>
           </div>
         )}
-
-        {/* ── 迷你地图横杠（紧凑排列）—— 只有这里触发面板展开 ── */}
-        <div
-          className="relative mt-3 flex-shrink-0 pointer-events-auto"
-          style={{ width: 24, height: barCount * 6 }}
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={handleMouseLeave}
-        >
-          {Array.from({ length: barCount }, (_, i) => {
-            const start = Math.floor((i * items.length) / barCount)
-            const end = Math.floor(((i + 1) * items.length) / barCount)
-            const group = items.slice(start, end)
-            const isVisible = group.some(isOnScreen)
-            // 未加载的横杠去掉高亮（只保留弱底色），以免“还没加载”和“已加载但不在视口”混淆。
-            const isLoadedInGroup = group.some(isLoaded)
-            const hasUser = group.some((it) => it.role === 'user')
-            const top = ((i + 0.5) / barCount) * 100
-            return (
-              <div
-                key={i}
-                className={cn(
-                  'absolute left-1 h-[2px] w-[20px] rounded-full transition-colors',
-                  isVisible
-                    ? 'bg-primary dark:bg-primary/70 minimap-visible-indicator'
-                    : hasUser
-                      ? 'bg-primary/25 dark:bg-primary/15'
-                      : 'bg-primary/40 dark:bg-primary/25',
-                  !isLoadedInGroup && 'opacity-40'
-                )}
-                style={{ top: `${top}%` }}
-              />
-            )
-          })}
-        </div>
       </div>
 
-      {/* ── 滚动进度条 ── */}
-      <div className="relative ml-[4px] py-4 flex-shrink-0 pointer-events-auto" style={{ width: 7 }}>
+      {/* ── 滚动进度条（仍在右边缘，和轨道分工：左边读位置，右边拖滚动） ── */}
+      <div className="absolute right-1 top-0 bottom-0 z-30 py-4 pointer-events-none">
         <div
           ref={trackRef}
-          className="relative h-full rounded-full cursor-pointer scroll-progress-track"
+          className="relative h-full rounded-full cursor-pointer pointer-events-auto"
+          style={{ width: 7 }}
           onMouseDown={handleTrackMouseDown}
         >
           <div
@@ -624,33 +726,33 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
                 ? 'scroll-progress-thumb-active cursor-grabbing'
                 : 'cursor-grab'
             )}
-            style={{
-              height: `${thumbHeightPct}%`,
-              top: `${thumbTopPct}%`,
-            }}
+            style={{ height: `${thumbHeightPct}%`, top: `${thumbTopPct}%` }}
             onMouseDown={handleThumbMouseDown}
           />
         </div>
       </div>
-    </div>
+    </>
   )
 }
 
 // ── 子组件 ──
 
 /**
- * 面板列表的一行。独立出来 memo 化：面板开启时滚动会持续重算“可见/已加载”状态，
+ * 面板列表的一行 = 一轮对话。独立出来 memo 化：面板开启时滚动会持续重算“可见/已加载”状态，
  * 避免每行（含 markdown 预览）在无关项变化时重建。
+ *
+ * 一行两段：上面是用户提问（可点击的那句），下面是助手回复摘要；
+ * 收尾状态（中断记录等）跟在最后一行，不单独占一行。
  */
-const MinimapRow = React.memo(function MinimapRow({
-  item,
+const TurnRow = React.memo(function TurnRow({
+  turn,
   isAnchor,
   loaded,
   onScreen,
   query,
   onSelect,
 }: {
-  item: MinimapItem
+  turn: NavigationTurn<MinimapItem>
   isAnchor: boolean
   loaded: boolean
   onScreen: boolean
@@ -661,17 +763,28 @@ const MinimapRow = React.memo(function MinimapRow({
     <button
       type="button"
       data-minimap-visible={isAnchor ? 'true' : undefined}
-      title={loaded ? undefined : '尚未加载这条历史，点击将先加载更早消息'}
+      title={loaded ? undefined : '尚未加载这一轮，点击将先加载更早消息'}
       className={cn(
         'flex items-start gap-2 w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent',
         onScreen && 'bg-accent/50',
         !loaded && 'opacity-45'
       )}
-      onClick={() => onSelect(item.id, item.matchKey)}
+      onClick={() => onSelect(turn.anchor.id, turn.anchor.matchKey)}
     >
-      <ItemIcon item={item} />
+      <ItemIcon item={turn.user ?? turn.anchor} />
       <div className="flex-1 min-w-0">
-        <HighlightedPreview text={item.preview} query={query} />
+        <HighlightedPreview text={turn.preview} query={query} />
+        {turn.assistant && (
+          <p className="mt-0.5 line-clamp-1 text-[11px] leading-snug text-muted-foreground/70">
+            {turn.assistant.preview || '(空回复)'}
+          </p>
+        )}
+        {turn.status && (
+          <p className="mt-0.5 flex items-center gap-1 text-[11px] leading-snug text-destructive/75">
+            <AlertTriangle className="size-3 shrink-0" />
+            <span className="line-clamp-1">{turn.status.preview}</span>
+          </p>
+        )}
       </div>
     </button>
   )
@@ -707,7 +820,7 @@ function HighlightedPreview({ text, query }: { text: string; query: string }): R
     const escaped = escapeRegExp(query)
     const parts = text.split(new RegExp(`(${escaped})`, 'gi'))
     return (
-      <span className="text-xs text-popover-foreground/80 line-clamp-3">
+      <span className="text-xs text-popover-foreground/80 line-clamp-2">
         {parts.map((part, i) =>
           part.toLowerCase() === query.toLowerCase()
             ? <mark key={i} className="bg-primary/20 text-primary rounded-sm px-0.5">{part}</mark>
@@ -718,7 +831,7 @@ function HighlightedPreview({ text, query }: { text: string; query: string }): R
   }
 
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none text-xs text-popover-foreground/80 prose-p:my-0 prose-headings:my-0.5 prose-headings:text-xs prose-li:my-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 line-clamp-3 overflow-hidden">
+    <div className="prose prose-sm dark:prose-invert max-w-none text-xs text-popover-foreground/80 prose-p:my-0 prose-headings:my-0.5 prose-headings:text-xs prose-li:my-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 line-clamp-2 overflow-hidden">
       <MarkdownPreview components={MARKDOWN_PREVIEW_LIGHT_COMPONENTS}>
         {text}
       </MarkdownPreview>
