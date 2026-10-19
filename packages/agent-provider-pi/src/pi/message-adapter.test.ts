@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
-import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, OMITTED_TOOL_IMAGE_TEXT, sanitizePiContextMessages, stripErrorFromContentMessage, TOOL_RESULT_BUDGET_MARKER } from './message-adapter'
+import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, installPiContextBudget, OMITTED_TOOL_IMAGE_TEXT, sanitizePiContextMessages, sanitizePiContextMessagesWithImages, stripErrorFromContentMessage, TOOL_RESULT_BUDGET_MARKER, type PiContextTransformAgent } from './message-adapter'
 import { createAgentRuntimeGuard } from '@profer/agent-runtime/runtime-guards'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
+import type { PiImageTranscoderPort } from '../ports'
 
 function textAssistant(content: string, overrides?: Partial<AssistantMessage>): AssistantMessage {
   return {
@@ -326,6 +327,189 @@ describe('sanitizePiContextMessages', () => {
     const twice = sanitizePiContextMessages(once)
 
     expect(twice).toEqual(once)
+  })
+})
+
+describe('sanitizePiContextMessagesWithImages', () => {
+  function imageToolResult(index: number, data: string): AgentMessage {
+    return {
+      role: 'toolResult',
+      toolCallId: `call-image-${index}`,
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [
+        { type: 'text', text: 'ok' },
+        { type: 'image', data, mimeType: 'image/png' },
+      ],
+    } as unknown as AgentMessage
+  }
+
+  function imageCount(messages: AgentMessage[]): number {
+    return messages.reduce((count, message) => {
+      const content = (message as unknown as { content: Array<Record<string, unknown>> }).content
+      if (!Array.isArray(content)) return count
+      return count + content.filter((block) => block.type === 'image').length
+    }, 0)
+  }
+
+  test('最近两张图走高清档，其余保留图走低清档', async () => {
+    const calls: Array<{ maxSide: number; quality: number }> = []
+    const transcoder: PiImageTranscoderPort = {
+      async transcode(_input, options) {
+        calls.push({ maxSide: options.maxSide, quality: options.quality })
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = Array.from({ length: 6 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(calls.map((call) => call.maxSide)).toEqual([1600, 1600, 1024, 1024, 1024, 1024])
+    expect(calls.map((call) => call.quality)).toEqual([82, 82, 70, 70, 70, 70])
+    expect(imageCount(result)).toBe(6)
+    // 不修改原始消息对象。
+    const originalContent = (messages[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(originalContent.find((block) => block.type === 'image')!.data).toBe('A'.repeat(1_000))
+  })
+
+  test('超过 6 张时只保留最近 6 张，更旧的图替换为说明', async () => {
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = Array.from({ length: 8 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(imageCount(result)).toBe(6)
+    const oldest = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(oldest.some((block) => block.type === 'text' && String(block.text).includes(OMITTED_TOOL_IMAGE_TEXT))).toBe(true)
+  })
+
+  test('总 base64 字节超预算时从最旧保留图开始省略', async () => {
+    const twoMb = 'A'.repeat(2 * 1024 * 1024)
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        // 模拟“压不动”的图：总预算只能靠省略旧图兜底。
+        return { data: twoMb, mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = Array.from({ length: 6 }, (_, index) => imageToolResult(index, twoMb))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    // 6MB / 2MB = 3 张；更旧的 3 张被省略。
+    expect(imageCount(result)).toBe(3)
+    const oldest = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(oldest.some((block) => block.type === 'text' && String(block.text).includes(OMITTED_TOOL_IMAGE_TEXT))).toBe(true)
+  })
+
+  test('没有转码器时退化为张数裁剪，不会因缺少宿主能力而报错', async () => {
+    const messages = Array.from({ length: 8 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages)
+
+    expect(imageCount(result)).toBe(6)
+  })
+
+  test('同一原始图片跨轮复用转码缓存，不重复编码', async () => {
+    let calls = 0
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        calls += 1
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = [imageToolResult(0, 'A'.repeat(1_000))]
+
+    await sanitizePiContextMessagesWithImages(messages, transcoder)
+    await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(calls).toBe(1)
+  })
+
+  test('user 消息中的 image block 也纳入预算', async () => {
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = [{
+      role: 'user',
+      content: [
+        { type: 'text', text: '看这张图' },
+        { type: 'image', data: 'A'.repeat(1_000), mimeType: 'image/png' },
+      ],
+    }] as unknown as AgentMessage[]
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+    const content = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    const image = content.find((block) => block.type === 'image')
+
+    expect(image).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+    expect(image!.data).toBe('B'.repeat(100))
+  })
+
+  test('转码器抛错时保留原图，不阻断下一轮请求', async () => {
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        throw new Error('transcode failed')
+      },
+    }
+    const messages = Array.from({ length: 2 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(imageCount(result)).toBe(2)
+  })
+})
+
+describe('installPiContextBudget', () => {
+  test('挂到 transformContext 并链式执行原 transform；首轮请求也会经过压缩', async () => {
+    const calls: string[] = []
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const agent: PiContextTransformAgent = {
+      transformContext: async (messages) => {
+        calls.push('previous')
+        return messages
+      },
+    }
+    installPiContextBudget(agent, transcoder)
+
+    const messages = [{
+      role: 'toolResult',
+      toolCallId: 'call-first-turn',
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [{ type: 'image', data: 'A'.repeat(1_000), mimeType: 'image/png' }],
+    }] as unknown as AgentMessage[]
+    const transformed = await agent.transformContext!(messages)
+
+    expect(calls).toEqual(['previous'])
+    const content = (transformed[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(content[0]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+    expect(content[0]!.data).toBe('B'.repeat(100))
+  })
+
+  test('没有原 transform 时直接压缩，不要求宿主额外接线', async () => {
+    const agent: PiContextTransformAgent = {}
+    installPiContextBudget(agent)
+    const messages = [{
+      role: 'toolResult',
+      toolCallId: 'call-no-transform',
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [{ type: 'image', data: '', mimeType: 'image/png' }],
+    }] as unknown as AgentMessage[]
+
+    const transformed = await agent.transformContext!(messages)
+    const content = (transformed[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(content[0]).toEqual({ type: 'text', text: EMPTY_IMAGE_PLACEHOLDER_TEXT })
   })
 })
 

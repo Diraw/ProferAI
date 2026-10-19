@@ -142,6 +142,30 @@ describe('Agent preview Claude adapter', () => {
     expect(formatted.content[1]).toEqual({ type: 'image', data: 'PNG_BYTES', mimeType: 'image/png' })
   })
 
+  test('caps preview images per model result by base64 byte budget', () => {
+    const images = Array.from({ length: 20 }, (_, index) => ({
+      data: 'A'.repeat(500_000),
+      mediaType: 'image/jpeg' as const,
+      filename: 'deck.pptx',
+      page: index + 1,
+    }))
+    const formatted = formatAgentPreviewToolResult({
+      file: { name: 'deck.pptx', kind: 'presentation', size: 42, modifiedAt: '2026-09-03T00:00:00.000Z', revision: 'sha256:abc' },
+      visual: { scope: 'all', images },
+    })
+
+    const imageBlocks = formatted.content.filter((block) => block.type === 'image')
+    expect(imageBlocks).toHaveLength(8)
+    const summary = JSON.parse((formatted.content[0] as { type: string; text: string }).text) as {
+      visual: { images: unknown[]; totalImages?: number }
+    }
+    expect(summary.visual.images).toHaveLength(8)
+    expect(summary.visual.totalImages).toBe(20)
+    const last = formatted.content[formatted.content.length - 1] as { type: string; text: string }
+    expect(last.type).toBe('text')
+    expect(last.text).toContain('本次仅返回前 8/20 张图片')
+  })
+
   test('keeps structured errors as text only', () => {
     const formatted = formatAgentPreviewToolResult({ error: { code: 'unauthorized_path', message: 'denied', retryable: false } })
     expect(formatted.content).toHaveLength(1)

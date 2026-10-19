@@ -81,8 +81,8 @@ import {
   isAbortedAssistantMessage,
   isAssistantPiMessage,
   normalizePermissionInput,
+  installPiContextBudget,
   restorePiInput,
-  sanitizePiContextMessages,
 } from './pi/message-adapter'
 import { DEFAULT_CONTEXT_WINDOW, buildModel, normalizePiApi } from './pi/model-registry'
 import { createPartialMessageCoalescer, type PartialMessageCoalescer } from './pi/streaming-control'
@@ -1862,14 +1862,9 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           }
         }
       }
-      // 历史消毒（见 sanitizePiContextMessages）：空图像块会让部分上游挂起直到超时，
-      // 必须在每轮构建请求前拦截；与项目指令 wrapper 叠加，作为最外层统一处理。
-      const previousPrepareBeforeSanitize = session.agent.prepareNextTurnWithContext
-      session.agent.prepareNextTurnWithContext = async (context, signal) => {
-        const snapshot = await previousPrepareBeforeSanitize?.(context, signal)
-        if (!snapshot || !Array.isArray(snapshot.messages)) return snapshot
-        return { ...snapshot, messages: sanitizePiContextMessages(snapshot.messages) }
-      }
+      // 历史消毒 + 图片分层压缩：挂到每次模型请求都会经过的 transformContext，
+      // 覆盖恢复会话后的首轮；prepareNextTurnWithContext 只覆盖 lastCompletedTurn 之后的轮次。
+      installPiContextBudget(session.agent, this.ports.imageTranscoder)
       if (piAi && input.codexFastMode && input.provider === 'openai-codex' && isCodexFastModeSupportedModel(input.model)) {
         // Pi 的通用 streamSimple 会丢弃 provider 专属 serviceTier；这里直接走
         // provider stream，确保 request body 与 usage.cost 都使用 priority tier。

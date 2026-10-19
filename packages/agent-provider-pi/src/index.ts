@@ -9,7 +9,14 @@
  */
 
 export * from './pi-agent-adapter'
-export type { PiAgentAdapterPorts, PiProviderHostDependencies } from './ports'
+export type {
+  PiAgentAdapterPorts,
+  PiImageTranscodeInput,
+  PiImageTranscodeOptions,
+  PiImageTranscodeResult,
+  PiImageTranscoderPort,
+  PiProviderHostDependencies,
+} from './ports'
 export type {
   PiCanUseTool,
   PiCanUseToolOptions,

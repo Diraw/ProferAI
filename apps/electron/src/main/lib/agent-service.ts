@@ -70,6 +70,7 @@ import { DEFAULT_MODEL_ID, DEFAULT_SESSION_TITLE } from './agent-prompt-utils'
 import { evaluatePptCapability } from './ppt-capability-gate'
 import { sdkPermissionModeForProferMode } from './agent-retry-utils'
 import { createElectronClaudeProcessLifecyclePort } from './claude-process-lifecycle-port'
+import { createElectronPiImageTranscoder } from './agent-image-compression'
 import { resolveSDKCliPath } from './agent-sdk-cli-path'
 import { buildPiRuntimeCredentialOptions } from './agent-runtime-credentials'
 import { applyAgentSdkAuthEnv } from './agent-sdk-auth-env'
@@ -103,7 +104,12 @@ const toolAssemblyBuild = async (sdk: unknown, context: unknown) => {
 const claudeProcessLifecycle = createElectronClaudeProcessLifecyclePort()
 export const agentRuntimeHost = createElectronAgentHost({ eventBus, execution: executionService, toolAssemblyBuild, processLifecycle: claudeProcessLifecycle })
 const claudeAdapter = new ClaudeAgentAdapter({ processLifecycle: agentRuntimeHost.ports.processLifecycle })
-const piAdapter = new PiAgentAdapter({ commands: agentRuntimeHost.ports.commands, backgroundTasks: agentRuntimeHost.ports.backgroundTasks, processRegistration: agentRuntimeHost.ports.processRegistration })
+const piAdapter = new PiAgentAdapter({
+  commands: agentRuntimeHost.ports.commands,
+  backgroundTasks: agentRuntimeHost.ports.backgroundTasks,
+  processRegistration: agentRuntimeHost.ports.processRegistration,
+  imageTranscoder: createElectronPiImageTranscoder(),
+})
 // 两个内核共用编排器和宿主权限，Pi 命令执行使用组合根注入的端口。
 const adapter = new RuntimeRoutingAgentAdapter({ claude: claudeAdapter, pi: piAdapter })
 /**

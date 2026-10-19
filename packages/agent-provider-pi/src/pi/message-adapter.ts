@@ -11,6 +11,7 @@ import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil
 import type { SDKMessage, SDKAssistantMessage } from '@profer/shared'
 import type { RuntimeGuardResultOverride } from '@profer/agent-runtime'
 import { isTransientNetworkError } from '@profer/agent-runtime/error-patterns'
+import type { PiImageTranscodeOptions, PiImageTranscodeResult, PiImageTranscoderPort } from '../ports'
 
 function getPiEditItems(input: Record<string, unknown>): Array<Record<string, unknown>> {
   return Array.isArray(input.edits)
@@ -135,12 +136,30 @@ export const EMPTY_IMAGE_PLACEHOLDER_TEXT = '[图像内容不可用：工具返�
  * 的截图是图片大头。Pi SDK 已按 50KB/2000 行截断单次工具输出，但旧结果会在
  * 后续每次请求里重复进入上下文，长会话因此膨胀到 9 万 token/次以上。
  *
- * 策略：最近 2 条工具结果保持完整；更早的文本压到 8k 字符（保留头尾），
- * 全局只保留最近 6 张图片。旧内容可随时重新读取/重跑工具，不改变工具本身语义。
+ * 策略：
+ * - 最近 2 条工具结果保持完整；更早的文本压到 8k 字符（保留头尾）。
+ * - 图片按“新旧分层 + 总 base64 字节”分配：最近 2 张高清，其余保留图低清；
+ *   总预算超限时从最旧开始省略。旧内容可随时重新读取/重跑工具。
+ * - 宿主注入 imageTranscoder 时，旧图会先降采样/转 JPEG 再发送；没有转码器时
+ *   退化为张数裁剪，至少不会把无限图片塞进请求。
  */
 const KEEP_RECENT_TOOL_RESULTS = 2
 const MAX_OLD_TOOL_RESULT_TEXT_CHARS = 8_000
 const MAX_CONTEXT_IMAGES = 6
+/** 请求中所有工具图片 base64 字符数的总预算（约 4.5MB 原始字节）。 */
+const MAX_CONTEXT_IMAGE_BASE64_BYTES = 6 * 1024 * 1024
+/** 最近两张图保留更高分辨率；其余旧图降为缩略图。 */
+const HIGH_RES_IMAGE_COUNT = 2
+const HIGH_RES_IMAGE_OPTIONS: PiImageTranscodeOptions = {
+  maxSide: 1600,
+  quality: 82,
+  maxBase64Bytes: 1_500_000,
+}
+const OLD_IMAGE_OPTIONS: PiImageTranscodeOptions = {
+  maxSide: 1024,
+  quality: 70,
+  maxBase64Bytes: 300_000,
+}
 
 export const TOOL_RESULT_BUDGET_MARKER = '[Profer context budget:'
 export const OMITTED_TOOL_IMAGE_TEXT = '[Profer context budget: 已省略较早的工具图片以节省上下文；如需查看，请重新调用对应工具。]'
@@ -153,67 +172,56 @@ function truncateToolResultText(text: string, maxChars: number): string {
   return `${text.slice(0, headChars)}\n\n${TOOL_RESULT_BUDGET_MARKER} 已省略 ${omitted} 个字符以节省上下文；如仍需完整内容，请重新调用工具或分页读取。]\n\n${text.slice(-tailChars)}`
 }
 
-function budgetToolResultContent(
-  content: unknown,
-  options: { maxTextChars: number | null; keepImages: number },
-): unknown | null {
-  const { maxTextChars, keepImages } = options
+function budgetToolResultText(content: unknown, maxTextChars: number | null): unknown | null {
+  if (maxTextChars === null) return null
 
   if (typeof content === 'string') {
-    if (maxTextChars === null) return null
     const truncated = truncateToolResultText(content, maxTextChars)
     return truncated === content ? null : truncated
   }
 
   if (!Array.isArray(content)) return null
 
-  let nextBlocks = content as Array<Record<string, unknown>>
-  let changed = false
+  const blocks = content as Array<Record<string, unknown>>
+  const textBlocks = blocks.filter((block) => block.type === 'text' && typeof block.text === 'string')
+  const totalTextChars = textBlocks.reduce((total, block) => total + String(block.text).length, 0)
+  if (totalTextChars <= maxTextChars) return null
 
-  // 文本：同一结果里的多个 text block 合并后压缩，避免每块各自未超限但总和更大。
-  if (maxTextChars !== null) {
-    const textBlocks = nextBlocks.filter((block) => block.type === 'text' && typeof block.text === 'string')
-    const totalTextChars = textBlocks.reduce((total, block) => total + String(block.text).length, 0)
-    if (totalTextChars > maxTextChars) {
-      const combined = textBlocks.map((block) => String(block.text)).join('\n')
-      const truncated = truncateToolResultText(combined, maxTextChars)
-      const firstTextIndex = nextBlocks.findIndex((block) => block.type === 'text')
-      if (firstTextIndex < 0) {
-        nextBlocks = [...nextBlocks, { type: 'text', text: truncated }]
-      } else {
-        const before = nextBlocks.slice(0, firstTextIndex).filter((block) => block.type !== 'text')
-        const after = nextBlocks.slice(firstTextIndex + 1).filter((block) => block.type !== 'text')
-        nextBlocks = [...before, { type: 'text', text: truncated }, ...after]
-      }
-      changed = true
+  const combined = textBlocks.map((block) => String(block.text)).join('\n')
+  const truncated = truncateToolResultText(combined, maxTextChars)
+  const firstTextIndex = blocks.findIndex((block) => block.type === 'text')
+  if (firstTextIndex < 0) return [...blocks, { type: 'text', text: truncated }]
+
+  const before = blocks.slice(0, firstTextIndex).filter((block) => block.type !== 'text')
+  const after = blocks.slice(firstTextIndex + 1).filter((block) => block.type !== 'text')
+  return [...before, { type: 'text', text: truncated }, ...after]
+}
+
+function budgetToolResultImagesByCount(content: unknown, keepImages: number): unknown | null {
+  if (!Array.isArray(content)) return null
+
+  const blocks = content as Array<Record<string, unknown>>
+  const imageCount = blocks.reduce((count, block) => count + (block.type === 'image' ? 1 : 0), 0)
+  if (imageCount <= keepImages) return null
+
+  const omitted = imageCount - keepImages
+  let keptImages = 0
+  let insertedNote = false
+  const output: Array<Record<string, unknown>> = []
+  for (const block of blocks) {
+    if (block.type !== 'image') {
+      output.push(block)
+      continue
+    }
+    if (keptImages < keepImages) {
+      output.push(block)
+      keptImages += 1
+    } else if (!insertedNote) {
+      output.push({ type: 'text', text: `${OMITTED_TOOL_IMAGE_TEXT}（${omitted} 张）` })
+      insertedNote = true
     }
   }
-
-  // 图片：只保留预算内的图片，超出的替换成一条说明，避免重复说明撑大上下文。
-  const imageCount = nextBlocks.reduce((count, block) => count + (block.type === 'image' ? 1 : 0), 0)
-  if (imageCount > keepImages) {
-    const omitted = imageCount - keepImages
-    let keptImages = 0
-    let insertedNote = false
-    const output: Array<Record<string, unknown>> = []
-    for (const block of nextBlocks) {
-      if (block.type !== 'image') {
-        output.push(block)
-        continue
-      }
-      if (keptImages < keepImages) {
-        output.push(block)
-        keptImages += 1
-      } else if (!insertedNote) {
-        output.push({ type: 'text', text: `${OMITTED_TOOL_IMAGE_TEXT}（${omitted} 张）` })
-        insertedNote = true
-      }
-    }
-    nextBlocks = output
-    changed = true
-  }
-
-  return changed ? nextBlocks : null
+  return output
 }
 
 function toolResultImageCount(message: AgentMessage): number {
@@ -224,38 +232,255 @@ function toolResultImageCount(message: AgentMessage): number {
   }, 0)
 }
 
-/** 从旧到新分配文本/图片预算；最新 KEEP_RECENT_TOOL_RESULTS 条工具结果不压缩文本。 */
-export function budgetPiToolResults(messages: AgentMessage[]): AgentMessage[] {
+function applyTextBudget(messages: AgentMessage[]): { messages: AgentMessage[]; changed: boolean } {
   const toolResultIndices: number[] = []
   for (let index = 0; index < messages.length; index += 1) {
     if ((messages[index] as { role?: unknown } | undefined)?.role === 'toolResult') toolResultIndices.push(index)
   }
-  if (toolResultIndices.length === 0) return messages
+  if (toolResultIndices.length === 0) return { messages, changed: false }
 
-  let remainingImages = MAX_CONTEXT_IMAGES
   let changed = false
   const next = [...messages]
 
-  // 从最新到最旧分配图片预算；最近两条工具结果保持完整文本，避免影响当前推理。
+  // 从最新到最旧分配文本预算；最近两条工具结果保持完整，避免影响当前推理。
   for (let order = toolResultIndices.length - 1; order >= 0; order -= 1) {
     const index = toolResultIndices[order]
     if (index === undefined) continue
     const message = messages[index] as ToolResultMessage
     const isRecent = order >= toolResultIndices.length - KEEP_RECENT_TOOL_RESULTS
+    const budgeted = budgetToolResultText(message.content, isRecent ? null : MAX_OLD_TOOL_RESULT_TEXT_CHARS)
+    if (budgeted === null) continue
+    next[index] = { ...message, content: budgeted as ToolResultMessage['content'] } as unknown as AgentMessage
+    changed = true
+  }
+
+  return { messages: changed ? next : messages, changed }
+}
+
+/** 同步预算：只做文本截断和张数裁剪，保留原有调用方/测试行为。 */
+export function budgetPiToolResults(messages: AgentMessage[]): AgentMessage[] {
+  const textBudget = applyTextBudget(messages)
+  const toolResultIndices: number[] = []
+  for (let index = 0; index < textBudget.messages.length; index += 1) {
+    if ((textBudget.messages[index] as { role?: unknown } | undefined)?.role === 'toolResult') toolResultIndices.push(index)
+  }
+  if (toolResultIndices.length === 0) return textBudget.messages
+
+  let remainingImages = MAX_CONTEXT_IMAGES
+  let changed = textBudget.changed
+  const next = [...textBudget.messages]
+
+  // 从最新到最旧分配图片预算；最近两条工具结果保持完整文本，避免影响当前推理。
+  for (let order = toolResultIndices.length - 1; order >= 0; order -= 1) {
+    const index = toolResultIndices[order]
+    if (index === undefined) continue
+    const message = textBudget.messages[index] as ToolResultMessage
     const imageCount = toolResultImageCount(message)
     const keepImages = Math.min(imageCount, remainingImages)
     remainingImages -= keepImages
 
-    const budgeted = budgetToolResultContent(message.content, {
-      maxTextChars: isRecent ? null : MAX_OLD_TOOL_RESULT_TEXT_CHARS,
-      keepImages,
-    })
+    const budgeted = budgetToolResultImagesByCount(message.content, keepImages)
     if (budgeted === null) continue
     changed = true
     next[index] = { ...message, content: budgeted as ToolResultMessage['content'] } as unknown as AgentMessage
   }
 
   return changed ? next : messages
+}
+
+type ToolResultBlock = Record<string, unknown>
+type ImageReplacementMap = Map<number, Map<number, ToolResultBlock | null>>
+
+/**
+ * 按原始 image block 对象缓存转码结果。
+ *
+ * prepareNextTurnWithContext 返回的是请求快照，不会改写 Pi 会话里的原始消息；
+ * 同一张图每轮都会重新进入预算。WeakMap 以原始 block 为键，既避免每轮重复编码，
+ * 又不会在会话结束后持有图片内存。
+ */
+const imageTranscodeCache = new WeakMap<object, Map<string, PiImageTranscodeResult | null>>()
+
+function transcodeCacheKey(options: PiImageTranscodeOptions): string {
+  return `${options.maxSide}:${options.quality}:${options.maxBase64Bytes}`
+}
+
+interface ImageSlot {
+  messageIndex: number
+  blockIndex: number
+  block: ToolResultBlock
+}
+
+function collectImageSlots(messages: AgentMessage[]): ImageSlot[] {
+  const slots: ImageSlot[] = []
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex]
+    const role = (message as { role?: unknown } | undefined)?.role
+    // 工具结果是主路径；user 消息也纳入，覆盖未来 session.prompt(images) 或桥接入口。
+    if (!message || (role !== 'toolResult' && role !== 'user')) continue
+    const content = (message as { content?: unknown }).content
+    if (!Array.isArray(content)) continue
+    for (let blockIndex = 0; blockIndex < content.length; blockIndex += 1) {
+      const block = content[blockIndex]
+      if (!block || typeof block !== 'object') continue
+      const record = block as ToolResultBlock
+      if (record.type === 'image' && typeof record.data === 'string' && record.data.length > 0) {
+        slots.push({ messageIndex, blockIndex, block: record })
+      }
+    }
+  }
+  // 最新消息优先；同一消息内保持原始顺序，让多页预览的前几页优先拿高清。
+  slots.sort((a, b) => b.messageIndex - a.messageIndex || a.blockIndex - b.blockIndex)
+  return slots
+}
+
+function setImageReplacement(
+  replacements: ImageReplacementMap,
+  messageIndex: number,
+  blockIndex: number,
+  replacement: ToolResultBlock | null,
+): void {
+  let blocks = replacements.get(messageIndex)
+  if (!blocks) {
+    blocks = new Map()
+    replacements.set(messageIndex, blocks)
+  }
+  blocks.set(blockIndex, replacement)
+}
+
+async function transcodeImageSlot(
+  slot: ImageSlot,
+  options: PiImageTranscodeOptions,
+  transcoder?: PiImageTranscoderPort,
+): Promise<ToolResultBlock> {
+  if (!transcoder) return slot.block
+  const cacheKey = transcodeCacheKey(options)
+  const cachedByTier = imageTranscodeCache.get(slot.block)
+  if (cachedByTier?.has(cacheKey)) {
+    const cached = cachedByTier.get(cacheKey)
+    return cached
+      ? { ...slot.block, data: cached.data, mimeType: cached.mimeType }
+      : slot.block
+  }
+
+  const currentData = String(slot.block.data)
+  const currentMimeType = typeof slot.block.mimeType === 'string' ? slot.block.mimeType : 'image/png'
+  let result: PiImageTranscodeResult | null = null
+  try {
+    const transcoded = await transcoder.transcode({ data: currentData, mimeType: currentMimeType }, options)
+    // 转码结果反而更大时缓存 null，下一轮直接保留原图，避免为了“压缩”把请求撑大。
+    if (transcoded && typeof transcoded.data === 'string' && transcoded.data.length > 0 && transcoded.data.length < currentData.length) {
+      result = {
+        data: transcoded.data,
+        mimeType: typeof transcoded.mimeType === 'string' ? transcoded.mimeType : 'image/jpeg',
+      }
+    }
+  } catch {
+    result = null
+  }
+
+  let cache = imageTranscodeCache.get(slot.block)
+  if (!cache) {
+    cache = new Map()
+    imageTranscodeCache.set(slot.block, cache)
+  }
+  cache.set(cacheKey, result)
+
+  return result ? { ...slot.block, data: result.data, mimeType: result.mimeType } : slot.block
+}
+
+function applyImageReplacements(messages: AgentMessage[], replacements: ImageReplacementMap): AgentMessage[] {
+  if (replacements.size === 0) return messages
+
+  let changed = false
+  const next = [...messages]
+  for (const [messageIndex, blockReplacements] of replacements) {
+    const message = messages[messageIndex] as { content?: unknown } | undefined
+    if (!message) continue
+    const content = message.content
+    if (!Array.isArray(content)) continue
+
+    let omitted = 0
+    const output: ToolResultBlock[] = []
+    for (let blockIndex = 0; blockIndex < content.length; blockIndex += 1) {
+      const block = content[blockIndex] as ToolResultBlock
+      if (block && block.type === 'image' && blockReplacements.has(blockIndex)) {
+        const replacement = blockReplacements.get(blockIndex)
+        if (replacement) output.push(replacement)
+        else omitted += 1
+        continue
+      }
+      output.push(block)
+    }
+    if (omitted > 0) output.push({ type: 'text', text: `${OMITTED_TOOL_IMAGE_TEXT}（${omitted} 张）` })
+    next[messageIndex] = { ...message, content: output } as unknown as AgentMessage
+    changed = true
+  }
+  return changed ? next : messages
+}
+
+/**
+ * 异步预算：文本截断 + 图片新旧分层 + 总 base64 字节上限。
+ *
+ * 最近两张图走高清档（1600px/JPEG 82），其余保留图走缩略档（1024px/JPEG 70）；
+ * 总数超过 6 张或总字节超过预算时，从最旧开始替换成省略说明。
+ */
+export async function budgetPiToolResultsWithImages(
+  messages: AgentMessage[],
+  transcoder?: PiImageTranscoderPort,
+): Promise<AgentMessage[]> {
+  const textBudget = applyTextBudget(messages)
+  const textBudgeted = textBudget.messages
+  const slots = collectImageSlots(textBudgeted)
+  if (slots.length === 0) return textBudgeted
+
+  const replacements: ImageReplacementMap = new Map()
+  const kept = slots.slice(0, MAX_CONTEXT_IMAGES)
+  for (const slot of slots.slice(MAX_CONTEXT_IMAGES)) {
+    setImageReplacement(replacements, slot.messageIndex, slot.blockIndex, null)
+  }
+
+  const processed: Array<{ slot: ImageSlot; block: ToolResultBlock }> = []
+  let totalBase64 = 0
+  for (let index = 0; index < kept.length; index += 1) {
+    const slot = kept[index]
+    if (!slot) continue
+    const options = index < HIGH_RES_IMAGE_COUNT ? HIGH_RES_IMAGE_OPTIONS : OLD_IMAGE_OPTIONS
+    const block = await transcodeImageSlot(slot, options, transcoder)
+    processed.push({ slot, block })
+    totalBase64 += String(block.data).length
+  }
+
+  // 总字节预算：从最旧的保留图开始省略，避免 6 张高清图仍撞上网关 body 上限。
+  while (totalBase64 > MAX_CONTEXT_IMAGE_BASE64_BYTES && processed.length > 1) {
+    const dropped = processed.pop()
+    if (!dropped) break
+    totalBase64 -= String(dropped.block.data).length
+    setImageReplacement(replacements, dropped.slot.messageIndex, dropped.slot.blockIndex, null)
+  }
+
+  // 只剩最新一张仍超预算：再降一档，而不是直接把当前正在看的图删掉。
+  if (totalBase64 > MAX_CONTEXT_IMAGE_BASE64_BYTES && processed.length === 1 && transcoder) {
+    const single = processed[0]
+    if (single) {
+      const emergency = await transcodeImageSlot(
+        single.slot,
+        { maxSide: 800, quality: 60, maxBase64Bytes: 300_000 },
+        transcoder,
+      )
+      if (String(emergency.data).length < totalBase64) {
+        processed[0] = { slot: single.slot, block: emergency }
+        setImageReplacement(replacements, single.slot.messageIndex, single.slot.blockIndex, emergency)
+      }
+    }
+  }
+
+  for (const { slot, block } of processed) {
+    if (block !== slot.block) {
+      setImageReplacement(replacements, slot.messageIndex, slot.blockIndex, block)
+    }
+  }
+
+  return applyImageReplacements(textBudgeted, replacements)
 }
 
 function isEmptyImageBlock(block: unknown): boolean {
@@ -289,6 +514,34 @@ function replaceEmptyImageBlocks(messages: AgentMessage[]): AgentMessage[] {
  */
 export function sanitizePiContextMessages(messages: AgentMessage[]): AgentMessage[] {
   return budgetPiToolResults(replaceEmptyImageBlocks(messages))
+}
+
+/** 请求前历史消毒 + 图片分层压缩；Pi adapter 的实际入口。 */
+export async function sanitizePiContextMessagesWithImages(
+  messages: AgentMessage[],
+  transcoder?: PiImageTranscoderPort,
+): Promise<AgentMessage[]> {
+  return budgetPiToolResultsWithImages(replaceEmptyImageBlocks(messages), transcoder)
+}
+
+/** transformContext 所需的最小 agent 面；便于单测不构造完整 Pi 会话。 */
+export interface PiContextTransformAgent {
+  transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>
+}
+
+/**
+ * 把图片预算挂到 Pi 的 transformContext。
+ *
+ * 这是每次模型请求都会经过的入口（含恢复会话后的第一轮）；相比
+ * prepareNextTurnWithContext 只覆盖 lastCompletedTurn 之后的轮次，它不会漏掉首轮。
+ * 若 SDK/其他扩展已设置 transformContext，则先执行原逻辑再压缩。
+ */
+export function installPiContextBudget(agent: PiContextTransformAgent, transcoder?: PiImageTranscoderPort): void {
+  const previousTransformContext = agent.transformContext
+  agent.transformContext = async (messages, signal) => {
+    const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages
+    return sanitizePiContextMessagesWithImages(Array.isArray(transformed) ? transformed : messages, transcoder)
+  }
 }
 
 function normalizeToolResultContent(content: unknown): unknown {

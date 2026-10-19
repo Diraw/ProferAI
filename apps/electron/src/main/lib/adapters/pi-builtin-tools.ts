@@ -92,6 +92,7 @@ import {
   searchWeb,
 } from '../web-search-service'
 import { browserController } from '../browser-controller'
+import { compressToolImageForModel } from '../agent-image-compression'
 import { resolveBrowserProfileKey } from '../browser-profile-policy'
 import { writeClipboardText } from '../clipboard-agent-tools'
 import { auditPptDelivery, planPptVisuals } from '../ppt-delivery-audit-service'
@@ -1496,17 +1497,18 @@ function buildBrowserTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): ToolDefiniti
     sdk.defineTool({
       name: 'BrowserScreenshot',
       label: '截取受管浏览器页面',
-      description: 'Capture the Agent working in-app browser page as a PNG. Use BrowserObserve first when semantic page structure is sufficient.',
+      description: 'Capture the Agent working in-app browser page as an image. Use BrowserObserve first when semantic page structure is sufficient.',
       parameters: Type.Object({ tabId: Type.Optional(Type.String({ description: 'Optional tab id. Defaults to the Agent working tab, independent of the tab visible to the user.' })) }),
       async execute(_id, params, signal?: AbortSignal) {
         const tabId = typeof (params as Record<string, unknown>).tabId === 'string' ? (params as Record<string, string>).tabId : undefined
         const screenshot = await browserController.screenshot(ctx.sessionId, tabId, signal)
+        const image = compressToolImageForModel({ data: screenshot.base64, mimeType: screenshot.mimeType })
         return {
           content: [
             { type: 'text', text: `已截取当前页面：${screenshot.url}` },
-            { type: 'image', data: screenshot.base64, mimeType: screenshot.mimeType },
+            { type: 'image', data: image.data, mimeType: image.mimeType },
           ],
-          details: { url: screenshot.url, mimeType: screenshot.mimeType, bytes: Math.floor(screenshot.base64.length * 0.75) },
+          details: { url: screenshot.url, mimeType: image.mimeType, bytes: Math.floor(image.data.length * 0.75) },
         } as AgentToolResult<unknown>
       },
     }),
