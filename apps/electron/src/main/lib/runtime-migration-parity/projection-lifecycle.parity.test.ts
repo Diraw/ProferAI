@@ -13,7 +13,7 @@
 import { describe, expect, test } from 'bun:test'
 import { AgentRuntimeCoordinator } from '@profer/agent-runtime'
 import { createAgentRuntimeProviderAdapter } from '@profer/agent-runtime'
-import type { AgentRuntimeAdapter, AgentRuntimeCallbacks, AgentRuntimeQuery } from '@profer/agent-runtime'
+import type { AgentRuntimeAdapter, AgentRuntimeCallbacks, AgentRuntimeEvent, AgentRuntimeQuery } from '@profer/agent-runtime'
 import type { AgentMessage, SDKMessage } from '@profer/shared'
 import { shouldMarkSessionUnreadOnCompletion, shouldClearSessionUnreadOnRunStart } from '../agent-unread-policy'
 import { createRuntimeTerminalProjector, type RuntimeTerminalFields } from '../agent-runtime-terminal-projection'
@@ -137,14 +137,20 @@ describe('消息落盘与终态顺序', () => {
     expect(observation.calls).toEqual(['complete:completed'])
     // 消息观测先于终态投递（单一时间线），且 runtime 事件以 claim → started → finished 包住消息
     expect(observation.timeline).toEqual(['run_started', 'message:assistant', 'message:result', 'settle:completed'])
-    // 宿主事件端口看到的顺序：claimed → started → message* → finished
+    // 宿主事件端口看到的顺序：claimed → 用户消息 → started → message* → finished
     expect(host.events.runtime.map(event => event.type)).toEqual([
       'runtime_claimed',
+      'message',
       'runtime_started',
       'message',
       'message',
       'runtime_finished',
     ])
+    // 首条消息事件必须是已落盘的用户消息：Pocket 没有乐观气泡，只能靠它看到指令。
+    const messageEvents = host.events.runtime.filter(
+      (event): event is Extract<AgentRuntimeEvent, { type: 'message' }> => event.type === 'message',
+    )
+    expect(messageEvents.map(event => event.message.type)).toEqual(['user', 'assistant', 'result'])
   })
 
   test('终态之后的迟到停止不再产生第二个终态', async () => {

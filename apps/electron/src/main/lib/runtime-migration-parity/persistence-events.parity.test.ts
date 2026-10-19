@@ -6,7 +6,8 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import type { SDKMessage } from '@profer/shared'
+import type { AgentRuntimeEvent } from '@profer/agent-runtime'
+import type { AgentStreamPayload, SDKMessage } from '@profer/shared'
 import { createAgentRunOutcomeReporter } from '@profer/agent-runtime'
 import { createNewEngine } from './support/new-engine'
 import { createEntryDriver } from './support/new-entry'
@@ -249,16 +250,24 @@ describe('backgroundTasksPending 与终态', () => {
 describe('事件顺序', () => {
   test('消息事件先于终态事件：两侧都满足"每条 provider 消息先投影，再给终态"', async () => {
     const oldRun = await driveOld(async function* () { yield assistant(); yield sdk({ type: 'result', subtype: 'success' }) })
+    const oldSdkMessages = oldRun.host.events.eventPort.filter(
+      (payload): payload is Extract<AgentStreamPayload, { kind: 'sdk_message' }> => payload.kind === 'sdk_message',
+    )
+    // 用户消息同样进入事件流：Pocket 靠这条事件看到电脑端发起的指令。
+    expect(oldSdkMessages.map(payload => payload.message.type)).toEqual(['user', 'assistant', 'result'])
     const oldEventKinds = oldRun.host.events.eventPort.map(payload => payload.kind)
-    expect(oldEventKinds.filter(kind => kind === 'sdk_message')).toHaveLength(2)
     expect(oldEventKinds.at(-1)).toBe('profer_event')
 
     const newRun = await driveNew(async function* () { yield assistant(); yield sdk({ type: 'result', subtype: 'success' }) })
     const newEventTypes = newRun.host.events.runtime.map(event => event.type)
-    expect(newEventTypes.filter(type => type === 'message')).toHaveLength(2)
-    // claim → 真正启动 → 消息 → 终态（claim 与 provider 启动已分开）。
+    const newMessageEvents = newRun.host.events.runtime.filter(
+      (event): event is Extract<AgentRuntimeEvent, { type: 'message' }> => event.type === 'message',
+    )
+    expect(newMessageEvents.map(event => event.message.type)).toEqual(['user', 'assistant', 'result'])
+    // 用户消息事件必须先于 runtime_started，移动端才能先看到指令再看到输出。
+    expect(newEventTypes.indexOf('message')).toBeLessThan(newEventTypes.indexOf('runtime_started'))
+    // claim → 用户消息 → 真正启动 → 消息 → 终态（claim 与 provider 启动已分开）。
     expect(newEventTypes[0]).toBe('runtime_claimed')
-    expect(newEventTypes[1]).toBe('runtime_started')
     expect(newEventTypes.at(-1)).toBe('runtime_finished')
   })
 })

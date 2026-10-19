@@ -67,6 +67,11 @@ jobs:
       - name: Verify built-in skin surface contract
         run: bun --cwd apps/electron run check:skin-contract
 
+      # 新旧执行链对照（132 条）。它们已按 *.parity.test.ts 命名进入上面的全量集，
+      # 这里再单独跑一次：失败时能直接定位到「执行链行为漂移」，而不是淹在全量输出里。
+      - name: Verify runtime migration parity
+        run: bun test --isolate --timeout 30000 apps/electron/src/main/lib/runtime-migration-parity/
+
       - name: Run unit and regression tests
         # --isolate: bun 的 mock.module('electron') 是进程级注册表，默认并行下多文件互相覆盖导致误报；隔离模式保证每个测试文件独立
         run: bun test --isolate --timeout 30000
