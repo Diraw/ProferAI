@@ -90,7 +90,8 @@ describe('Claude provider：SDK 查询选项透传', () => {
       expect(sdkOptions.allowDangerouslySkipPermissions).toBe(false)
       expect(sdkOptions.includePartialMessages).toBe(false)
       expect(sdkOptions.promptSuggestions).toBe(false)
-      expect(sdkOptions.toolUseConcurrency).toBe(1)
+      // SDK 不认识这个选项，传了会被静默忽略；断言不存在，防止再把无效开关当成串行控制。
+      expect('toolUseConcurrency' in sdkOptions).toBe(false)
       expect(sdkOptions.settingSources).toEqual(['project'])
       expect(sdkOptions.cwd).toBe('/fixture/cwd')
       expect(sdkOptions.resume).toBe('resume-fixture')
