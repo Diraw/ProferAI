@@ -302,6 +302,13 @@ export interface AppSettings {
   tutorialBannerDismissed?: boolean
   /** 自动归档天数（0 = 禁用，默认 7） */
   archiveAfterDays?: number
+  /**
+   * 每个工作区保留的最近会话数（默认 3，0 = 不保留）。
+   *
+   * 这些会话即使超过归档天数也不会被自动归档；其余会话仍需同时满足
+   * 「超过归档天数 + 无未完成任务 + 非置顶 + 非运行中」才会归档。
+   */
+  archiveKeepRecentPerWorkspace?: number
   /** 发送消息快捷键模式：true = Cmd/Ctrl+Enter 发送，false(默认) = Enter 发送 */
   sendWithCmdEnter?: boolean
   /** 用户自定义快捷键覆盖 */

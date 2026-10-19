@@ -111,6 +111,7 @@ function getPersistedAssistantError(message: unknown): { errorCode?: string; err
   return { errorCode: assistant._errorCode ?? assistant.error?.errorType ?? assistant.errorCode, errorText }
 }
 import {
+  buildGraphFromEvents,
   getGraphJsonlPath,
   parseEventsFromJsonl,
   serializeEvent,
@@ -2679,28 +2680,111 @@ export function rewindFilesFromSnapshot(
 }
 
 /**
+ * 每个工作区默认保留的最近会话数。
+ *
+ * 这些会话是「保留名额」，不参与超时归档；用 0 可关闭名额（回到纯时间阈值）。
+ */
+export const DEFAULT_ARCHIVE_KEEP_PER_WORKSPACE = 3
+
+/** 任务图中仍视为「未完成」的节点状态。 */
+const UNFINISHED_TASK_STATUSES = new Set<string>(['pending', 'in_progress'])
+
+/**
+ * 会话是否存在未完成的任务图节点。
+ *
+ * 读不到/解析失败时按「有未完成」处理：宁可少归档一个，也不要把仍在推进的
+ * 会话从侧栏里送走。损坏的任务图留给用户手动归档兜底。
+ */
+function hasUnfinishedTaskGraph(sessionId: string): boolean {
+  const graphPath = getGraphJsonlPath(getAgentSessionsDir(), sessionId)
+  if (!existsSync(graphPath)) return false
+  try {
+    const graph = buildGraphFromEvents(parseEventsFromJsonl(readFileSync(graphPath, 'utf-8')))
+    return Object.values(graph.nodes).some((node) => UNFINISHED_TASK_STATUSES.has(node.status))
+  } catch (error) {
+    console.warn(`[Agent 会话] 读取任务图失败，跳过归档 (${sessionId}):`, error)
+    return true
+  }
+}
+
+/**
+ * 是否计入「工作区保留名额」。
+ *
+ * 只统计用户亲手开的顶层会话。定时任务会话、委派子会话和探索分支是系统产物，
+ * 数量由运行策略决定；让它们挤占名额会把用户真正在用的会话顶出保护位。
+ * 这些会话仍按时间阈值归档，行为与旧版一致。
+ */
+function isQuotaAccountedSession(session: AgentSessionMeta): boolean {
+  return !session.draft
+    && !session.parentSessionId
+    && !session.rootSessionId
+    && !session.sourceAutomationId
+    && !session.sourceDelegationId
+    && !session.explorationParentSessionId
+}
+
+/**
  * 自动归档超过指定天数未更新的 Agent 会话
  *
- * 置顶会话不会被归档。
+ * 两级保护：
+ * 1. 保留名额：每个工作区按最后活跃时间保留最近 `keepRecentPerWorkspace` 个会话，
+ *    这些会话不参与超时归档（0 表示关闭名额保护）。
+ * 2. 逐条豁免：置顶、草稿、运行中/分叉中、任务图仍有未完成节点（pending / in_progress）。
+ *
+ * 保留名额只覆盖「仅超出天数」这一种淘汰；会话必须同时满足「超出天数 + 无豁免」
+ * 才归档，不会因为新建了第 N+1 个会话就把当天还在用的旧会话送走。
  *
  * @param daysThreshold 天数阈值
+ * @param keepRecentPerWorkspace 每个工作区保留的最近会话数，0 = 不保留
  * @returns 本次归档的会话数量
  */
-export function autoArchiveAgentSessions(daysThreshold: number): number {
+export function autoArchiveAgentSessions(
+  daysThreshold: number,
+  keepRecentPerWorkspace = 0,
+): number {
   const index = readIndex()
+  // 兜底：非正数阈值意味着「立刻全部归档」，调用方误传时直接不做事。
+  if (!Number.isFinite(daysThreshold) || daysThreshold <= 0) return 0
   const threshold = Date.now() - daysThreshold * 86_400_000
-  let count = 0
+  const keepCount = Number.isFinite(keepRecentPerWorkspace)
+    ? Math.max(0, Math.floor(keepRecentPerWorkspace))
+    : 0
 
-  for (const session of index.sessions) {
-    if (!session.pinned && !session.archived && session.updatedAt < threshold) {
-      session.archived = true
-      count++
+  // 先算出各工作区的保留名单，再统一扫描：保留判定与归档判定分开，
+  // 避免扫描顺序影响结果（同一工作区里被后处理的会话不应改变前者的名额）。
+  const retainedSessionIds = new Set<string>()
+  if (keepCount > 0) {
+    const byWorkspace = new Map<string, AgentSessionMeta[]>()
+    for (const session of index.sessions) {
+      if (session.archived || !isQuotaAccountedSession(session)) continue
+      const key = session.workspaceId ?? ''
+      const bucket = byWorkspace.get(key)
+      if (bucket) bucket.push(session)
+      else byWorkspace.set(key, [session])
     }
+    for (const bucket of byWorkspace.values()) {
+      bucket.sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt)
+      for (const session of bucket.slice(0, keepCount)) retainedSessionIds.add(session.id)
+    }
+  }
+
+  let count = 0
+  for (const session of index.sessions) {
+    if (session.archived || session.pinned || session.draft) continue
+    if (retainedSessionIds.has(session.id)) continue
+    // 时间阈值放在前面：只有真正超时的会话才会触发昂贵的任务图读取。
+    if (session.updatedAt >= threshold) continue
+    if (agentSessionActiveChecker?.(session.id) || isAgentSessionForking(session.id)) continue
+    if (hasUnfinishedTaskGraph(session.id)) continue
+    session.archived = true
+    count++
   }
 
   if (count > 0) {
     writeIndex(index)
-    console.log(`[Agent 会话] 自动归档 ${count} 个会话（阈值: ${daysThreshold} 天）`)
+    console.log(
+      `[Agent 会话] 自动归档 ${count} 个会话（阈值: ${daysThreshold} 天，每工作区保留: ${keepCount}）`,
+    )
   }
 
   return count
