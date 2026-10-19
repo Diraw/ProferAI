@@ -16,7 +16,6 @@ import { UserAvatar } from '@/components/chat/UserAvatar'
 import { SidebarWindowDragStrip, SIDEBAR_DRAG_STRIP_HEIGHT, AutomationSidebarEntry, SkillsSidebarEntry, renderWorkspaceSortIcon } from './navigation-items'
 import { ConversationItem, AgentSessionItem, RelatedChildSessionItem, AgentProjectGroupItem, PINNED_SESSION_MAX_HEIGHT, getSessionLeftAccent } from './session-items'
 import { getOpenSessionEntries, WORKSPACE_SORT_LABEL } from './sidebar-utils'
-import { getRelatedSessionSummary, getSessionTreeStatus, treeContainsSessionId } from './session-tree'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { useCloseTab } from '@/hooks/useCloseTab'
 import type { SidebarModel } from './use-left-sidebar'
@@ -49,7 +48,6 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     regeneratingConversationTitleIds,
     handleTogglePin,
     handleToggleArchive,
-    pinnedAgentSessionTrees,
     agentIndicatorMap,
     expandedRelatedParentIds,
     agentDraftIds,
@@ -107,7 +105,6 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
     hasUpdate,
     hasEnvironmentIssues,
   } = s
-  const [sidebarSection, setSidebarSection] = React.useState<'pinned' | 'projects'>('projects')
   const { requestClose: requestCloseTab, requestCloseMany: requestCloseTabs } = useCloseTab()
   const openSessionEntries = React.useMemo(
     () => getOpenSessionEntries(mode, tabs, conversations, agentSessions),
@@ -338,102 +335,9 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
         </div>
       ) : mode === 'agent' && viewMode === 'active' ? (
         <div className="flex-1 flex flex-col min-h-0">
-          {sidebarSection === 'pinned' && pinnedAgentSessionTrees.length > 0 && (
-            <div className="order-2 pt-2 pb-1 flex-shrink-0 titlebar-no-drag">
-              <div
-                className="sidebar-session-scroll overflow-y-auto scrollbar-thin"
-                style={{ maxHeight: PINNED_SESSION_MAX_HEIGHT }}
-              >
-                <div className="px-2">
-                  <div className="ml-4 flex flex-col gap-0.5">
-                    {pinnedAgentSessionTrees.slice(0, progressiveCount).map((item) => {
-                      const childCount = item.childSessions.length
-                      const rowStatus = getSessionTreeStatus(item, agentIndicatorMap)
-                      const treeActive = treeContainsSessionId(item, activeSessionId)
-                      const activeChildVisible = item.childSessions.some((child) => child.id === activeSessionId)
-                      const expandedChildren = expandedRelatedParentIds.has(item.session.id) || activeChildVisible
-
-                      return (
-                        <div key={`pinned-${item.session.id}`} className="flex flex-col gap-0.5">
-                          <AgentSessionItem
-                            session={item.session}
-                            active={treeActive}
-                            indicatorStatus={rowStatus}
-                            showPinIcon={false}
-                            hasDraft={agentDraftIds.has(item.session.id)}
-                            delegationSummary={childCount > 0
-                              ? {
-                                ...getRelatedSessionSummary(item.childSessions),
-                                expanded: expandedChildren,
-                                onToggle: () => handleToggleRelatedParent(item.session.id),
-                              }
-                              : undefined}
-                            leftAccent={getSessionLeftAccent(rowStatus)}
-                            workspaceName={item.session.workspaceId ? workspaceNameMap.get(item.session.workspaceId) : undefined}
-                            relativeTimeNow={relativeTimeNow}
-                            onSelect={handleSelectAgentSession}
-                            onRequestDelete={handleRequestDelete}
-                            onRequestMove={handleRequestMove}
-                            onRename={handleAgentRename}
-                            onRegenerateTitle={handleAgentRegenerateTitle}
-                            regeneratingTitle={regeneratingTitleIds.has(item.session.id)}
-                            onTogglePin={handleTogglePinAgent}
-                            onToggleArchive={handleToggleArchiveAgent}
-                            onMarkUnread={handleToggleSessionUnread}
-                          />
-
-                          {childCount > 0 && expandedChildren && (
-                            <div className="ml-3 border-l border-foreground/10 pl-2 flex flex-col gap-0.5">
-                              {item.childSessions.map((childSession) => (
-                                <RelatedChildSessionItem
-                                  key={childSession.id}
-                                  session={childSession}
-                                  activeSessionId={activeSessionId}
-                                  agentIndicatorMap={agentIndicatorMap}
-                                  hasDraft={agentDraftIds.has(childSession.id)}
-                                  relativeTimeNow={relativeTimeNow}
-                                  workspaceName={childSession.workspaceId ? workspaceNameMap.get(childSession.workspaceId) : undefined}
-                                  onSelect={handleSelectAgentSession}
-                                  onRequestDelete={handleRequestDelete}
-                                  onRequestMove={handleRequestMove}
-                                  onRename={handleAgentRename}
-                                  onRegenerateTitle={handleAgentRegenerateTitle}
-                                  regeneratingTitle={regeneratingTitleIds.has(childSession.id)}
-                                  onTogglePin={handleTogglePinAgent}
-                                  onToggleArchive={handleToggleArchiveAgent}
-                                  onMarkUnread={handleToggleSessionUnread}
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 置顶 / 项目只控制下面这块索引，不影响上面的会话区。 */}
-          <div className="order-1 px-2 pt-2 pb-1 flex items-center justify-between flex-shrink-0 titlebar-no-drag">
-            <div className="flex items-center gap-1 rounded-[8px] bg-foreground/[0.04] p-0.5">
-              {(['pinned', 'projects'] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={sidebarSection === value}
-                  onClick={() => setSidebarSection(value)}
-                  className={cn(
-                    'rounded-[6px] px-2 py-[1.5px] text-[13px] transition-colors',
-                    sidebarSection === value ? 'bg-background text-foreground shadow-sm' : 'text-foreground/40 hover:text-foreground/70',
-                  )}
-                >
-                  {value === 'pinned' ? '置顶' : '项目'}
-                </button>
-              ))}
-            </div>
-            {sidebarSection === 'projects' && <div className="flex items-center gap-0.5">
+          <div className="px-2 pt-2 pb-1 flex items-center justify-between flex-shrink-0 titlebar-no-drag">
+            <span className="ml-[4px] px-1.5 text-[14px] font-medium leading-[19px] text-foreground/40 select-none">项目</span>
+            <div className="flex items-center gap-0.5">
               {/* 已收纳入口：仅在存在收纳项时出现，点击弹出列表可逐个取出 */}
               {archivedWorkspaces.length > 0 && (
                 <Popover>
@@ -500,10 +404,10 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                 </TooltipTrigger>
                 <TooltipContent side="top">新建项目</TooltipContent>
               </Tooltip>
-              </div>}
+            </div>
           </div>
 
-          <div className={cn('order-3 sidebar-session-scroll flex-1 overflow-y-auto px-2 pb-3 scrollbar-thin min-h-0 titlebar-no-drag', sidebarSection !== 'projects' && 'hidden')}>
+          <div className="sidebar-session-scroll flex-1 overflow-y-auto px-2 pb-3 scrollbar-thin min-h-0 titlebar-no-drag">
             {creatingProject && (
               <div className="flex items-center gap-2 px-2 py-1.5 mb-1 rounded-md bg-foreground/[0.04]">
                 <FolderOpen size={14} className="flex-shrink-0 text-foreground/40" />
