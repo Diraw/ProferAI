@@ -615,39 +615,30 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
                 />
 
                 {/* 悬停预览：一轮 = 提问 + 回复，贴着被悬停的那一根向右展开。
-                    不做入场动画、不延迟：沿轨道滑动时内容直接跟着换，才跟得上指针。 */}
+                    一张卡、两块内容、只用间距分隔：不做分割线、不加标题行、不做入场动画——
+                    指针滑过时它就是一块跟着走的内容，而不是一堆被线切碎的小格子。 */}
                 {isHovered && !panelOpen && hoveredTurn && (
-                  <div className="pointer-events-none absolute left-full top-1/2 z-40 ml-4 w-[280px] -translate-y-1/2 overflow-hidden rounded-lg border bg-popover shadow-lg">
-                    <div className="flex items-center gap-1.5 border-b px-2.5 py-1.5">
+                  <div className="pointer-events-none absolute left-full top-1/2 z-40 ml-4 w-[280px] -translate-y-1/2 rounded-lg border bg-popover px-2.5 py-2 shadow-lg">
+                    <div className="flex items-start gap-1.5">
                       <ItemIcon item={hoveredTurn.user ?? hoveredTurn.anchor} />
-                      <span className="text-[11px] font-medium text-popover-foreground/75">
-                        {hoveredTurn.user ? '你问' : '助手'}
-                      </span>
-                      <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
-                        第 {hoveredBarIndex + 1} / {turns.length} 轮
-                      </span>
+                      <p className="line-clamp-2 text-xs leading-relaxed text-popover-foreground/85">
+                        {hoveredTurn.preview.trim() || '(空消息)'}
+                      </p>
                     </div>
-                    <p className="px-2.5 py-1.5 text-xs leading-relaxed text-popover-foreground/85 line-clamp-2">
-                      {hoveredTurn.preview || '(空消息)'}
-                    </p>
                     {hoveredTurn.assistant && (
-                      <div className="flex items-start gap-1.5 border-t px-2.5 py-1.5">
+                      <div className="mt-1.5 flex items-start gap-1.5">
                         <ItemIcon item={hoveredTurn.assistant} />
-                        <p className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground/80">
-                          {hoveredTurn.assistant.preview || '(空回复)'}
+                        <p className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground/75">
+                          {hoveredTurn.assistant.preview.trim() || '(空回复)'}
                         </p>
                       </div>
                     )}
                     {!hoveredTurn.assistant && hoveredTurn.status && (
-                      <div className="flex items-start gap-1.5 border-t px-2.5 py-1.5 text-destructive/80">
+                      <div className="mt-1.5 flex items-start gap-1.5 text-destructive/80">
                         <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                         <p className="line-clamp-2 text-[11px] leading-relaxed">{hoveredTurn.status.preview}</p>
                       </div>
                     )}
-                    {/* 右键入口没有可见按钮，借这条预览把手势教给用户（跟着气泡一起消失，不常驻） */}
-                    <p className="border-t px-2.5 py-1 text-[10px] leading-none text-muted-foreground/70">
-                      右键轨道打开消息导航 · ⌘F
-                    </p>
                   </div>
                 )}
               </button>

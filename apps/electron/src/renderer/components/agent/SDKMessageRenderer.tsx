@@ -13,7 +13,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
  */
 
 import * as React from 'react'
-import { extractUserText, isUserInputMessage } from '@profer/session-core'
+import { extractUserText, isUserInputMessage, stripUserContextBlocks } from '@profer/session-core'
 import { isGoalIterationMessage } from '@profer/shared'
 import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Pencil, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
 import { ImageLightbox } from '@profer/ui/primitives/image-lightbox'
 import { ContentBlock } from './ContentBlock'
+import { parseAgentImageAttachmentDetails } from './image-attachment-marker'
 import { TaskProgressCard } from './TaskProgressCard'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
 import { ProcessBlockGroup } from './ProcessBlockGroup'
@@ -788,14 +789,41 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
   const completedToolResultIds = React.useMemo(() => {
     return buildCompletedToolResultIds(turn.turnMessages)
   }, [turn.turnMessages])
+  const pinnedToolUseIds = React.useMemo(() => {
+    const sendLocalImageToolIds = new Set<string>()
+    for (const message of turn.assistantMessages) {
+      for (const block of message.message?.content ?? []) {
+        if (block.type === 'tool_use' && block.name === 'send_local_image' && typeof block.id === 'string') {
+          sendLocalImageToolIds.add(block.id)
+        }
+      }
+    }
+
+    const ids = new Set<string>()
+    for (const message of turn.turnMessages) {
+      if (message.type !== 'user') continue
+      const userMessage = message as SDKUserMessage
+      const content = userMessage.message?.content
+      if (!Array.isArray(content)) continue
+      const rawMessage = userMessage as unknown as Record<string, unknown>
+      const details = rawMessage.tool_use_result ?? rawMessage.toolUseResult
+      if (parseAgentImageAttachmentDetails(details).length === 0) continue
+      for (const block of content) {
+        if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && sendLocalImageToolIds.has(block.tool_use_id)) {
+          ids.add(block.tool_use_id)
+        }
+      }
+    }
+    return ids
+  }, [turn.assistantMessages, turn.turnMessages])
   const visualizationRecords = useAtomValue(visualizationsAtom)
   const turnVisualizations = React.useMemo(() => visualizationsForTurn(visualizationRecords.get(sessionId ?? '') ?? [], turn.turnMessages, allMessages), [visualizationRecords, sessionId, turn.turnMessages, allMessages])
   const renderItems = React.useMemo(() => {
     const items: AssistantTurnRenderItem<StableContentBlock>[] = buildAssistantTurnRenderItems(topLevelItems, {
-      isStreaming, completedToolResultIds, showThinking,
+      isStreaming, completedToolResultIds, pinnedToolUseIds, showThinking,
     })
     return [...items, ...turnVisualizations.map((record) => ({ type: 'visualization' as const, record, identity: `visualization:${record.id}` }))]
-  }, [topLevelItems, isStreaming, completedToolResultIds, showThinking, turnVisualizations])
+  }, [topLevelItems, isStreaming, completedToolResultIds, pinnedToolUseIds, showThinking, turnVisualizations])
   // 渲染窗口：过程与回复各自取尾部窗口，避免过程把回复挤出可视范围。
   // 展开/收起状态属于 turn；裁剪与分组保留已派生的稳定块身份。
   //
@@ -1826,7 +1854,7 @@ export function getGroupPreview(group: MessageGroup): string {
       const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
       return typeof iteration === 'number' ? `Goal 自动迭代 · 第 ${iteration} 轮` : 'Goal 自动迭代'
     }
-    return parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text.slice(0, GROUP_PREVIEW_LIMIT)
+    return stripUserContextBlocks(parseAttachedFiles(stripScheduledRunMarker(extractUserText(group.message) ?? '')).text).slice(0, GROUP_PREVIEW_LIMIT)
   }
   if (group.type === 'system') {
     if (group.message.subtype === 'compact_boundary') return '上下文已压缩'

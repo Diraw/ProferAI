@@ -9,6 +9,7 @@
  * 唯一键的实现抽在 `@/lib/navigation-item-key`，与面板列表共用同一份，避免两处各抄一份。
  */
 import type { AgentNavigationIndexEntry } from '@profer/shared'
+import { stripUserContextBlocks } from '@profer/session-core'
 import { getGroupNavKey, getGroupPreview, type MessageGroup } from './SDKMessageRenderer'
 import { navigationItemKey } from '@/lib/navigation-item-key'
 
@@ -99,7 +100,9 @@ export function buildNavigationItems(
     const skeleton: NavigationItem[] = indexEntries.map((entry) => ({
       id: entry.id,
       role: entry.role,
-      preview: entry.preview,
+      // 索引可能来自旧版本主进程（预览里带着 <quoted_context> 这类内部 XML），
+      // 也可能命中进程内缓存；在展示层再洗一遍，保证导航里只出现人话。
+      preview: entry.role === 'user' ? stripUserContextBlocks(entry.preview) : entry.preview,
       model: entry.model,
       matchKey: entry.matchKey,
     }))

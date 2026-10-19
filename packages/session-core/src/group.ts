@@ -384,6 +384,26 @@ export function stripScheduledRunMarker(text: string): string {
 }
 
 /**
+ * 用户消息正文里混着若干「不是用户说的话」的上下文块：
+ * 附件清单、引用文件、引用消息/可视化/中断说明、被引用的会话清单。
+ *
+ * 预览/大纲只该显示用户真正敲的字，否则迷你地图里会冒出整段 XML
+ * （典型现场：`<quoted_context source="agent-interruption" ...`）。
+ */
+const USER_CONTEXT_BLOCK_PATTERNS = [
+  /<attached_files>[\s\S]*?<\/attached_files>\n*/g,
+  /<quoted_file[^>]*>[\s\S]*?<\/quoted_file>\n*/g,
+  /<quoted_context[^>]*>[\s\S]*?<\/quoted_context>\n*/g,
+  /<referenced_sessions>[\s\S]*?<\/referenced_sessions>\n*/g,
+] as const
+
+export function stripUserContextBlocks(text: string): string {
+  let result = text
+  for (const pattern of USER_CONTEXT_BLOCK_PATTERNS) result = result.replace(pattern, '')
+  return result.trim()
+}
+
+/**
  * 从 MessageGroup 中提取纯文本预览，供迷你地图 / outline 使用
  */
 export function getGroupPreview(group: MessageGroup): string {
@@ -392,9 +412,7 @@ export function getGroupPreview(group: MessageGroup): string {
       const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
       return typeof iteration === 'number' ? `Goal 自动迭代 · 第 ${iteration} 轮` : 'Goal 自动迭代'
     }
-    return stripScheduledRunMarker(extractUserText(group.message) ?? '')
-      .replace(/<attached_files>[\s\S]*?<\/attached_files>\n*/, '')
-      .replace(/<quoted_file[^>]*>[\s\S]*?<\/quoted_file>\n*/g, '')
+    return stripUserContextBlocks(stripScheduledRunMarker(extractUserText(group.message) ?? ''))
       .slice(0, 200)
   }
   if (group.type === 'system') {
