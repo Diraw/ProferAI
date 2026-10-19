@@ -71,6 +71,7 @@ import { evaluatePptCapability } from './ppt-capability-gate'
 import { sdkPermissionModeForProferMode } from './agent-retry-utils'
 import { createElectronClaudeProcessLifecyclePort } from './claude-process-lifecycle-port'
 import { createElectronPiImageTranscoder } from './agent-image-compression'
+import { createElectronPiToolResultPersist } from './agent-tool-result-store'
 import { resolveSDKCliPath } from './agent-sdk-cli-path'
 import { buildPiRuntimeCredentialOptions } from './agent-runtime-credentials'
 import { applyAgentSdkAuthEnv } from './agent-sdk-auth-env'
@@ -109,6 +110,7 @@ const piAdapter = new PiAgentAdapter({
   backgroundTasks: agentRuntimeHost.ports.backgroundTasks,
   processRegistration: agentRuntimeHost.ports.processRegistration,
   imageTranscoder: createElectronPiImageTranscoder(),
+  toolResultPersist: createElectronPiToolResultPersist(),
 })
 // 两个内核共用编排器和宿主权限，Pi 命令执行使用组合根注入的端口。
 const adapter = new RuntimeRoutingAgentAdapter({ claude: claudeAdapter, pi: piAdapter })

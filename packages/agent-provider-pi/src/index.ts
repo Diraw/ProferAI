@@ -16,6 +16,7 @@ export type {
   PiImageTranscodeResult,
   PiImageTranscoderPort,
   PiProviderHostDependencies,
+  PiToolResultPersistPort,
 } from './ports'
 export type {
   PiCanUseTool,

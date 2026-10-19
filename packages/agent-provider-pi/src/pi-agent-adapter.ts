@@ -1864,7 +1864,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       }
       // 历史消毒 + 图片分层压缩：挂到每次模型请求都会经过的 transformContext，
       // 覆盖恢复会话后的首轮；prepareNextTurnWithContext 只覆盖 lastCompletedTurn 之后的轮次。
-      installPiContextBudget(session.agent, this.ports.imageTranscoder)
+      installPiContextBudget(session.agent, this.ports.imageTranscoder, {
+        persist: this.ports.toolResultPersist,
+        sessionId: session.sessionId,
+      })
       if (piAi && input.codexFastMode && input.provider === 'openai-codex' && isCodexFastModeSupportedModel(input.model)) {
         // Pi 的通用 streamSimple 会丢弃 provider 专属 serviceTier；这里直接走
         // provider stream，确保 request body 与 usage.cost 都使用 priority tier。

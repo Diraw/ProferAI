@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
-import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, installPiContextBudget, OMITTED_TOOL_IMAGE_TEXT, sanitizePiContextMessages, sanitizePiContextMessagesWithImages, stripErrorFromContentMessage, TOOL_RESULT_BUDGET_MARKER, type PiContextTransformAgent } from './message-adapter'
+import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, installPiContextBudget, OMITTED_TOOL_IMAGE_TEXT, PERSISTED_TOOL_RESULT_PREFIX, sanitizePiContextMessages, sanitizePiContextMessagesWithImages, stripErrorFromContentMessage, TOOL_RESULT_BUDGET_MARKER, type PiContextTransformAgent } from './message-adapter'
 import { createAgentRuntimeGuard } from '@profer/agent-runtime/runtime-guards'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { PiImageTranscoderPort } from '../ports'
@@ -226,6 +226,23 @@ describe('convertPiMessage', () => {
 })
 
 describe('sanitizePiContextMessages', () => {
+  function assistantCalling(ids: string[]): AgentMessage {
+    return {
+      role: 'assistant',
+      content: ids.map((id) => ({ type: 'toolCall', id, name: 'bash', arguments: {} })),
+    } as unknown as AgentMessage
+  }
+
+  function bashResult(id: string, text: string): AgentMessage {
+    return {
+      role: 'toolResult',
+      toolCallId: id,
+      toolName: 'bash',
+      isError: false,
+      content: [{ type: 'text', text }],
+    } as unknown as AgentMessage
+  }
+
   test('空图像块被替换为文本占位，防止带空 data 的 image part 让上游挂起', () => {
     const toolResult = {
       role: 'toolResult',
@@ -266,26 +283,69 @@ describe('sanitizePiContextMessages', () => {
     expect(result[0]).toBe(validImage)
   })
 
-  test('旧工具结果超预算时保留头尾并插入说明，最近两条保持完整', () => {
+  test('旧工具结果超预算时保留头尾并插入说明，最近两组（按 assistant 回复）保持完整', () => {
     const long = 'A'.repeat(20_000)
-    const messages = Array.from({ length: 3 }, (_, index) => ({
-      role: 'toolResult',
-      toolCallId: `call-old-${index}`,
-      toolName: 'bash',
-      isError: false,
-      content: [{ type: 'text', text: long }],
-    })) as unknown as AgentMessage[]
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', long),
+      assistantCalling(['recent-1']),
+      bashResult('recent-1', long),
+      assistantCalling(['recent-2']),
+      bashResult('recent-2', long),
+    ]
 
     const result = sanitizePiContextMessages(messages)
-    const firstContent = result[0] as unknown as { content: Array<Record<string, unknown>> }
-    const firstText = String(firstContent.content[0]!.text)
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
 
     expect(firstText.length).toBeLessThan(9_000)
     expect(firstText).toContain(TOOL_RESULT_BUDGET_MARKER)
     expect(firstText.startsWith('A')).toBe(true)
     expect(firstText.endsWith('A')).toBe(true)
-    expect((result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
-    expect((result[2] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+    expect((result[3] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+    expect((result[5] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+  })
+
+  test('同一条 assistant 回复的并行工具结果成组保留，不按条数劈开', () => {
+    const long = 'P'.repeat(20_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', long),
+      assistantCalling(['p1', 'p2', 'p3']),
+      bashResult('p1', long),
+      bashResult('p2', long),
+      bashResult('p3', long),
+      assistantCalling(['tail']),
+      bashResult('tail', long),
+    ]
+
+    const result = sanitizePiContextMessages(messages)
+    const textAt = (index: number) =>
+      String((result[index] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text)
+
+    // 只有最早那组被压缩；并行的 p1/p2/p3 同属一组，全部保留。
+    expect(textAt(1).length).toBeLessThan(9_000)
+    for (const index of [3, 4, 5, 7]) expect(textAt(index)).toBe(long)
+  })
+
+  test('内容本身包含预算标记字面量时仍会被裁剪', () => {
+    const embedded = `${TOOL_RESULT_BUDGET_MARKER} 已省略 123 个字符以节省上下文；如仍需完整内容，请重新调用工具或分页读取。]\n${'C'.repeat(20_000)}`
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', embedded),
+      assistantCalling(['a']),
+      bashResult('a', 'short-a'),
+      assistantCalling(['b']),
+      bashResult('b', 'short-b'),
+    ]
+
+    const result = sanitizePiContextMessages(messages)
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+
+    expect(firstText.length).toBeLessThan(9_000)
   })
 
   test('全局只保留最近 6 张工具图片，旧图片替换为一条说明', () => {
@@ -313,15 +373,106 @@ describe('sanitizePiContextMessages', () => {
     expect(lastContent.some((block) => block.type === 'image')).toBe(true)
   })
 
+  test('聚合预算超出时把旧组原文落盘，消息里只留路径和预览', () => {
+    const oldText = 'H'.repeat(120_000)
+    const middleText = 'M'.repeat(120_000)
+    const newestText = 'N'.repeat(120_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', oldText),
+      assistantCalling(['mid']),
+      bashResult('mid', middleText),
+      assistantCalling(['new']),
+      bashResult('new', newestText),
+    ]
+    const persisted: Array<{ toolCallId: string; text: string }> = []
+
+    const result = sanitizePiContextMessages(messages, {
+      sessionId: 'session-1',
+      persist: {
+        persist: (input) => {
+          persisted.push({ toolCallId: input.toolCallId, text: input.text })
+          return { path: `/tmp/${input.toolCallId}.txt` }
+        },
+      },
+    })
+
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+    expect(firstText.startsWith(PERSISTED_TOOL_RESULT_PREFIX)).toBe(true)
+    expect(firstText).toContain('/tmp/old.txt')
+    // 落盘的是完整原文，不是 8k 截断版
+    expect(persisted).toHaveLength(1)
+    expect(persisted[0]!.toolCallId).toBe('old')
+    expect(persisted[0]!.text).toBe(oldText)
+    // 最近两组不受影响
+    expect((result[3] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(middleText)
+    expect((result[5] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(newestText)
+  })
+
+  test('没有落盘端口时退化为原地截断，请求不因缺少宿主能力而失败', () => {
+    const huge = 'H'.repeat(120_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', huge),
+      assistantCalling(['mid']),
+      bashResult('mid', 'M'.repeat(120_000)),
+      assistantCalling(['new']),
+      bashResult('new', 'N'.repeat(120_000)),
+    ]
+
+    const result = sanitizePiContextMessages(messages, { sessionId: 'session-1' })
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+
+    expect(firstText.startsWith(PERSISTED_TOOL_RESULT_PREFIX)).toBe(false)
+    expect(firstText).toContain(TOOL_RESULT_BUDGET_MARKER)
+    expect(firstText.length).toBeLessThan(9_000)
+  })
+
+  test('落盘预览可重复处理，不会二次落盘', () => {
+    const huge = 'H'.repeat(120_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', huge),
+      assistantCalling(['mid']),
+      bashResult('mid', 'M'.repeat(120_000)),
+      assistantCalling(['new']),
+      bashResult('new', 'N'.repeat(120_000)),
+    ]
+    const options = {
+      sessionId: 'session-1',
+      persist: { persist: () => ({ path: '/tmp/old.txt' }) },
+    }
+
+    const once = sanitizePiContextMessages(messages, options)
+    let secondPassCalls = 0
+    const twice = sanitizePiContextMessages(once, {
+      sessionId: 'session-1',
+      persist: {
+        persist: () => {
+          secondPassCalls += 1
+          return { path: '/tmp/old.txt' }
+        },
+      },
+    })
+
+    expect(secondPassCalls).toBe(0)
+    expect(twice).toEqual(once)
+  })
+
   test('预算处理可重复执行，不会重复插入省略说明', () => {
     const long = 'B'.repeat(20_000)
-    const messages = Array.from({ length: 3 }, (_, index) => ({
-      role: 'toolResult',
-      toolCallId: `call-idem-${index}`,
-      toolName: 'bash',
-      isError: false,
-      content: [{ type: 'text', text: long }],
-    })) as unknown as AgentMessage[]
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', long),
+      assistantCalling(['a']),
+      bashResult('a', long),
+      assistantCalling(['b']),
+      bashResult('b', long),
+    ]
 
     const once = sanitizePiContextMessages(messages)
     const twice = sanitizePiContextMessages(once)

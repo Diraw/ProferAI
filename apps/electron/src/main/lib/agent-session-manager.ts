@@ -36,6 +36,7 @@ import { copySettledPiHarnessEventsForFork } from './pi-harness/pi-harness-store
 import { forkPiSessionArtifact } from './pi-session-fork'
 import { isRecoveredEphemeralTransportError } from './error-patterns'
 import { adoptPiFileCheckpoints, loadPiFileCheckpoint, restorePiFileCheckpoint, prunePiFileCheckpoints, removePiFileCheckpoints } from './pi-file-checkpoint'
+import { removeToolResultDir } from './agent-tool-result-store'
 
 // 在模块加载时一次性设置 SDK 配置目录，避免在 forkSession 等异步调用中临时修改/恢复
 // process.env 导致的并发安全问题（异步操作的 await 间隙其他代码可能读到错误值）。
@@ -918,6 +919,9 @@ export function deleteAgentSession(id: string): void {
   } catch (error) {
     console.warn(`[Agent 会话] 清理 Pi 文件检查点失败 (${id}):`, error)
   }
+
+  // 历史工具结果落盘副本：独立目录，不随会话工作区/checkpoint 清理，必须显式删除。
+  removeToolResultDir(id)
 
   console.log(`[Agent 会话] 已删除会话: ${removed.title} (${removed.id})`)
 

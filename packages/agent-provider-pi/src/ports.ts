@@ -46,6 +46,18 @@ export interface PiImageTranscoderPort {
   transcode(input: PiImageTranscodeInput, options: PiImageTranscodeOptions): Promise<PiImageTranscodeResult | null>
 }
 
+/**
+ * 历史工具结果落盘端口。
+ *
+ * 超预算的旧工具结果一旦被直接砍断，模型就再也拿不回来；宿主注入该端口后，
+ * 完整内容写到磁盘、消息里只留路径和预览。端口缺失或写失败时退化为原地截断。
+ *
+ * 同步实现是刻意的：预算发生在请求前的同步路径上，改异步会传染整个消息适配层。
+ */
+export interface PiToolResultPersistPort {
+  persist(input: { sessionId: string; toolCallId: string; text: string; isJson: boolean }): { path: string } | null
+}
+
 /** Pi adapter 的可注入端口集合；宿主实现与测试替身使用同一形状。 */
 export interface PiAgentAdapterPorts {
   /** 结构化命令执行端口；缺省时 Bash/PowerShell 工具回落到内置进程执行。 */
@@ -58,4 +70,6 @@ export interface PiAgentAdapterPorts {
   host?: PiProviderHostDependencies
   /** 历史图片压缩；缺省时只做张数/字节裁剪，不做降采样。 */
   imageTranscoder?: PiImageTranscoderPort
+  /** 历史工具结果落盘；缺省时超预算内容退化为原地截断。 */
+  toolResultPersist?: PiToolResultPersistPort
 }
