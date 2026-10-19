@@ -8,6 +8,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { CommandExecutionPort, BackgroundTaskPort, ProcessRegistrationPort, AgentRuntimePreparedContext } from '@profer/agent-runtime'
 import { createPiCommandBashOperations } from './pi/command-bash'
+import { FileReadTracker, isTruncatedReadOutput, readFileState } from './pi/file-read-tracker'
 import type { PiAgentAdapterPorts, PiProviderHostDependencies } from './ports'
 import type { Dispatcher } from 'undici'
 import { buildWslBashArgs, windowsPathToWslPath, executeWslBashCommand, executeLocalBashCommand, waitForLocalBashProcess, classifyLocalBashFailure } from './pi/shell-execution'
@@ -804,6 +805,13 @@ function findSessionFile(sessionDir: string, sdkSessionId: string): string | und
 
 interface ToolWrapOptions {
   canUseTool?: PiAgentQueryOptions['canUseTool']
+  /**
+   * 允许该工具走全局并发调度（只读工具用）。
+   *
+   * 默认不设：包装后强制 `executionMode='sequential'`，权限确认与副作用执行按调用顺序进行。
+   * 只读工具传 true 时不写 executionMode，交给 `agent.toolExecution`（parallel）调度。
+   */
+  allowParallel?: boolean
 }
 
 export function wrapToolWithPermission<TParams extends TSchema, TDetails, TState>(
@@ -811,10 +819,10 @@ export function wrapToolWithPermission<TParams extends TSchema, TDetails, TState
   options: ToolWrapOptions,
 ): ToolDefinition<TParams, TDetails, TState> {
   const canUseTool = options.canUseTool
-  const executionMode = 'sequential' as const
   return {
     ...definition,
-    executionMode,
+    // allowParallel 时不覆盖定义自带的 executionMode，由全局策略决定并发。
+    ...(options.allowParallel ? {} : { executionMode: 'sequential' as const }),
     async execute(toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<TDetails>> {
       const rawInput = params as Record<string, unknown>
       let updatedParams = rawInput
@@ -881,6 +889,40 @@ export function shouldDeferPiOverflowTerminalMessage(
   contextWindow: number | undefined,
 ): boolean {
   return message.stopReason !== 'stop' && isPiContextOverflow(message, contextWindow)
+}
+
+/**
+ * 触发主动压缩的真实上下文占用比例。
+ *
+ * 留 20% 给下一轮输出与工具结果，避免撞上 API 的 context overflow。
+ */
+export const PI_REAL_USAGE_COMPACTION_RATIO = 0.8
+
+/**
+ * 用服务端返回的真实 usage 判断是否需要压缩。
+ *
+ * Pi SDK 自带的 `shouldCompact` 只用 `chars / 4` 估算上下文；实测（1097 个样本）真实
+ * token 是估算值的 **2.36 倍**（中位）：中英文混杂、代码与 JSON 标点密集时，`/4`
+ * 会系统性地少算一半以上。中文占比高的会话偏差更大。
+ *
+ * 结果是 SDK 在「估算 80%」时才压缩，而那时真实占用已超窗口。本函数用上一轮响应里
+ * 服务端回报的 `input + cacheRead`（真实值）做判断，作为估算之外的第二个触发点。
+ */
+export function shouldCompactByRealUsage(
+  messages: ReadonlyArray<{ role?: string; usage?: { input?: number; cacheRead?: number } }>,
+  contextWindow: number | undefined,
+  ratio: number = PI_REAL_USAGE_COMPACTION_RATIO,
+): boolean {
+  if (!contextWindow || contextWindow <= 0 || ratio <= 0) return false
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message?.role !== 'assistant') continue
+    const usage = message.usage
+    if (!usage) continue
+    const used = (usage.input ?? 0) + (usage.cacheRead ?? 0)
+    return used >= contextWindow * ratio
+  }
+  return false
 }
 
 export function shouldDeferPiOverflowTerminalError(
@@ -1559,6 +1601,91 @@ function createStrictWriteOperations() {
   }
 }
 
+/**
+ * 可安全并行的内置工具：只读、无副作用、不改会话状态。
+ *
+ * 其余（bash / edit / write / PowerShell）一律保持 executionMode='sequential'，
+ * 避免同文件写入竞态与权限弹窗乱序。
+ */
+const PARALLEL_SAFE_BUILTIN_TOOLS = new Set(['read', 'grep', 'find', 'ls'])
+
+/** 文件读状态跟踪器（跨会话按 sessionId 隔离，单会话内 LRU 上限见 tracker）。 */
+const fileReadTracker = new FileReadTracker()
+
+/** 把工具参数里的相对路径按 cwd 解析成绝对路径。 */
+function resolveTrackedPath(input: unknown, cwd: string): string | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const path = (input as { path?: unknown }).path
+  if (typeof path !== 'string' || path === '') return undefined
+  const expanded = path.startsWith('~/') ? join(homedir(), path.slice(2)) : path
+  return isAbsolute(expanded) ? expanded : resolve(cwd, expanded)
+}
+
+/** 从工具结果里拼出可见文本，用于判断 read 是否被截断。 */
+function toolResultText(result: unknown): string {
+  const content = (result as { content?: unknown }).content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => (block && typeof block === 'object' && (block as { type?: unknown }).type === 'text'
+      ? String((block as { text?: unknown }).text ?? '')
+      : ''))
+    .join('\n')
+}
+
+/**
+ * read 工具包一层：执行后记录「读到的文件指纹」，供 write 前校验。
+ * 记录失败不能影响读取本身，所以整体包在 try 里。
+ */
+function wrapReadForTracking<T extends ToolDefinition>(definition: T, cwd: string, sessionId: string): T {
+  return {
+    ...definition,
+    async execute(toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) {
+      const result = await (definition as unknown as {
+        execute: (a: string, b: unknown, c?: AbortSignal, d?: unknown, e?: unknown) => Promise<unknown>
+      }).execute(toolCallId, params, signal, onUpdate, ctx)
+      try {
+        const absPath = resolveTrackedPath(params, cwd)
+        if (absPath) {
+          const info = await readFileState(absPath)
+          if (info) {
+            fileReadTracker.record(sessionId, absPath, {
+              mtimeMs: info.mtimeMs,
+              size: info.size,
+              hash: info.hash,
+              complete: !isTruncatedReadOutput(toolResultText(result)),
+            })
+          }
+        }
+      } catch {
+        // 跟踪失败不影响读取结果。
+      }
+      return result
+    },
+  } as T
+}
+
+/**
+ * write 工具包一层：整文件覆盖前校验「读到的内容还是不是现在的」。
+ *
+ * 目标文件不存在时直接放行（新建文件不存在陈旧读取问题）。
+ */
+function wrapWriteWithReadCheck<T extends ToolDefinition>(definition: T, cwd: string, sessionId: string): T {
+  return {
+    ...definition,
+    async execute(toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) {
+      const absPath = resolveTrackedPath(params, cwd)
+      if (absPath) {
+        const current = await readFileState(absPath)
+        const check = fileReadTracker.check(sessionId, absPath, current)
+        if (!check.ok) throw new Error(check.message)
+      }
+      return (definition as unknown as {
+        execute: (a: string, b: unknown, c?: AbortSignal, d?: unknown, e?: unknown) => Promise<unknown>
+      }).execute(toolCallId, params, signal, onUpdate, ctx)
+    },
+  } as T
+}
+
 export function buildBuiltinToolDefinitions(
   sdk: PiSdk,
   sessionId: string,
@@ -1588,8 +1715,18 @@ export function buildBuiltinToolDefinitions(
     sdk.createLsToolDefinition(cwd),
   ] as unknown as ToolDefinition[]
 
-  return definitions.map((tool) =>
-    wrapToolWithPermission(tool as unknown as ToolDefinition<TSchema, unknown, unknown>, { canUseTool }) as ToolDefinition)
+  return definitions.map((tool) => {
+    const name = tool.name
+    const tracked = name === 'read'
+      ? wrapReadForTracking(tool, cwd, sessionId)
+      : name === 'write'
+        ? wrapWriteWithReadCheck(tool, cwd, sessionId)
+        : tool
+    return wrapToolWithPermission(tracked as unknown as ToolDefinition<TSchema, unknown, unknown>, {
+      canUseTool,
+      allowParallel: PARALLEL_SAFE_BUILTIN_TOOLS.has(name),
+    }) as ToolDefinition
+  })
 }
 
 function wrapCustomToolDefinitions(
@@ -1849,7 +1986,9 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         ...(input.tools !== undefined ? { tools: input.tools } : {}),
         customTools,
       })
-      session.agent.toolExecution = 'sequential'
+      // 全局并行，只读工具（read/grep/find/ls）才会真正并行；
+      // 有副作用的工具由 wrapToolWithPermission 标 executionMode='sequential'，不受此开关影响。
+      session.agent.toolExecution = 'parallel'
       if (projectInstructionScope) {
         const previousPrepareNextTurnWithContext = session.agent.prepareNextTurnWithContext
         session.agent.prepareNextTurnWithContext = async (context, signal) => {
@@ -2265,7 +2404,22 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 },
               },
             )
-            if (!compactContextRequested) break
+            if (!compactContextRequested) {
+              // 估算低估时 SDK 的自动压缩会迟到，这里用真实 usage 补一个触发点。
+              const usageTriggered = shouldCompactByRealUsage(
+                session.agent.state.messages as ReadonlyArray<{ role?: string; usage?: { input?: number; cacheRead?: number } }>,
+                model.contextWindow,
+              )
+              if (!usageTriggered) break
+              // 真实占用已接近窗口：压缩后收束本轮，原任务已完成，不需要续跑。
+              try {
+                await compactCurrentSessionAfterTurn(session, (message) => queue.push(message))
+              } catch (error) {
+                if (active.abortRequested) return
+                throw error
+              }
+              break
+            }
             try {
               // 模型主动请求压缩：本 turn 落定后执行 session.compact()，再按需续跑原任务。
               await compactCurrentSessionAfterTurn(session, (message) => queue.push(message))

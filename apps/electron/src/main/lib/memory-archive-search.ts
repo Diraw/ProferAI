@@ -47,6 +47,30 @@ export interface MemoryArchiveSearchHit {
   /** FTS5 BM25 分数（越小越相关），供排序/调试 */
   score: number
   matchedTokens: string[]
+  /** 主题文件 mtime（毫秒）。用于提示记忆陈旧度；索引拿不到时缺省。 */
+  mtimeMs?: number
+}
+
+/** 记忆命中的陈旧度：距文件 mtime 的天数（向下取整）；拿不到 mtime 时返回 undefined。 */
+export function memoryHitAgeDays(hit: MemoryArchiveSearchHit, now = Date.now()): number | undefined {
+  if (typeof hit.mtimeMs !== 'number' || !Number.isFinite(hit.mtimeMs)) return undefined
+  return Math.max(0, Math.floor((now - hit.mtimeMs) / 86_400_000))
+}
+
+/**
+ * 命中里出现 1 天以上的记录时，给一条统一提示。
+ *
+ * 记忆是「当时的观察」，不是当前状态。不提醒的话，模型会把旧结论当现状引用
+ * （例如三个月前的「我们决定用 X」）。参照 Claude Code 的 memory staleness reminder。
+ */
+export function memoryFreshnessNote(hits: MemoryArchiveSearchHit[], now = Date.now()): string | undefined {
+  const ages = hits
+    .map((h) => memoryHitAgeDays(h, now))
+    .filter((d): d is number => d !== undefined)
+  if (!ages.length) return undefined
+  const oldest = Math.max(...ages)
+  if (oldest < 1) return undefined
+  return `检索命中包含 ${oldest} 天前的记录。记忆是当时的观察，不是当前状态；涉及代码行为、文件位置或版本结论时，请对照当前代码验证后再引用。`
 }
 
 interface FtsRow {
@@ -275,6 +299,7 @@ export function createMemoryArchiveSearcher(memoryArchivePath: string) {
         endIndex: end,
         score: row.score,
         matchedTokens: terms.map((t) => t.replace(/"/g, '')),
+        mtimeMs: fileMeta.get(mapping.absFile)?.mtime,
       })
     }
     return hits
@@ -300,6 +325,7 @@ export function createMemoryArchiveSearcher(memoryArchivePath: string) {
         endIndex: end,
         score: 0,
         matchedTokens: [],
+        mtimeMs: (() => { try { return statSync(absFile).mtimeMs } catch { return undefined } })(),
       })
     }
     return hits.sort((a, b) => a.relativePath.localeCompare(b.relativePath)).slice(0, Math.min(topK, MAX_TOP_K))

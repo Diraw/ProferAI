@@ -34,7 +34,7 @@ export async function injectClaudeBrowserMcpServer(
     executionSource: ctx.executionSource ?? 'user',
   })
 
-  const optionalTabId = z.string().min(1).optional().describe('Optional tab id. Defaults to the Agent working tab.')
+  const optionalTabId = z.string().min(1).optional().describe('Optional tab id.')
   const readOnly = { annotations: { readOnlyHint: true } }
   const tools = [
 
