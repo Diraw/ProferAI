@@ -143,9 +143,9 @@ function formatSystemToolName(toolName: string): string {
   return toolName
 }
 
-/** 用户点名的 Skill 被门禁拦下时的提示：原因直接给用户看，不依赖模型转述。 */
-function SkillRoutingNotice({ message }: { message: SDKSystemMessage }): React.ReactElement {
-  const text = typeof message.message === 'string' && message.message.length > 0 ? message.message : 'Skill 未加载'
+/** 系统提示条：宿主侧拦下的操作（Skill 未加载、压缩被跳过等）直接给用户看，不依赖模型转述。 */
+function AgentNotice({ message, fallback }: { message: SDKSystemMessage; fallback: string }): React.ReactElement {
+  const text = typeof message.message === 'string' && message.message.length > 0 ? message.message : fallback
   return (
     <div className="my-3 pl-[46px] pr-1">
       <div className="flex items-start gap-2.5 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs text-foreground/80">
@@ -350,7 +350,7 @@ export type MessageGroup =
  * 规则：
  * 1. user（真正用户输入）→ 单独的 user group
  * 2. assistant + user(tool_result) + assistant... → 合并为一个 assistant-turn
- * 3. system（compact_boundary / compacting / permission_denied）→ 独立渲染，其他归入当前 turn
+ * 3. system（compact_boundary / compacting / permission_denied / compact_skipped 等）→ 独立渲染，其他归入当前 turn
  * 4. 其他类型（result, tool_progress 等）→ 归入当前 assistant-turn
  * 5. 后处理：合并相邻同模型的 assistant-turn（处理子代理切换模型导致的碎片化）
  */
@@ -413,9 +413,9 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
       }
     } else if (msg.type === 'system') {
       const sysMsg = msg as SDKSystemMessage
-      // 仅需要独立渲染的 system 消息才中断 turn（compact_boundary / compacting / permission_denied / interruption_record / skill_routing_notice）
+      // 仅需要独立渲染的 system 消息才中断 turn（compact_boundary / compacting / permission_denied / interruption_record / skill_routing_notice / compact_skipped）
       // 其他 system 消息（如 init、task_started、task_progress）归入当前 turn，不中断分组
-      if (sysMsg.subtype === 'compact_boundary' || sysMsg.subtype === 'compacting' || sysMsg.subtype === 'permission_denied' || sysMsg.subtype === 'interruption_record' || sysMsg.subtype === 'skill_routing_notice') {
+      if (sysMsg.subtype === 'compact_boundary' || sysMsg.subtype === 'compacting' || sysMsg.subtype === 'permission_denied' || sysMsg.subtype === 'interruption_record' || sysMsg.subtype === 'skill_routing_notice' || sysMsg.subtype === 'compact_skipped') {
         flushTurn()
         groups.push({ type: 'system', message: sysMsg })
       } else if (sysMsg.subtype === 'task_notification') {
@@ -474,7 +474,7 @@ function mergeAdjacentSameModelTurns(groups: MessageGroup[]): MessageGroup[] {
     for (let i = result.length - 1; i >= 0; i--) {
       const prev = result[i]!
       if (prev.type === 'user') break // 真正的用户输入阻断合并
-      if (prev.type === 'system' && ['compact_boundary', 'permission_denied'].includes((prev.message as SDKSystemMessage).subtype ?? '')) break
+      if (prev.type === 'system' && ['compact_boundary', 'permission_denied', 'compact_skipped'].includes((prev.message as SDKSystemMessage).subtype ?? '')) break
       if (prev.type === 'assistant-turn') {
         if (prev.model === group.model) {
           mergeTargetIdx = i
@@ -1155,7 +1155,10 @@ export function SDKMessageRenderer({
       return null
     }
     if (subtype === 'skill_routing_notice') {
-      return <SkillRoutingNotice message={sysMsg} />
+      return <AgentNotice message={sysMsg} fallback="Skill 未加载" />
+    }
+    if (subtype === 'compact_skipped') {
+      return <AgentNotice message={sysMsg} fallback="上下文压缩已跳过" />
     }
 
     // compacting 事件已由 isCompacting flag 驱动的尾部指示器接管（见 AgentMessages），此处不再渲染持久条目
@@ -1862,6 +1865,7 @@ export function getGroupPreview(group: MessageGroup): string {
     if (group.message.subtype === 'permission_denied') return '自动审批已拒绝操作'
     if (group.message.subtype === 'interruption_record') return group.message.message ?? '任务中断'
     if (group.message.subtype === 'skill_routing_notice') return group.message.message ?? 'Skill 未加载'
+    if (group.message.subtype === 'compact_skipped') return group.message.message ?? '上下文压缩已跳过'
     return ''
   }
   // assistant-turn：按顺序累加 text 块，达到预览上限即返回。
@@ -1921,7 +1925,8 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
     if (subtype === 'permission_denied') return <div data-message-id={groupId} data-message-nav-key={navKey}><PermissionDeniedNotice message={group.message} /></div>
     // 中断记录保留在消息数据中供恢复/续接使用，但不在会话正文显示。
     if (subtype === 'interruption_record') return null
-    if (subtype === 'skill_routing_notice') return <div data-message-id={groupId} data-message-nav-key={navKey}><SkillRoutingNotice message={group.message} /></div>
+    if (subtype === 'skill_routing_notice') return <div data-message-id={groupId} data-message-nav-key={navKey}><AgentNotice message={group.message} fallback="Skill 未加载" /></div>
+    if (subtype === 'compact_skipped') return <div data-message-id={groupId} data-message-nav-key={navKey}><AgentNotice message={group.message} fallback="上下文压缩已跳过" /></div>
     return null
   }
 

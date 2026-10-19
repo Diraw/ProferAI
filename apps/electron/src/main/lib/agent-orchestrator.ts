@@ -822,7 +822,7 @@ export class AgentOrchestrator {
           m.type === 'user' ||
           m.type === 'result' ||
           (m.type === 'system' &&
-            ['compact_boundary', 'permission_denied'].includes((m as import('@profer/shared').SDKSystemMessage).subtype ?? '')),
+            ['compact_boundary', 'permission_denied', 'compact_skipped'].includes((m as import('@profer/shared').SDKSystemMessage).subtype ?? '')),
       )
       .filter((m) => {
       // Pi partial 仅用于实时预览；即使未来调用方误传，也不能污染 JSONL 历史。

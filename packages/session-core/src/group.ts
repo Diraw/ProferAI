@@ -99,6 +99,7 @@ const NAVIGATION_BREAKING_SUBTYPES: ReadonlySet<string> = new Set([
   'permission_denied',
   'interruption_record',
   'skill_routing_notice',
+  'compact_skipped',
 ])
 
 /** 历史默认断组集合（回溯水位 / CLI outline 沿用）。 */
@@ -272,7 +273,7 @@ function navigationIdentity(group: MessageGroup): {
 /**
  * 系统消息在「消息导航」里的预览文案。
  *
- * 渲染层 MessageGroupRenderer 只渲染这 4 种 subtype（其余返回 null），且中断/技能提示另有
+ * 渲染层 MessageGroupRenderer 只渲染这几种 subtype（其余返回 null），且中断/技能/压缩提示另有
  * 文案。本模块的 getGroupPreview 是 CLI/回溯共用的历史口径，不能为了导航去改它（会扰动
  * 已有消费者），所以导航侧在这里单独镜像渲染层的分支。
  */
@@ -284,6 +285,7 @@ function navigationSystemPreview(sysMsg: SDKSystemMessage): string | null {
     case 'compacting': return null
     case 'interruption_record': return sysMsg.message ?? '任务中断'
     case 'skill_routing_notice': return sysMsg.message ?? 'Skill 未加载'
+    case 'compact_skipped': return sysMsg.message ?? '上下文压缩已跳过'
     default: return null
   }
 }

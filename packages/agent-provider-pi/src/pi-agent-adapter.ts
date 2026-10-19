@@ -97,6 +97,7 @@ import {
   runWithPiRequestProxy,
 } from './pi/request-proxy'
 import { compactPiToolDefinitions } from './pi/tool-definition-compaction'
+import { PiManualCompactionGuard, countPiEffectiveTurns, createPiCompactionSkippedMessage } from './pi/compaction-guard'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
 type BashOperations = import('@earendil-works/pi-coding-agent').BashOperations
@@ -1653,6 +1654,11 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     }
   }
   private activeSessions = new Map<string, ActivePiSession>()
+  /**
+   * 手动压缩守卫：状态按 sessionId 跨 query 调用保存。
+   * 每次 `/compact` 都是新的一次 query，in-flight 标记与熔断计数不能放在 query 内。
+   */
+  private readonly manualCompactionGuard = new PiManualCompactionGuard()
 
   /** Keep the orchestrator's existing structured error and retry pipeline runtime-neutral. */
   errorHelpers = {
@@ -2186,44 +2192,60 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         // 手动压缩：走 pi 原生 session.compact()，而非把 /compact 当普通 prompt 发给模型。
         // compaction_start/end 事件已在上面的 subscribe 中转成 compacting/compact_boundary system 消息；
         // compact() 不发 agent_end，故这里补一个合成 result 消息收束本轮（供 orchestrator 结束消费循环）。
-        session.compact()
-          .then(() => {
-            queue.push({
-              type: 'result',
-              subtype: 'success',
-              usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-              terminal_reason: 'completed',
-              session_id: session.sessionId,
-            } as unknown as SDKMessage)
-            queue.close()
-          })
-          .catch((error) => {
-            // 「会话太小无需压缩」/「已压缩」是良性情况，不是执行错误：
-            // pi 会抛 "Nothing to compact (session too small)" / "Already compacted"。
-            // 这里不 fail 队列（否则前端弹通用「执行错误」），改为正常收尾并给出友好提示。
-            const message = error instanceof Error ? error.message : String(error)
-            if (/nothing to compact|already compacted/i.test(message)) {
-              queue.push({
-                type: 'system',
-                subtype: 'compact_noop',
-                session_id: session.sessionId,
-                message: /already compacted/i.test(message)
-                  ? '当前上下文已经压缩过，无需重复压缩。'
-                  : '当前上下文较小，暂时无需压缩。',
-              } as unknown as SDKMessage)
-              queue.push({
-                type: 'result',
-                subtype: 'success',
-                usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-                terminal_reason: 'completed',
-                session_id: session.sessionId,
-              } as unknown as SDKMessage)
-              queue.close()
-            } else {
-              queue.fail(error)
-            }
-          })
-          .finally(cleanupActiveSession)
+        const finishManualCompaction = (): void => {
+          queue.push({
+            type: 'result',
+            subtype: 'success',
+            usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+            terminal_reason: 'completed',
+            session_id: session.sessionId,
+          } as unknown as SDKMessage)
+          queue.close()
+        }
+        // 前置守卫：Pi SDK 只有「空历史 / 最后一条已是压缩」两条跳过条件，
+        // 小会话白压、压缩未返回又压、压缩完立刻又满再压都要在宿主侧挡掉。
+        const effectiveTurns = countPiEffectiveTurns(session.agent.state.messages, {
+          ignoreTextPrefixes: [PI_COMPACTION_CONTINUATION_PROMPT],
+        })
+        const guardDecision = this.manualCompactionGuard.evaluate(session.sessionId, effectiveTurns)
+        if (!guardDecision.allowed && guardDecision.reason && guardDecision.message) {
+          queue.push(
+            createPiCompactionSkippedMessage(session.sessionId, guardDecision.reason, guardDecision.message) as unknown as SDKMessage,
+          )
+          finishManualCompaction()
+        } else {
+          let compactionOutcome: 'compacted' | 'failed' | 'noop' = 'failed'
+          this.manualCompactionGuard.begin(session.sessionId)
+          session.compact()
+            .then(() => {
+              compactionOutcome = 'compacted'
+              finishManualCompaction()
+            })
+            .catch((error) => {
+              // 「会话太小无需压缩」/「已压缩」是良性情况，不是执行错误：
+              // pi 会抛 "Nothing to compact (session too small)" / "Already compacted"。
+              // 这里不 fail 队列（否则前端弹通用「执行错误」），改为正常收尾并给出友好提示。
+              const message = error instanceof Error ? error.message : String(error)
+              if (/nothing to compact|already compacted/i.test(message)) {
+                compactionOutcome = 'noop'
+                queue.push({
+                  type: 'system',
+                  subtype: 'compact_noop',
+                  session_id: session.sessionId,
+                  message: /already compacted/i.test(message)
+                    ? '当前上下文已经压缩过，无需重复压缩。'
+                    : '当前上下文较小，暂时无需压缩。',
+                } as unknown as SDKMessage)
+                finishManualCompaction()
+              } else {
+                queue.fail(error)
+              }
+            })
+            .finally(() => {
+              this.manualCompactionGuard.settle(session.sessionId, compactionOutcome)
+              cleanupActiveSession()
+            })
+        }
       } else {
         const runCompactionAwareChain = async (): Promise<void> => {
           let continuationPrompt: string | undefined

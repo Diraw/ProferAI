@@ -71,6 +71,28 @@ describe('system 消息渲染分组', () => {
     expect(groups.map((group) => group.type)).toEqual(['user', 'system', 'assistant-turn'])
     expect(getGroupPreview(groups[1]!)).toBe('Skill 未加载：pptx（所需工具组已关闭）')
   })
+
+  test('压缩被跳过时独立成组，预览与渲染都给出原因', () => {
+    const skipText = '最近 5 分钟内已连续压缩 2 次，暂时跳过本次压缩以免反复压缩。'
+    const notice = { ...systemMessage('compact_skipped'), message: skipText } as unknown as SDKMessage
+    // 单独的 /compact 请求没有 assistant turn；不进断组集合的话这条提示会被分组逻辑直接丢掉。
+    const groups = groupIntoTurns([notice])
+    expect(groups.map((group) => group.type)).toEqual(['system'])
+    expect(getGroupPreview(groups[0]!)).toBe(skipText)
+
+    const markup = renderToStaticMarkup(
+      React.createElement(
+        Provider,
+        { store: createStore() },
+        React.createElement(MessageGroupRenderer, {
+          group: groups[0]!,
+          allMessages: [notice],
+          historicalTaskSubjects: new Map<string, string>(),
+        }),
+      ),
+    )
+    expect(markup).toContain(skipText)
+  })
 })
 
 function assistantTurn(blocks: string[][]): MessageGroup {
