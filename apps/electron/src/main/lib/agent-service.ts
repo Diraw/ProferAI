@@ -525,8 +525,10 @@ export async function runAgent(
   webContents: WebContents,
   onDraftPromoted?: (session: import('@profer/shared').AgentSessionMeta) => void | Promise<void>,
 ): Promise<void> {
-  // IR-D1：桌面 runtime 开关默认启用；显式回退值为 0 时回退旧链。
-  // 任何 await 之前读一次；显式回退态下面的旧代码路径逐字节不变。Goal 输入始终回旧链（GAP-6 未关闭）。
+  // IR-D1：桌面 runtime 开关**默认关闭**（显式 opt-in，v0.16.10 起）；只有显式置为 `1` 才走新链。
+  // 判定实现在 agent-runtime-desktop-switch.ts：`isDesktopRuntimeSwitchEnabled` 只认值 `'1'`；
+  // 未设置、设为 `0` 或任何其他值都走旧编排器，便于发版后止损。
+  // 本函数不自读环境变量（parity 断言：函数体内不得出现开关字面量），只调判定函数一次。
   // 顺序：开关判定 → 桌面入口自承担 registerWebContents / backlog / 入口清未读 → 守卫 → claim；
   // claim 之前不得有 await（runDesktopRuntimeAgent 内部同样保证）。
   if (resolveDesktopRunChain(input) === 'runtime') {

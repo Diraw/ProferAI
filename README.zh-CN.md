@@ -181,6 +181,29 @@ Profer 是一个**本地优先的 Electron 应用**：工作区、会话与文�
 
 <img src="./docs/assets/architecture-diagram.svg" alt="Profer 架构图" width="100%" />
 
+### 目录结构
+
+Profer 是 Bun workspace monorepo：
+
+```text
+profer/
+├── packages/
+│   ├── shared/                # 共享类型、IPC 契约、配置、工具函数
+│   ├── core/                  # Provider 适配器、SSE、代码高亮
+│   ├── ui/                    # 共享 React 组件库
+│   ├── session-core/          # headless 会话读取 / 分组 / 搜索 / 渲染
+│   ├── project-core/          # headless 项目编排：图构建、状态回放、查询
+│   ├── agent-runtime/         # 宿主无关的 Agent 执行契约与运行时生命周期
+│   ├── agent-provider-claude/ # Claude Agent SDK provider：query 流、权限、后台任务
+│   ├── agent-provider-pi/     # Pi Agent SDK provider：适配器、消息转换、Pi 工具
+│   ├── agent-fabric/          # Agent Node / Task Graph / Capability / Policy 契约
+│   ├── office-engine/         # DOCX / PPTX / XLSX 双平面版式解析引擎
+│   └── plugin-api/            # 第三方插件公开契约
+└── apps/
+    ├── electron/              # Electron 桌面应用
+    └── cli/                   # 命令行：会话渐进式读取（list / info / outline / search / export）
+```
+
 ### 技术栈
 
 **桌面端（Electron）**
