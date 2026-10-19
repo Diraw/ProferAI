@@ -3735,7 +3735,7 @@ declare global {
       sendResult: (id: string, result: import('@profer/shared').AgentPreviewRenderOutput) => void
       sendError: (id: string, payload: { code?: string; message?: string }) => void
       notifyReady: () => void
-      capture: (id: string) => Promise<string>
+      capture: (id: string) => Promise<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>
     }
   }
 }
@@ -3753,7 +3753,7 @@ const agentPreviewAPI = {
     ipcRenderer.send('agent-preview:error', id, payload)
   },
   notifyReady: () => ipcRenderer.send('agent-preview:ready'),
-  capture: (id: string) => ipcRenderer.invoke('agent-preview:capture', id) as Promise<string>,
+  capture: (id: string) => ipcRenderer.invoke('agent-preview:capture', id) as Promise<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>,
 }
 
 // iframe 内容（HTML/PDF）不需要也不能获得主进程预览控制能力。

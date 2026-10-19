@@ -145,7 +145,7 @@ export const AGENT_PREVIEW_LIMITS = {
   maxImagesPerRequest: 80,
   maxImagePixels: 16_000_000,
   maxPayloadBytes: 30 * 1024 * 1024,
-  maxTextChars: 200_000,
+  maxTextChars: 50_000,
 } as const
 
 export const AGENT_PREVIEW_DEFAULT_MODE_BY_KIND: Readonly<Record<AgentPreviewFileKind, InspectPreviewMode>> = {
