@@ -266,6 +266,8 @@ export interface ElectronAPI {
   pasteAgentBrowserClipboard: (input: import('@profer/shared').BrowserTabInput) => Promise<import('@profer/shared').BrowserTranslateResult>
   /** 订阅受管网页下载被拦截的脱敏事件。 */
   onAgentBrowserDownloadBlocked: (callback: (event: import('@profer/shared').BrowserDownloadBlockedEvent) => void) => () => void
+  /** 订阅原生网页上「关闭拆分视图」浮标的点击（主进程绘制，renderer 负责解散组合）。 */
+  onSplitViewCloseClicked: (callback: (event: import('@profer/shared').BrowserSplitViewCloseEvent) => void) => () => void
   /**
    * 订阅「用户在浏览器列的文件预览里划词」。
    * 选区本身发生在无 preload 的沙箱 viewer 页，只能由主进程转投过来。
@@ -1745,6 +1747,11 @@ const electronAPI: ElectronAPI = {
     const listener = (_event: Electron.IpcRendererEvent, payload: import('@profer/shared').BrowserDownloadBlockedEvent) => callback(payload)
     ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_DOWNLOAD_BLOCKED, listener)
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_DOWNLOAD_BLOCKED, listener)
+  },
+  onSplitViewCloseClicked: (callback: (event: import('@profer/shared').BrowserSplitViewCloseEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: import('@profer/shared').BrowserSplitViewCloseEvent) => callback(payload)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.SPLIT_VIEW_CLOSE_CLICKED, listener)
+    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.SPLIT_VIEW_CLOSE_CLICKED, listener)
   },
   onAgentBrowserLocalFileSelection: (
     callback: (event: import('@profer/shared').BrowserLocalFileSelectionEvent) => void,

@@ -30,6 +30,7 @@ import {
   planAutoGroupWorkTab,
   planFollowWorkTab,
   planPreviewSplit,
+  planReplaceGroupMember,
   planGroupDrop,
   reconcileGroup,
   reconcileTabGroups,
@@ -587,6 +588,67 @@ test('planPreviewSplit：对侧是浏览器/其他会话内容时不改写用户
   ] as const
   const groups = [{ leftTabId: 's1', rightTabId: '__browser__:s1', focusedTabId: 's1' }]
   expect(planPreviewSplit({ groups, tabs, agentTabId: 's1', workTabId: '__preview__:s1:a', focus: 'preview' })).toBeNull()
+})
+
+test('planReplaceGroupMember：新页接管原分屏栏，会话焦点不被抢走', () => {
+  const group = createGroup('agent', 'page-old', 'agent')!
+  const plan = planReplaceGroupMember({
+    groups: [group],
+    previousTabId: 'page-old',
+    nextTabId: 'page-new',
+    activeTabId: 'agent',
+  })
+  expect(plan?.groups).toEqual([createGroup('agent', 'page-new', 'agent')!])
+  expect(plan?.activeTabId).toBe('agent')
+})
+
+test('planReplaceGroupMember：原页是焦点时焦点跟到新页', () => {
+  const group = createGroup('agent', 'page-old', 'page-old')!
+  const plan = planReplaceGroupMember({
+    groups: [group],
+    previousTabId: 'page-old',
+    nextTabId: 'page-new',
+    activeTabId: 'page-old',
+  })
+  expect(plan?.groups).toEqual([createGroup('agent', 'page-new', 'page-new')!])
+  expect(plan?.activeTabId).toBe('page-new')
+})
+
+test('planReplaceGroupMember：左栏页同样原位替换，保留左右顺序', () => {
+  const group = createGroup('page-old', 'agent', 'agent')!
+  const plan = planReplaceGroupMember({
+    groups: [group],
+    previousTabId: 'page-old',
+    nextTabId: 'page-new',
+    activeTabId: 'agent',
+  })
+  expect(plan?.groups).toEqual([createGroup('page-new', 'agent', 'agent')!])
+})
+
+test('planReplaceGroupMember：原页不在组合里时只跟随激活页，不改布局', () => {
+  const plan = planReplaceGroupMember({
+    groups: [],
+    previousTabId: 'page-old',
+    nextTabId: 'page-new',
+    activeTabId: 'page-old',
+  })
+  expect(plan).toEqual({ groups: [], activeTabId: 'page-new' })
+  expect(planReplaceGroupMember({
+    groups: [],
+    previousTabId: 'page-old',
+    nextTabId: 'page-new',
+    activeTabId: 'agent',
+  })).toBeNull()
+})
+
+test('planReplaceGroupMember：新页已在别的组合时不抢成员', () => {
+  const groups = [createGroup('agent', 'page-old', 'agent')!, createGroup('page-new', 'agent-2', 'page-new')!]
+  expect(planReplaceGroupMember({
+    groups,
+    previousTabId: 'page-old',
+    nextTabId: 'page-new',
+    activeTabId: 'agent',
+  })).toBeNull()
 })
 
 test('planPreviewSplit：预览已入别的组合时不抢，同一组合内则只切焦点', () => {

@@ -1,5 +1,9 @@
 import * as React from 'react'
+import { useAtomValue, useSetAtom } from 'jotai'
 import type { BrowserViewLayout } from '@profer/shared'
+import { activeTabIdAtom, createBrowserTabId } from '@/atoms/tab-atoms'
+import { browserNativePaneTabIdsAtom } from '@/atoms/browser-atoms'
+import { findTabGroup, groupSideOf, isGroupActive, tabGroupsAtom } from '@/atoms/tab-group-atoms'
 import { resolveNativeBrowserVisible, sameBrowserViewportLayout } from './browser-viewport-layout'
 
 // renderer 刷新时生成新的实例标识；同一 renderer 内的 BrowserViewport 挂载实例再使用
@@ -93,6 +97,35 @@ export function BrowserViewport({
   visible: boolean
 }): React.ReactElement {
   const pageRef = React.useRef<HTMLDivElement>(null)
+  const tabGroups = useAtomValue(tabGroupsAtom)
+  const activeTabId = useAtomValue(activeTabIdAtom)
+  const topTabId = createBrowserTabId(sessionId, tabId)
+  const splitCloseGroup = findTabGroup(tabGroups, topTabId)
+  const showSplitClose = !!splitCloseGroup
+    && isGroupActive(splitCloseGroup, activeTabId)
+    && groupSideOf(splitCloseGroup, topTabId) === 'right'
+  const showSplitCloseRef = React.useRef(showSplitClose)
+  showSplitCloseRef.current = showSplitClose
+  const publishRef = React.useRef<(() => void) | null>(null)
+  const setNativePaneTabs = useSetAtom(browserNativePaneTabIdsAtom)
+
+  // 原生网页挂载期间登记自己的顶栏 Tab：DOM 退出按钮据此让位给主进程绘制的原生浮标。
+  React.useLayoutEffect(() => {
+    setNativePaneTabs((previous) => {
+      if (previous.has(topTabId)) return previous
+      const next = new Set(previous)
+      next.add(topTabId)
+      return next
+    })
+    return () => {
+      setNativePaneTabs((previous) => {
+        if (!previous.has(topTabId)) return previous
+        const next = new Set(previous)
+        next.delete(topTabId)
+        return next
+      })
+    }
+  }, [setNativePaneTabs, topTabId])
 
   React.useLayoutEffect(() => {
     const page = pageRef.current
@@ -130,6 +163,7 @@ export function BrowserViewport({
             width: Math.max(0, Math.round(pageRect.width)),
             height: Math.max(0, Math.round(pageRect.height)),
           },
+          splitViewClose: showSplitCloseRef.current,
         }
         if (!force && sameBrowserViewportLayout(previous, next)) return
         previous = next
@@ -140,6 +174,7 @@ export function BrowserViewport({
     // 纳入协议，收起或窄窗自动隐藏时立即撤走 native WebContentsView，不能让它
     // 继续停留在上一次的有效矩形上覆盖已不可见的 DOM 卡片。
     const publishCurrentVisibility = () => publish(resolveNativeBrowserVisible(panelVisible, findBlockingOverlay(frame)))
+    publishRef.current = publishCurrentVisibility
     // 分栏拖动、窗口调整和侧栏切换可能只改变元素位置，IntersectionObserver 在某些平台
     // 不会逐帧报告这种变化。短暂逐帧收敛几何，既保证原生 View 跟手，又不引入常驻轮询。
     const scheduleGeometryPoll = () => {
@@ -199,6 +234,7 @@ export function BrowserViewport({
       window.removeEventListener('scroll', publishOnScroll, true)
       if (raf) cancelAnimationFrame(raf)
       if (geometryPollRaf) cancelAnimationFrame(geometryPollRaf)
+      publishRef.current = null
       setLayout({
         sessionId,
         tabId,
@@ -209,9 +245,15 @@ export function BrowserViewport({
         viewportBounds: { x: 0, y: 0, width: 0, height: 0 },
         viewportRadius: readFrameRadius(frame),
         pageBounds: { x: 0, y: 0, width: 0, height: 0 },
+        splitViewClose: false,
       })
     }
   }, [panelVisible, sessionId, tabId])
+
+  // 分屏成员/焦点变化不重建整个视口，只重新发布一次带最新 splitViewClose 的布局。
+  React.useLayoutEffect(() => {
+    publishRef.current?.()
+  }, [showSplitClose])
 
   return <div ref={pageRef} className="flex flex-1 min-h-0 bg-browser-host titlebar-no-drag" aria-label="受管浏览器页面" data-browser-native-page />
 }
