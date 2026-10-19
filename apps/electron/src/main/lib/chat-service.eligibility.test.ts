@@ -65,6 +65,8 @@ mock.module('@profer/core', () => ({
     return { content: 'fixture-reply' }
   },
   fetchTitle: async () => { titleCalls += 1; return titleResult },
+  fetchTitleWithRetry: async () => { titleCalls += 1; return { title: titleResult } },
+  resolveTitleBaseUrl: (_provider: string, baseUrl: string) => baseUrl,
   detectInsufficientCredits: () => null,
 }))
 const { sendMessage, generateTitle } = await import('./chat-service')

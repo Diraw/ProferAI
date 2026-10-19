@@ -41,3 +41,22 @@ test.each(['claude', 'pi'] as const)('%s：真实落盘用户消息可以重新�
   expect(generate.mock.calls[0]?.[0].contextMessages).toEqual(['给我谈谈grok和gpt'])
   expect(sessions.getAgentSessionMeta(meta.id)?.title).toBe('Grok与GPT比较')
 })
+
+test('手动重新生成标题：模型没有返回结果时抛错，且绝不写入本地兜底标题', async () => {
+  const meta = sessions.createAgentSession('用户自己起的名字', undefined, undefined, undefined, 'pi')
+  mkdirSync(paths.getAgentSessionsDir(), { recursive: true })
+  writeFileSync(paths.getAgentSessionMessagesPath(meta.id), JSON.stringify({
+    type: 'user',
+    message: { content: [{ type: 'text', text: '帮我梳理项目结构，并给出长期演进建议' }] },
+    parent_tool_use_id: null,
+  }) + '\n')
+  const orchestrator = new AgentOrchestrator({} as never, { on() {}, emit() {} } as never)
+  const generate = spyOn(orchestrator, 'generateTitle').mockImplementation(async (_input, options) => {
+    options?.onFailure?.('HTTP 400: model does not support thinking')
+    return null
+  })
+  await expect(orchestrator.regenerateTitle(meta.id, 'fixture', 'model')).rejects.toThrow('HTTP 400: model does not support thinking')
+  // 手动重新命名必须把真实失败原因透出，而不是静默写回「首条消息前 20 字」。
+  expect(generate.mock.calls[0]?.[1]).toHaveProperty('onFailure')
+  expect(sessions.getAgentSessionMeta(meta.id)?.title).toBe('用户自己起的名字')
+})

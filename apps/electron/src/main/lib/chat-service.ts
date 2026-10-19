@@ -20,8 +20,9 @@ import { pushChatStream } from './chat-stream-bus'
 import type { Channel, ChatSendInput, ChatMessage, ConversationMeta, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
 import {
   getAdapter,
+  resolveTitleBaseUrl,
   streamSSE,
-  fetchTitle,
+  fetchTitleWithRetry,
   detectInsufficientCredits,
 } from '@profer/core'
 import type { ImageAttachmentData, ContinuationMessage } from '@profer/core'
@@ -815,7 +816,7 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
   try {
     const adapter = getAdapter(channel.provider)
     const request = adapter.buildTitleRequest({
-      baseUrl: proxyBaseUrl || channel.baseUrl,
+      baseUrl: proxyBaseUrl || resolveTitleBaseUrl(channel.provider, channel.baseUrl) || channel.baseUrl,
       apiKey,
       modelId,
       prompt: titlePrompt,
@@ -825,7 +826,7 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
 
     const proxyUrl = await getEffectiveProxyUrl()
     const fetchFn = getFetchFn(proxyUrl)
-    const title = await fetchTitle(request, adapter, fetchFn)
+    const title = (await fetchTitleWithRetry(request, adapter, fetchFn)).title
     if (!title) {
       console.warn('[标题生成] API 返回空标题')
       return null
