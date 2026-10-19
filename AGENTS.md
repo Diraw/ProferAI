@@ -31,11 +31,13 @@ profer/
 │   ├── core/                  # AI Provider 适配器、SSE、代码高亮服务 (v0.2.12)
 │   ├── ui/                    # 共享 UI 组件 (CodeBlock, MermaidBlock) (v0.2.0)
 │   ├── session-core/          # headless session 读取/分组/搜索/渲染 (v0.1.1)
+│   ├── session-store/         # Node-only 会话持久化：索引/消息/事件/工作区存储与操作契约 (v0.1.0)
 │   ├── project-core/          # headless 项目编排：图构建、状态回放、查询 (v0.1.0)
 │   ├── agent-runtime/         # 宿主无关的 Agent 执行契约与运行时生命周期工具 (v0.1.0)
 │   ├── agent-provider-claude/ # Claude Agent SDK provider：query 流、权限、后台任务 (v0.1.0)
 │   ├── agent-provider-pi/     # Pi Agent SDK provider：完整适配器、消息转换、Pi 工具集成 (v0.1.0)
 │   ├── agent-fabric/          # Agent Node / Task Graph / Capability / Policy 契约与纯函数 (v0.1.0)
+│   ├── edition-contract/      # 发行版能力契约：账号会话/代管凭据路由/发行版标识，不依赖 Electron (v0.1.0)
 │   ├── office-engine/         # DOCX/PPTX/XLSX 双平面版式解析引擎 (v0.1.0)
 │   └── plugin-api/            # 第三方插件公开契约 (v0.1.1)
 └── apps/
@@ -47,7 +49,7 @@ profer/
     └── cli/                   # 命令行工具：会话渐进式读取 list/info/outline/search/export (v0.1.1)
 ```
 
-**包命名规范**：`@profer/*` 作用域（`@profer/core`、`@profer/shared`、`@profer/ui`、`@profer/electron` 等，共 11 个 `packages/*` + 2 个 `apps/*`）
+**包命名规范**：`@profer/*` 作用域（`@profer/core`、`@profer/shared`、`@profer/ui`、`@profer/electron` 等，共 13 个 `packages/*` + 2 个 `apps/*`）
 
 **依赖管理**：package.json 中使用 `workspace:*` 引用内部包
 
@@ -75,6 +77,11 @@ profer/
 - **导出模块**：`.`（`group`、`outline`、`read`、`search`、`select`、`transcript`、`render-markdown`、`thinking-tags`、`tokens`）、`./node`（文件系统读取 + session 列表）
 - **依赖**：`@profer/shared`
 
+#### @profer/session-store (v0.1.0)
+- **职责**：Node-only 的会话持久化层——会话索引、消息/事件、工作区与 blob 文件的读写契约与操作；不读 Electron `app.getPath`、不持有 provider SDK，运行时路径由宿主（`apps/electron/src/main/lib/session-store-host.ts`）注入
+- **导出模块**：`.`（`contracts`、`paths`、index / message / metadata / blob / event / workspace / file / session store、`operations`）
+- **依赖**：`@profer/project-core`、`@profer/session-core`、`@profer/shared`
+
 #### @profer/project-core (v0.1.0)
 - **职责**：headless 项目编排——图构建、状态回放和查询；由 Electron 应用、CLI 和未来查询界面共用
 - **导出模块**：`.`
@@ -100,6 +107,11 @@ profer/
 - **职责**：Agent Node / Task Protocol / Task Graph / Capability / Policy / Event / Artifact / Result 统一契约与纯函数行为（状态机、策略收窄、事件重放、审批绑定）；不绑定 Electron、Claude SDK 或 Pi runtime
 - **导出模块**：`.`
 - **依赖**：无运行时依赖
+
+#### @profer/edition-contract (v0.1.0)
+- **职责**：发行版能力契约——账号会话、代管凭据路由与发行版标识；执行链只依赖本包，不直接依赖商业模块。Electron 侧的装配点在 `apps/electron/src/main/lib/edition/`
+- **导出模块**：`.`
+- **依赖**：`@profer/shared`
 
 #### @profer/office-engine (v0.1.0)
 - **职责**：DOCX / PPTX / XLSX 双平面版式解析（语义重排平面 + 归一化空间拓扑平面，带引用锚点），零第三方依赖
@@ -208,11 +220,11 @@ bun run generate:icons    # 生成应用图标
 类型定义 → 主进程处理 → Preload 桥接 → 渲染进程调用：
 
 1. **类型 & 常量**：`@profer/shared` 定义 IPC 通道名称常量和请求/响应类型
-2. **主进程处理**：`main/ipc.ts`（4679 行）注册 `ipcMain.handle()` 处理器，调用 `main/lib/` 服务；实际 `ipcMain.handle` 共 524 处（另有 8 处 `ipcMain.on`），其中 `ipc.ts` 248 处，其余分散在 35 个 `main/lib/` 子模块（planning / global-skill / channel / feishu / plugins 等，最大单文件 21 处）
-3. **Preload 桥接**：`preload/index.ts`（3743 行）通过 `contextBridge.exposeInMainWorld` 暴露类型安全的 API；`ElectronAPI` 接口顶层 536 个成员（其中 7 个是 `auth` / `knowledge` / `globalSkill` / `skillMaster` 等分组对象），按分组展开后共 583 个键、其中 576 个是可调用方法
+2. **主进程处理**：`main/ipc.ts`（4682 行）注册 `ipcMain.handle()` 处理器，调用 `main/lib/` 服务；实际 `ipcMain.handle` 共 522 处（另有 8 处 `ipcMain.on`），其中 `ipc.ts` 248 处，其余分散在 35 个 `main/lib/` 子模块（planning / global-skill / channel / feishu / plugins 等，最大单文件 21 处）
+3. **Preload 桥接**：`preload/index.ts`（3760 行）通过 `contextBridge.exposeInMainWorld` 暴露类型安全的 API；`ElectronAPI` 接口顶层 538 个成员（其中 7 个是 `auth` / `knowledge` / `globalSkill` / `skillMaster` 等分组对象），按分组展开后共 585 个键、其中 578 个是可调用方法
 4. **渲染进程**：通过 `window.electronAPI.*` 调用，Jotai atoms 中封装调用逻辑
 
-添加新 IPC 通道时，需要同步修改这四个位置。`packages/shared/src/types/*.ts` 与 `packages/plugin-api` 共声明 24 个 `*_IPC_CHANNELS` 常量组、485 条通道字符串（AST 统计，全部为字面量）。
+添加新 IPC 通道时，需要同步修改这四个位置。`packages/shared/src/types/*.ts` 与 `packages/plugin-api` 共声明 23 个 `*_IPC_CHANNELS` 常量组、461 条通道字符串（AST 统计，全部为字面量）。
 
 #### 主要 IPC 通道组
 
@@ -238,8 +250,10 @@ bun run generate:icons    # 生成应用图标
 | `agent-collaboration-tools.ts` | Agent 协作委派工具（1607 行）：10 个 MCP 工具（delegate_agent / delegate_agents / wait_for_delegations / list_delegations / get_delegation_results / stop_delegation / stop_delegations / answer_delegation_question / continue_delegation / list_available_agent_models），子会话创建、等待、管理和恢复 |
 | `adapters/claude-agent-adapter.ts` | 转发门面（387 字节）：`export * from '@profer/agent-provider-claude'`，保留旧入口供 agent-service / agent-orchestrator 与既有测试不改调用点；完整实现（2427 行，含 streamInput 持久化、工具权限注入、thinking signature 错误处理）在 `packages/agent-provider-claude` |
 | `adapters/pi-agent-adapter.ts` | 转发门面（1362 字节）：继承并注入 Electron 宿主事实（渠道账号策略 / xAI OAuth 凭据），其余导出转发到 `@profer/agent-provider-pi`；完整实现（7841 行，含内置产品工具注册、AskUserQuestion 闭环）在 `packages/agent-provider-pi` |
-| `agent-session-manager.ts` | Agent 会话管理（3050 行）：SDK 消息持久化、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
-| `agent-prompt-builder.ts` | Agent 系统提示词构建（341 行）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
+| `agent-session-manager.ts` | Agent 会话管理（3054 行）：SDK 消息持久化（经 `@profer/session-store`）、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
+| `agent-session-index.ts` | 转发门面（2 行）：索引 store 的实际实现已移入 `@profer/session-store`，这里只 re-export 保留旧调用点 |
+| `session-store-host.ts` | 宿主适配（31 行）：把 Electron 运行时路径（config / sessions / workspaces / checkpoints，经 `config-paths` 解析）注入 `@profer/session-store`；存储包自身不读 `app.getPath` |
+| `agent-prompt-builder.ts` | Agent 系统提示词构建（348 行）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
 | `agent-service.ts` | Agent 运行服务入口（约 1300 行）：`runAgent()` 按 `agent-runtime-desktop-switch.ts` 的判定分流到桌面 runtime 链或旧编排器；含无界面运行与协作子会话执行 |
 | `agent-headless-runner-registry.ts` | Headless runner 注册表：管理协作委派的 Agent 运行实例生命周期 |
 | `agent-model-selection.ts` | 协作委派模型选择验证：确保委派子会话使用已启用的合法模型 |
@@ -250,6 +264,7 @@ bun run generate:icons    # 生成应用图标
 | `chat-service.ts` | Chat 流式调用编排（38KB）：Provider 适配器集成、消息持久化、AbortController |
 | `conversation-manager.ts` | 对话管理（37KB）：对话 CRUD、JSONL 消息存储（parentId-tree）、置顶、上下文分割、活跃分支 activePath、forkBranchAt 分叉 |
 | `channel-manager.ts` | 渠道管理（82KB）：渠道 CRUD、API Key AES-256-GCM 加密（safeStorage）、连接测试、模型获取 |
+| `edition/index.ts` | 发行版装配点（25 行）：按发行版向执行链注入 account（会话/恢复）与 credentials（代管路由/代管 Bearer）实现；商业模块只在此处汇编 |
 
 #### 集成服务
 
@@ -562,7 +577,7 @@ React UI 更新
 - **错误处理**：SDK 错误映射 + 重试逻辑
 - **自动标题**：首次对话自动生成标题
 
-#### agent-prompt-builder.ts（提示词构建，341 行）
+#### agent-prompt-builder.ts（提示词构建，348 行）
 - **系统提示词生成**：基于工作区配置
 - **动态上下文构建**：注入工作区信息
 - **内置 Agent 构建**：预定义 Agent 配置
