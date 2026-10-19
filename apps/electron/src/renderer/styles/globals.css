@@ -2178,6 +2178,16 @@
   content: none;
 }
 
+/* ===== KaTeX 块级公式：窄消息区横向滚动，避免长公式撑破气泡 =====
+ * rehype-katex 输出 .katex-display（display: block），默认既不换行也不滚动；
+ * 长公式在消息气泡里会溢出。这里只约束块级公式，行内公式保持随文排版。 */
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+
 /* ===== FileBrowser 自动定位的高亮脉冲 =====
  * 末关键帧用 transparent 是故意的：Agent 自动 reveal（select=false）一行不进入选中态，
  * 动画结束后行需要恢复无背景色。如果改成 hsl(--accent) 等不透明色，那一行会一直停留

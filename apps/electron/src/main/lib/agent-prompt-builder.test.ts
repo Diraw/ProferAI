@@ -101,6 +101,20 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('不假装存在唯一答案')
   })
 
+  test('标准提示词包含公式输出契约，避免价格与 shell 变量被误解析', () => {
+    const prompt = buildSystemPrompt({
+      workspaceName: 'Demo',
+      workspaceSlug: 'demo-workspace',
+      sessionId: 'session-math',
+      permissionMode: 'auto',
+    })
+
+    expect(prompt).toContain('## Markdown 与公式')
+    expect(prompt).toContain('行内公式用 `$...$`')
+    expect(prompt).toContain('块级公式用 `$$...$$` 并独占行')
+    expect(prompt).toContain('字面美元符号前加反斜杠转义')
+  })
+
   test('开放认识论允许暂定与创作自由，但必须表态且不放宽执行真实性', () => {
     const prompt = buildSystemPrompt({
       workspaceName: 'Demo',
