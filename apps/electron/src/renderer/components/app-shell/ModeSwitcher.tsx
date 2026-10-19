@@ -179,7 +179,7 @@ export function ModeSwitcher(): React.ReactElement {
                 setPreviewMode(value)
               }}
               className={cn(
-                'mode-btn titlebar-no-drag relative z-[1] h-8 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-0 text-sm font-medium transition-colors duration-200 select-none',
+                'mode-btn titlebar-no-drag relative z-[1] h-8 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-0 text-[15px] leading-5 font-medium transition-colors duration-200 select-none',
                 isActive
                   ? 'mode-btn-selected text-foreground'
                   : isPreview

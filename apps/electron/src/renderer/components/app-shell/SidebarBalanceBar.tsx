@@ -105,10 +105,10 @@ export function SidebarBalanceBar({ collapsed = false }: SidebarBalanceBarProps)
     >
       <div className="flex items-center gap-2">
         <Coins className={cn('size-3.5 shrink-0', tone.text)} />
-        <span className="text-[11px] text-foreground/50 flex-1">
+        <span className="text-[12px] text-foreground/50 flex-1">
           {isOverdraft ? '积分已透支' : isExhausted ? '积分已耗尽' : isLow ? '积分偏低' : '我的积分'}
         </span>
-        <span className={cn('text-xs font-semibold tabular-nums', tone.text)}>
+        <span className={cn('text-[13px] font-semibold tabular-nums', tone.text)}>
           {formatPoints(points)}
         </span>
       </div>

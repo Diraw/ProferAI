@@ -141,7 +141,7 @@ export function RailRecentButton({
             />
             {item.isAutomation
               ? <Clock size={14} className="text-foreground/40" />
-              : <span className="text-[13px] font-semibold leading-none">{item.initial}</span>
+              : <span className="text-[14px] font-semibold leading-none">{item.initial}</span>
             }
           </button>
         </TooltipTrigger>
@@ -351,7 +351,7 @@ export function SessionItemActions({
       <span
         title={`最后更新：${new Date(updatedAt).toLocaleString('zh-CN')}`}
         className={cn(
-          'absolute inset-y-0 right-0 block w-full text-right text-[11px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
+          'absolute inset-y-0 right-0 block w-full text-right text-[12px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
           forceVisible ? 'opacity-0' : 'opacity-100 group-hover:opacity-0',
         )}
       >
@@ -642,12 +642,12 @@ export const ConversationItem = React.memo(function ConversationItem({
                 onKeyDown={handleKeyDown}
                 onBlur={saveTitle}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full bg-transparent text-[13px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
+                className="w-full bg-transparent text-[14px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
                 maxLength={100}
               />
             ) : (
               <div className={cn(
-                'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
+                'truncate text-[14px] leading-[19px] flex items-center gap-1.5',
                 active ? 'text-foreground' : 'text-foreground/80'
               )}>
                 {/* 置顶标记 */}
@@ -657,7 +657,7 @@ export const ConversationItem = React.memo(function ConversationItem({
                 {regeneratingTitle ? (
                   <>
                     <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
-                    <span className="flex-shrink-0 text-[11px] text-info">正在生成标题…</span>
+                    <span className="flex-shrink-0 text-[12px] text-info">正在生成标题…</span>
                   </>
                 ) : null}
                 <span className="truncate">{conversation.title}</span>
@@ -977,12 +977,12 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 onKeyDown={handleKeyDown}
                 onBlur={saveTitle}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full bg-transparent text-[13px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
+                className="w-full bg-transparent text-[14px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
                 maxLength={100}
               />
             ) : (
               <div className={cn(
-                'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
+                'truncate text-[14px] leading-[19px] flex items-center gap-1.5',
                 active ? 'text-foreground' : 'text-foreground/80'
               )}>
                 {showPinIcon && (
@@ -1000,7 +1000,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 {regeneratingTitle ? (
                   <>
                     <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
-                    <span className="flex-shrink-0 text-[11px] text-info">正在生成标题…</span>
+                    <span className="flex-shrink-0 text-[12px] text-info">正在生成标题…</span>
                   </>
                 ) : hasBrowser ? (
                   <Globe size={11} className="flex-shrink-0 text-foreground/40" aria-label="该会话正在使用浏览器" />
@@ -1011,7 +1011,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                   <Pencil size={11} className="flex-shrink-0 text-foreground/40" aria-label="输入框有未发送内容" />
                 )}
                 {workspaceName && (
-                  <span className="flex-shrink-0 px-1.5 py-0 rounded-full bg-primary/10 text-[10px] leading-4 workspace-badge font-medium truncate max-w-[80px]">
+                  <span className="flex-shrink-0 px-1.5 py-0 rounded-full bg-primary/10 text-[11px] leading-4 workspace-badge font-medium truncate max-w-[80px]">
                     {workspaceName}
                   </span>
                 )}
@@ -1023,7 +1023,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                       event.stopPropagation()
                       delegationSummary.onToggle()
                     }}
-                    className="flex-shrink-0 inline-flex items-center gap-0.5 text-[11px] leading-4 text-foreground/45 hover:text-foreground/65 transition-colors"
+                    className="flex-shrink-0 inline-flex items-center gap-0.5 text-[12px] leading-4 text-foreground/45 hover:text-foreground/65 transition-colors"
                   >
                     <ChevronRight
                       size={10}
@@ -1352,7 +1352,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               onChange={(e) => setWorkspaceEditName(e.target.value)}
               onKeyDown={handleWorkspaceRenameKeyDown}
               onBlur={() => void handleWorkspaceRenameCommit()}
-              className="flex-1 min-w-0 bg-transparent text-[13px] font-medium text-foreground border-b border-primary/50 outline-none px-0.5 leading-[18px]"
+              className="flex-1 min-w-0 bg-transparent text-[14px] font-medium text-foreground border-b border-primary/50 outline-none px-0.5 leading-[19px]"
               maxLength={50}
             />
           </div>
@@ -1392,7 +1392,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
             )}
           >
             {renderWorkspaceIcon(13, 'flex-shrink-0 text-foreground/40')}
-            <span className="flex-1 min-w-0 truncate text-[13px] font-medium leading-[18px]">
+            <span className="flex-1 min-w-0 truncate text-[14px] font-medium leading-[19px]">
               {group.workspace.name}
             </span>
             <span
@@ -1536,7 +1536,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                 <button
                   type="button"
                   onClick={() => onShowMore(group.workspace.id)}
-                  className="w-full text-left px-1.5 py-1 rounded-md text-[12px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                  className="w-full text-left px-1.5 py-1 rounded-md text-[13px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
                 >
                   显示更多
                 </button>
@@ -1546,14 +1546,14 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                 <button
                   type="button"
                   onClick={() => onCollapseExtra(group.workspace.id)}
-                  className="w-full text-left px-1.5 py-1 rounded-md text-[12px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                  className="w-full text-left px-1.5 py-1 rounded-md text-[13px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
                 >
                   收起
                 </button>
               )}
             </div>
           ) : (
-            <div className="px-1.5 py-0.5 text-[12px] text-foreground/22 select-none">
+            <div className="px-1.5 py-0.5 text-[13px] text-foreground/22 select-none">
               暂无会话
             </div>
           )

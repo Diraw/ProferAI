@@ -161,7 +161,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
         <button
           data-profer-navigation-item="new-session"
           onClick={mode === 'agent' ? handleNewAgentSession : handleNewConversation}
-          className="flex-1 flex items-center gap-2 px-3 py-2 rounded-[10px] text-[13px] font-medium text-foreground/70 bg-primary/5 hover:bg-primary/10 hover:text-foreground transition-[background-color,border-color,color] duration-150 titlebar-no-drag border border-border/60 hover:border-border"
+          className="flex-1 flex items-center gap-2 px-3 py-2 rounded-[10px] text-[14px] font-medium text-foreground/70 bg-primary/5 hover:bg-primary/10 hover:text-foreground transition-[background-color,border-color,color] duration-150 titlebar-no-drag border border-border/60 hover:border-border"
         >
           <Plus size={14} />
           <span>{mode === 'agent' ? '新会话' : '新对话'}</span>
@@ -204,8 +204,8 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
       {/* 当前会话：直接复用现有会话行组件，不另造一套 Tab 行。 */}
       <div className="flex-none px-2 pt-2 pb-1 titlebar-no-drag">
         <div className="mb-1 flex items-center justify-between px-2">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-foreground/40">当前会话</span>
-          <span className="text-[10px] tabular-nums text-foreground/30">{openSessionEntries.length}</span>
+          <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-foreground/40">当前会话</span>
+          <span className="text-[11px] tabular-nums text-foreground/30">{openSessionEntries.length}</span>
         </div>
         <div className={cn('sidebar-session-scroll -mr-2 flex max-h-[144px] flex-col gap-0.5 overflow-y-auto pr-2 scrollbar-thin', openSessionListIndentClass)}>
           {openSessionEntries.map((entry) => {
@@ -269,7 +269,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
         <div className="flex-1 flex flex-col min-h-0">
           {pinnedConversations.length > 0 && (
             <div className="pt-2 pb-1 flex-shrink-0 titlebar-no-drag">
-              <div className="pl-[18px] pr-3.5 pb-1 text-[13px] font-medium leading-[18px] text-foreground/40 select-none">
+              <div className="pl-[18px] pr-3.5 pb-1 text-[14px] font-medium leading-[19px] text-foreground/40 select-none">
                 置顶
               </div>
               <div
@@ -303,13 +303,13 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
           )}
 
           <div className="px-2 pt-2 pb-1 flex-shrink-0">
-            <span className="ml-[4px] px-1.5 text-[13px] font-medium leading-[18px] text-foreground/40 select-none">对话</span>
+            <span className="ml-[4px] px-1.5 text-[14px] font-medium leading-[19px] text-foreground/40 select-none">对话</span>
           </div>
 
           <div className="sidebar-session-scroll flex-1 overflow-y-auto px-2 pb-3 scrollbar-thin min-h-0 titlebar-no-drag">
             {progressiveConversationGroups.map((group) => (
               <div key={group.label} className="mb-1">
-                <div className="ml-[4px] px-1.5 pt-2 pb-1 text-[11px] font-medium text-foreground/40 select-none">
+                <div className="ml-[4px] px-1.5 pt-2 pb-1 text-[12px] font-medium text-foreground/40 select-none">
                   {group.label}
                 </div>
                 <div className="flex flex-col gap-0.5">
@@ -425,7 +425,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                   aria-pressed={sidebarSection === value}
                   onClick={() => setSidebarSection(value)}
                   className={cn(
-                    'rounded-[6px] px-2 py-[1.5px] text-[12px] transition-colors',
+                    'rounded-[6px] px-2 py-[1.5px] text-[13px] transition-colors',
                     sidebarSection === value ? 'bg-background text-foreground shadow-sm' : 'text-foreground/40 hover:text-foreground/70',
                   )}
                 >
@@ -517,7 +517,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
                     setNewProjectName('')
                   }}
                   placeholder="项目名称..."
-                  className="flex-1 min-w-0 bg-transparent text-[13px] text-foreground border-b border-primary/50 outline-none px-0.5"
+                  className="flex-1 min-w-0 bg-transparent text-[14px] text-foreground border-b border-primary/50 outline-none px-0.5"
                   maxLength={50}
                 />
               </div>
@@ -573,7 +573,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
           {/* 归档视图标题栏 */}
           {viewMode === 'archived' && (
             <div className="px-6 pt-3 pb-1">
-              <div className="text-[12px] font-medium text-foreground/40">
+              <div className="text-[13px] font-medium text-foreground/40">
                 已归档{mode === 'agent' ? '会话' : '对话'}
               </div>
             </div>
@@ -585,7 +585,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
               /* Chat 归档：对话按日期分组 */
               progressiveConversationGroups.map((group) => (
                 <div key={group.label} className="mb-1">
-                  <div className="px-3 pt-2 pb-1 text-[11px] font-medium text-foreground/40 select-none">
+                  <div className="px-3 pt-2 pb-1 text-[12px] font-medium text-foreground/40 select-none">
                     {group.label}
                   </div>
                   <div className="flex flex-col gap-0.5">
@@ -614,7 +614,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
               /* Agent 模式归档：Agent 会话按日期分组 */
               progressiveAgentSessionGroups.map((group) => (
                 <div key={group.label} className="mb-1">
-                  <div className="px-3 pt-2 pb-1 text-[11px] font-medium text-foreground/40 select-none">
+                  <div className="px-3 pt-2 pb-1 text-[12px] font-medium text-foreground/40 select-none">
                     {group.label}
                   </div>
                   <div className="flex flex-col gap-0.5">
@@ -655,7 +655,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
             {mode === 'chat' && archivedConversationCount > 0 && (
               <button
                 onClick={() => setViewMode('archived')}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-[10px] text-[12px] text-foreground/40 hover:bg-foreground/[0.04] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-[10px] text-[13px] text-foreground/40 hover:bg-foreground/[0.04] hover:text-foreground/60 transition-colors titlebar-no-drag"
               >
                 <Archive size={13} className="text-foreground/30" />
                 <span>已归档 ({archivedConversationCount})</span>
@@ -664,7 +664,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
             {mode === 'agent' && archivedAgentSessionCount > 0 && (
               <button
                 onClick={() => setViewMode('archived')}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-[10px] text-[12px] text-foreground/40 hover:bg-foreground/[0.04] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-[10px] text-[13px] text-foreground/40 hover:bg-foreground/[0.04] hover:text-foreground/60 transition-colors titlebar-no-drag"
               >
                 <Archive size={13} className="text-foreground/30" />
                 <span>已归档 ({archivedAgentSessionCount})</span>
@@ -674,7 +674,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
         ) : (
           <button
             onClick={() => setViewMode('active')}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-[10px] text-[12px] text-foreground/60 bg-foreground/[0.04] hover:bg-foreground/[0.07] hover:text-foreground/80 transition-colors titlebar-no-drag"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-[10px] text-[13px] text-foreground/60 bg-foreground/[0.04] hover:bg-foreground/[0.07] hover:text-foreground/80 transition-colors titlebar-no-drag"
           >
             <ArrowLeft size={13} className="text-foreground/50" />
             <span>返回活跃{mode === 'agent' ? '会话' : '对话'}</span>
@@ -693,7 +693,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
           className="w-full flex items-center gap-3 px-3 py-2 rounded-[10px] transition-colors titlebar-no-drag text-foreground/70 hover:bg-foreground/[0.04] hover:text-foreground"
         >
           <UserAvatar avatar={userProfile.avatar} size={28} />
-          <span className="flex-1 text-sm truncate text-left">{userProfile.userName}</span>
+          <span className="flex-1 text-[15px] leading-5 truncate text-left">{userProfile.userName}</span>
           <div className="relative flex-shrink-0 text-foreground/40">
             <Settings size={16} />
             {(hasUpdate || hasEnvironmentIssues) && (
