@@ -11,6 +11,7 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, rmSync, renameSync, readdirSync, cpSync, copyFileSync, createReadStream, createWriteStream, type WriteStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { createAgentSessionIndexStore } from './agent-session-index'
+import { createSyncSessionMessageStore } from '@profer/session-store'
 import { createSnippet, extractTextFromPersistedMessage, matchAgentJsonlLine } from './agent-session-search'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -122,6 +123,14 @@ import {
 const sessionIndex = createAgentSessionIndexStore(getAgentSessionsIndexPath)
 const readIndex = sessionIndex.read
 const writeIndex = sessionIndex.write
+
+const syncMessageStore = createSyncSessionMessageStore(
+  () => ({ sessionsDir: getAgentSessionsDir() }),
+  {
+    parseMessage: (sessionId, line) => parseSDKMessageLine(line, sessionId) ?? undefined,
+    serializeMessage: (sessionId, message) => serializeSDKMessageForStorage(message, undefined, undefined),
+  },
+)
 
 /** UPDATE_SESSION_AGENT_RUNTIME 需要原子回滚的 runtime-owned 元数据快照。 */
 export interface AgentRuntimeMetaSnapshot {
@@ -563,13 +572,8 @@ export function appendSDKMessages(id: string, messages: SDKMessage[]): void {
     if (session) lockAgentSessionRuntime(id, normalizeAgentRuntime(session.agentRuntime))
   }
 
-  const filePath = getAgentSessionMessagesPath(id)
-
   try {
-    const lines = persistentMessages
-      .map((m) => externalizeSerializedSessionLine(JSON.stringify(m), id))
-      .join('\n') + '\n'
-    appendFileSync(filePath, lines, 'utf-8')
+    syncMessageStore.append(id, persistentMessages)
   } catch (error) {
     console.error(`[Agent 会话] 追加 SDKMessage 失败 (${id}):`, error)
     throw new Error('追加 SDKMessage 失败')
