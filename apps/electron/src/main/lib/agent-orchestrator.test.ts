@@ -23,15 +23,13 @@ describe('buildPiAdditionalDirectoriesPrompt', () => {
       sourceDirectory: 'D:\\REPO',
       name: 'AAAI学习大师',
       relativePath: 'AAAI学习大师',
+      packageName: 'aaai',
+      repositoryRoot: 'D:\\REPO',
     }]
 
     const prompt = buildPiAdditionalDirectoriesPrompt(['D:\\REPO'], candidates)
     expect(prompt).toContain('<detected_project_candidates>')
-    expect(prompt).toContain('<root>D:\\REPO\\AAAI学习大师</root>')
-    expect(prompt).toContain('<type>obsidian-vault</type>')
-    expect(prompt).toContain('<name>AAAI学习大师</name>')
-    expect(prompt).toContain('<relative_to_attached_directory>AAAI学习大师</relative_to_attached_directory>')
-    expect(prompt).toContain('repository_root')
+    expect(prompt).toContain('- AAAI学习大师（obsidian-vault）：D:\\REPO\\AAAI学习大师，package=aaai，repo=D:\\REPO')
     expect(prompt).toContain('唯一语义匹配候选')
   })
 

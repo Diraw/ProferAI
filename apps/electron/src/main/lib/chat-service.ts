@@ -26,8 +26,8 @@ import {
   detectInsufficientCredits,
 } from '@profer/core'
 import type { ImageAttachmentData, ContinuationMessage } from '@profer/core'
+import { resolveEditionBearerToken } from '@profer/edition-contract'
 import { listChannels, decryptApiKey, canSelfConfig } from './channel-manager'
-import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
 import { appendMessage, appendBranchTail, updateConversationMeta, getConversationBranch, getConversationMeta, DEFAULT_CONVERSATION_TITLE } from './conversation-manager'
 import { readAttachmentAsBase64, isImageAttachment } from './attachment-service'
 import { extractTextFromAttachment, isDocumentAttachment } from './document-parser'
@@ -35,7 +35,7 @@ import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { getEnabledTools } from './chat-tool-registry'
 import { executeToolCalls } from './chat-tool-executor'
-import { shouldUseManagedCommercialRoute } from './commercial-routing-policy'
+import { editionProviders } from './edition'
 import { searchKnowledgeItemsForChat } from './knowledge-item-service'
 import { prepareChatKnowledgeRequest } from './chat-knowledge-request'
 import { buildTitlePrompt, buildWindowTitlePrompt, collectTitleSources, mergeTitleRefineAttempts, planTitleWindow, preflightTitleWindow, sanitizeGeneratedTitle, MAX_TITLE_LENGTH, SHORT_MESSAGE_THRESHOLD } from './title-generation'
@@ -280,10 +280,10 @@ export async function sendMessage(
   let apiKey: string
   let proxyBaseUrl = ''
   // 代管模式判定集中由商业旁侧策略提供；自配渠道继续走直连。
-  const shouldUseCommercialProxy = shouldUseManagedCommercialRoute(channel, { respectDirectDataPlane: true })
+  const shouldUseCommercialProxy = editionProviders.credentials.shouldUseManagedRoute(channel, { respectDirectDataPlane: true })
 
   if (shouldUseCommercialProxy) {
-    const auth = await getTeamAuthWithRefresh()
+    const auth = await editionProviders.account.getSession()
     if (!auth) {
       pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
         conversationId,
@@ -295,7 +295,7 @@ export async function sendMessage(
 
     const proxyPath = ANTHROPIC_PROXY_PROVIDERS.has(channel.provider) ? '/v1/proxy/messages' : '/v1/proxy/chat'
     proxyBaseUrl = `${auth.baseUrl}${proxyPath}`
-    apiKey = auth.proxyToken || auth.token
+    apiKey = resolveEditionBearerToken(auth)
   } else {
     try {
       apiKey = decryptApiKey(channelId)
@@ -420,7 +420,7 @@ export async function sendMessage(
         const canRecover = !controller.signal.aborted && (isInvalidRelayTokenError(error) || channel.directDataPlane === true)
         if (!canRecover) throw error
 
-        const recovered = await recoverCommercialProxyAuth()
+        const recovered = await editionProviders.account.recoverSession()
         if (!recovered) throw error
 
         if (channel.directDataPlane === true) {
@@ -790,10 +790,10 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
 
   let apiKey: string
   let proxyBaseUrl = ''
-  const shouldUseCommercialProxy = shouldUseManagedCommercialRoute(channel, { respectDirectDataPlane: true })
+  const shouldUseCommercialProxy = editionProviders.credentials.shouldUseManagedRoute(channel, { respectDirectDataPlane: true })
 
   if (shouldUseCommercialProxy) {
-    const auth = await getTeamAuthWithRefresh().catch((error) => {
+    const auth = await editionProviders.account.getSession().catch((error) => {
       console.warn('[标题生成] 获取团队认证失败:', error)
       return null
     })
@@ -803,7 +803,7 @@ export async function generateTitle(input: GenerateTitleInput): Promise<string |
     }
     const proxyPath = ANTHROPIC_PROXY_PROVIDERS.has(channel.provider) ? '/v1/proxy/messages' : '/v1/proxy/chat'
     proxyBaseUrl = `${auth.baseUrl}${proxyPath}`
-    apiKey = auth.proxyToken || auth.token
+    apiKey = resolveEditionBearerToken(auth)
   } else {
     try {
       apiKey = decryptApiKey(channelId)

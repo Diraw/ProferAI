@@ -65,7 +65,6 @@ import {
   persistCodexOAuthCredentials,
   resolveCodexOAuthCredentials,
 } from './channel-manager'
-import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
 import { AgentEventBus } from './agent-event-bus'
 import { createAgentQueryPreparationPort, createAgentRunOwnershipRegistry, createAgentRunOwnershipView, createAgentRunRejectionError, createAgentStreamDrainController, readAgentStreamNext, waitForRetryDelay } from '@profer/agent-runtime'
 import type { AgentRunOwnershipRegistry, AgentRunOwnershipView, AgentRuntimeQuery, AgentRuntimeQueryPreparationPort, AgentStreamDrainState } from '@profer/agent-runtime'
@@ -95,13 +94,14 @@ import { appendGraphEvent } from './project-graph-service'
 import { injectAgentCollaborationMcpServer, registerCollaborationEventBus, stopDelegationsForParent } from './agent-collaboration-tools'
 import { setHeadlessAgentRunner, setAgentStopper } from './agent-headless-runner-registry'
 import { getAdapter, resolveTitleBaseUrl, fetchTitleWithRetry } from '@profer/core'
+import { resolveEditionBearerToken } from '@profer/edition-contract'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { generateCodexTitle } from './adapters/pi-codex-title-generator'
 import { buildTitlePrompt, buildWindowTitlePrompt, sanitizeGeneratedTitle } from './title-generation'
 import { collectSessionTitleSources, runSessionTitleNaming } from './agent-session-title-naming'
 import type { SessionTitleNamingLogger } from './agent-session-title-naming'
-import { shouldUseCommercialBearerAuth } from './commercial-routing-policy'
+import { editionProviders } from './edition'
 import {
   appendSDKMessages,
   lockAgentSessionRuntime,
@@ -576,14 +576,14 @@ export class AgentOrchestrator {
 
       let apiKey: string
       let proxyBaseUrl = ''
-      if (shouldUseCommercialBearerAuth(channel)) {
-        const auth = await getTeamAuthWithRefresh()
+      if (editionProviders.credentials.shouldUseBearerAuth(channel)) {
+        const auth = await editionProviders.account.getSession()
         if (!auth) {
           return fail('团队账号登录已过期')
         }
         const proxyPath = (this.adapter.isAnthropicProxyProvider?.(channel.provider) ?? true) ? '/v1/proxy/messages' : '/v1/proxy/chat'
         proxyBaseUrl = `${auth.baseUrl}${proxyPath}`
-        apiKey = auth.proxyToken || auth.token
+        apiKey = resolveEditionBearerToken(auth)
       } else {
         apiKey = decryptApiKey(channelId)
       }
@@ -2297,7 +2297,7 @@ export class AgentOrchestrator {
         if (relayTokenRecoveryAttempted || (!runtimeCredentials.forceBearerAuth && channel.directDataPlane !== true)) return false
         relayTokenRecoveryAttempted = true
 
-        const recovered = await recoverCommercialProxyAuth()
+        const recovered = await editionProviders.account.recoverSession()
         if (!recovered) return false
 
         // 直连 canary 失败时同步一次渠道目录，将该用户切回 Relay；旧 Relay 令牌仍由服务端控制。
