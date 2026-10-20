@@ -4,7 +4,7 @@ import { projectAgentPayloadForPocket, projectSdkMessageForPocket } from './pock
 const large = 'private tool data '.repeat(1000)
 
 describe('Pocket 远程 Agent 投影', () => {
-  test('只保留正文和工具名称，不下发思考与工具入参', () => {
+  test('保留有界思考预览，不下发工具入参', () => {
     const projected = projectSdkMessageForPocket({
       type: 'assistant',
       message: {
@@ -15,12 +15,46 @@ describe('Pocket 远程 Agent 投影', () => {
         ],
       },
       parent_tool_use_id: null,
+    }) as never as {
+      message: { content: [Record<string, unknown>, Record<string, unknown>, Record<string, unknown>] }
+    }
+    const [thinking, text, tool] = projected.message.content
+    expect(text).toEqual({ type: 'text', text: '完成' })
+    expect(tool).toEqual({ type: 'tool_use', id: 'tool-1', name: 'Bash', input: {} })
+    // final 帧思考上限 2000 字符，保留结尾；整条消息不再携带 18k 的原始思考。
+    expect(thinking.type).toBe('thinking')
+    expect(String(thinking.thinking).startsWith('…')).toBe(true)
+    expect(String(thinking.thinking).length).toBe(2001)
+    expect(String(thinking.thinking).endsWith('private tool data')).toBe(true)
+    expect(JSON.stringify(projected).length).toBeLessThan(4000)
+  })
+
+  test('partial 思考只带尾部窗口，避免每帧重发全文', () => {
+    const projected = projectSdkMessageForPocket({
+      type: 'assistant',
+      _partial: true,
+      uuid: 'a1',
+      message: {
+        content: [
+          { type: 'thinking', thinking: `${'早期推理。'.repeat(300)}最新结论` },
+          { type: 'text', text: '正在处理' },
+        ],
+      },
+      parent_tool_use_id: null,
     }) as never as { message: { content: Array<Record<string, unknown>> } }
-    expect(projected.message.content).toEqual([
-      { type: 'text', text: '完成' },
-      { type: 'tool_use', id: 'tool-1', name: 'Bash', input: {} },
-    ])
-    expect(JSON.stringify(projected)).not.toContain(large)
+    const thinking = projected.message.content.find((block) => block.type === 'thinking')
+    expect(thinking).toBeDefined()
+    expect(String(thinking?.thinking).length).toBe(801)
+    expect(String(thinking?.thinking).endsWith('最新结论')).toBe(true)
+  })
+
+  test('空思考不产生思考块', () => {
+    const projected = projectSdkMessageForPocket({
+      type: 'assistant',
+      message: { content: [{ type: 'thinking', thinking: '   ' }, { type: 'text', text: 'ok' }] },
+      parent_tool_use_id: null,
+    }) as never as { message: { content: Array<Record<string, unknown>> } }
+    expect(projected.message.content).toEqual([{ type: 'text', text: 'ok' }])
   })
 
   test('assistant 只透传上下文用量需要的四个 token 计数', () => {
@@ -55,7 +89,8 @@ describe('Pocket 远程 Agent 投影', () => {
     const payload = projectAgentPayloadForPocket({
       kind: 'sdk_message',
       message: { type: 'assistant', message: { content: [{ type: 'thinking', thinking: large }] }, parent_tool_use_id: null },
-    } as never) as never as { message: { message: { content: unknown[] } } }
-    expect(payload.message.message.content).toEqual([])
+    } as never) as never as { message: { message: { content: Array<Record<string, unknown>> } } }
+    expect(payload.message.message.content).toHaveLength(1)
+    expect(payload.message.message.content[0]?.type).toBe('thinking')
   })
 })
