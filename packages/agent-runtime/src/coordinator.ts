@@ -303,6 +303,11 @@ export class AgentRuntimeCoordinator {
           if (!session) throw new AgentRuntimePreparationError('Persisted user message requires a SessionPort', 'session_port_missing', 'persistence')
           session.appendMessages(input.sessionId, [input.persistedUserMessage])
           userMessagePersisted = true
+          // 用户气泡也是事件流的一部分：桌面渲染层有乐观气泡并按 uuid 去重，
+          // 且不消费 user 文本事件；但 Pocket 没有本地状态，只能靠这条事件在运行中
+          // 看到电脑端发起的那句话。缺了它，手机端整轮只剩回复、看不到指令。
+          // 必须在 provider 启动前投递，保证移动端先看到用户输入再看到输出。
+          await emit({ type: 'message', sessionId: input.sessionId, message: input.persistedUserMessage })
         }
         if (!providerStarted) {
           // 「真正运行开始」的唯一触发点：准备已经成功，provider 随即启动。

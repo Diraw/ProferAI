@@ -293,6 +293,9 @@ export class OpenAIAdapter implements ProviderAdapter {
         model: input.modelId,
         messages: [{ role: 'user', content: input.prompt }],
         max_tokens: 128,
+        // 显式关闭流式：一些 OpenAI 兼容网关缺省就返回 SSE，
+        // 标题请求按 JSON 解析会报 `Unexpected token 'd'`。
+        stream: false,
         ...(isDeepSeekV4 ? { thinking: { type: 'disabled' } } : {}),
         ...(isLikelyOpenAIReasoning ? { reasoning_effort: 'none' } : {}),
       }),

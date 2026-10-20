@@ -39,7 +39,7 @@
     },
     "apps/electron": {
       "name": "@profer/electron",
-      "version": "0.16.9",
+      "version": "0.16.10",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "0.3.201",
         "@anthropic-ai/sdk": "^0.93.0",
@@ -63,9 +63,11 @@
         "@profer/agent-provider-pi": "workspace:*",
         "@profer/agent-runtime": "workspace:*",
         "@profer/core": "workspace:*",
+        "@profer/edition-contract": "workspace:*",
         "@profer/plugin-api": "workspace:*",
         "@profer/project-core": "workspace:*",
         "@profer/session-core": "workspace:*",
+        "@profer/session-store": "workspace:*",
         "@profer/shared": "workspace:*",
         "@profer/ui": "workspace:*",
         "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -237,6 +239,16 @@
         "@modelcontextprotocol/sdk": ">=1.0.0",
       },
     },
+    "packages/edition-contract": {
+      "name": "@profer/edition-contract",
+      "version": "0.1.0",
+      "dependencies": {
+        "@profer/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "^5.0.0",
+      },
+    },
     "packages/office-engine": {
       "name": "@profer/office-engine",
       "version": "0.1.0",
@@ -268,6 +280,18 @@
       "name": "@profer/session-core",
       "version": "0.1.1",
       "dependencies": {
+        "@profer/shared": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "^5.0.0",
+      },
+    },
+    "packages/session-store": {
+      "name": "@profer/session-store",
+      "version": "0.1.0",
+      "dependencies": {
+        "@profer/project-core": "workspace:*",
+        "@profer/session-core": "workspace:*",
         "@profer/shared": "workspace:*",
       },
       "devDependencies": {
@@ -658,6 +682,8 @@
 
     "@profer/core": ["@profer/core@workspace:packages/core"],
 
+    "@profer/edition-contract": ["@profer/edition-contract@workspace:packages/edition-contract"],
+
     "@profer/electron": ["@profer/electron@workspace:apps/electron"],
 
     "@profer/office-engine": ["@profer/office-engine@workspace:packages/office-engine"],
@@ -667,6 +693,8 @@
     "@profer/project-core": ["@profer/project-core@workspace:packages/project-core"],
 
     "@profer/session-core": ["@profer/session-core@workspace:packages/session-core"],
+
+    "@profer/session-store": ["@profer/session-store@workspace:packages/session-store"],
 
     "@profer/shared": ["@profer/shared@workspace:packages/shared"],
 

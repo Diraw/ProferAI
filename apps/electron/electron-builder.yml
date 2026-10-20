@@ -68,11 +68,11 @@ files:
   # 安装包内运行时不会读取 map，线上调试也用不到 asar 内的 map
   - "!node_modules/**/*.map"
   # 排除 workspace 包的 symlink（代码已被 esbuild/Vite 打包到 dist/ 中）
-  - "!node_modules/@proma/**"
+  - "!node_modules/@profer/**"
 
 # 通用额外资源
 extraResources:
-  # 默认 Skills 模板（首次启动时同步到 ~/.proma/default-skills/）
+  # 默认 Skills 模板（首次启动时同步到 ~/.profer/default-skills/）
   - from: default-skills
     to: default-skills
     filter:
@@ -88,11 +88,6 @@ extraResources:
   # 内置皮肤包（设置 → 外观设置 → 特殊风格；skin-service 打包路径 process.resourcesPath/skins）
   - from: resources/skins
     to: skins
-    filter:
-      - "**/*"
-  # PPT Style Pack（风格注册表与固定视觉缩略图；运行时路径 process.resourcesPath/ppt-style-packs）
-  - from: resources/ppt-style-packs
-    to: ppt-style-packs
     filter:
       - "**/*"
   # 皮肤模板（skin-manager 新建/导入皮肤时复制，打包路径 process.resourcesPath/skin-template）

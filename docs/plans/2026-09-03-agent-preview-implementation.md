@@ -336,7 +336,7 @@ git add apps/electron/src/main/lib/adapters apps/electron/src/main/lib/agent-orc
 - Modify: `apps/electron/src/main/lib/*test.ts`（仅补集成覆盖）
 - Modify: `apps/electron/package.json`（按仓库规则递增 patch）
 - Modify: `packages/shared/package.json`（若 shared 类型发生变化，递增 patch）
-- Modify: `/Users/mac/profer/profer-main/CLAUDE.md`（仅在确认规则/架构入口需要同步时）
+- Modify: `/Users/alice/project/CLAUDE.md`（仅在确认规则/架构入口需要同步时）
 - Modify: `README.md` / `README.en.md`（仓库规则要求功能变化同步，修改前需用户允许）
 - Create: `docs/plans/2026-09-03-agent-preview-design.md`（已完成）
 
@@ -397,7 +397,7 @@ git add apps/electron packages/shared docs/plans
 
 ## Implementation Notes
 
-- 当前工作树已有未提交的 macOS 相关改动。实施前后都必须使用 `git -C /Users/mac/profer/profer-main status -sb`，只提交本功能文件，绝不覆盖或整理既有改动。
+- 当前工作树已有未提交的 macOS 相关改动。实施前后都必须使用 `git -C /Users/alice/project status -sb`，只提交本功能文件，绝不覆盖或整理既有改动。
 - 不要引入新的数据库；短期 renderer 缓存可使用内存 Map，并以 revision 与授权上下文隔离。
 - 不要把模型可见的结果设计为本机绝对路径；图片必须走 runtime image content block。
 - 不要把“上一次 revision”误解为历史内容；每次调用都重新读取当前磁盘版本。

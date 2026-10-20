@@ -17,7 +17,7 @@ describe('更新源优先级', () => {
       url: DOMESTIC_UPDATE_FEED_URL,
       timeout: UPDATE_REQUEST_TIMEOUT_MS,
     })
-    // 2026-10-08：香港机 45.114.127.232 失联，主源不能再是 updates.profer.cn
+    // 2026-10-08：香港机失联，主源不能再是 updates.profer.cn
     expect(DOMESTIC_UPDATE_FEED_URL).toBe('https://profer.cn/profer-updates/')
     expect(getUpdateSources(undefined)[1]?.configuration)
       .toMatchObject({ provider: 'generic', url: DOMESTIC_FALLBACK_UPDATE_FEED_URL })
@@ -33,7 +33,7 @@ describe('更新源优先级', () => {
   test('拒绝明文 HTTP、裸 IP、凭据和无效 URL 覆盖', () => {
     for (const value of [
       'http://updates.example.com/profer/',
-      'https://47.109.108.57/profer/',
+      'https://203.0.113.10/profer/',
       'https://[::1]/profer/',
       'https://user:pass@updates.example.com/profer/',
       'not-a-url',

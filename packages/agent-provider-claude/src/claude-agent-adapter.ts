@@ -1095,9 +1095,10 @@ export class ClaudeAgentAdapter implements AgentProviderAdapter {
         ...(options.additionalDirectories && options.additionalDirectories.length > 0 && {
           additionalDirectories: options.additionalDirectories,
         }),
-        // 强制顺序执行工具，防止并发 tool_use 导致 400 错误
-        // 根因：多个 tool_use 并发时若结果未完整批量提交会触发 invalid_request_error
-        toolUseConcurrency: 1,
+        // 这里刻意不传 toolUseConcurrency：Claude Agent SDK 0.3.x 的 sdk.mjs / sdk.d.ts 里
+        // 没有这个选项（搜 0 命中），SDK 忽略未知字段，传了也只是「以为串行、实际没限制」。
+        // 工具并发由 CLI 内部的 isConcurrencySafe 判定，宿主无法用 SDK 选项直接配置；
+        // 确实需要串行时只能在 PreToolUse hook / canUseTool 里拦截。
 
         // Stop hook 观察者：读取本轮结束时仍在飞行的后台任务/定时任务集合。
         // background_tasks（run_in_background bash / Monitor / subagent）与 session_crons

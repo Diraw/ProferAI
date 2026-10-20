@@ -26,6 +26,17 @@ export interface BrowserViewLayout {
   viewportRadius: number
   /** 网页在 native frame 内的局部矩形；当前工具栏/标签栏位于 renderer DOM，不占原生 frame。 */
   pageBounds: BrowserViewBounds
+  /**
+   * 该网页当前位于分屏右栏，需要在原生网页右下角叠加「关闭拆分视图」浮标。
+   * 原生 WebContentsView 盖在 renderer DOM 之上，普通 DOM 按钮无法覆盖网页内容。
+   */
+  splitViewClose?: boolean
+}
+
+export interface BrowserSplitViewCloseEvent {
+  sessionId: string
+  /** 浏览器内部页 id；渲染进程用它定位所属的分屏组合。 */
+  tabId: string
 }
 
 export type BrowserExecutionSource = 'user' | 'automation' | 'delegation' | 'goal'

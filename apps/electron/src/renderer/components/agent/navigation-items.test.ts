@@ -91,6 +91,21 @@ describe('导航条目组装 · 全量索引为骨架', () => {
     expect(items.map((it) => it.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
   })
 
+  test('Given 索引预览里带着内部 XML When 组装 Then 只显示用户自己的话', () => {
+    // 旧版本主进程的索引 / 进程内缓存可能还是带 <quoted_context> 的旧预览，
+    // 展示层再洗一遍，不能让整段 XML 冒到迷你地图上。
+    const index = [
+      entry({
+        id: 'u1',
+        preview: '<quoted_context source="agent-interruption" label="已被用户中断" message_id="" role="">\n上次任务被中断\n</quoted_context>\n\n帮我把它的签名搞定，然后打开',
+      }),
+    ]
+
+    const items = buildNavigationItems(index, [], undefined)
+
+    expect(items[0]!.preview).toBe('帮我把它的签名搞定，然后打开')
+  })
+
   test('Given 索引为空 When 本地有分组 Then 回退到本地（不阻塞会话）', () => {
     const local = [userGroup('u1'), assistantGroup('a1')]
 

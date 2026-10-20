@@ -1,12 +1,19 @@
 # Upload Profer Windows update files to the domestic update server.
 # Usage: run from apps/electron: powershell -File .\scripts\upload-update.ps1
+# Required env: PROFER_UPDATE_LEGACY_SSH_TARGET (user@host)。生产主机信息不入库。
+# Optional env: PROFER_UPDATE_LEGACY_STAGING_DIR / PROFER_UPDATE_LEGACY_DIR
 
 $ErrorActionPreference = "Stop"
 
 $outDir = "out"
-$server = "ecs-user@47.109.108.57"
-$remoteDir = "/home/ecs-user/profer-updates"
-$nginxDir = "/usr/share/nginx/html/profer-updates"
+$server = $env:PROFER_UPDATE_LEGACY_SSH_TARGET
+if (-not $server) {
+  Write-Error "Missing PROFER_UPDATE_LEGACY_SSH_TARGET (user@host); production host must not live in the repo."
+  exit 1
+}
+$remoteUser = $server.Split('@')[0]
+$remoteDir = if ($env:PROFER_UPDATE_LEGACY_STAGING_DIR) { $env:PROFER_UPDATE_LEGACY_STAGING_DIR } else { "/home/$remoteUser/profer-updates" }
+$nginxDir = if ($env:PROFER_UPDATE_LEGACY_DIR) { $env:PROFER_UPDATE_LEGACY_DIR } else { "/usr/share/nginx/html/profer-updates" }
 $feedUrl = "https://profer.cn/profer-updates/latest.yml"
 $stagingDir = Join-Path $outDir "update-upload"
 
@@ -164,21 +171,21 @@ Write-Host "  latest.yml"
 Write-Host "  latest.yml.sig"
 Write-Host "  $($manifestPath).blockmap"
 
-Invoke-NativeCommand "scp" @($stagedExe, "${server}:${remoteDir}/")
-Invoke-NativeCommand "scp" @($stagedYml, "${server}:${remoteDir}/latest.yml")
-Invoke-NativeCommand "scp" @($stagedSignature, "${server}:${remoteDir}/latest.yml.sig")
-Invoke-NativeCommand "scp" @($stagedBlockmap, "${server}:${remoteDir}/")
+Invoke-NativeCommand "scp" @("-o", "StrictHostKeyChecking=yes", $stagedExe, "${server}:${remoteDir}/")
+Invoke-NativeCommand "scp" @("-o", "StrictHostKeyChecking=yes", $stagedYml, "${server}:${remoteDir}/latest.yml")
+Invoke-NativeCommand "scp" @("-o", "StrictHostKeyChecking=yes", $stagedSignature, "${server}:${remoteDir}/latest.yml.sig")
+Invoke-NativeCommand "scp" @("-o", "StrictHostKeyChecking=yes", $stagedBlockmap, "${server}:${remoteDir}/")
 
 # 同步版本历史 releases.json（从仓库根目录 release-notes/ 生成）
 $releasesJson = Join-Path $PSScriptRoot ".." ".." ".." "release-notes" "releases.json"
 if (Test-Path $releasesJson) {
   Write-Host "Uploading releases.json..."
-  Invoke-NativeCommand "scp" @($releasesJson, "${server}:${remoteDir}/releases.json")
+  Invoke-NativeCommand "scp" @("-o", "StrictHostKeyChecking=yes", $releasesJson, "${server}:${remoteDir}/releases.json")
 } else {
   Write-Warning "releases.json not found, skipping"
 }
 
 $publishCommand = "set -e; mkdir -p $nginxDir; cp $remoteDir/* $nginxDir/; echo update-files-deployed-to-nginx"
-Invoke-NativeCommand "ssh" @($server, "sudo sh -c '$publishCommand'")
+Invoke-NativeCommand "ssh" @("-o", "StrictHostKeyChecking=yes", $server, "sudo sh -c '$publishCommand'")
 
 Write-Host "Done. Update feed: $feedUrl"

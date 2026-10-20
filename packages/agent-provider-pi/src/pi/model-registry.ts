@@ -23,7 +23,7 @@ import {
   resolveProviderNativeProtocol,
   isLocalOllamaBaseUrl,
 } from '@profer/shared'
-import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk } from '@profer/core/providers'
+import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeGoogleBaseUrl, normalizeOpenAIBaseUrlForSdk } from '@profer/core/providers'
 import type { Api, KnownProvider, Model } from '@earendil-works/pi-ai/compat'
 import { createIsolatedModelRuntimeOptions } from './model-runtime-options'
 
@@ -485,6 +485,14 @@ function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType)
   // 需先还原成协议根地址，避免 Pi 重复拼接。
   if (api === 'openai-completions' || api === 'openai-responses') {
     return normalizeOpenAIBaseUrlForSdk(baseUrl)
+  }
+  if (api === 'google-generative-ai') {
+    // Pi 的 Google 实现把 baseUrl 当成“已含版本段”的协议根（
+    // @google/genai 被设为 apiVersion=""），官方 provider 的 baseUrl 就是
+    // `…/v1beta`。中转站通常只能填到域名，直接交给 SDK 会把请求发到站点根路径，
+    // 换回首页 HTML 而不是模型响应；这里补齐 /v1beta。
+    const normalized = normalizeGoogleBaseUrl(baseUrl)
+    return /\/v1beta$/i.test(normalized) ? normalized : `${normalized}/v1beta`
   }
   return baseUrl.trim().replace(/\/$/, '')
 }

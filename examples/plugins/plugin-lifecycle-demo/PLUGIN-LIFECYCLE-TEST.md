@@ -9,7 +9,7 @@
 1. 启动 Profer 开发版。
 2. 打开插件设置入口。
 3. 选择“安装目录”，选择本目录：
-   `/Users/mac/profer/profer-main/examples/plugins/plugin-lifecycle-demo`
+   `/Users/alice/project/examples/plugins/plugin-lifecycle-demo`
 4. 点击“查看并授权能力”，授权本插件声明的能力。
 5. 在插件设置的页面入口中打开“插件实例验收台”。页面会作为独立 Tab 打开。
 

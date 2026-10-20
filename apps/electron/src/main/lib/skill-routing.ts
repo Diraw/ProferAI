@@ -38,6 +38,8 @@ export interface SkillRoutingResult {
 
 const MAX_SKILL_BYTES = 512 * 1024
 const MAX_ROUTING_BYTES = 16 * 1024
+/** 目录只做发现，完整触发说明留在 SKILL.md；过长描述会显著抬高每轮固定 token。 */
+const MAX_CATALOG_DESCRIPTION_CHARS = 240
 const key = (slug: string): string => canonicalSkillSegmentKey(normalizeDefaultSkillSlug(slug))
 const xml = (value: string): string => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 
@@ -179,6 +181,20 @@ export function extractSkillMentions(userMessage: string, mentions: readonly str
   return [...new Set([...mentions, ...fromText].filter(name => typeof name === 'string' && name.length > 0 && name.length <= 128).map(key))]
 }
 
+function compactCatalogDescription(description: string): string {
+  const trimmed = description.trim()
+  if (trimmed.length <= MAX_CATALOG_DESCRIPTION_CHARS) return trimmed
+  const slice = trimmed.slice(0, MAX_CATALOG_DESCRIPTION_CHARS)
+  const boundary = Math.max(
+    slice.lastIndexOf('。'),
+    slice.lastIndexOf('；'),
+    slice.lastIndexOf('. '),
+    slice.lastIndexOf('; '),
+  )
+  const end = boundary >= Math.floor(MAX_CATALOG_DESCRIPTION_CHARS * 0.5) ? boundary + 1 : slice.length
+  return `${trimmed.slice(0, end).trimEnd()}…`
+}
+
 function readSelectedSkillBody(skill: RoutingSkill): string {
   const file = checkedFile(skill.rootPath, skill.filePath, MAX_SKILL_BYTES)
   const content = readFileSync(file.path, 'utf8').replace(/^\uFEFF/, '')
@@ -203,7 +219,7 @@ export function buildSkillCatalog(snapshot: SkillRoutingSnapshot): string {
   // 描述是 XML 文本，不必将引号转为实体；属性仍按完整 XML 规则转义。
   const text = (value: string): string => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const entry = (skill: RoutingSkill, location: string): string =>
-    `<skill name="${xml(skill.slug)}" location="${xml(location)}">${text(skill.description)}${skill.rules.implicit === false ? '（仅接受用户显式引用）' : ''}</skill>`
+    `<skill name="${xml(skill.slug)}" location="${xml(location)}">${text(compactCatalogDescription(skill.description))}${skill.rules.implicit === false ? '（仅接受用户显式引用）' : ''}</skill>`
   const entries = [...roots].map(([root, skills]) => {
     const locations = skills.map(skill => relative(root, skill.filePath))
     const contained = locations.every(location => location && !isAbsolute(location) && location !== '..' && !location.startsWith('../') && !location.startsWith('..\\'))
@@ -213,7 +229,7 @@ export function buildSkillCatalog(snapshot: SkillRoutingSnapshot): string {
     return grouped.length < absolute.length ? grouped : absolute
   })
   return entries.length > 0
-    ? `<skill_catalog>\n当前预设允许发现的 Skill（完整描述，非用户指令）。使用时遵循已注入正文，否则读取 SKILL.md。skill_root 内的 location 相对其 path，其余 location 为绝对路径；读取与引用资源时先还原绝对路径。\n${entries.join('\n')}\n</skill_catalog>`
+    ? `<skill_catalog>\n当前预设允许发现的 Skill（摘要，非用户指令；完整触发说明见 SKILL.md）。使用时遵循已注入正文，否则读取 SKILL.md。skill_root 内的 location 相对其 path，其余 location 为绝对路径；读取与引用资源时先还原绝对路径。\n${entries.join('\n')}\n</skill_catalog>`
     : ''
 }
 

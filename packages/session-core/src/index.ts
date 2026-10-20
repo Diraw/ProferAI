@@ -32,6 +32,7 @@ export {
   extractMeta,
   isUserInputMessage,
   stripScheduledRunMarker,
+  stripUserContextBlocks,
   type MessageGroup,
   type AssistantTurn,
   type MessageMeta,

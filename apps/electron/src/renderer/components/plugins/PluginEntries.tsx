@@ -56,7 +56,7 @@ export function PluginSidebarEntries({ collapsed = false }: { collapsed?: boolea
   if (!pages.length) return null
   return <div className={collapsed ? 'max-h-40 overflow-y-auto space-y-1' : 'max-h-48 overflow-y-auto px-3 py-1 space-y-1'}>
     {pages.map((entry) => <button key={`${entry.pluginId}:${entry.page.id}`} type="button" title={entry.page.title} aria-label={entry.page.title}
-      className={`titlebar-no-drag flex items-center gap-2 rounded-xl text-sm text-muted-foreground hover:bg-primary/10 hover:text-foreground ${collapsed ? 'size-10 justify-center' : 'w-full px-3 py-2'}`}
+      className={`titlebar-no-drag flex items-center gap-2 rounded-xl text-[15px] leading-5 text-muted-foreground hover:bg-primary/10 hover:text-foreground ${collapsed ? 'size-10 justify-center' : 'w-full px-3 py-2'}`}
       onClick={() => void open(entry.pluginId, entry.page.id, entry.page.title, undefined, 'sidebar').catch(report)}>
       <PluginPageIcon entry={entry} />{!collapsed && <span className="truncate">{entry.page.title}</span>}
     </button>)}

@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { getDeviceIdentityPath } from './config-paths'
 import type { DeviceIdentity, UserIdentity } from '../../types/identity'
 
@@ -30,6 +30,14 @@ function generateDeviceName(): string {
 }
 
 let _deviceIdentity: DeviceIdentity | null = null
+
+/** device.json 含 deviceId（令牌 AES 密钥派生源），只允许当前用户读写。 */
+function writeDeviceIdentity(path: string, identity: DeviceIdentity): void {
+  writeFileSync(path, JSON.stringify(identity, null, 2), { encoding: 'utf-8', mode: 0o600 })
+  if (process.platform !== 'win32') {
+    try { chmodSync(path, 0o600) } catch { /* 只读介质/网络盘等忽略 */ }
+  }
+}
 
 /**
  * 获取设备身份，不存在则创建。
@@ -68,7 +76,7 @@ export function getOrCreateDeviceIdentity(): DeviceIdentity {
     try { writeDurableDeviceId(finalId) } catch { /* 静默降级 */ }
   }
   try {
-    writeFileSync(path, JSON.stringify(identity, null, 2), 'utf-8')
+    writeDeviceIdentity(path, identity)
   } catch (err) {
     console.warn('[身份] 持久化设备身份失败:', err)
   }
@@ -96,7 +104,7 @@ export function updateDeviceName(name: string): DeviceIdentity {
   identity.deviceName = name
 
   try {
-    writeFileSync(getDeviceIdentityPath(), JSON.stringify(identity, null, 2), 'utf-8')
+    writeDeviceIdentity(getDeviceIdentityPath(), identity)
   } catch (err) {
     console.warn('[身份] 更新设备名称失败:', err)
   }

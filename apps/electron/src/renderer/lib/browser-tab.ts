@@ -6,7 +6,7 @@
  *   主进程会话销毁（state.tabs 为空）时该会话全部浏览器 Tab 消失。
  * - 手动打开 = 清除 dismissed 标记 + reconcile + 激活当前页 Tab；
  * - Agent 推送（自动打开区）= reconcile 后自动与对话组合并排（对话左、浏览器右，
- *   焦点留在对话），后续新页面只在顶栏后台出现；
+ *   焦点留在对话）；页面内在新标签打开的页会接管原分屏栏，不打断左右布局；
  * - 关闭顶栏 Tab = 关闭对应网页（useCloseTab 调 closeAgentBrowserTab）；
  *   用户关掉该会话最后一个浏览器 Tab 时记入 dismissed，推送不再自动重开。
  */
@@ -21,7 +21,7 @@ import {
   type TabItem,
 } from '@/atoms/tab-atoms'
 import { browserPanelDismissedSessionIdsAtom } from '@/atoms/browser-atoms'
-import { planAutoGroupWorkTab, tabGroupsAtom } from '@/atoms/tab-group-atoms'
+import { planAutoGroupWorkTab, planReplaceGroupMember, tabGroupsAtom } from '@/atoms/tab-group-atoms'
 import { appModeAtom } from '@/atoms/app-mode'
 import { currentAgentSessionIdAtom } from '@/atoms/agent-atoms'
 import type { BrowserViewState } from '@profer/shared'
@@ -92,15 +92,50 @@ export function reconcileBrowserTabs(store: JotaiStore, state: BrowserViewState)
 }
 
 /**
+ * 浏览器页内打开新页（target=_blank / 新建标签）时，让新页接管原来的分屏栏。
+ *
+ * 主进程会新建并激活内部页；顶栏对应会多出一个页签。如果不跟随，原顶栏页会变成
+ * “激活此页面”占位，用户点了链接反而看不到新页面。这里只在“新页确实是旧状态里
+ * 没有的页”时触发；用户切到已有页仍走顶栏 Tab 的正常语义。
+ */
+function followReplacedBrowserPage(
+  store: JotaiStore,
+  state: BrowserViewState,
+  previousState: BrowserViewState | null,
+): void {
+  if (!previousState || previousState.sessionId !== state.sessionId) return
+  if (!previousState.activeTabId || !state.activeTabId) return
+  if (previousState.activeTabId === state.activeTabId) return
+  if (previousState.tabs.some((tab) => tab.tabId === state.activeTabId)) return
+
+  const previousTopTabId = createBrowserTabId(state.sessionId, previousState.activeTabId)
+  const nextTopTabId = createBrowserTabId(state.sessionId, state.activeTabId)
+  const tabs = store.get(tabsAtom)
+  // 原页/新页任一不在顶栏（用户已关闭，或 reconcile 尚未落定）时不改布局。
+  if (!tabs.some((tab) => tab.id === previousTopTabId) || !tabs.some((tab) => tab.id === nextTopTabId)) return
+
+  const groups = store.get(tabGroupsAtom)
+  const activeTabId = store.get(activeTabIdAtom)
+  const plan = planReplaceGroupMember({ groups, previousTabId: previousTopTabId, nextTabId: nextTopTabId, activeTabId })
+  if (!plan) return
+  if (plan.groups !== groups) store.set(tabGroupsAtom, plan.groups)
+  if (plan.activeTabId !== activeTabId) store.set(activeTabIdAtom, plan.activeTabId)
+}
+
+/**
  * Agent 推送驱动的浏览器 Tab 打开：
  * - reconcile 同步页签（会话存在顶栏浏览器 Tab 时必经此路径保持同步）；
  * - 用户正看着该会话对话、首次收到浏览器页且两者都未入组时，自动组合并排（对话左、浏览器右），
  *   焦点留在对话；已有页面的后续推送只同步标签，保留用户的组合/解散选择；
+ * - 页面内新开并激活的页接管原分屏栏（见 followReplacedBrowserPage）；
  * - 用户自己摆过布局（已有组合）时不动布局，页面 Tab 仍出现在顶栏。
  *
  * dismissed 守卫由 reconcile 内部处理；autoOpen 判定在调用方（MainArea）。
  */
-export function openBrowserTabFromPush(state: BrowserViewState, options?: { autoGroup?: boolean }): void {
+export function openBrowserTabFromPush(
+  state: BrowserViewState,
+  options?: { autoGroup?: boolean; previousState?: BrowserViewState | null },
+): void {
   const store = getDefaultStore()
   const sessionId = state.sessionId
   // 只处理当前会话：后台会话的页面变化等切回时由 getState 恢复路径统一对账，
@@ -109,6 +144,7 @@ export function openBrowserTabFromPush(state: BrowserViewState, options?: { auto
   // 自动组合仅发生在页面首次进入顶栏时；已有页的状态刷新不能撤销用户的解散/排序。
   const hadBrowserTabs = store.get(tabsAtom).some((tab) => isBrowserTab(tab) && tab.sessionId === sessionId)
   const topTabId = reconcileBrowserTabs(store, state)
+  followReplacedBrowserPage(store, state, options?.previousState ?? null)
   if (!topTabId || options?.autoGroup === false || hadBrowserTabs) return
   const next = planAutoGroupWorkTab({
     groups: store.get(tabGroupsAtom),

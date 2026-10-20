@@ -148,7 +148,7 @@ describe('resolveHostAgentRuntimeEnv（新链 Pi runtimeEnv 与旧链同源）',
   test('Given macOS/Linux 宿主 Then 使用存在性校验过的 Bash 绝对路径且不覆盖 SHELL', async () => {
     const result = await resolveHostAgentRuntimeEnv({
       sessionId: 'session-1',
-      cwd: '/Users/mac/workspace',
+      cwd: '/Users/alice/workspace',
       platform: 'darwin',
       pathDelimiter: ':',
       processEnv: { PATH: '/usr/bin:/bin', SHELL: '/bin/zsh' },

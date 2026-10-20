@@ -17,6 +17,7 @@ export function sameBrowserViewportLayout(
   return previous.sessionId === next.sessionId
     && previous.tabId === next.tabId
     && previous.visible === next.visible
+    && previous.splitViewClose === next.splitViewClose
     && previous.viewportRadius === next.viewportRadius
     && sameBounds(previous.viewportBounds, next.viewportBounds)
     && sameBounds(previous.pageBounds, next.pageBounds)

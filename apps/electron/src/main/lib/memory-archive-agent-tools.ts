@@ -10,6 +10,7 @@
  */
 
 import type { MemoryArchiveSearchHit } from './memory-archive-search'
+import { memoryFreshnessNote, memoryHitAgeDays } from './memory-archive-search'
 import { filterDisabledTools } from '@profer/shared'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> }
@@ -53,7 +54,9 @@ export async function injectMemoryArchiveMcpServer(
             startIndex: h.startIndex,
             endIndex: h.endIndex,
             matched: h.matchedTokens,
+            ageDays: memoryHitAgeDays(h),
           })),
+          freshnessNote: memoryFreshnessNote(hits),
           message: hits.length ? undefined : 'memory-archive 中没有匹配的长期记忆。若属新话题，可咨询用户是否需要沉淀。',
         })
       },

@@ -311,6 +311,13 @@ Pi 没有 Claude Agent SDK 的自动记忆后台机制，但 Profer 已为 Pi �
     sections.push(`10. **创建 Profer 皮肤**：用户明确要求制作、创建、应用或修改 Profer 皮肤时，加载 \`profer-theme-authoring\` skill 并按其流程用 \`create_skin\` 落地；不要只给方案、只生成图片或让用户手动复制文件。安装位置以 \`create_skin\` 返回的 \`installedPath\` 为准，不要用 find、\`ls -R\`、\`Get-ChildItem -Recurse\` 等递归或全盘搜索定位皮肤目录。`)
   }
 
+  // 公式输出契约：模型按 LaTeX 习惯输出时容易把价格、shell 变量误触发成公式，
+  // 或把块级公式写进行内；渲染器只做分隔符兜底，输出格式仍需在提示词里约束。
+  sections.push(`## Markdown 与公式
+
+- 行内公式用 \`$...$\`，块级公式用 \`$$...$$\` 并独占行；不要把 \`$$...$$\` 夹在段落中间。
+- 字面美元符号前加反斜杠转义或用反引号包裹；同一段两个未转义的 \`$\` 会被当成公式，价格和 shell 变量最容易中招；只有真正的数学内容才用公式。`)
+
   const browserToolNames = AGENT_PRESET_CAPABILITY_GROUPS.find((group) => group.id === 'browser')?.toolNames ?? []
   const availableBrowserTools = new Set(
     browserToolNames.filter((toolName) => !capabilityDisabled('browser') && !toolDisabled(toolName)),

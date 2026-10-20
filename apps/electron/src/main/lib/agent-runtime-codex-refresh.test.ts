@@ -24,6 +24,7 @@ mock.module('./token-crypto', () => ({
 mock.module('./auth-service', () => ({
   getCommercialMode: () => false, isSelfConfigAllowed: () => true,
   getTeamAuth: () => null, getTeamAuthWithRefresh: async () => null,
+  recoverCommercialProxyAuth: async () => null,
 }))
 mock.module('./build-target', () => ({ isCommercialBuild: () => false }))
 mock.module('./proxy-settings-service', () => ({ getEffectiveProxyUrl: async () => undefined }))

@@ -7,7 +7,7 @@
 1. 启动 Profer 开发版。
 2. 打开「设置 → 插件」入口。
 3. 选择「安装目录」，选中当前目录：
-   `/Users/mac/profer/profer-main/examples/plugins/desktop-pet`
+   `/Users/alice/project/examples/plugins/desktop-pet`
 4. 查看并授权 `pluginStorage`。
 5. 在插件设置或左侧栏打开「桌宠」。
 

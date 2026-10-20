@@ -102,6 +102,14 @@ describe('buildNavigationEntries · 身份与预览', () => {
     expect(entries[0]!.preview).toBe('Goal 自动迭代 · 第 3 轮')
   })
 
+  test('Given 用户消息带 quoted_context When 构建 Then 预览只保留用户自己说的话', () => {
+    const entries = buildNavigationEntries([
+      user('<quoted_context source="agent-interruption" label="已被用户中断" message_id="" role="">\n上次任务被中断\n</quoted_context>\n\n帮我把它的签名搞定，然后打开'),
+    ])
+
+    expect(entries[0]!.preview).toBe('帮我把它的签名搞定，然后打开')
+  })
+
   test('Given 工具结果夹在中间 When 构建 Then 不单独成行', () => {
     const entries = buildNavigationEntries([user('一'), toolResult(), assistant('一答'), user('二'), toolResult(), assistant('二答')])
     expect(entries.map((e) => e.role)).toEqual(['user', 'assistant', 'user', 'assistant'])

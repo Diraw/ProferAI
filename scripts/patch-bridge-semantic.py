@@ -1,7 +1,10 @@
 """Patch bridge.py: add bge-small semantic search with pre-computed embeddings"""
+import os
 import re
 
-BRIDGE_PATH = "/home/ecs-user/paperpipe-bridge.py"
+BRIDGE_PATH = os.environ.get("PROFER_BRIDGE_PATH")
+if not BRIDGE_PATH:
+    raise SystemExit("请设置 PROFER_BRIDGE_PATH 指向目标 bridge 脚本")
 
 with open(BRIDGE_PATH, "r") as f:
     content = f.read()

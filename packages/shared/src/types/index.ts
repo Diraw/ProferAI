@@ -33,7 +33,6 @@ export * from './global-skill'
 export * from './skill-manifest'
 export * from './browser'
 export * from './pi-harness'
-export * from './ppt-deck'
 
 // Lark 集成相关类型
 export * from './lark'

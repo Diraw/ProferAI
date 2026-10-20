@@ -29,3 +29,10 @@ test('视口、页面、标签和可见性任一变化都会发布', () => {
   expect(sameBrowserViewportLayout(layout, { ...layout, viewportBounds: { ...layout.viewportBounds, x: 201 } })).toBeFalse()
   expect(sameBrowserViewportLayout(layout, { ...layout, pageBounds: { ...layout.pageBounds, height: 499 } })).toBeFalse()
 })
+
+test('分屏右栏退出浮标的显示开关变化必须重新发布', () => {
+  expect(sameBrowserViewportLayout(
+    { ...layout, splitViewClose: false },
+    { ...layout, splitViewClose: true },
+  )).toBeFalse()
+})

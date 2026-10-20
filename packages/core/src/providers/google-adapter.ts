@@ -20,7 +20,7 @@ import type {
   ToolDefinition,
   ContinuationMessage,
 } from './types.ts'
-import { normalizeBaseUrl } from './url-utils.ts'
+import { normalizeGoogleBaseUrl } from './url-utils.ts'
 
 // ===== Google 特有类型 =====
 
@@ -202,7 +202,7 @@ export class GoogleAdapter implements ProviderAdapter {
 
   buildStreamRequest(input: StreamRequestInput): ProviderRequest {
     this.toolCallCounter = 0  // 每个流式请求重置计数器
-    const url = normalizeBaseUrl(input.baseUrl)
+    const url = normalizeGoogleBaseUrl(input.baseUrl)
     const contents = toGoogleContents(input)
 
     // 构建 generationConfig
@@ -301,7 +301,7 @@ export class GoogleAdapter implements ProviderAdapter {
   }
 
   buildTitleRequest(input: TitleRequestInput): ProviderRequest {
-    const url = normalizeBaseUrl(input.baseUrl)
+    const url = normalizeGoogleBaseUrl(input.baseUrl)
 
     return {
       url: `${url}/v1beta/models/${input.modelId}:generateContent?key=${input.apiKey}`,

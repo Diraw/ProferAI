@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Patch paperpipe-bridge.py search handler for FTS5"""
+import os
 import re, json
 from pathlib import Path
 
 DATA_BASE = "/data/paperpipe"
-BRIDGE_PATH = "/home/ecs-user/paperpipe-bridge.py"
+BRIDGE_PATH = os.environ.get("PROFER_BRIDGE_PATH")
+if not BRIDGE_PATH:
+    raise SystemExit("请设置 PROFER_BRIDGE_PATH 指向目标 bridge 脚本")
 
 with open(BRIDGE_PATH, "r") as f:
     content = f.read()

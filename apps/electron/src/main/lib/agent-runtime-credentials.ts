@@ -1,8 +1,8 @@
 import type { AgentRuntime, Channel, CodexOAuthCredentials, ProviderType, XaiOAuthCredentials } from '@profer/shared'
 import { PROVIDER_DEFAULT_URLS, resolveXaiCredentialMode } from '@profer/shared'
-import { getTeamAuthWithRefresh } from './auth-service'
+import { resolveEditionBearerToken } from '@profer/edition-contract'
 import { decryptApiKey, persistCodexOAuthCredentials, persistXaiOAuthCredentials, resolveChannelAgentBaseUrl, resolveCodexOAuthCredentials, resolveXaiOAuthCredentials } from './channel-manager'
-import { shouldUseCommercialBearerAuth } from './commercial-routing-policy'
+import { editionProviders } from './edition'
 import { normalizePiApi } from './adapters/pi-model-registry'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 
@@ -45,7 +45,7 @@ export async function resolveRuntimeCredentials(
   channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode' | 'directDataPlane'>,
   runtime: AgentRuntime = 'claude',
 ): Promise<ResolveRuntimeCredentialsResult> {
-  const forceBearerAuth = shouldUseCommercialBearerAuth(channel)
+  const forceBearerAuth = editionProviders.credentials.shouldUseBearerAuth(channel)
 
   const useDirectDataPlane = forceBearerAuth && channel.directDataPlane === true
   const baseUrl = resolveRuntimeBaseUrl(channel, runtime)
@@ -67,12 +67,12 @@ export async function resolveRuntimeCredentials(
         return { ok: false, code: 'api_key_decrypt_failed' }
       }
     }
-    const auth = await getTeamAuthWithRefresh()
+    const auth = await editionProviders.account.getSession()
     if (!auth) return { ok: false, code: 'token_expired' }
     return {
       ok: true,
       credentials: {
-        apiKey: auth.proxyToken || auth.token,
+        apiKey: resolveEditionBearerToken(auth),
         baseUrl: `${auth.baseUrl}/v1/proxy`,
         provider: channel.provider,
         forceBearerAuth: true,

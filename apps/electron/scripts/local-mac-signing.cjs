@@ -53,7 +53,10 @@ async function signCopy({ source, output, keychain, fingerprint }) {
     preAutoEntitlements: false,
     preEmbedProvisioningProfile: false,
     optionsForFile: (file) => ({
-      hardenedRuntime: true,
+      // 自签名证书没有 Team ID：开启 hardened runtime 会启用 library validation，
+      // helper 加载 Electron Framework 时强制比对 Team ID，必然失败并中止启动
+      // （Profer Helper 崩溃报告：different Team IDs）。本地签名保持与 ad-hoc 产物一致的运行行为。
+      hardenedRuntime: false,
       timestamp: 'none',
       // helper 使用 osx-sign 按角色提供的默认 entitlement。
       ...(path.resolve(file) === target ? {

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
-import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, sanitizePiContextMessages, stripErrorFromContentMessage } from './message-adapter'
+import { convertPiMessage, convertResultMessage, EMPTY_IMAGE_PLACEHOLDER_TEXT, EMPTY_OUTPUT_ERROR_MESSAGE, hasTerminalErrorWithContent, installPiContextBudget, OMITTED_TOOL_IMAGE_TEXT, PERSISTED_TOOL_RESULT_PREFIX, sanitizePiContextMessages, sanitizePiContextMessagesWithImages, stripErrorFromContentMessage, TOOL_RESULT_BUDGET_MARKER, type PiContextTransformAgent } from './message-adapter'
 import { createAgentRuntimeGuard } from '@profer/agent-runtime/runtime-guards'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
+import type { PiImageTranscoderPort } from '../ports'
 
 function textAssistant(content: string, overrides?: Partial<AssistantMessage>): AssistantMessage {
   return {
@@ -225,6 +226,23 @@ describe('convertPiMessage', () => {
 })
 
 describe('sanitizePiContextMessages', () => {
+  function assistantCalling(ids: string[]): AgentMessage {
+    return {
+      role: 'assistant',
+      content: ids.map((id) => ({ type: 'toolCall', id, name: 'bash', arguments: {} })),
+    } as unknown as AgentMessage
+  }
+
+  function bashResult(id: string, text: string): AgentMessage {
+    return {
+      role: 'toolResult',
+      toolCallId: id,
+      toolName: 'bash',
+      isError: false,
+      content: [{ type: 'text', text }],
+    } as unknown as AgentMessage
+  }
+
   test('空图像块被替换为文本占位，防止带空 data 的 image part 让上游挂起', () => {
     const toolResult = {
       role: 'toolResult',
@@ -263,6 +281,386 @@ describe('sanitizePiContextMessages', () => {
 
     expect(result).toBe(messages)
     expect(result[0]).toBe(validImage)
+  })
+
+  test('旧工具结果超预算时保留头尾并插入说明，最近两组（按 assistant 回复）保持完整', () => {
+    const long = 'A'.repeat(20_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', long),
+      assistantCalling(['recent-1']),
+      bashResult('recent-1', long),
+      assistantCalling(['recent-2']),
+      bashResult('recent-2', long),
+    ]
+
+    const result = sanitizePiContextMessages(messages)
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+
+    expect(firstText.length).toBeLessThan(9_000)
+    expect(firstText).toContain(TOOL_RESULT_BUDGET_MARKER)
+    expect(firstText.startsWith('A')).toBe(true)
+    expect(firstText.endsWith('A')).toBe(true)
+    expect((result[3] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+    expect((result[5] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(long)
+  })
+
+  test('同一条 assistant 回复的并行工具结果成组保留，不按条数劈开', () => {
+    const long = 'P'.repeat(20_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', long),
+      assistantCalling(['p1', 'p2', 'p3']),
+      bashResult('p1', long),
+      bashResult('p2', long),
+      bashResult('p3', long),
+      assistantCalling(['tail']),
+      bashResult('tail', long),
+    ]
+
+    const result = sanitizePiContextMessages(messages)
+    const textAt = (index: number) =>
+      String((result[index] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text)
+
+    // 只有最早那组被压缩；并行的 p1/p2/p3 同属一组，全部保留。
+    expect(textAt(1).length).toBeLessThan(9_000)
+    for (const index of [3, 4, 5, 7]) expect(textAt(index)).toBe(long)
+  })
+
+  test('内容本身包含预算标记字面量时仍会被裁剪', () => {
+    const embedded = `${TOOL_RESULT_BUDGET_MARKER} 已省略 123 个字符以节省上下文；如仍需完整内容，请重新调用工具或分页读取。]\n${'C'.repeat(20_000)}`
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', embedded),
+      assistantCalling(['a']),
+      bashResult('a', 'short-a'),
+      assistantCalling(['b']),
+      bashResult('b', 'short-b'),
+    ]
+
+    const result = sanitizePiContextMessages(messages)
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+
+    expect(firstText.length).toBeLessThan(9_000)
+  })
+
+  test('全局只保留最近 6 张工具图片，旧图片替换为一条说明', () => {
+    const messages = Array.from({ length: 8 }, (_, index) => ({
+      role: 'toolResult',
+      toolCallId: `call-image-${index}`,
+      toolName: 'inspect_preview',
+      isError: false,
+      content: [
+        { type: 'text', text: 'ok' },
+        { type: 'image', data: 'a', mimeType: 'image/png' },
+      ],
+    })) as unknown as AgentMessage[]
+
+    const result = sanitizePiContextMessages(messages)
+    const images = result.reduce((count, message) => {
+      const content = (message as unknown as { content: Array<Record<string, unknown>> }).content
+      return count + content.filter((block) => block.type === 'image').length
+    }, 0)
+
+    expect(images).toBe(6)
+    const firstContent = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(firstContent.some((block) => block.type === 'text' && String(block.text).includes(OMITTED_TOOL_IMAGE_TEXT))).toBe(true)
+    const lastContent = (result[7] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(lastContent.some((block) => block.type === 'image')).toBe(true)
+  })
+
+  test('聚合预算超出时把旧组原文落盘，消息里只留路径和预览', () => {
+    const oldText = 'H'.repeat(120_000)
+    const middleText = 'M'.repeat(120_000)
+    const newestText = 'N'.repeat(120_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', oldText),
+      assistantCalling(['mid']),
+      bashResult('mid', middleText),
+      assistantCalling(['new']),
+      bashResult('new', newestText),
+    ]
+    const persisted: Array<{ toolCallId: string; text: string }> = []
+
+    const result = sanitizePiContextMessages(messages, {
+      sessionId: 'session-1',
+      persist: {
+        persist: (input) => {
+          persisted.push({ toolCallId: input.toolCallId, text: input.text })
+          return { path: `/tmp/${input.toolCallId}.txt` }
+        },
+      },
+    })
+
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+    expect(firstText.startsWith(PERSISTED_TOOL_RESULT_PREFIX)).toBe(true)
+    expect(firstText).toContain('/tmp/old.txt')
+    // 落盘的是完整原文，不是 8k 截断版
+    expect(persisted).toHaveLength(1)
+    expect(persisted[0]!.toolCallId).toBe('old')
+    expect(persisted[0]!.text).toBe(oldText)
+    // 最近两组不受影响
+    expect((result[3] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(middleText)
+    expect((result[5] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text).toBe(newestText)
+  })
+
+  test('没有落盘端口时退化为原地截断，请求不因缺少宿主能力而失败', () => {
+    const huge = 'H'.repeat(120_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', huge),
+      assistantCalling(['mid']),
+      bashResult('mid', 'M'.repeat(120_000)),
+      assistantCalling(['new']),
+      bashResult('new', 'N'.repeat(120_000)),
+    ]
+
+    const result = sanitizePiContextMessages(messages, { sessionId: 'session-1' })
+    const firstText = String(
+      (result[1] as unknown as { content: Array<Record<string, unknown>> }).content[0]!.text,
+    )
+
+    expect(firstText.startsWith(PERSISTED_TOOL_RESULT_PREFIX)).toBe(false)
+    expect(firstText).toContain(TOOL_RESULT_BUDGET_MARKER)
+    expect(firstText.length).toBeLessThan(9_000)
+  })
+
+  test('落盘预览可重复处理，不会二次落盘', () => {
+    const huge = 'H'.repeat(120_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', huge),
+      assistantCalling(['mid']),
+      bashResult('mid', 'M'.repeat(120_000)),
+      assistantCalling(['new']),
+      bashResult('new', 'N'.repeat(120_000)),
+    ]
+    const options = {
+      sessionId: 'session-1',
+      persist: { persist: () => ({ path: '/tmp/old.txt' }) },
+    }
+
+    const once = sanitizePiContextMessages(messages, options)
+    let secondPassCalls = 0
+    const twice = sanitizePiContextMessages(once, {
+      sessionId: 'session-1',
+      persist: {
+        persist: () => {
+          secondPassCalls += 1
+          return { path: '/tmp/old.txt' }
+        },
+      },
+    })
+
+    expect(secondPassCalls).toBe(0)
+    expect(twice).toEqual(once)
+  })
+
+  test('预算处理可重复执行，不会重复插入省略说明', () => {
+    const long = 'B'.repeat(20_000)
+    const messages = [
+      assistantCalling(['old']),
+      bashResult('old', long),
+      assistantCalling(['a']),
+      bashResult('a', long),
+      assistantCalling(['b']),
+      bashResult('b', long),
+    ]
+
+    const once = sanitizePiContextMessages(messages)
+    const twice = sanitizePiContextMessages(once)
+
+    expect(twice).toEqual(once)
+  })
+})
+
+describe('sanitizePiContextMessagesWithImages', () => {
+  function imageToolResult(index: number, data: string): AgentMessage {
+    return {
+      role: 'toolResult',
+      toolCallId: `call-image-${index}`,
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [
+        { type: 'text', text: 'ok' },
+        { type: 'image', data, mimeType: 'image/png' },
+      ],
+    } as unknown as AgentMessage
+  }
+
+  function imageCount(messages: AgentMessage[]): number {
+    return messages.reduce((count, message) => {
+      const content = (message as unknown as { content: Array<Record<string, unknown>> }).content
+      if (!Array.isArray(content)) return count
+      return count + content.filter((block) => block.type === 'image').length
+    }, 0)
+  }
+
+  test('最近两张图走高清档，其余保留图走低清档', async () => {
+    const calls: Array<{ maxSide: number; quality: number }> = []
+    const transcoder: PiImageTranscoderPort = {
+      async transcode(_input, options) {
+        calls.push({ maxSide: options.maxSide, quality: options.quality })
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = Array.from({ length: 6 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(calls.map((call) => call.maxSide)).toEqual([1600, 1600, 1024, 1024, 1024, 1024])
+    expect(calls.map((call) => call.quality)).toEqual([82, 82, 70, 70, 70, 70])
+    expect(imageCount(result)).toBe(6)
+    // 不修改原始消息对象。
+    const originalContent = (messages[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(originalContent.find((block) => block.type === 'image')!.data).toBe('A'.repeat(1_000))
+  })
+
+  test('超过 6 张时只保留最近 6 张，更旧的图替换为说明', async () => {
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = Array.from({ length: 8 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(imageCount(result)).toBe(6)
+    const oldest = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(oldest.some((block) => block.type === 'text' && String(block.text).includes(OMITTED_TOOL_IMAGE_TEXT))).toBe(true)
+  })
+
+  test('总 base64 字节超预算时从最旧保留图开始省略', async () => {
+    const twoMb = 'A'.repeat(2 * 1024 * 1024)
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        // 模拟“压不动”的图：总预算只能靠省略旧图兜底。
+        return { data: twoMb, mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = Array.from({ length: 6 }, (_, index) => imageToolResult(index, twoMb))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    // 6MB / 2MB = 3 张；更旧的 3 张被省略。
+    expect(imageCount(result)).toBe(3)
+    const oldest = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(oldest.some((block) => block.type === 'text' && String(block.text).includes(OMITTED_TOOL_IMAGE_TEXT))).toBe(true)
+  })
+
+  test('没有转码器时退化为张数裁剪，不会因缺少宿主能力而报错', async () => {
+    const messages = Array.from({ length: 8 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages)
+
+    expect(imageCount(result)).toBe(6)
+  })
+
+  test('同一原始图片跨轮复用转码缓存，不重复编码', async () => {
+    let calls = 0
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        calls += 1
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = [imageToolResult(0, 'A'.repeat(1_000))]
+
+    await sanitizePiContextMessagesWithImages(messages, transcoder)
+    await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(calls).toBe(1)
+  })
+
+  test('user 消息中的 image block 也纳入预算', async () => {
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const messages = [{
+      role: 'user',
+      content: [
+        { type: 'text', text: '看这张图' },
+        { type: 'image', data: 'A'.repeat(1_000), mimeType: 'image/png' },
+      ],
+    }] as unknown as AgentMessage[]
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+    const content = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    const image = content.find((block) => block.type === 'image')
+
+    expect(image).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+    expect(image!.data).toBe('B'.repeat(100))
+  })
+
+  test('转码器抛错时保留原图，不阻断下一轮请求', async () => {
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        throw new Error('transcode failed')
+      },
+    }
+    const messages = Array.from({ length: 2 }, (_, index) => imageToolResult(index, 'A'.repeat(1_000)))
+
+    const result = await sanitizePiContextMessagesWithImages(messages, transcoder)
+
+    expect(imageCount(result)).toBe(2)
+  })
+})
+
+describe('installPiContextBudget', () => {
+  test('挂到 transformContext 并链式执行原 transform；首轮请求也会经过压缩', async () => {
+    const calls: string[] = []
+    const transcoder: PiImageTranscoderPort = {
+      async transcode() {
+        return { data: 'B'.repeat(100), mimeType: 'image/jpeg' }
+      },
+    }
+    const agent: PiContextTransformAgent = {
+      transformContext: async (messages) => {
+        calls.push('previous')
+        return messages
+      },
+    }
+    installPiContextBudget(agent, transcoder)
+
+    const messages = [{
+      role: 'toolResult',
+      toolCallId: 'call-first-turn',
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [{ type: 'image', data: 'A'.repeat(1_000), mimeType: 'image/png' }],
+    }] as unknown as AgentMessage[]
+    const transformed = await agent.transformContext!(messages)
+
+    expect(calls).toEqual(['previous'])
+    const content = (transformed[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(content[0]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+    expect(content[0]!.data).toBe('B'.repeat(100))
+  })
+
+  test('没有原 transform 时直接压缩，不要求宿主额外接线', async () => {
+    const agent: PiContextTransformAgent = {}
+    installPiContextBudget(agent)
+    const messages = [{
+      role: 'toolResult',
+      toolCallId: 'call-no-transform',
+      toolName: 'BrowserScreenshot',
+      isError: false,
+      content: [{ type: 'image', data: '', mimeType: 'image/png' }],
+    }] as unknown as AgentMessage[]
+
+    const transformed = await agent.transformContext!(messages)
+    const content = (transformed[0] as unknown as { content: Array<Record<string, unknown>> }).content
+    expect(content[0]).toEqual({ type: 'text', text: EMPTY_IMAGE_PLACEHOLDER_TEXT })
   })
 })
 

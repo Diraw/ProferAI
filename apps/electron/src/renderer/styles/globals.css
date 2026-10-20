@@ -1531,12 +1531,15 @@
   color: hsl(var(--mist-paper-message-foreground));
 }
 
-/* 经典界面：视觉规则对齐 upstream。 */
+/* 经典界面：视觉规则对齐 upstream。
+ * 几何单独覆盖；颜色不在这里硬编码——侧栏表面由 --sidebar-surface 决定，
+ * 皮肤需要能覆盖它。此前这里写过 --sidebar-surface: 0 0% 98%，
+ * 但经典界面当时用的是 bg-surface-raised（--card），该赋值从未被读取，
+ * 却以 (0,2,0) 的特异性压过皮肤 :root，导致皮肤声明侧栏色无效。 */
 :root.ui-classic {
   --radius: 0.625rem;
   --radius-xl-extra: 4px;
   --radius-2xl-extra: 8px;
-  --sidebar-surface: 0 0% 98%;
 }
 
 .ui-classic .tabbar-bg {
@@ -2173,6 +2176,16 @@
 .prose code::before,
 .prose code::after {
   content: none;
+}
+
+/* ===== KaTeX 块级公式：窄消息区横向滚动，避免长公式撑破气泡 =====
+ * rehype-katex 输出 .katex-display（display: block），默认既不换行也不滚动；
+ * 长公式在消息气泡里会溢出。这里只约束块级公式，行内公式保持随文排版。 */
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
 }
 
 /* ===== FileBrowser 自动定位的高亮脉冲 =====

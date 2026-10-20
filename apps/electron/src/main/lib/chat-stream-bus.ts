@@ -7,7 +7,7 @@
  * 桌面行为零变化，remote-service 只需订阅 chatEventBus 即可把 Chat 流式事件广播给移动端。
  */
 
-import type { WebContents } from 'electron'
+import { BrowserWindow, type WebContents } from 'electron'
 
 type ChatBusListener = (conversationId: string, channel: string, payload: unknown) => void
 
@@ -47,6 +47,18 @@ export function pushChatStream(
       webContents.send(channel, payload)
     } catch {
       /* 窗口已销毁等异常，忽略 */
+    }
+  } else {
+    // 移动端发起的请求没有归属窗口：广播给所有桌面窗口。
+    // 否则手机发消息/触发流式时，桌面端要等重新打开会话才看得到。
+    for (const window of BrowserWindow.getAllWindows()) {
+      const target = window.webContents
+      if (target.isDestroyed()) continue
+      try {
+        target.send(channel, payload)
+      } catch {
+        /* 窗口已销毁等异常，忽略 */
+      }
     }
   }
   chatEventBus.emit(conversationId, channel, payload)

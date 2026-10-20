@@ -45,6 +45,19 @@ export function getRelatedParentSessionId(session: AgentSessionMeta): string | u
   return undefined
 }
 
+/**
+ * 项目内会话排序：置顶优先，其余按更新时间倒序。
+ *
+ * 置顶不再抽到跨项目「置顶」区，而是留在所属项目顶部；
+ * 同组内保持稳定排序，委托/探索子会话继续由 buildAgentSessionTrees 归并到母会话下。
+ */
+export function sortProjectSessions(sessions: readonly AgentSessionMeta[]): AgentSessionMeta[] {
+  return [...sessions].sort((a, b) => {
+    const pinnedDelta = Number(!!b.pinned) - Number(!!a.pinned)
+    return pinnedDelta !== 0 ? pinnedDelta : b.updatedAt - a.updatedAt
+  })
+}
+
 export function buildAgentSessionTrees(sessions: AgentSessionMeta[]): AgentSessionTreeItem[] {
   const sessionIds = new Set(sessions.map((session) => session.id))
   const childrenByParentId = new Map<string, AgentSessionMeta[]>()
@@ -228,16 +241,6 @@ export function collectDelegatedDeletionSessionIds(
   }
   visit(rootSessionId)
   return ids
-}
-
-export function hasPinnedVisibleParent(session: AgentSessionMeta, sessions: AgentSessionMeta[]): boolean {
-  const parentSessionId = getRelatedParentSessionId(session)
-  if (!parentSessionId) return false
-  const parent = sessions.find((item) => item.id === parentSessionId)
-  return !!parent
-    && parent.workspaceId === session.workspaceId
-    && !!parent.pinned
-    && !parent.archived
 }
 
 export function getSyncableDelegatedChildren(

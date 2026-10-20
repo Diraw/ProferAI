@@ -162,6 +162,31 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return trimTrailingUrlPathSlash(baseUrl)
 }
 
+/**
+ * 规范化 Gemini 原生协议的 Base URL（返回协议根）。
+ *
+ * 调用方会在后面自行拼 `/v1beta/…`，所以用户误填的版本段必须全部剥掉，否则会得到
+ * `…/v1beta/v1beta/…`、`…/v1/v1beta/…` 这类 404 地址：
+ * - 中转站和用户习惯把地址写成 OpenAI 兼容的 `…/v1`
+ * - Google 文档和部分网关直接给 `…/v1beta` 或完整的 `…/v1beta/models`
+ *
+ * 只处理版本段本身；其它自定义前缀（如 `…/tenant/v2`）原样保留，
+ * 网关可能把 Gemini 挂在自有路由下。
+ *
+ * 例如：
+ * - "https://api.fluxlane.cn" → 不变
+ * - "https://api.fluxlane.cn/v1/" → "https://api.fluxlane.cn"
+ * - "https://gw.example.com/v1beta" → "https://gw.example.com"
+ * - "https://gw.example.com/v1beta/models" → "https://gw.example.com"
+ * - "https://gw.example.com/tenant/v1beta" → "https://gw.example.com/tenant"
+ */
+export function normalizeGoogleBaseUrl(baseUrl: string): string {
+  return mapUrlPath(baseUrl, (path) => {
+    if (path === '/v1') return '/'
+    return path.replace(/\/v1beta(?:\/models)?$/i, '') || '/'
+  })
+}
+
 /** SDK 使用字符串拼接请求路径，不能安全传递 Base URL 上的 query/hash。 */
 export function assertSdkBaseUrlSupportsRouting(baseUrl: string): void {
   if (/[?#]/.test(baseUrl.trim())) {

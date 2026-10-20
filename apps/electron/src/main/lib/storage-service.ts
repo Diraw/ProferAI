@@ -17,8 +17,10 @@ import {
   getAgentWorkspacesDir,
   getAttachmentsDir,
   getConversationsDir,
+  getPiCheckpointsDir,
 } from './config-paths'
 import { listAgentSessions } from './agent-session-manager'
+import { removePiFileCheckpoints } from './pi-file-checkpoint'
 import { listAgentWorkspaces } from './agent-workspace-manager'
 import { blobRootDir } from './blob-store'
 
@@ -27,6 +29,7 @@ import { blobRootDir } from './blob-store'
 export type StorageCategoryKey =
   | 'agent-sessions'
   | 'sdk-config'
+  | 'agent-checkpoints'
   | 'workspaces'
   | 'conversations'
   | 'attachments'
@@ -41,6 +44,11 @@ export interface StorageCategory {
   hasOrphans: boolean
   orphanBytes: number
   orphanCount: number
+  /** 其中属于「仍存在但已归档」会话的占用；这类数据没有孤儿可清，只能显式回收。 */
+  archivedBytes?: number
+  archivedCount?: number
+  /** 上面那部分占用涉及的会话数（按会话目录计，不是文件数）。 */
+  archivedSessions?: number
 }
 
 export interface StorageStats {
@@ -53,6 +61,13 @@ export interface CleanupOptions {
   categories: StorageCategoryKey[]
   orphansOnly: boolean
   archivedBeforeDays: number
+  /**
+   * 回收仍存在但已归档会话的「可重建」数据（当前只有文件检查点）。
+   *
+   * 与 `archivedBeforeDays` 分开是有意的：归档只做收纳，删数据必须是显式且可预期的动作，
+   * 不能因为用户调了「自动归档天数」就悄悄失去文件回退能力。
+   */
+  includeArchivedSessions?: boolean
 }
 
 export interface CleanupResult {
@@ -72,6 +87,10 @@ const SKIP_DIRS = new Set([
 
 // 单次扫描最大文件数上限，防止超大工作区导致无限递归
 const MAX_FILE_SCAN = 100_000
+
+/** 检查点目录布局：复制引擎的清单在每份快照子目录内，git 引擎的共享仓库在会话目录下。 */
+const CHECKPOINT_COPY_MANIFEST = '.manifest.json'
+const CHECKPOINT_SHADOW_REPO = 'shadow.git'
 
 async function getDirSize(dirPath: string): Promise<{ bytes: number; count: number }> {
   let bytes = 0
@@ -348,6 +367,148 @@ async function calcSdkConfigCategory(): Promise<StorageCategory> {
   }
 }
 
+/** 检查点目录里存的是被快照文件的副本或 git 对象，任何「跳过目录」都会让统计偏小。 */
+async function getCheckpointDirSize(
+  dirPath: string,
+  budget = { remaining: 400_000 },
+): Promise<{ bytes: number; count: number }> {
+  let bytes = 0
+  let count = 0
+  if (!existsSync(dirPath)) return { bytes, count }
+
+  const walk = async (dir: string): Promise<void> => {
+    let entries
+    try {
+      entries = await fsPromises.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (budget.remaining <= 0) return
+      const full = join(dir, entry.name)
+      try {
+        if (entry.isDirectory()) {
+          await walk(full)
+        } else if (entry.isFile()) {
+          bytes += (await fsPromises.stat(full)).size
+          count++
+          budget.remaining--
+        }
+      } catch { /* skip */ }
+    }
+  }
+
+  await walk(dirPath)
+  return { bytes, count }
+}
+
+/** 复制引擎的清单里直接记了字节数，不必再扫一遍文件。 */
+async function readCopyCheckpointManifest(
+  manifestPath: string,
+): Promise<{ bytes: number; count: number } | null> {
+  try {
+    const raw = await fsPromises.readFile(manifestPath, 'utf-8')
+    const parsed = JSON.parse(raw) as { version?: unknown; bytes?: unknown; files?: unknown }
+    if (parsed.version !== 2 || typeof parsed.bytes !== 'number') return null
+    return { bytes: parsed.bytes, count: Array.isArray(parsed.files) ? parsed.files.length : 0 }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 单个会话的检查点占用。
+ *
+ * git 引擎的清单只记了「仓库当时的总量」，多个检查点共用一个影子仓库时相加会重复计算，
+ * 因此仓库本身单独精确统计；复制引擎的清单则每条都是自己的体积，直接相加即可。
+ */
+async function checkpointSessionUsage(sessionDir: string): Promise<{ bytes: number; count: number }> {
+  let bytes = 0
+  let count = 0
+  let entries
+  try {
+    entries = await fsPromises.readdir(sessionDir, { withFileTypes: true })
+  } catch {
+    return { bytes, count }
+  }
+
+  for (const entry of entries) {
+    const full = join(sessionDir, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name === CHECKPOINT_SHADOW_REPO) continue
+      const manifest = await readCopyCheckpointManifest(join(full, CHECKPOINT_COPY_MANIFEST))
+      if (manifest) {
+        bytes += manifest.bytes
+        count += manifest.count
+        continue
+      }
+      // 没有清单的目录（中断残留）按实际占用算，否则会漏算
+      const sub = await getCheckpointDirSize(full)
+      bytes += sub.bytes
+      count += sub.count
+      continue
+    }
+    if (!entry.isFile()) continue
+    try {
+      bytes += (await fsPromises.stat(full)).size
+      count++
+    } catch { /* skip */ }
+  }
+
+  const repo = join(sessionDir, CHECKPOINT_SHADOW_REPO)
+  if (existsSync(repo)) {
+    const sub = await getCheckpointDirSize(repo)
+    bytes += sub.bytes
+    count += sub.count
+  }
+
+  return { bytes, count }
+}
+
+/**
+ * 文件检查点（Pi 每轮编辑前的基线快照）。
+ *
+ * 这块以前完全不在统计范围内：`du ~/.profer` 与设置页「存储用量」相差的那几个 GB
+ * 就是它。它也无法用「孤儿」概念处理——占用最大的往往是**已归档但还活着**的会话。
+ */
+async function calcCheckpointsCategory(): Promise<StorageCategory> {
+  const dir = getPiCheckpointsDir()
+  const sessions = listAgentSessions(true)
+  const knownIds = new Set(sessions.map((s) => s.id))
+  const archivedIds = new Set(sessions.filter((s) => s.archived).map((s) => s.id))
+  let bytes = 0, count = 0, orphanBytes = 0, orphanCount = 0
+  let archivedBytes = 0, archivedCount = 0, archivedSessions = 0
+
+  if (existsSync(dir)) {
+    try {
+      const entries = await fsPromises.readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        const usage = await checkpointSessionUsage(join(dir, entry.name))
+        bytes += usage.bytes
+        count += usage.count
+        if (!knownIds.has(entry.name)) {
+          orphanBytes += usage.bytes
+          orphanCount += usage.count
+        } else if (archivedIds.has(entry.name)) {
+          archivedBytes += usage.bytes
+          archivedCount += usage.count
+          archivedSessions++
+        }
+      }
+    } catch { /* 目录不可读时返回已统计的部分 */ }
+  }
+
+  return {
+    label: '文件检查点',
+    key: 'agent-checkpoints',
+    bytes, count,
+    hasOrphans: orphanCount > 0,
+    orphanBytes, orphanCount,
+    archivedBytes, archivedCount, archivedSessions,
+  }
+}
+
 async function calcWorkspacesCategory(): Promise<StorageCategory> {
   const wsDir = getAgentWorkspacesDir()
   const activeIds = getActiveSessionIds()
@@ -442,6 +603,7 @@ export async function calculateStorageStats(): Promise<StorageStats> {
   const categories = await Promise.all([
     calcAgentSessionsCategory(),
     calcSdkConfigCategory(),
+    calcCheckpointsCategory(),
     calcWorkspacesCategory(),
     calcConversationsCategory(),
     calcAttachmentsCategory(),
@@ -627,16 +789,65 @@ async function cleanupOrphanWorkspaces(): Promise<CleanupResult> {
   return { freedBytes, deletedCount, errors }
 }
 
-function cleanupArchivedSessions(beforeDays: number): CleanupResult {
+/**
+ * 建一份 Pi 原生会话文件索引（sessionId → 文件）。
+ *
+ * 不能用文件名片段匹配来定位：Pi 的文件名是 `{时间戳}_{sessionId}.jsonl`，而删除是不可逆的，
+ * 只能认 header 里的 `type=session` + `id`。索引只扫一遍，避免每个已归档会话都全目录重扫。
+ */
+async function indexPiSessionFiles(): Promise<Map<string, { path: string; bytes: number }>> {
+  const index = new Map<string, { path: string; bytes: number }>()
+  const dir = join(getSdkConfigDir(), 'sessions', 'pi')
+  if (!existsSync(dir)) return index
+
+  let files: string[]
+  try {
+    files = await fsPromises.readdir(dir)
+  } catch {
+    return index
+  }
+
+  for (const file of files) {
+    if (!file.endsWith('.jsonl')) continue
+    const full = join(dir, file)
+    try {
+      const stat = await fsPromises.stat(full)
+      const handle = await fsPromises.open(full, 'r')
+      let headerLine = ''
+      try {
+        const buffer = Buffer.alloc(512)
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+        headerLine = buffer.subarray(0, bytesRead).toString('utf-8').split('\n', 1)[0] ?? ''
+      } finally {
+        await handle.close()
+      }
+      const header = headerLine ? JSON.parse(headerLine) as { type?: unknown; id?: unknown } : undefined
+      if (header?.type === 'session' && typeof header.id === 'string') {
+        index.set(header.id, { path: full, bytes: stat.size })
+      }
+    } catch { /* 损坏或非 Pi 的 JSONL 不参与匹配 */ }
+  }
+
+  return index
+}
+
+async function cleanupArchivedSessions(beforeDays: number): Promise<CleanupResult> {
   const cutoff = Date.now() - beforeDays * 24 * 60 * 60 * 1000
   const sessions = listAgentSessions(true)
   const sdkDir = getSdkConfigDir()
   let freedBytes = 0, deletedCount = 0
   const errors: string[] = []
 
-  for (const session of sessions) {
-    if (!session.archived || session.updatedAt > cutoff) continue
+  const victims = sessions.filter((session) => session.archived && session.updatedAt <= cutoff)
+  if (victims.length === 0) return { freedBytes, deletedCount, errors }
 
+  // Pi 原生会话文件与 agent-sessions 是两份不同的落盘：只删后者会留下整份 SDK 记录。
+  // 先去重再建索引：没命中就不必扫全目录。
+  const piSessionFiles = victims.some((session) => session.sdkSessionId)
+    ? await indexPiSessionFiles()
+    : new Map<string, { path: string; bytes: number }>()
+
+  for (const session of victims) {
     // 删除 JSONL 消息文件
     const msgPath = join(getAgentSessionsDir(), `${session.id}.jsonl`)
     if (existsSync(msgPath)) {
@@ -644,9 +855,18 @@ function cleanupArchivedSessions(beforeDays: number): CleanupResult {
       if (freed > 0) { freedBytes += freed; deletedCount++ }
     }
 
+    // Pi 原生 session JSONL（resume 用的就是它）
+    const sdkSessionId = session.sdkSessionId
+    const piFile = sdkSessionId ? piSessionFiles.get(sdkSessionId) : undefined
+    if (sdkSessionId && piFile) {
+      const freed = safeUnlink(piFile.path)
+      if (freed > 0) { freedBytes += freed; deletedCount++ }
+      piSessionFiles.delete(sdkSessionId)
+    }
+
     // 清理 SDK file-history（同步删除，safeRmDir 的同步路径）
-    if (session.sdkSessionId) {
-      const histDir = join(sdkDir, 'file-history', session.sdkSessionId)
+    if (sdkSessionId) {
+      const histDir = join(sdkDir, 'file-history', sdkSessionId)
       if (existsSync(histDir)) {
         try {
           rmSync(histDir, { recursive: true, force: true })
@@ -658,6 +878,58 @@ function cleanupArchivedSessions(beforeDays: number): CleanupResult {
 
   if (freedBytes > 0) {
     console.log(`[存储清理] 归档数据: 释放 ${(freedBytes / 1024 / 1024).toFixed(1)} MB, 删除 ${deletedCount} 项`)
+  }
+  return { freedBytes, deletedCount, errors }
+}
+
+/**
+ * 回收文件检查点。
+ *
+ * 两种范围互不重叠：
+ * - `orphansOnly`：会话已经不存在的残留目录；
+ * - `includeArchivedSessions`：仍存在但已归档会话的检查点。这是**显式**动作，
+ *   删后这些会话失去文件回退能力（对话记录不受影响），因此不能跟归档本身绑在一起。
+ */
+async function cleanupCheckpoints(options: {
+  orphansOnly: boolean
+  includeArchivedSessions?: boolean
+}): Promise<CleanupResult> {
+  const dir = getPiCheckpointsDir()
+  const sessions = listAgentSessions(true)
+  const knownIds = new Set(sessions.map((s) => s.id))
+  const archivedIds = new Set(sessions.filter((s) => s.archived).map((s) => s.id))
+  let freedBytes = 0, deletedCount = 0
+  const errors: string[] = []
+
+  if (!existsSync(dir)) return { freedBytes, deletedCount, errors }
+
+  try {
+    const entries = await fsPromises.readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const exists = knownIds.has(entry.name)
+      const target = options.orphansOnly
+        ? !exists
+        : Boolean(options.includeArchivedSessions) && exists && archivedIds.has(entry.name)
+      if (!target) continue
+
+      const sessionDir = join(dir, entry.name)
+      // 先量后删：删完就不知道释放了多少
+      const usage = await checkpointSessionUsage(sessionDir)
+      removePiFileCheckpoints(dir, entry.name)
+      if (existsSync(sessionDir)) {
+        errors.push(`删除检查点失败: ${entry.name}`)
+        continue
+      }
+      freedBytes += usage.bytes
+      deletedCount += 1
+    }
+  } catch (e) {
+    errors.push(`清理文件检查点失败: ${e}`)
+  }
+
+  if (freedBytes > 0) {
+    console.log(`[存储清理] 文件检查点: 释放 ${(freedBytes / 1024 / 1024).toFixed(1)} MB, 删除 ${deletedCount} 个会话快照`)
   }
   return { freedBytes, deletedCount, errors }
 }
@@ -682,12 +954,15 @@ export async function cleanupStorage(options: CleanupOptions): Promise<CleanupRe
       switch (cat) {
         case 'agent-sessions': merge(await cleanupOrphanAgentSessions()); break
         case 'sdk-config': merge(await cleanupOrphanSdkConfig()); break
+        case 'agent-checkpoints': merge(await cleanupCheckpoints({ orphansOnly: true })); break
         case 'workspaces': merge(await cleanupOrphanWorkspaces()); break
         case 'session-blobs': merge(await cleanupOrphanSessionBlobs()); break
       }
+    } else if (cat === 'agent-checkpoints' && options.includeArchivedSessions) {
+      merge(await cleanupCheckpoints({ orphansOnly: false, includeArchivedSessions: true }))
     } else if (options.archivedBeforeDays > 0) {
       if (cat === 'agent-sessions' || cat === 'sdk-config') {
-        merge(cleanupArchivedSessions(options.archivedBeforeDays))
+        merge(await cleanupArchivedSessions(options.archivedBeforeDays))
       }
     }
   }

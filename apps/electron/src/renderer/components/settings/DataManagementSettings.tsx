@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronRight,
   HardDrive,
+  History,
   Trash2,
   RefreshCw,
   PackageOpen,
@@ -94,6 +95,10 @@ interface StorageCategory {
   hasOrphans: boolean
   orphanBytes: number
   orphanCount: number
+  /** 属于「仍存在但已归档」会话的占用，只能显式回收（当前只有文件检查点提供这个字段） */
+  archivedBytes?: number
+  archivedCount?: number
+  archivedSessions?: number
 }
 
 interface StorageStats {
@@ -139,6 +144,8 @@ const BAR_COLORS = [
   'bg-emerald-500',
   'bg-rose-500',
   'bg-cyan-500',
+  'bg-teal-500',
+  'bg-indigo-500',
 ]
 
 // ==================== 主组件 ====================
@@ -701,7 +708,7 @@ function StorageSection(): React.ReactElement {
     setLastResult(null)
     try {
       const result = await window.electronAPI.cleanupStorage({
-        categories: ['agent-sessions', 'sdk-config', 'workspaces', 'session-blobs'],
+        categories: ['agent-sessions', 'sdk-config', 'agent-checkpoints', 'workspaces', 'session-blobs'],
         orphansOnly: true,
         archivedBeforeDays: 0,
       }) as CleanupResult
@@ -709,6 +716,32 @@ function StorageSection(): React.ReactElement {
       await loadStats()
     } catch (e) {
       console.error('[存储管理] 清理孤儿数据失败:', e)
+      throw e
+    } finally {
+      setCleaningKey(null)
+    }
+  }
+
+  /**
+   * 回收已归档会话的文件检查点。
+   *
+   * 归档本身只做收纳，不释放磁盘（归档会话仍可打开、仍能回退）——这是有意的语义。
+   * 回退能力属于「可重建但不可恢复」的数据：只能显式点击，不能跟在归档后面静默执行。
+   */
+  const handleCleanArchivedCheckpoints = async (): Promise<void> => {
+    setCleaningKey('agent-checkpoints')
+    setLastResult(null)
+    try {
+      const result = await window.electronAPI.cleanupStorage({
+        categories: ['agent-checkpoints'],
+        orphansOnly: false,
+        archivedBeforeDays: 0,
+        includeArchivedSessions: true,
+      }) as CleanupResult
+      setLastResult(result)
+      await loadStats()
+    } catch (e) {
+      console.error('[存储管理] 回收归档会话检查点失败:', e)
       throw e
     } finally {
       setCleaningKey(null)
@@ -865,6 +898,40 @@ function StorageSection(): React.ReactElement {
                     <Trash2 size={12} />
                     {cleaningKey === 'temp-files' ? '清理中...' : '清理'}
                   </Button>
+                ) : cat.key === 'agent-checkpoints' ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    {(cat.archivedBytes ?? 0) > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        其中 {cat.archivedSessions ?? 0} 个已归档会话占 {formatBytes(cat.archivedBytes ?? 0)}
+                      </span>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setConfirmation({
+                        label: '回收已归档会话的文件检查点',
+                        description: `将删除 ${cat.archivedSessions ?? 0} 个已归档会话的文件检查点（约 ${formatBytes(cat.archivedBytes ?? 0)}）。这些会话仍可打开和继续对话，但将无法再把文件回退到更早的轮次；无法撤销。`,
+                        run: handleCleanArchivedCheckpoints,
+                      })}
+                      disabled={confirming || cleaningKey !== null || compacting || loading || statsError || (cat.archivedBytes ?? 0) === 0}
+                      className="h-7 gap-1 text-xs"
+                    >
+                      <History size={12} />
+                      {cleaningKey === 'agent-checkpoints' ? '回收中...' : '回收已归档'}
+                    </Button>
+                    {cat.hasOrphans && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setConfirmation({ label: `清理${cat.label}孤儿数据`, description: '永久删除已失去会话关联的快照，无法撤销。', run: () => handleCleanCategory(cat.key, true) })}
+                        disabled={confirming || cleaningKey !== null || compacting || loading || statsError}
+                        className="h-7 gap-1 text-xs"
+                      >
+                        <Trash2 size={12} />
+                        清理孤儿 {formatBytes(cat.orphanBytes)}
+                      </Button>
+                    )}
+                  </div>
                 ) : cat.hasOrphans ? (
                   <Button
                     variant="ghost"
@@ -900,10 +967,10 @@ function StorageSection(): React.ReactElement {
             disabled={!settingsLoaded || savingSettings}
             onCheckedChange={handleAutoCleanupTempChange}
           />
-          <SettingsRow label="清理已归档会话数据" description="自动清理超过指定天数的已归档会话消息和 SDK 数据">
+          <SettingsRow label="清理已归档会话数据" description="自动删除超过指定天数的已归档会话记录（对话消息与 Pi/Claude 会话文件）。归档本身不释放空间，靠这里回收；文件检查点请在「存储用量」里单独回收">
             <Select value={String(autoCleanupDays)} disabled={!settingsLoaded || savingSettings} onValueChange={(value) => {
               if (value === '0') void handleAutoCleanupDaysChange(value).catch(() => {})
-              else setConfirmation({ label: '启用归档数据自动清理', description: `将自动删除超过 ${value} 天的已归档会话消息和 SDK 数据，删除后不可恢复。请先备份。`, run: () => handleAutoCleanupDaysChange(value) })
+              else setConfirmation({ label: '启用归档数据自动清理', description: `将自动删除超过 ${value} 天的已归档会话的对话消息与会话文件，这些会话将清空且无法恢复。请先备份。`, run: () => handleAutoCleanupDaysChange(value) })
             }}>
               <SelectTrigger className="w-28">
                 <SelectValue />

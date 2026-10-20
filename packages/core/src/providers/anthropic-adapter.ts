@@ -458,6 +458,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       model: input.modelId,
       max_tokens: 128,
       messages: [{ role: 'user', content: input.prompt }],
+      // 显式声明非流式：部分中转站缺省行为是 SSE，会让标题响应变成 `data: {...}`。
+      stream: false,
     }
     if (capability.disableStrategy === 'explicit-disabled') {
       body.thinking = { type: 'disabled' }

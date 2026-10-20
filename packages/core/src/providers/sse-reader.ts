@@ -393,19 +393,108 @@ async function runStreamAttempt(options: StreamSSEOptions): Promise<StreamSSERes
 
 // ===== 非流式标题请求 =====
 
+/** 标题请求失败的结构化原因；用于把「模型调用失败」和「没有可用结果」区分开。 */
+export interface TitleFetchDiagnostics {
+  /** HTTP 状态码（网络异常时为 undefined）。 */
+  status?: number
+  /** 可直接展示给用户的失败原因（含状态码与响应片段）。 */
+  reason: string
+}
+
+export interface TitleFetchResult {
+  title: string | null
+  diagnostics?: TitleFetchDiagnostics
+}
+
+/** 把响应里的内容块（字符串 / 内容块数组）归一为纯文本。 */
+function normalizeTitleContent(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+  return value
+    .map((block) => {
+      if (typeof block === 'string') return block
+      if (!block || typeof block !== 'object') return ''
+      const text = (block as { text?: unknown }).text
+      return typeof text === 'string' ? text : ''
+    })
+    .join('')
+}
+
 /**
- * 执行非流式标题生成请求
+ * 从单个 SSE 事件载荷中提取增量标题文本。
+ *
+ * 覆盖三种标题会用到的协议：OpenAI Chat Completions、Anthropic Messages 与
+ * OpenAI Responses。只取可见文本，不把 reasoning / thinking 增量混进标题。
+ */
+function extractTitleDelta(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return ''
+  const data = payload as Record<string, unknown>
+
+  const choices = data.choices
+  if (Array.isArray(choices) && choices.length > 0) {
+    const choice = choices[0] as Record<string, unknown> | undefined
+    const delta = choice?.delta as Record<string, unknown> | undefined
+    const message = choice?.message as Record<string, unknown> | undefined
+    return normalizeTitleContent(delta?.content)
+      || normalizeTitleContent(message?.content)
+      || normalizeTitleContent(choice?.text)
+  }
+
+  const delta = data.delta as Record<string, unknown> | undefined
+  if (data.type === 'content_block_delta' && delta?.type === 'text_delta') {
+    return typeof delta.text === 'string' ? delta.text : ''
+  }
+  if (data.type === 'content_block_start') {
+    const contentBlock = data.content_block as Record<string, unknown> | undefined
+    if (contentBlock?.type === 'text' && typeof contentBlock.text === 'string') return contentBlock.text
+  }
+
+  if (typeof data.type === 'string' && data.type.endsWith('output_text.delta')) {
+    return typeof data.delta === 'string' ? data.delta : ''
+  }
+  const response = data.response as Record<string, unknown> | undefined
+  if (typeof response?.output_text === 'string') return response.output_text
+
+  return ''
+}
+
+/**
+ * 把 `data:` 事件流正文聚合成标题文本；不是事件流时返回空串。
+ *
+ * 中转站常见两种返回：真正的 SSE，或 `data: {...}\n\ndata: [DONE]` 的伪流式。
+ * 两种都按行解析，心跳/非 JSON 行直接忽略。
+ */
+export function extractTitleFromEventStream(body: string): string {
+  let text = ''
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line.startsWith('data:')) continue
+    const payload = line.slice(5).trim()
+    if (!payload || payload === '[DONE]') continue
+    try {
+      text += extractTitleDelta(JSON.parse(payload))
+    } catch {
+      // 非 JSON 的心跳/注释行不参与标题。
+    }
+  }
+  return text.trim()
+}
+
+/**
+ * 执行非流式标题生成请求，并保留失败原因。
+ *
+ * 标题是旁路请求：失败不能阻断运行，但也不能像之前那样只返回 null 让上层
+ * 静默回退。调用方可以用 diagnostics.reason 向用户解释到底是 401/404/超时
+ * 还是响应里没有标题文本。
  *
  * @param request 构建好的 HTTP 请求配置
  * @param adapter 供应商适配器（用于解析响应）
- * @returns 提取的标题文本，失败返回 null
  */
-export async function fetchTitle(
+export async function fetchTitleDetailed(
   request: ProviderRequest,
   adapter: ProviderAdapter,
   fetchFn: typeof globalThis.fetch = fetch,
-): Promise<string | null> {
-  try {
+): Promise<TitleFetchResult> {  try {
     console.log('[fetchTitle] 发送请求:', {
       url: request.url,
       provider: adapter.providerType,
@@ -430,20 +519,140 @@ export async function fetchTitle(
         status: response.status,
         error: errorText.slice(0, 500),
       })
-      return null
+      const snippet = errorText.trim().slice(0, 300)
+      return {
+        title: null,
+        diagnostics: {
+          status: response.status,
+          reason: `HTTP ${response.status}${snippet ? `: ${snippet}` : ''}`,
+        },
+      }
     }
 
-    const data: unknown = await response.json()
-    console.log('[fetchTitle] 解析响应体:', {
-      provider: adapter.providerType,
-      dataPreview: JSON.stringify(data).slice(0, 500),
-    })
+    const contentType = response.headers.get('content-type') ?? ''
+    const bodyText = await response.text()
+    const trimmed = bodyText.trim()
+    const snippet = trimmed.slice(0, 300)
 
-    const title = adapter.parseTitleResponse(data)
+    // 部分中转站/新 API 网关会忽略非流式请求，直接返回 `data: {...}` 的 SSE 正文。
+    // 先按 JSON 解析；失败或声明为事件流时，回退到 SSE 事件聚合，避免把流式响应
+    // 当成非法 JSON 报错（“Unexpected token 'd'”）。
+    const looksLikeEventStream = /text\/event-stream/i.test(contentType)
+      || trimmed.startsWith('data:')
+      || trimmed.startsWith('event:')
+
+    let title: string | null = null
+    if (!looksLikeEventStream) {
+      try {
+        const data: unknown = JSON.parse(bodyText)
+        console.log('[fetchTitle] 解析响应体:', {
+          provider: adapter.providerType,
+          dataPreview: JSON.stringify(data).slice(0, 500),
+        })
+        title = adapter.parseTitleResponse(data)
+      } catch {
+        console.warn('[fetchTitle] 响应不是合法 JSON，尝试按 SSE 解析:', snippet)
+      }
+    }
+
+    if (!title) {
+      title = extractTitleFromEventStream(bodyText)
+    }
+
     console.log('[fetchTitle] 解析标题结果:', { title })
-    return title
+    if (!title) {
+      return {
+        title: null,
+        diagnostics: {
+          status: response.status,
+          reason: trimmed
+            ? `响应中没有可用的标题文本: ${snippet}`
+            : '响应中没有可用的标题文本',
+        },
+      }
+    }
+    return { title }
   } catch (error) {
     console.error('[fetchTitle] 异常:', error)
-    return null
+    return {
+      title: null,
+      diagnostics: { reason: error instanceof Error ? error.message : String(error) },
+    }
+  }
+}
+
+/**
+ * 执行非流式标题生成请求
+ *
+ * @param request 构建好的 HTTP 请求配置
+ * @param adapter 供应商适配器（用于解析响应）
+ * @returns 提取的标题文本，失败返回 null
+ */
+export async function fetchTitle(
+  request: ProviderRequest,
+  adapter: ProviderAdapter,
+  fetchFn: typeof globalThis.fetch = fetch,
+): Promise<string | null> {
+  return (await fetchTitleWithRetry(request, adapter, fetchFn)).title
+}
+
+/**
+ * 构造「兼容重试」的标题请求。
+ *
+ * 部分第三方网关对推理模型 + 非流式 + 厂商私有参数（`thinking` / `reasoning_effort`）
+ * 的组合会返回 200 但 `completion_tokens: 0`（真实样本：`choices: []` 的 usage chunk）。
+ * 重试时只保留最通用的 Chat Completions 字段，并显式开流式——网关对流的支持
+ * 比非流式广；同时放宽标题预算，避免推理吃光 token 后没有正文。
+ */
+export function buildCompatibleTitleRetryRequest(request: ProviderRequest): ProviderRequest {
+  try {
+    const body = JSON.parse(request.body) as Record<string, unknown>
+    body.stream = true
+    if (typeof body.max_tokens === 'number') body.max_tokens = 512
+    if (typeof body.max_output_tokens === 'number') body.max_output_tokens = 512
+    delete body.thinking
+    delete body.reasoning
+    delete body.reasoning_effort
+    delete body.stream_options
+    return { ...request, body: JSON.stringify(body) }
+  } catch {
+    return request
+  }
+}
+
+/**
+ * 标题请求（带一次兼容重试）。
+ *
+ * 第一次失败常见于中转站的返回形态差异（SSE/参数严格）；兼容重试只会在
+ * 首次确实没拿到标题时发生，不会对正常渠道多发请求。
+ */
+export async function fetchTitleWithRetry(
+  request: ProviderRequest,
+  adapter: ProviderAdapter,
+  fetchFn: typeof globalThis.fetch = fetch,
+): Promise<TitleFetchResult> {
+  const first = await fetchTitleDetailed(request, adapter, fetchFn)
+  if (first.title) return first
+
+  // 鉴权/路由错误重试没有意义（同一地址、同一凭据）；只对「参数过严 / 空补全 / 网络抖动」
+  // 这类可能被兼容参数救回来的失败重试一次。Google 的标题请求没有 stream 字段，不参与。
+  const status = first.diagnostics?.status
+  if (adapter.providerType === 'google' || status === 401 || status === 403 || status === 404) return first
+
+  const retryRequest = buildCompatibleTitleRetryRequest(request)
+  if (retryRequest.body === request.body) return first
+
+  console.warn('[fetchTitle] 首次未取得标题，使用兼容参数重试一次')
+  const retry = await fetchTitleDetailed(retryRequest, adapter, fetchFn)
+  if (retry.title) return retry
+
+  const firstReason = first.diagnostics?.reason ?? '未知原因'
+  const retryReason = retry.diagnostics?.reason ?? '未知原因'
+  return {
+    title: null,
+    diagnostics: {
+      status: retry.diagnostics?.status ?? first.diagnostics?.status,
+      reason: `首次失败: ${firstReason}；兼容重试失败: ${retryReason}`,
+    },
   }
 }

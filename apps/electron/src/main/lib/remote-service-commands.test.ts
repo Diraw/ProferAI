@@ -8,6 +8,27 @@ import { handleRemoteCommand } from './remote-service'
  * 以及旧端兼容（未知指令仍返回原错误文案）。
  */
 describe('remote-service 新增 WS 命令', () => {
+  test('list_chat_tools：返回脱敏的工具列表（不含执行器配置与凭据）', async () => {
+    const result = await handleRemoteCommand(JSON.stringify({ type: 'list_chat_tools' }), 1)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(Array.isArray(result.data)).toBe(true)
+    const serialized = JSON.stringify(result.data)
+    expect(serialized).not.toContain('httpConfig')
+    expect(serialized).not.toContain('apiKey')
+    expect(serialized).not.toContain('systemPromptAppend')
+  })
+
+  test('update_chat_tool：缺少 toolId 时报错', async () => {
+    const result = await handleRemoteCommand(JSON.stringify({ type: 'update_chat_tool', enabled: true }), 1)
+    expect(result).toEqual({ ok: false, error: '缺少 toolId' })
+  })
+
+  test('save_agent_attachment：缺少附件数据时报错', async () => {
+    const result = await handleRemoteCommand(JSON.stringify({ type: 'save_agent_attachment', sessionId: 's1' }), 1)
+    expect(result).toEqual({ ok: false, error: '缺少有效附件数据' })
+  })
+
   test('get_pi_reasoning_capability：缺少 provider 时报错', async () => {
     const result = await handleRemoteCommand(JSON.stringify({ type: 'get_pi_reasoning_capability' }), 1)
     expect(result).toEqual({ ok: false, error: '缺少 provider' })

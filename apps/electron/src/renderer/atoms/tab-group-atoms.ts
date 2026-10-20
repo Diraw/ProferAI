@@ -303,6 +303,50 @@ export function planFollowWorkTab(input: {
 }
 
 /**
+ * 「新页接管当前栏」：浏览器页在页面内打开新页（target=_blank / 新建标签）时，
+ * 新页替换原分屏栏里的页，而不是把分屏拆掉或让原栏变成“激活此页面”占位。
+ *
+ * 焦点语义：
+ * - 原页是焦点成员 → 焦点跟到新页（并同步 activeTabId）；
+ * - 对侧会话是焦点 → 只换栏内成员，不抢用户正在看的会话。
+ *
+ * 原页不在组合里时不改布局，只在它本来就是激活页时切到新页（保持普通新标签页行为）。
+ * 返回 null 表示无需改动。
+ */
+export function planReplaceGroupMember(input: {
+  groups: TabGroupsState
+  previousTabId: string
+  nextTabId: string
+  activeTabId: string | null
+}): { groups: TabGroupsState; activeTabId: string | null } | null {
+  const { groups, previousTabId, nextTabId, activeTabId } = input
+  if (!previousTabId || !nextTabId || previousTabId === nextTabId) return null
+  // 新页已在别的组合里时不能抢成员（每个标签最多属于一个组合）。
+  if (findTabGroup(groups, nextTabId)) return null
+
+  const group = findTabGroup(groups, previousTabId)
+  if (!group) {
+    if (activeTabId !== previousTabId) return null
+    return { groups, activeTabId: nextTabId }
+  }
+
+  const side = groupSideOf(group, previousTabId)
+  if (!side) return null
+  const nextFocusedTabId = group.focusedTabId === previousTabId ? nextTabId : group.focusedTabId
+  const nextGroup = createGroup(
+    side === 'left' ? nextTabId : group.leftTabId,
+    side === 'right' ? nextTabId : group.rightTabId,
+    nextFocusedTabId,
+  )
+  if (!nextGroup) return null
+
+  return {
+    groups: replaceTabGroup(groups, group, nextGroup),
+    activeTabId: activeTabId === previousTabId ? nextTabId : activeTabId,
+  }
+}
+
+/**
  * 「预览与对话分屏」：把会话与其预览标签摆成左右并排（会话在左、预览在右）。
  *
  * 与 planFollowWorkTab 的区别：不要求用户此刻正看着该会话（用户主动打开预览时强制生效），

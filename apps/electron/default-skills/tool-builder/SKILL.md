@@ -1,30 +1,30 @@
 ---
 name: tool-builder
-description: 交互式创建和管理 Chat 模式的自定义 HTTP 工具。当用户想要创建新的 API 工具、配置 Chat 工具、添加自定义工具、管理自定义工具、或说"帮我创建一个 XX 工具"时使用此 Skill。也适用于调试、修复或删除已有的自定义工具。
-version: "1.0.1"
+description: Interactively create and manage custom HTTP tools for Chat mode. Use this skill when the user wants to create a new API tool, configure a Chat tool, add a custom tool, manage a custom tool, or says "help me create an XX tool". It also applies when debugging, fixing, or deleting an existing custom tool.
+version: "1.0.2"
 ---
 # Tool Builder
 
-通过交互式对话帮助用户创建可在 Chat 模式中使用的自定义 HTTP API 工具。
+Help users create custom HTTP API tools that can be used in Chat mode through interactive conversation.
 
-## 工作流程
+## Workflow
 
-### 1. 需求收集
+### 1. Gather requirements
 
-向用户了解：
-- 工具用途（查天气、翻译、汇率等）
-- API 端点 URL 和认证方式
-- 需要哪些参数（名称、类型、是否必填）
-- HTTP 方法（GET/POST）
-- 响应中需要提取哪部分数据
+Ask the user about:
+- The tool's purpose (weather lookup, translation, exchange rates, etc.)
+- The API endpoint URL and authentication method
+- Which parameters are needed (name, type, whether required)
+- The HTTP method (GET/POST)
+- Which part of the response should be extracted
 
-如果用户不确定具体 API，帮助推荐合适的公开 API。
+If the user is unsure which API to use, help recommend a suitable public API.
 
-### 2. 构建配置
+### 2. Build the configuration
 
-根据收集的信息构建工具配置 JSON。配置文件位于 `~/.profer/chat-tools.json`。
+Build the tool configuration JSON from the collected information. The configuration file is `~/.profer/chat-tools.json`.
 
-#### 配置文件结构
+#### Configuration file structure
 
 ```json
 {
@@ -37,10 +37,10 @@ version: "1.0.1"
   "customTools": [
     {
       "id": "custom-weather",
-      "name": "天气查询",
-      "description": "查询指定城市的当前天气信息",
+      "name": "Weather Lookup",
+      "description": "Look up the current weather information for a specified city",
       "params": [
-        { "name": "city", "type": "string", "description": "城市名称", "required": true }
+        { "name": "city", "type": "string", "description": "City name", "required": true }
       ],
       "category": "custom",
       "executorType": "http",
@@ -54,81 +54,81 @@ version: "1.0.1"
 }
 ```
 
-#### ChatToolMeta 字段说明
+#### ChatToolMeta field reference
 
-| 字段 | 必填 | 说明 |
+| Field | Required | Description |
 |------|------|------|
-| `id` | 是 | 唯一标识，必须以 `custom-` 前缀 + slug 格式（如 `custom-weather`） |
-| `name` | 是 | 显示名称 |
-| `description` | 是 | 工具描述，AI 据此决定何时调用 |
-| `params` | 是 | 参数列表，每个含 `name`/`type`/`description`/`required` |
-| `category` | 是 | 固定为 `"custom"` |
-| `executorType` | 是 | 固定为 `"http"` |
-| `httpConfig` | 是 | HTTP 请求配置 |
-| `icon` | 否 | Lucide 图标名（如 `"Cloud"`、`"Languages"`） |
-| `systemPromptAppend` | 否 | 启用时注入的系统提示词 |
+| `id` | Yes | Unique identifier; must use the `custom-` prefix + slug format (for example, `custom-weather`) |
+| `name` | Yes | Display name |
+| `description` | Yes | Tool description; the AI uses it to decide when to call the tool |
+| `params` | Yes | Parameter list; each item contains `name`/`type`/`description`/`required` |
+| `category` | Yes | Fixed as `"custom"` |
+| `executorType` | Yes | Fixed as `"http"` |
+| `httpConfig` | Yes | HTTP request configuration |
+| `icon` | No | Lucide icon name (for example, `"Cloud"` or `"Languages"`) |
+| `systemPromptAppend` | No | System prompt injected when enabled |
 
-#### httpConfig 字段说明
+#### httpConfig field reference
 
-| 字段 | 必填 | 说明 |
+| Field | Required | Description |
 |------|------|------|
-| `urlTemplate` | 是 | URL 模板，`{{paramName}}` 占位符会被参数值替换（自动 URL 编码） |
-| `method` | 是 | `"GET"` 或 `"POST"` |
-| `headers` | 否 | 请求头，常用于 API Key 认证：`{ "Authorization": "Bearer xxx" }` |
-| `bodyTemplate` | 否 | POST 请求体 JSON 模板，`{{paramName}}` 占位符会被替换（不编码） |
-| `resultPath` | 否 | 点号路径提取响应中的特定字段（如 `"data.results"`） |
+| `urlTemplate` | Yes | URL template; `{{paramName}}` placeholders are replaced with parameter values (URL-encoded automatically) |
+| `method` | Yes | `"GET"` or `"POST"` |
+| `headers` | No | Request headers, commonly used for API key authentication: `{ "Authorization": "Bearer xxx" }` |
+| `bodyTemplate` | No | JSON template for a POST request body; `{{paramName}}` placeholders are replaced (without encoding) |
+| `resultPath` | No | Dot path that extracts a specific field from the response (for example, `"data.results"`) |
 
-#### 参数类型
+#### Parameter types
 
-`params[].type` 支持：`"string"` / `"number"` / `"boolean"`
+`params[].type` supports: `"string"` / `"number"` / `"boolean"`
 
-可选添加 `enum` 字段限制可选值：
+You can optionally add an `enum` field to restrict the available values:
 ```json
-{ "name": "unit", "type": "string", "description": "温度单位", "enum": ["celsius", "fahrenheit"] }
+{ "name": "unit", "type": "string", "description": "Temperature unit", "enum": ["celsius", "fahrenheit"] }
 ```
 
-### 3. 写入配置
+### 3. Write the configuration
 
-操作步骤：
-1. 读取 `~/.profer/chat-tools.json`（如不存在则创建）
-2. 将新工具追加到 `customTools` 数组（按 `id` 去重）
-3. 在 `toolStates` 中添加 `{ "enabled": true }` 使其默认启用
-4. 写回文件（保持 JSON 格式化）
+Steps:
+1. Read `~/.profer/chat-tools.json` (create it if it does not exist)
+2. Append the new tool to the `customTools` array (deduplicate by `id`)
+3. Add `{ "enabled": true }` to `toolStates` so it is enabled by default
+4. Write the file back (preserve formatted JSON)
 
-写入后应用会自动检测文件变化并刷新工具列表。
+After writing, the application automatically detects the file change and refreshes the tool list.
 
-### 4. 测试引导
+### 4. Testing guidance
 
-告知用户：
-- "工具已创建并启用，请切换到 Chat 模式测试"
-- "在 Chat 输入框左下角的工具选择器中应该能看到新工具"
-- "试着问一个需要用到这个工具的问题"
-- "如果有问题，回到 Agent 模式告诉我，我帮你调试"
+Tell the user:
+- "The tool has been created and enabled. Switch to Chat mode to test it."
+- "The new tool should appear in the tool picker at the lower left of the Chat input box."
+- "Try asking a question that requires this tool."
+- "If there is a problem, return to Agent mode and tell me; I can help debug it."
 
-### 5. 调试修复
+### 5. Debugging and fixes
 
-用户反馈问题时，常见原因：
-- URL 模板错误 → 修正 `urlTemplate`
-- 参数映射不对 → 调整 `params` 定义
-- 响应格式变化 → 修改 `resultPath`
-- 认证失败 → 检查 `headers` 中的 API Key
-- 超时 → 检查 API 可达性
+Common causes when the user reports a problem:
+- Incorrect URL template → fix `urlTemplate`
+- Incorrect parameter mapping → adjust the `params` definition
+- Response format changed → modify `resultPath`
+- Authentication failure → check the API key in `headers`
+- Timeout → check API reachability
 
-修复后重新写入 `chat-tools.json`，应用自动刷新。
+After fixing, write `chat-tools.json` again; the application refreshes automatically.
 
-### 6. 删除工具
+### 6. Delete a tool
 
-从 `customTools` 数组中移除对应工具，同时删除 `toolStates` 中的条目。
+Remove the corresponding tool from the `customTools` array and delete its entry from `toolStates`.
 
-## 完整示例：天气查询工具
+## Complete example: weather lookup tool
 
 ```json
 {
   "id": "custom-weather",
-  "name": "天气查询",
-  "description": "查询指定城市的当前天气和温度信息。当用户询问天气时调用。",
+  "name": "Weather Lookup",
+  "description": "Look up the current weather and temperature for a specified city. Call this when the user asks about the weather.",
   "params": [
-    { "name": "city", "type": "string", "description": "城市名称（英文）", "required": true }
+    { "name": "city", "type": "string", "description": "City name (in English)", "required": true }
   ],
   "category": "custom",
   "executorType": "http",
@@ -140,16 +140,16 @@ version: "1.0.1"
 }
 ```
 
-## 完整示例：翻译工具（POST + API Key）
+## Complete example: translation tool (POST + API key)
 
 ```json
 {
   "id": "custom-translate",
-  "name": "翻译",
-  "description": "将文本翻译为目标语言。当用户需要翻译时调用。",
+  "name": "Translation",
+  "description": "Translate text into a target language. Call this when the user needs a translation.",
   "params": [
-    { "name": "text", "type": "string", "description": "要翻译的文本", "required": true },
-    { "name": "target_lang", "type": "string", "description": "目标语言代码", "required": true, "enum": ["EN", "ZH", "JA", "KO", "FR", "DE", "ES"] }
+    { "name": "text", "type": "string", "description": "Text to translate", "required": true },
+    { "name": "target_lang", "type": "string", "description": "Target language code", "required": true, "enum": ["EN", "ZH", "JA", "KO", "FR", "DE", "ES"] }
   ],
   "category": "custom",
   "executorType": "http",

@@ -4,8 +4,8 @@ import { localFileUrlToPath, parseTableChildren, rowsToMarkdown, rowsToTsv } fro
 
 describe('localFileUrlToPath', () => {
   test('normalizes a Windows file URL to an absolute Windows path', () => {
-    expect(localFileUrlToPath('file:///C:/Users/yuan/Documents/report%20final.md'))
-      .toBe('C:/Users/yuan/Documents/report final.md')
+    expect(localFileUrlToPath('file:///C:/Users/alice/Documents/report%20final.md'))
+      .toBe('C:/Users/alice/Documents/report final.md')
   })
 
   test('preserves an absolute Unix file path', () => {
