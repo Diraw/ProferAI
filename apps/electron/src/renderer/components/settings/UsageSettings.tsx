@@ -493,7 +493,7 @@ export function UsageSettings(): React.ReactElement {
         <SettingsCard>
           <SettingsRow
             label="自动归档"
-            description="超过指定天数未更新的会话将自动归档（置顶、进行中、有未完成任务的除外）"
+            description="超过指定天数未更新的会话将从列表里收纳起来（置顶、进行中、有未完成任务的除外）。归档只改变显示与排序，不释放磁盘空间；需要回收请到「数据管理 → 存储用量」。"
           >
             <Select disabled={settingsLoading || Boolean(settingsError) || archiveSaving} value={String(archiveAfterDays)} onValueChange={handleArchiveDaysChange}>
               <SelectTrigger aria-label="自动归档" className="w-[120px] h-8 text-[13px]">

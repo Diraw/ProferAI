@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SDKMessage } from '@profer/shared'
@@ -157,3 +157,126 @@ function findOnlyBlobPath(): string {
   expect(found).toHaveLength(1)
   return found[0]!
 }
+
+// ─── 文件检查点 ───────────────────────────────────────────────────────────────
+
+/** 造一份复制引擎快照：清单里直接记字节数 */
+function writeCopyCheckpoint(sessionId: string, id: string, bytes: number): string {
+  const dir = join(configPaths.getPiCheckpointsDir(), sessionId, id)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, '.manifest.json'), JSON.stringify({ version: 2, bytes, files: ['a.txt', 'b.txt'] }))
+  return dir
+}
+
+/**
+ * 造一份 git 引擎快照：清单里的 repoBytes 是「创建时仓库总量」，会随回收变小，
+ * 因此统计必须以 shadow.git 实际占用为准，不能相加清单里的数。
+ */
+function writeGitCheckpoint(sessionId: string, id: string, objectBytes: number, claimedRepoBytes = 50_000): string {
+  const sessionDir = join(configPaths.getPiCheckpointsDir(), sessionId)
+  mkdirSync(sessionDir, { recursive: true })
+  writeFileSync(join(sessionDir, `${id}.json`), JSON.stringify({ version: 3, repoBytes: claimedRepoBytes, files: ['a.txt'] }))
+  const objectsDir = join(sessionDir, 'shadow.git', 'objects')
+  mkdirSync(objectsDir, { recursive: true })
+  writeFileSync(join(objectsDir, id), 'x'.repeat(objectBytes))
+  return sessionDir
+}
+
+async function checkpointsCategory(): Promise<{ bytes: number; count: number; orphanBytes: number; orphanCount: number; archivedBytes?: number; archivedSessions?: number }> {
+  const stats = await storageService.calculateStorageStats()
+  const category = stats.categories.find((c) => c.key === 'agent-checkpoints')
+  expect(category).toBeDefined()
+  return category!
+}
+
+describe('存储统计 · 文件检查点', () => {
+  test('Given 复制快照与 git 快照 When 统计 Then 两者都计入且不重复计算影子仓库', async () => {
+    const session = sessions.createAgentSession('checkpoint copy')
+    writeCopyCheckpoint(session.id, 'snap-1', 1000)
+
+    const gitSession = sessions.createAgentSession('checkpoint git')
+    // 同一会话两份 git 快照共用仓库：两份对象各 4000 字节，清单却都声称仓库有 50KB
+    writeGitCheckpoint(gitSession.id, 'snap-1', 4000)
+    writeGitCheckpoint(gitSession.id, 'snap-2', 4000)
+
+    const category = await checkpointsCategory()
+
+    // 1KB 复制快照 + 8KB 对象；清单里的 50KB 是创建时快照，不能参与相加
+    expect(category.bytes).toBeGreaterThan(9000)
+    expect(category.bytes).toBeLessThan(12000)
+    expect(category.orphanCount).toBe(0)
+  })
+
+  test('Given 会话已不存在 When 统计 Then 记为孤儿并可清理', async () => {
+    // 会话 ID 不在索引里 = 已删除会话留下的残留目录（直接删会话会连检查点一起清，造不出孤儿）
+    const orphanId = '11111111-2222-3333-4444-555555555555'
+    const dir = writeCopyCheckpoint(orphanId, 'snap-1', 2000)
+
+    const before = await checkpointsCategory()
+    expect(before.orphanCount).toBe(2)          // 清单里记的两个文件
+    expect(existsSync(dir)).toBe(true)
+
+    const result = await storageService.cleanupStorage({ categories: ['agent-checkpoints'], orphansOnly: true, archivedBeforeDays: 0 })
+
+    expect(existsSync(dir)).toBe(false)
+    expect(result.deletedCount).toBe(1)
+    const after = await checkpointsCategory()
+    expect(after.bytes).toBe(0)
+  })
+
+  test('Given 已归档会话 When 普通归档清理 Then 检查点不动；显式回收才删', async () => {
+    const session = sessions.createAgentSession('checkpoint archived')
+    const dir = writeCopyCheckpoint(session.id, 'snap-1', 3000)
+    sessions.updateAgentSessionMeta(session.id, { archived: true })
+
+    const before = await checkpointsCategory()
+    expect(before.archivedSessions).toBe(1)
+    expect(before.archivedBytes).toBeGreaterThan(0)
+
+    // 只按归档天数清理消息文件：检查点必须原样保留
+    await storageService.cleanupStorage({ categories: ['agent-checkpoints'], orphansOnly: false, archivedBeforeDays: 1 })
+    expect(existsSync(dir)).toBe(true)
+
+    const result = await storageService.cleanupStorage({
+      categories: ['agent-checkpoints'],
+      orphansOnly: false,
+      archivedBeforeDays: 0,
+      includeArchivedSessions: true,
+    })
+
+    expect(existsSync(dir)).toBe(false)
+    expect(result.deletedCount).toBe(1)
+    const after = await checkpointsCategory()
+    expect(after.bytes).toBe(0)
+  })
+})
+
+describe('归档数据清理 · Pi 原生会话文件', () => {
+  test('Given 已归档且超期的 Pi 会话 When 按天数清理 Then 消息文件与原生 JSONL 一起删除', async () => {
+    const session = sessions.createAgentSession('pi archived')
+    const sdkId = '01a1aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee'
+    sessions.updateAgentSessionMeta(session.id, { sdkSessionId: sdkId, agentRuntime: 'pi', archived: true })
+
+    const messagePath = join(configPaths.getAgentSessionsDir(), `${session.id}.jsonl`)
+    writeFileSync(messagePath, '{"type":"user"}\n')
+
+    const piDir = join(configPaths.getSdkConfigDir(), 'sessions', 'pi')
+    mkdirSync(piDir, { recursive: true })
+    const piFile = join(piDir, `2026-09-01T00-00-00-000Z_${sdkId}.jsonl`)
+    writeFileSync(piFile, `${JSON.stringify({ type: 'session', version: 3, id: sdkId, cwd: root })}\n`)
+
+    // 把 updatedAt 推到 40 天前：清理只处理「归档且超期」的会话
+    const indexPath = join(configPaths.getConfigDir(), 'agent-sessions.json')
+    const index = JSON.parse(readFileSync(indexPath, 'utf-8')) as { sessions: Array<{ id: string; updatedAt: number }> }
+    const target = index.sessions.find((item) => item.id === session.id)
+    expect(target).toBeDefined()
+    target!.updatedAt = Date.now() - 40 * 24 * 60 * 60 * 1000
+    writeFileSync(indexPath, JSON.stringify(index))
+
+    const result = await storageService.cleanupStorage({ categories: ['sdk-config'], orphansOnly: false, archivedBeforeDays: 30 })
+
+    expect(existsSync(messagePath)).toBe(false)
+    expect(existsSync(piFile)).toBe(false)
+    expect(result.deletedCount).toBe(2)
+  })
+})
