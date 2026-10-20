@@ -75,4 +75,18 @@ describe('Pi model registry host boundaries', () => {
     expect(updated).toHaveLength(1)
     expect(updated[0]).toMatchObject({ access: 'refreshed-access', accountId: 'account' })
   })
+
+  test('Given Google 渠道只填域名或误填 /v1 When 注册 Pi 模型 Then baseUrl 补齐原生 /v1beta', async () => {
+    for (const [baseUrl, expected] of [
+      ['https://fixture.invalid', 'https://fixture.invalid/v1beta'],
+      ['https://fixture.invalid/v1', 'https://fixture.invalid/v1beta'],
+      ['https://fixture.invalid/v1beta/', 'https://fixture.invalid/v1beta'],
+      ['https://fixture.invalid/v1beta/models', 'https://fixture.invalid/v1beta'],
+    ] as const) {
+      const fixture = fakeSdk()
+      await buildModel(fixture.sdk, { sessionId: 'fixture', apiKey: 'fixture-key', provider: 'google', channelId: 'channel', model: 'gemini-3.7-flash', baseUrl })
+      expect(fixture.models[0]?.baseUrl).toBe(expected)
+      expect(fixture.models[0]?.api).toBe('google-generative-ai')
+    }
+  })
 })

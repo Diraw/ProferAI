@@ -27,7 +27,7 @@ import type {
 import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApiToken, isAgentEnabledForChannel, isCodexCredentialExpired, isLocalOllamaBaseUrl, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveProviderNativeProtocol, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
-import { assertSdkBaseUrlSupportsRouting, isAnthropicShapedEndpoint, resolveAnthropicMessagesUrl, resolveAnthropicModelsUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
+import { assertSdkBaseUrlSupportsRouting, isAnthropicShapedEndpoint, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveAnthropicModelsUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
 import { parseMiniMaxGeneralQuotaWindows } from './channel-plan-quota-parsers'
 import { parseCodexPlanQuotaResponse } from './codex-plan-quota'
 import { loginCodexOAuth, refreshCodexOAuth } from './codex-oauth-service'
@@ -1754,7 +1754,8 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
     }
   } catch (error) {
     if (signal?.aborted) return { success: false, cancelled: true, message: '请求已取消' }
-    return { success: false, message: error instanceof Error && error.name === 'TimeoutError' ? '连接测试超时（15 秒），请重试' : '连接测试失败，请检查端点、凭据或供应商响应' }
+    const reason = describeChannelFailure(error, input.apiKey)
+    return { success: false, message: error instanceof Error && error.name === 'TimeoutError' ? '连接测试超时（15 秒），请重试' : reason ? `连接测试失败：${reason}` : '连接测试失败，请检查端点、凭据或供应商响应' }
   }
 }
 
@@ -1800,8 +1801,21 @@ export async function fetchModels(input: FetchModelsInput, signal?: AbortSignal)
     }
   } catch (error) {
     if (signal?.aborted) return { success: false, cancelled: true, message: '请求已取消', models: [] }
-    return { success: false, message: error instanceof Error && error.name === 'TimeoutError' ? '拉取模型超时（15 秒），请重试' : '拉取模型失败，请检查端点、凭据或供应商响应', models: [] }
+    const reason = describeChannelFailure(error, input.apiKey)
+    return { success: false, message: error instanceof Error && error.name === 'TimeoutError' ? '拉取模型超时（15 秒），请重试' : reason ? `拉取模型失败：${reason}` : '拉取模型失败，请检查端点、凭据或供应商响应', models: [] }
   }
+}
+
+/**
+ * 把失败原因透出给 UI 时抹掉可能随错误文本带出的凭据。
+ * 目录校验/URL 解析错误可能携带 `key=...` 或直接带 Key 原文，不能原样展示。
+ * 无法安全展示时返回空串，由调用方回退到通用提示。
+ */
+function describeChannelFailure(error: unknown, apiKey: string): string {
+  if (!(error instanceof Error)) return ''
+  const reason = error.message.trim().replace(/(\bkey=)[^&\s]+/gi, '$1***')
+  if (!reason || (apiKey && reason.includes(apiKey))) return ''
+  return reason
 }
 
 /** 响应必须是成功对象，不能把 HTTP 200 错误包当权威空目录。 */
@@ -1849,7 +1863,7 @@ function modelsResult(models: ChannelModel[], sort = false): FetchModelsResult {
 
 /** Google / Ollama 原生端点只操作 pathname，保留既有 query 路由。 */
 function resolveGoogleModelsUrl(baseUrl: string, apiKey: string): string {
-  const url = new URL(baseUrl.trim())
+  const url = new URL(normalizeGoogleBaseUrl(baseUrl))
   const path = url.pathname.replace(/\/+$/, '')
   url.pathname = path.endsWith('/models') ? path : `${path.replace(/\/v1beta$/, '')}/v1beta/models`
   url.searchParams.set('key', apiKey)
@@ -1991,13 +2005,22 @@ async function fetchGoogleModels(baseUrl: string, apiKey: string, proxyUrl?: str
     const { data, items } = modelPage(await response.json(), 'models')
     for (const item of items) {
       const name = modelString(item.name, 'name')
-      if (!name.startsWith('models/') || !name.slice(7).trim()) throw new Error('Google 模型 name 无效')
-      const id = name.slice(7)
-      const displayName = item.displayName === undefined ? id : modelString(item.displayName, 'displayName')
-      if (!Array.isArray(item.supportedGenerationMethods) || item.supportedGenerationMethods.some((method) => typeof method !== 'string')) throw new Error('Google 模型生成能力结构无效')
-      if (item.supportedGenerationMethods.includes('generateContent')) models.push(fetchedModel(id, displayName))
+      // 官方目录带 `models/` 前缀；第三方 Gemini 兼容网关（中转站）通常只给裸模型 ID。
+      const id = name.startsWith('models/') ? name.slice(7) : name
+      if (!id.trim()) throw new Error('Google 模型 name 无效')
+      const displayName = item.displayName === undefined || item.displayName === null ? id : modelString(item.displayName, 'displayName')
+      const methods = item.supportedGenerationMethods
+      // 网关常把能力声明省略或写成 null。缺声明时按可生成处理，否则整个目录被判无效，
+      // 用户连手动挑模型的机会都没有；官方端点始终返回数组，不受影响。
+      if (methods === undefined || methods === null) {
+        models.push(fetchedModel(id, displayName))
+        continue
+      }
+      if (!Array.isArray(methods) || methods.some((method) => typeof method !== 'string')) throw new Error('Google 模型生成能力结构无效')
+      if (methods.includes('generateContent')) models.push(fetchedModel(id, displayName))
     }
-    if (data.nextPageToken === undefined || data.nextPageToken === '') return modelsResult(models)
+    // 网关常把“无下一页”写成 null（官方是省略字段或空串），两者都表示目录已结束。
+    if (data.nextPageToken === undefined || data.nextPageToken === null || data.nextPageToken === '') return modelsResult(models)
     const token = modelString(data.nextPageToken, 'nextPageToken')
     if (tokens.has(token)) throw new Error('模型目录分页未前进')
     tokens.add(token)

@@ -5,6 +5,7 @@ import {
   normalizeAnthropicBaseUrlForSdk,
   normalizeOpenAIBaseUrlForSdk,
   normalizeBaseUrl,
+  normalizeGoogleBaseUrl,
   normalizeAnthropicProviderUrl,
   resolveOpenAIChatCompletionsUrl,
   resolveOpenAIResponsesUrl,
@@ -96,6 +97,21 @@ describe('normalizeBaseUrl', () => {
   test('仅去除尾部斜杠', () => {
     expect(normalizeBaseUrl('https://api.openai.com/v1/')).toBe('https://api.openai.com/v1')
     expect(normalizeBaseUrl('https://api.openai.com/v1')).toBe('https://api.openai.com/v1')
+  })
+})
+
+describe('normalizeGoogleBaseUrl', () => {
+  test('剥掉误填的版本段，统一回到协议根', () => {
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn/v1')).toBe('https://api.fluxlane.cn')
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn/v1/')).toBe('https://api.fluxlane.cn')
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn')).toBe('https://api.fluxlane.cn')
+    // Google 文档与部分网关直接给 /v1beta，不剥会拼成 /v1beta/v1beta
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn/v1beta')).toBe('https://api.fluxlane.cn')
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn/v1beta/')).toBe('https://api.fluxlane.cn')
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn/v1beta/models')).toBe('https://api.fluxlane.cn')
+    // 自定义前缀保留，只剥版本段
+    expect(normalizeGoogleBaseUrl('https://gw.example.com/tenant/v1beta')).toBe('https://gw.example.com/tenant')
+    expect(normalizeGoogleBaseUrl('https://api.fluxlane.cn/v1/?route=fixture#anchor')).toBe('https://api.fluxlane.cn?route=fixture#anchor')
   })
 })
 

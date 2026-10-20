@@ -51,7 +51,7 @@ import type {
   FetchModelsResult,
   ProviderType,
 } from '@profer/shared'
-import { isAnthropicShapedEndpoint, resolveAnthropicMessagesUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl } from '@profer/core'
+import { isAnthropicShapedEndpoint, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl } from '@profer/core'
 import { getProviderLogo } from '@/lib/model-logo'
 import { applyModelDiscoveryResult, buildModelDiscoveryAttemptKey, shouldAutoDiscoverModels } from '@/lib/channel-model-discovery'
 import { addManualModel } from '@/lib/channel-manual-model'
@@ -176,8 +176,43 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
     return resolveAnthropicMessagesUrl(baseUrl, provider)
   }
   if (provider === 'xai' || provider === 'openai-responses') return resolveOpenAIResponsesUrl(baseUrl, provider)
-  if (provider === 'google') return `${trimmed}${PROVIDER_CHAT_PATHS[provider]}`
+  if (provider === 'google') return `${normalizeGoogleBaseUrl(trimmed)}${PROVIDER_CHAT_PATHS[provider]}`
   return resolveOpenAIChatCompletionsUrl(baseUrl, provider)
+}
+
+/**
+ * 地址形态与渠道协议不匹配时的提示。
+ *
+ * 这些误填不会报错，只会拼出一个不存在的地址（例如把 Responses 端点填进 OpenAI 兼容渠道
+ * 会得到 `/v1/responses/chat/completions`），用户要到真正聊天失败才发现。
+ * 预览里必须说清楚，而不是展示一个看起来很正常的 URL。
+ */
+function describeEndpointMismatch(baseUrl: string, provider: ProviderType): string {
+  const raw = baseUrl.trim().replace(/\/+$/, '')
+  if (!raw) return ''
+  const path = (() => {
+    try { return new URL(raw).pathname.toLowerCase() } catch { return raw.toLowerCase() }
+  })()
+
+  if (provider === 'anthropic-compatible' && !/\/messages$/.test(path)) {
+    return '；Anthropic 兼容渠道必须填写完整请求端点（以 /v1/messages 结尾），否则请求会打到错误路径'
+  }
+  if (provider === 'ollama' && /\/(chat\/completions|messages)$/.test(path)) {
+    return '；Ollama 只填服务根地址（如 http://127.0.0.1:11434），不要带请求端点'
+  }
+  if (provider === 'google' && /(chat\/completions|\/responses|\/messages)/.test(path)) {
+    return '；Gemini 渠道应填协议根地址（如 https://host），不要填写 OpenAI / Anthropic 端点'
+  }
+  if ((provider === 'openai' || provider === 'deepseek') && /\/messages$/.test(path)) {
+    return '；这是 Anthropic 协议的端点，此渠道走 OpenAI 兼容协议，请改用「Anthropic 兼容格式」'
+  }
+  if ((provider === 'openai' || provider === 'deepseek') && /\/responses$/.test(path)) {
+    return '；这是 Responses 协议的端点，请改用「OpenAI Responses 格式」渠道'
+  }
+  if ((provider === 'xai' || provider === 'openai-responses') && /\/chat\/completions$/.test(path)) {
+    return '；此渠道使用 Responses 协议，不要填写 Chat Completions 端点'
+  }
+  return ''
 }
 
 /** auto-save 防抖延迟 */
@@ -1027,8 +1062,8 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               placeholder="https://api.example.com/v1"
               description={baseUrl.trim()
                 ? provider === 'ollama'
-                  ? `预览：${buildPreviewUrl(baseUrl, provider)}；${getOllamaNetworkScope(baseUrl)}`
-                  : `预览：${buildPreviewUrl(baseUrl, provider)}`
+                  ? `预览：${buildPreviewUrl(baseUrl, provider)}；${getOllamaNetworkScope(baseUrl)}${describeEndpointMismatch(baseUrl, provider)}`
+                  : `预览：${buildPreviewUrl(baseUrl, provider)}${describeEndpointMismatch(baseUrl, provider)}`
                 : undefined}
             />
           )}
