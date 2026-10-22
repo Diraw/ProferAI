@@ -5,7 +5,7 @@
  * 通过 ProviderType 查找对应的适配器实例。
  */
 
-import type { ProviderType } from '@profer/shared'
+import type { ProviderType, XaiApiProtocol } from '@profer/shared'
 import { PROVIDER_CAPABILITIES } from '@profer/shared'
 import type { ProviderAdapter } from './types.ts'
 import { AnthropicAdapter } from './anthropic-adapter.ts'
@@ -61,7 +61,10 @@ const adapterRegistry = new Map<ProviderType, () => ProviderAdapter>([
  * @returns 对应的适配器实例
  * @throws Error 如果供应商类型不支持
  */
-export function getAdapter(provider: ProviderType): ProviderAdapter {
+export function getAdapter(provider: ProviderType, xaiApiProtocol?: XaiApiProtocol): ProviderAdapter {
+  // xAI 渠道的协议由用户在渠道上选择：官方默认 Responses，只支持 Chat Completions
+  // 的第三方中转可切到 OpenAI 兼容适配器，不再要求中转去实现 /responses。
+  if (provider === 'xai' && xaiApiProtocol === 'chat-completions') return new OpenAIAdapter('xai')
   const createAdapter = adapterRegistry.get(provider)
   if (!createAdapter) {
     throw new Error(`不支持的供应商: ${provider}。你可能过去使用的是 Profer 商业版，请重新下载商业版覆盖安装，当前版本为开源版本。`)
@@ -79,12 +82,26 @@ export function getAdapter(provider: ProviderType): ProviderAdapter {
  * 这里复用同一份归一化，保证标题与主链路请求落在同一个地址上。只对 OpenAI 兼容
  * 族生效；Anthropic/Google 与 OAuth 订阅渠道的地址语义不同，保持原样。
  */
-export function resolveTitleBaseUrl(provider: ProviderType, baseUrl?: string): string | undefined {
+export function resolveTitleBaseUrl(
+  provider: ProviderType,
+  baseUrl?: string,
+  xaiApiProtocol?: XaiApiProtocol,
+): string | undefined {
   const raw = baseUrl?.trim()
   if (!raw) return baseUrl
+  if (provider === 'xai') {
+    // Responses 渠道保持原样（历史行为）；Chat Completions 渠道需要把误填的
+    // /responses 或 /chat/completions 还原成协议根，避免标题请求拼出双层端点。
+    if (xaiApiProtocol !== 'chat-completions') return baseUrl
+    try {
+      return normalizeOpenAIBaseUrlForSdk(raw)
+    } catch {
+      return baseUrl
+    }
+  }
   const protocol = PROVIDER_CAPABILITIES[provider]?.nativeProtocol
   const openAICompatible = protocol === 'openai-completions' || protocol === 'openai-responses'
-  if (!openAICompatible || provider === 'ollama' || provider === 'xai' || provider === 'openai-codex') return baseUrl
+  if (!openAICompatible || provider === 'ollama' || provider === 'openai-codex') return baseUrl
   try {
     return normalizeOpenAIBaseUrlForSdk(raw)
   } catch {

@@ -122,6 +122,17 @@ describe('F14：请求超时与测试能力边界', () => {
     expect(requests.every(({ init }) => init.method === 'POST' && init.signal instanceof AbortSignal)).toBe(true)
   })
 
+  test('Given xAI 渠道选择 Chat Completions When 测试 Then 请求 /chat/completions 而非 /responses', async () => {
+    responder = async () => json({ choices: [{ message: { content: 'fixture' } }] })
+    expect((await testChannelDirect(input('xai', { modelId: 'grok-4.3', apiProtocol: 'chat-completions' }))).success).toBe(true)
+    expect(new URL(requests[0]!.url).pathname).toBe('/v1/chat/completions')
+
+    requests.length = 0
+    responder = async () => json({ output: [{ type: 'message', content: [{ text: 'fixture' }] }] })
+    expect((await testChannelDirect(input('xai', { modelId: 'grok-4.3' }))).success).toBe(true)
+    expect(new URL(requests[0]!.url).pathname).toBe('/v1/responses')
+  })
+
   test('Given Pi/Claude 双端点 When 指定 runtime Then 分别检查对应协议且明确标注 Claude', async () => {
     responder = async ({ url }) => json(url.includes('/messages') ? { content: [{ type: 'text', text: 'fixture' }] } : { choices: [{ message: { content: 'fixture' } }] })
     const fixture = input('custom', { modelId: 'manual-fixture',

@@ -20,10 +20,27 @@ export function createCenteredStartupSplashBounds(workArea: StartupSplashBounds)
 }
 
 /**
+ * Splash 首帧已提交到合成器的信号（写入 document.title）。
+ *
+ * 主进程靠它决定何时 show 窗口：did-finish-load 只代表 HTML 加载完，
+ * 此时 WebGL 首帧通常还没画出来，窗口会先露出 backgroundColor 纯色再顶内容，
+ * 在部分 NVIDIA + D3D11 组合下就是那一帧闪动。
+ */
+export const SPLASH_READY_TITLE = 'profer-splash-ready'
+
+/**
+ * 等首帧信号的兜底上限（ms）。
+ *
+ * 页面脚本异常或 WebGL 不可用时必须仍然显示 Splash，否则 splashShown 永远为 false，
+ * 主窗口的 showWhenReady 会被一起卡死。所以到点无条件显示。
+ */
+export const SPLASH_REVEAL_FALLBACK_MS = 600
+
+/**
  * 生成冷启动独立窗口的原始 WebGL Splash HTML。
  *
- * Windows 主进程在创建窗口前默认选择 ANGLE D3D11on12，规避部分 NVIDIA + D3D11
- * 环境中原始动态 ring 的呈现闪动；shader 的原始视觉结构保持不变。
+ * 首帧绘制提交后通过 document.title 回报 SPLASH_READY_TITLE，主进程据此决定 show 时机；
+ * 这样不必为规避呈现闪动而全局改写 Windows 的 ANGLE 后端。shader 的原始视觉结构保持不变。
  */
 export function createStartupSplashHtml(isDark: boolean): string {
   const background = isDark ? '#0b0b0c' : '#f7f7f5'
@@ -40,6 +57,6 @@ export function createStartupSplashHtml(isDark: boolean): string {
     .logo{position:relative;z-index:2;font-size:clamp(52px,10vw,112px);font-weight:600;font-style:italic;letter-spacing:-.045em;transform:skewX(-7deg);text-shadow:0 0 28px ${highlight}28;animation:rise 1.1s cubic-bezier(.22,1,.36,1) both}.status{position:absolute;z-index:2;bottom:8%;font:10px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.32em;text-transform:uppercase;color:${muted};animation:pulse 1.8s ease-in-out infinite}
     @keyframes rise{from{opacity:0;transform:translateY(18px) skewX(-7deg) scale(.96)}to{opacity:1;transform:translateY(0) skewX(-7deg) scale(1)}}@keyframes breathe{0%,100%{opacity:.35;transform:scale(.86)}50%{opacity:.8;transform:scale(1.08)}}@keyframes pulse{0%,100%{opacity:.35}50%{opacity:.8}}
   </style></head><body><main class="stage"><canvas id="fluid"></canvas><div class="glow"></div><div class="logo">Profer</div><div class="status">Loading</div></main><script>
-  (function(){var c=document.getElementById('fluid'),gl=c.getContext('webgl',{alpha:false,antialias:false}),dark=${isDark ? 'true' : 'false'};if(!gl)return;function shader(type,src){var x=gl.createShader(type);if(!x)return null;gl.shaderSource(x,src);gl.compileShader(x);return gl.getShaderParameter(x,gl.COMPILE_STATUS)?x:null}var v=shader(gl.VERTEX_SHADER,${vertex}),f=shader(gl.FRAGMENT_SHADER,${fragment});if(!v||!f)return;var p=gl.createProgram();gl.attachShader(p,v);gl.attachShader(p,f);gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))return;var b=gl.createBuffer(),a=gl.getAttribLocation(p,'aPosition'),time=gl.getUniformLocation(p,'uTime'),res=gl.getUniformLocation(p,'uResolution'),op=gl.getUniformLocation(p,'uOpacity'),seed=gl.getUniformLocation(p,'uSeed'),theme=gl.getUniformLocation(p,'uThemeLight'),continuous=gl.getUniformLocation(p,'uContinuous');if(!b||a<0||!time||!res||!op||!seed||!theme||!continuous)return;gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);var w=1,h=1,started=performance.now(),seedValue=Math.random()*1000;function resize(){var r=c.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,1.5),nw=Math.max(1,Math.round(r.width*d)),nh=Math.max(1,Math.round(r.height*d));if(nw===w&&nh===h)return;w=nw;h=nh;c.width=w;c.height=h}resize();if(typeof ResizeObserver!=='undefined')new ResizeObserver(resize).observe(c);addEventListener('resize',resize);function draw(now){var elapsed=now-started;gl.viewport(0,0,w,h);gl.clearColor(dark?.043:.969,dark?.043:.969,dark?.047:.961,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(p);gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);gl.uniform1f(time,elapsed/625);gl.uniform2f(res,w,h);gl.uniform1f(op,1);gl.uniform1f(seed,seedValue);gl.uniform1f(theme,dark?0:1);gl.uniform1f(continuous,0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);requestAnimationFrame(draw)}requestAnimationFrame(draw)})();
+  (function(){var c=document.getElementById('fluid'),gl=c.getContext('webgl',{alpha:false,antialias:false}),dark=${isDark ? 'true' : 'false'};var readySent=false;function signalReady(){if(readySent)return;readySent=true;document.title='${SPLASH_READY_TITLE}'}if(!gl){signalReady();return}function shader(type,src){var x=gl.createShader(type);if(!x)return null;gl.shaderSource(x,src);gl.compileShader(x);return gl.getShaderParameter(x,gl.COMPILE_STATUS)?x:null}var v=shader(gl.VERTEX_SHADER,${vertex}),f=shader(gl.FRAGMENT_SHADER,${fragment});if(!v||!f){signalReady();return}var p=gl.createProgram();gl.attachShader(p,v);gl.attachShader(p,f);gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS)){signalReady();return}var b=gl.createBuffer(),a=gl.getAttribLocation(p,'aPosition'),time=gl.getUniformLocation(p,'uTime'),res=gl.getUniformLocation(p,'uResolution'),op=gl.getUniformLocation(p,'uOpacity'),seed=gl.getUniformLocation(p,'uSeed'),theme=gl.getUniformLocation(p,'uThemeLight'),continuous=gl.getUniformLocation(p,'uContinuous');if(!b||a<0||!time||!res||!op||!seed||!theme||!continuous){signalReady();return}gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);var w=1,h=1,started=performance.now(),seedValue=Math.random()*1000;function resize(){var r=c.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,1.5),nw=Math.max(1,Math.round(r.width*d)),nh=Math.max(1,Math.round(r.height*d));if(nw===w&&nh===h)return;w=nw;h=nh;c.width=w;c.height=h}resize();if(typeof ResizeObserver!=='undefined')new ResizeObserver(resize).observe(c);addEventListener('resize',resize);function draw(now){var elapsed=now-started;gl.viewport(0,0,w,h);gl.clearColor(dark?.043:.969,dark?.043:.969,dark?.047:.961,1);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(p);gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);gl.uniform1f(time,elapsed/625);gl.uniform2f(res,w,h);gl.uniform1f(op,1);gl.uniform1f(seed,seedValue);gl.uniform1f(theme,dark?0:1);gl.uniform1f(continuous,0);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);if(!readySent)requestAnimationFrame(signalReady);requestAnimationFrame(draw)}requestAnimationFrame(draw)})();
   </script></body></html>`
 }

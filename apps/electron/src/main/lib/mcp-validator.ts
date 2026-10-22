@@ -9,7 +9,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import type { McpServerEntry } from '@profer/shared'
 
 /**
@@ -99,8 +99,17 @@ export async function validateMcpServer(
  * 策略：
  * 1. 如果是绝对路径，检查文件是否存在
  * 2. 如果是相对命令（如 npx），使用 which 查找
+ *
+ * 注意：command 来自 MCP 服务器配置（renderer 可写），不可信。
+ * which/where 一律通过 execFileSync 以参数数组调用，不经 shell 解析，
+ * 否则 `node; rm -rf ~` 之类的配置会被当作 shell 命令执行。
  */
 async function isCommandAvailable(command: string): Promise<boolean> {
+  // 防御：空命令、含换行/回车/NUL 的命令没有任何合法用途，直接判为不可用（不做清洗）。
+  if (command.length === 0 || command.includes('\n') || command.includes('\r') || command.includes('\0')) {
+    return false
+  }
+
   // 绝对路径
   if (command.startsWith('/') || command.startsWith('\\') || /^[A-Z]:/i.test(command)) {
     return existsSync(command)
@@ -108,9 +117,9 @@ async function isCommandAvailable(command: string): Promise<boolean> {
 
   // 相对命令：使用 which 查找
   try {
-    // 跨平台 which 查找
+    // 跨平台 which 查找：参数数组传递，避免 shell 元字符注入
     const whichCommand = process.platform === 'win32' ? 'where' : 'which'
-    execSync(`${whichCommand} ${command}`, { stdio: 'ignore' })
+    execFileSync(whichCommand, [command], { stdio: 'ignore' })
     return true
   } catch {
     return false

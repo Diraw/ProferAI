@@ -7,6 +7,10 @@ mock.module('../memory-archive-search', () => ({
   createMemoryArchiveSearcher: () => ({
     search: (query: string, topK: number) => [{ relativePath: 'memory.md', content: `hit:${query}`, startIndex: 0, endIndex: query.length, score: 0, matchedTokens: [query] }].slice(0, topK),
   }),
+  // 同进程其它测试会导入这两个导出；mock 模块会替换整个模块缓存，缺一个就报
+  // “Export named ... not found”，把无关测试拖下水。
+  memoryFreshnessNote: () => undefined,
+  memoryHitAgeDays: () => undefined,
 }))
 
 // 内置工具桥接经会话/工作区服务间接导入 Electron；Bun 单测需提供最小主进程 mock。

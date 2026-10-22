@@ -588,8 +588,8 @@ export class AgentOrchestrator {
         apiKey = decryptApiKey(channelId)
       }
 
-      const providerAdapter = getAdapter(channel.provider)
-      const titleBaseUrl = proxyBaseUrl || resolveTitleBaseUrl(channel.provider, channel.baseUrl) || channel.baseUrl
+      const providerAdapter = getAdapter(channel.provider, channel.apiProtocol)
+      const titleBaseUrl = proxyBaseUrl || resolveTitleBaseUrl(channel.provider, channel.baseUrl, channel.apiProtocol) || channel.baseUrl
       const request = providerAdapter.buildTitleRequest({
         baseUrl: titleBaseUrl,
         apiKey,

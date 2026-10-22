@@ -217,6 +217,18 @@ describe('ChannelForm 真实事件与退出控制器接线（隔离 hook 宿主�
     expect(form.updates[1]).toMatchObject({ agentRuntimes: ['pi'], agentExperimentalEnabled: true })
   })
 
+  test('xAI API Key 渠道可切换 Chat Completions 协议，预览与落盘同步', async () => {
+    const form = setup({ ...fixture, provider: 'xai', credentialMode: 'api-key', agentRuntimes: ['pi'] })
+    expect(form.field('API 协议').value).toBe('responses')
+    ;(form.field('API 协议').onValueChange as (value: string) => void)('chat-completions')
+    form.render()
+    ;(form.field('OpenAI 端点').onChange as (value: string) => void)('https://relay.example.com/v1')
+    form.render()
+    expect(String(form.field('OpenAI 端点').description)).toContain('https://relay.example.com/v1/chat/completions')
+    expect(await store.get(channelFormControllerAtom)!.flush()).toBe(true)
+    expect(form.updates[0]).toMatchObject({ apiProtocol: 'chat-completions' })
+  })
+
   test('新建 Codex 读取本地目录、无需 Key/端点；重复保存只发一次授权 IPC', async () => {
     const authorized = deferred<Channel>()
     const inputs: unknown[] = []

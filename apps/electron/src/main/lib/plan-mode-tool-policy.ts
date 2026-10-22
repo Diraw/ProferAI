@@ -27,6 +27,10 @@
  */
 
 import {
+  hasDangerousStructure,
+  isReadOnlyGitBashCommand,
+} from '@profer/shared'
+import {
   isBrowserToolName,
   isPlanModeMarkdownPath,
   isPlanModeMcpTool,
@@ -75,25 +79,49 @@ export const DEFERRED_OR_PROACTIVE_TOOLS: ReadonlySet<string> = new Set([
  * 逐条对齐旧实现：正则、判定顺序、返回语义完全一致；只读判定失败即视为写操作。
  */
 export function isBashCommandReadOnly(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed) return false
+  // 先共用结构检查：换行、管道、重定向、命令拼接、子 shell、后台执行。
+  // 这些结构会让下面的 deny-list 失效（例如 `git log\nrm -rf /`）。
+  if (hasDangerousStructure(trimmed)) return false
+  // git 的写操作与带副作用的参数交给共享判定，避免 auto / plan 两套规则各漏一半。
+  if (/^git(\s|$)/.test(trimmed)) return isReadOnlyGitBashCommand(trimmed)
   // 输出重定向：匹配未被数字或 & 前置的 > 符号（排除 2>/dev/null、&> 等 fd 重定向）
-  if (/(?<![0-9&])>/.test(command)) return false
+  if (/(?<![0-9&])>/.test(trimmed)) return false
   // 破坏性文件操作
-  if (/\b(rm|rmdir)\s/.test(command)) return false
-  if (/\bsed\s+[^|&;]*-i/.test(command)) return false  // sed -i 原地编辑
-  if (/\b(chmod|chown|chattr|truncate)\s/.test(command)) return false
-  if (/\b(mv|cp)\s/.test(command)) return false
-  if (/\b(mkdir|touch|mktemp)\s/.test(command)) return false
+  if (/\b(rm|rmdir)\s/.test(trimmed)) return false
+  if (/\bsed\s+[^|&;]*-i/.test(trimmed)) return false  // sed -i 原地编辑
+  if (/\b(chmod|chown|chattr|truncate)\s/.test(trimmed)) return false
+  if (/\b(mv|cp)\s/.test(trimmed)) return false
+  if (/\b(mkdir|touch|mktemp)\s/.test(trimmed)) return false
   // 包管理器写操作
-  if (/\b(npm|pnpm|yarn|bun)\s+(install|i\b|add|remove|uninstall|update|upgrade|link|unlink)\b/.test(command)) return false
-  if (/\bpip[23]?\s+(install|uninstall|upgrade)\b/.test(command)) return false
-  if (/\b(apt|apt-get|brew|yum|dnf)\s+(install|remove|purge|uninstall|upgrade)\b/.test(command)) return false
+  if (/\b(npm|pnpm|yarn|bun)\s+(install|i\b|add|remove|uninstall|update|upgrade|link|unlink)\b/.test(trimmed)) return false
+  if (/\bpip[23]?\s+(install|uninstall|upgrade)\b/.test(trimmed)) return false
+  if (/\b(apt|apt-get|brew|yum|dnf)\s+(install|remove|purge|uninstall|upgrade)\b/.test(trimmed)) return false
   // Git 写操作
-  if (/\bgit\s+(commit|push|checkout\s+-[bB]|branch\s+-[mMdD]|merge\b|rebase\b|reset\b|stash\s+(drop|pop)\b|add\b|apply\b|cherry-pick\b)/.test(command))
+  if (/\bgit\s+(commit|push|checkout\s+-[bB]|branch\s+-[mMdD]|merge\b|rebase\b|reset\b|stash\s+(drop|pop)\b|add\b|apply\b|cherry-pick\b)/.test(trimmed))
     return false
   // 进程控制
-  if (/\b(kill|killall|pkill)\s/.test(command)) return false
+  if (/\b(kill|killall|pkill)\s/.test(trimmed)) return false
   // 脚本执行（具有潜在副作用，如 node script.js / python main.py）
-  if (/\b(node|python[23]?|ruby|perl|php)\s+[^-]/.test(command)) return false
+  if (/\b(node|python[23]?|ruby|perl|php)\s+[^-]/.test(trimmed)) return false
+  // 解释器内联执行：python -c / node -e / perl -e / php -r / ruby -e
+  if (/\b(node|python[23]?|ruby|perl|php)\s+(-e|--eval|-c|-r)\b/.test(trimmed)) return false
+  // shell 内联执行与环境变量注入（env VAR=x cmd 会执行 cmd）
+  if (/^(sh|bash|zsh|fish)\s+(-c|--command)\b/.test(trimmed)) return false
+  if (/^(eval|exec|source|\.)\s/.test(trimmed)) return false
+  if (/^env\s+\S/.test(trimmed)) return false
+  // 外部程序执行 / 写文件原语（管道已被结构检查拦截，这里只需看命令位置）
+  if (/^(xargs|tee|dd|install|ln|open|osascript|launchctl)\b/.test(trimmed)) return false
+  if (/^defaults\s+write\b/.test(trimmed)) return false
+  if (/^(npm|pnpm|yarn|bun)\s+(exec|x)\b/.test(trimmed)) return false
+  // 搜索/文件工具的副作用参数
+  if (/^rg\b[^|&;]*\s--pre(=|\s)/.test(trimmed)) return false
+  if (/^file\b[^|&;]*\s(-C|--compile)(\s|=|$)/.test(trimmed)) return false
+  if (/^tree\b[^|&;]*\s(-o|--output)(\s|=|$)/.test(trimmed)) return false
+  if (/^find\b[^|&;]*\s-(fprint|fprintf|fls)\b/.test(trimmed)) return false
+  // awk 的 system() 可执行任意命令
+  if (/\bsystem\s*\(/.test(trimmed)) return false
   return true
 }
 

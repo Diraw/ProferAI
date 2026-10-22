@@ -14,7 +14,7 @@
  */
 
 // 仅类型依赖 channel.ts；运行时依赖方向是 channel.ts → 本文件，不构成循环。
-import type { ProviderType } from './channel'
+import type { ProviderType, XaiApiProtocol } from './channel'
 
 /** 请求协议族；与 pi-ai 的 Api 及 reasoning 的 ReasoningTransport 对齐。 */
 export type ProviderNativeProtocol =
@@ -181,10 +181,20 @@ export function isLocalOllamaBaseUrl(baseUrl?: string): boolean {
  * 共同的上游事实源：渲染层思考档位菜单与运行时请求注入必须用同一份判定，
  * 否则 deepseek 接第三方 OpenAI 网关时会出现「菜单显示档位、实际注入被跳过」
  * 的静默无效。绝大多数 provider 直接返回静态 nativeProtocol；只有
- * protocolVariesByEndpoint 的 deepseek / ollama 需要看 baseUrl。
+ * protocolVariesByEndpoint 的 deepseek / ollama 需要看 baseUrl，xAI API Key
+ * 渠道额外看用户选的 apiProtocol（responses / chat-completions）。
  */
-export function resolveProviderNativeProtocol(provider: ProviderType, baseUrl?: string): ProviderNativeProtocol {
+export function resolveProviderNativeProtocol(
+  provider: ProviderType,
+  baseUrl?: string,
+  xaiApiProtocol?: XaiApiProtocol,
+): ProviderNativeProtocol {
   const capability = PROVIDER_CAPABILITIES[provider]
+  if (provider === 'xai') {
+    // xAI 官方支持 Responses 与 Chat Completions 两套端点；第三方 Grok 中转
+    // 常常只实现后者。协议必须跟随用户选择，不能写死 Responses。
+    return xaiApiProtocol === 'chat-completions' ? 'openai-completions' : capability.nativeProtocol
+  }
   if (provider === 'ollama') {
     // 远程 Ollama 走 OpenAI 兼容；本机保持静态默认（anthropic-messages 供 Agent）。
     return isLocalOllamaBaseUrl(baseUrl) ? capability.nativeProtocol : 'openai-completions'

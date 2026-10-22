@@ -145,6 +145,47 @@ async function safeRmDir(dirPath: string): Promise<number> {
   }
 }
 
+// ─── 会话文件名解析 ───
+
+export type AgentSessionFileKind = 'messages' | 'graph' | 'pi-harness'
+
+export interface ParsedAgentSessionFileName {
+  /** 会话 ID（不是文件名前缀片段）。UUID 自身含 `-`，只能按后缀剥离。 */
+  baseSessionId: string
+  kind: AgentSessionFileKind
+}
+
+const PI_HARNESS_SUFFIX = '-pi-harness.jsonl'
+const GRAPH_SUFFIX = '-graph.jsonl'
+const JSONL_SUFFIX = '.jsonl'
+
+/**
+ * 把 agent-sessions 目录里的文件名解析成「会话 ID + 文件种类」。
+ *
+ * 同一会话可能落盘三种文件：`{id}.jsonl`（消息）、`{id}-graph.jsonl`（Graph 事件）、
+ * `{id}-pi-harness.jsonl`（Pi 事件账本）。判定孤儿必须回到 `baseSessionId`，
+ * 否则侧车文件去掉 `.jsonl` 后得到 `X-graph`，永远不可能命中 UUID 索引而被整体误删。
+ *
+ * 顺序不能反：`-pi-harness` 必须先于 `-graph` 匹配；也绝不能 `split('-')[0]`，UUID 本身含 `-`。
+ * 无法识别的文件名（非 .jsonl、后缀前没有会话 ID）返回 null，调用方一律按「不可判定」处理。
+ */
+export function parseAgentSessionFileName(fileName: string): ParsedAgentSessionFileName | null {
+  if (!fileName.endsWith(JSONL_SUFFIX)) return null
+
+  if (fileName.endsWith(PI_HARNESS_SUFFIX)) {
+    const baseSessionId = fileName.slice(0, -PI_HARNESS_SUFFIX.length)
+    return baseSessionId ? { baseSessionId, kind: 'pi-harness' } : null
+  }
+
+  if (fileName.endsWith(GRAPH_SUFFIX)) {
+    const baseSessionId = fileName.slice(0, -GRAPH_SUFFIX.length)
+    return baseSessionId ? { baseSessionId, kind: 'graph' } : null
+  }
+
+  const baseSessionId = fileName.slice(0, -JSONL_SUFFIX.length)
+  return baseSessionId ? { baseSessionId, kind: 'messages' } : null
+}
+
 // ─── 统计 ───
 
 function getActiveSessionIds(): Set<string> {
@@ -258,14 +299,16 @@ async function calcAgentSessionsCategory(): Promise<StorageCategory> {
     try {
       const files = await fsPromises.readdir(dir)
       for (const file of files) {
-        if (!file.endsWith('.jsonl')) continue
+        const parsed = parseAgentSessionFileName(file)
+        // 非 .jsonl 完全不计；.jsonl 但解析不出会话 ID 的只计入总量，不计孤儿
+        if (!parsed && !file.endsWith('.jsonl')) continue
         const fullPath = join(dir, file)
         try {
           const stat = await fsPromises.stat(fullPath)
-          const id = basename(file, '.jsonl')
           bytes += stat.size
           count++
-          if (!activeIds.has(id)) {
+          // 侧车文件与消息文件共用同一个 baseSessionId 判定，口径必须与清理一致
+          if (parsed && !activeIds.has(parsed.baseSessionId)) {
             orphanBytes += stat.size
             orphanCount++
           }
@@ -666,9 +709,10 @@ async function cleanupOrphanAgentSessions(): Promise<CleanupResult> {
   try {
     const files = await fsPromises.readdir(dir)
     for (const file of files) {
-      if (!file.endsWith('.jsonl')) continue
-      const id = basename(file, '.jsonl')
-      if (activeIds.has(id)) continue
+      const parsed = parseAgentSessionFileName(file)
+      // 解析不出会话 ID 的文件不删：删除不可逆，宁可漏清也不能误删
+      if (!parsed) continue
+      if (activeIds.has(parsed.baseSessionId)) continue
       const freed = safeUnlink(join(dir, file))
       if (freed > 0) { freedBytes += freed; deletedCount++ }
     }

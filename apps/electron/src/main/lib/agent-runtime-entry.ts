@@ -14,8 +14,7 @@
  * - 原生 session ID 由宿主持久化（provider 只负责回调）；
  * - 终态未读按宿主策略在终态广播之前写入。
  *
- * 依赖全部由 `RuntimeHeadlessEntryDeps` 注入，因此入口级行为可以被真实测试直接驱动
- * （见 `runtime-migration-parity/projection-lifecycle.parity.ts`、`capability-snapshot.parity.ts`），
+ * 依赖全部由 `RuntimeHeadlessEntryDeps` 注入，因此入口级行为可以被真实测试直接驱动，
  * 不需要切片编译 `agent-service.ts`，也不需要在测试里复刻接线。
  *
  * 边界：本模块**不**注册 webContents / backlog（那是 agent-service 的 IPC 责任），

@@ -11,7 +11,7 @@ import { Plus, Pencil, Trash2, Server, RefreshCw, ChevronDown } from 'lucide-rea
 import { toast } from 'sonner'
 import { Button } from '@profer/ui/primitives/button'
 import { Switch } from '@profer/ui/primitives/switch'
-import { PROVIDER_LABELS, isChannelEnabledForRuntime, isAgentEnabledForChannel } from '@profer/shared'
+import { PROVIDER_LABELS, isChannelEnabledForAnyRuntime, isChannelEnabledForRuntime } from '@profer/shared'
 import type { Channel, OfficialChannelHealth, ProviderType } from '@profer/shared'
 import { getChannelLogo } from '@/lib/model-logo'
 import { resolvePiCoreState } from '@/lib/channel-model-groups'
@@ -161,13 +161,13 @@ export function ChannelSettings(): React.ReactElement {
     return () => { active = false; requestVersion.current += 1 }
   }, [loadChannels, authStatus.isLoggedIn])
 
-  // 渠道启用/兼容性变化 → 自动同步 Agent 渠道列表
-  // 当渠道启用且 provider 兼容 Agent 时，自动纳入 agentChannelIds；
-  // 当渠道关闭或不兼容时，自动从 agentChannelIds 移除。
+  // 渠道启用/可用内核变化 → 自动同步 Agent 渠道列表。
+  // 判据必须覆盖任一内核：主推 Pi 后，只勾选 Pi 的渠道（典型是 xAI）也必须进入列表；
+  // 具体内核的过滤交给模型选择器的协议过滤，不在这里用 Claude 白名单一刀切。
   React.useEffect(() => {
     if (loading || loadError) return
     const derivedIds = channels
-      .filter((c) => isAgentEnabledForChannel(c))
+      .filter((c) => isChannelEnabledForAnyRuntime(c))
       .map((c) => c.id)
     const currentIds = agentChannelIdsRef.current
     const unchanged =
@@ -282,7 +282,7 @@ export function ChannelSettings(): React.ReactElement {
       if (!mounted.current || account !== currentAccount.current) return
       await syncAgentChannelEligibility(
         savedChannel,
-        isAgentEnabledForChannel(savedChannel),
+        isChannelEnabledForAnyRuntime(savedChannel),
       )
       if (!mounted.current || account !== currentAccount.current) return
       await loadChannels(true)

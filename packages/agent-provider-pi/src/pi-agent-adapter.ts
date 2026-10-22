@@ -34,6 +34,7 @@ import type {
   SDKMessage,
   SDKUserMessageInput,
   TypedError,
+  XaiApiProtocol,
   XaiOAuthCredentials,
 } from '@profer/shared'
 import { isCodexFastModeSupportedModel } from '@profer/shared'
@@ -219,6 +220,8 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   onCodexOAuthCredentialsRefreshed?: (credentials: CodexOAuthCredentials) => void | Promise<void>
   /** xAI 认证模式；API Key 使用 Pi 内置 provider 的 runtime key。 */
   xaiCredentialMode?: 'api-key' | 'oauth'
+  /** xAI API Key 渠道的请求协议；缺失时按 responses 处理。 */
+  xaiApiProtocol?: XaiApiProtocol
   /** xAI OAuth credential store 使用真实 expires 和 refresh，不读取 ~/.pi。 */
   xaiOAuthCredentials?: XaiOAuthCredentials
   /** Pi 运行中刷新 xAI OAuth 后，将新凭据回写到 Profer 渠道存储。 */
@@ -258,6 +261,7 @@ export function applyPiPreparedQuery(input: PiAgentQueryOptions): PiAgentQueryOp
       codexOAuthCredentials: credentials.codexOAuthCredentials,
       xaiOAuthCredentials: credentials.xaiOAuthCredentials,
       xaiCredentialMode: credentials.xaiCredentialMode,
+      xaiApiProtocol: credentials.xaiApiProtocol,
     }),
     ...(typeof prepared.systemPrompt === 'string'
       ? { systemPrompt: prepared.systemPrompt }
@@ -1908,7 +1912,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const openAIReasoningProfile = (input.provider === 'openai-codex' || input.provider === 'xai' || input.provider === 'openai-responses')
         ? resolveReasoningProfile({
             modelId: input.model,
-            transport: inferReasoningTransport(input.provider),
+            transport: inferReasoningTransport(input.provider, input.baseUrl, input.xaiApiProtocol),
           })
         : undefined
       // DeepSeek 同时支持 OpenAI 兼容与 Anthropic 兼容两套端点，协议由端点形态决定。

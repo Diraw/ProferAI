@@ -92,30 +92,234 @@ export const DANGEROUS_COMMANDS: readonly string[] = [
 /**
  * 检测 Bash 命令是否包含危险结构
  *
- * 检测管道、输出重定向、exec 子命令等危险模式。
- * MVP 阶段使用简单字符串检测，后续可升级为 shell AST 解析。
+ * 这些结构会让「命令名白名单」失去意义，必须在任何参数级判定之前拦掉：
+ * 管道、重定向、命令拼接、子 shell、后台执行、换行。
+ *
+ * 按原始字符串判断，引号内的同类字符也会被判为危险——宁可多问一次，
+ * 也不把带引号的 `$(...)`、反引号或换行放过去。
  */
 export function hasDangerousStructure(command: string): boolean {
+  // 换行/回车可当作命令分隔符
+  if (/[\r\n]/.test(command)) return true
   // 管道操作
   if (/[|]/.test(command)) return true
-  // 输出重定向
-  if (/>{1,2}/.test(command)) return true
+  // 输出重定向（含 &>、2> 等）
+  if (/>/.test(command)) return true
   // find -exec / -delete（可执行任意命令/删除文件）
   if (/\b-exec\b/.test(command) || /\b-delete\b/.test(command)) return true
-  // 命令链接操作符：&& 和命令上下文中的独立分号（排除引号内字符串中的分号）
-  if (/&&/.test(command) || /;\s*(?=\S)/.test(command)) return true
-  // 子 shell / 命令替换（$(...) 和反引号）
-  if (/\$\(/.test(command) || /`/.test(command)) return true
+  // 命令链接操作符：&&、|| 和命令上下文中的独立分号
+  if (/&&/.test(command) || /\|\|/.test(command) || /;\s*(?=\S)/.test(command)) return true
+  // 子 shell / 命令替换 / 变量展开（$(...)、反引号、${...}）
+  if (/\$\(/.test(command) || /`/.test(command) || /\$\{/.test(command)) return true
+  // 进程替换：<(cmd) / >(cmd)
+  if (/[<>]\(/.test(command)) return true
+  // 后台执行：& 前不能是 >/<（排除 2>&1 这类 fd 重定向）
+  if (/(^|[^>&])&/.test(command)) return true
   return false
 }
 
 /**
- * 判断 Bash 命令是否匹配安全模式
+ * 把 Bash 命令拆成参数 token，支持单/双引号与反斜杠转义。
+ *
+ * 无法可靠解析（引号未闭合、末尾孤立反斜杠）时返回 null，调用方一律按不安全处理。
+ */
+function tokenizeBashCommand(command: string): string[] | null {
+  const tokens: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  let started = false
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote) {
+      if (ch === quote) {
+        quote = null
+        continue
+      }
+      if (quote === '"' && ch === '\\' && i + 1 < command.length) {
+        current += command[++i]!
+        continue
+      }
+      current += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      started = true
+      continue
+    }
+    if (ch === '\\') {
+      if (i + 1 >= command.length) return null
+      current += command[++i]!
+      started = true
+      continue
+    }
+    if (ch === ' ' || ch === '\t') {
+      if (started) {
+        tokens.push(current)
+        current = ''
+        started = false
+      }
+      continue
+    }
+    current += ch
+    started = true
+  }
+
+  if (quote) return null
+  if (started) tokens.push(current)
+  return tokens
+}
+
+/** 取 flag 名，忽略 `--flag=value` 形式的取值部分。 */
+function flagName(token: string): string {
+  const eq = token.indexOf('=')
+  return eq === -1 ? token : token.slice(0, eq)
+}
+
+/** git 只读子命令。 */
+const GIT_READ_SUBCOMMANDS = new Set(['status', 'log', 'diff', 'show', 'branch', 'remote', 'tag'])
+
+/** 会写文件、执行外部程序或改变仓库状态的 git 选项。 */
+const GIT_FORBIDDEN_FLAGS = new Set([
+  '--output',
+  '--ext-diff',
+  '--textconv',
+  '--exec-path',
+  '--upload-pack',
+  '--open-files-in-pager',
+  '--edit-description',
+  '--set-upstream-to',
+  '--unset-upstream',
+  '--delete',
+  '--move',
+  '--force',
+  '--create-reflog',
+  '--recurse-submodules',
+  '--rebase',
+  '--interactive',
+])
+
+/** `git branch` 的只读选项；未列出的选项一律按写操作处理。 */
+const GIT_BRANCH_READ_FLAGS = new Set([
+  '-a', '-r', '-v', '-vv', '--all', '--remotes', '--verbose', '--list', '--show-current',
+  '--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '--format',
+  '--sort', '--column', '--no-column', '--abbrev', '--no-abbrev', '--omit-empty',
+  '--color', '--no-color', '--ignore-case',
+])
+
+/** `git tag` 的只读选项；`-a/-s/-m/-F/-d` 等创建/删除选项不在其中。 */
+const GIT_TAG_READ_FLAGS = new Set([
+  '-l', '-n', '--list', '--contains', '--no-contains', '--merged', '--no-merged',
+  '--points-at', '--sort', '--format', '--column', '--no-column', '--omit-empty',
+  '--color', '--no-color', '--ignore-case',
+])
+
+/** 允许带位置参数（分支名/模式）的只读选择器。 */
+const GIT_POSITIONAL_SELECTORS = new Set([
+  '-l', '--list', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at',
+])
+
+/**
+ * 判断 git 子命令是否只读。
+ *
+ * `git branch` / `git tag` 用「选项白名单 + 位置参数需搭配选择器」判定：
+ * `git branch -a`、`git branch --list 'feat*'` 放行；`git branch new-branch`、
+ * `git tag v1.0.0` 这类创建操作不放行。
+ */
+function isReadOnlyGitArgs(args: string[]): boolean {
+  const [subcommand, ...rest] = args
+  if (!subcommand || !GIT_READ_SUBCOMMANDS.has(subcommand)) return false
+  if (rest.some((arg) => GIT_FORBIDDEN_FLAGS.has(flagName(arg)))) return false
+
+  if (subcommand === 'branch' || subcommand === 'tag') {
+    const allowedFlags = subcommand === 'branch' ? GIT_BRANCH_READ_FLAGS : GIT_TAG_READ_FLAGS
+    for (const arg of rest) {
+      if (arg.startsWith('-') && !allowedFlags.has(flagName(arg))) return false
+    }
+    const hasPositional = rest.some((arg) => !arg.startsWith('-'))
+    if (hasPositional && !rest.some((arg) => GIT_POSITIONAL_SELECTORS.has(flagName(arg)))) return false
+    return true
+  }
+
+  if (subcommand === 'remote') {
+    if (rest.length === 0) return true
+    const [action, ...names] = rest
+    if (action === '-v' || action === '--verbose') return names.length === 0
+    if (action === 'show') return names.every((name) => !name.startsWith('-') || name === '-n')
+    if (action === 'get-url') return names.every((name) => !name.startsWith('-') || name === '--all' || name === '--push')
+    return false
+  }
+
+  return true
+}
+
+/**
+ * 判断整条 git 命令是否只读；供 auto 与 plan 两套判定共用。
+ */
+export function isReadOnlyGitBashCommand(command: string): boolean {
+  const tokens = tokenizeBashCommand(command.trim())
+  if (!tokens || tokens[0] !== 'git') return false
+  return isReadOnlyGitArgs(tokens.slice(1))
+}
+
+/** 非 git 命令的参数级只读校验。 */
+function isReadOnlyNonGitArgs(tokens: string[]): boolean {
+  const [command, ...args] = tokens
+  switch (command) {
+    case 'ls':
+    case 'head':
+    case 'tail':
+    case 'grep':
+    case 'wc':
+    case 'stat':
+    case 'du':
+    case 'df':
+    case 'which':
+    case 'uname':
+      // 这些命令本身不写文件、不执行子进程；重定向/管道已由结构检查拦截。
+      return true
+    case 'whoami':
+    case 'pwd':
+    case 'env':
+      return args.length === 0
+    case 'rg':
+      // --pre/--pre-glob 会以 `COMMAND <path>` 执行外部程序。
+      return !args.some((arg) => ['--pre', '--pre-glob'].includes(flagName(arg)))
+    case 'file':
+      // -C/--compile 会编译 magic 文件并写盘。
+      return !args.some((arg) => ['-C', '--compile'].includes(flagName(arg)))
+    case 'tree':
+      // -o/--output 会写文件。
+      return !args.some((arg) => ['-o', '--output'].includes(flagName(arg)))
+    case 'node':
+      return args.length === 1 && args[0] === '--version'
+    case 'bun':
+      return (args.length === 1 && args[0] === '--version')
+        || (args.length === 2 && args[0] === 'pm' && args[1] === 'ls')
+    case 'npm':
+      return ['list', 'ls', 'view', 'info', 'outdated'].includes(args[0] ?? '')
+    default:
+      return false
+  }
+}
+
+/**
+ * 判断 Bash 命令是否可自动放行（只读）。
+ *
+ * 三层：结构检查 → 命令族白名单 → 参数级校验。第三层是必需的：
+ * 只匹配命令名会让 `git diff --output=...`、`rg --pre ...`、`file -C` 这类
+ * 「命令本身只读、参数带副作用」的调用全部漏过。
  */
 export function isSafeBashCommand(command: string): boolean {
   const trimmed = command.trim()
-  if (hasDangerousStructure(trimmed)) return false
-  return SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))
+  if (!trimmed || hasDangerousStructure(trimmed)) return false
+  if (!SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false
+
+  const tokens = tokenizeBashCommand(trimmed)
+  if (!tokens || tokens.length === 0) return false
+  if (tokens[0] === 'git') return isReadOnlyGitArgs(tokens.slice(1))
+  return isReadOnlyNonGitArgs(tokens)
 }
 
 /** Windows PowerShell 的自动允许必须独立于 Bash：仅覆盖不读取内容、不写入、不启动进程的简单查询。 */

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Channel } from '@profer/shared'
-import { isAgentModelSelectionValid, nextAgentChannelIdsAfterModelSelect, resolveAgentModelSelection } from './agent-channel-selection'
+import { isAgentModelSelectionValid, nextAgentChannelIdsAfterModelSelect, resolveAgentModelSelection, resolveAgentRuntimeSelection } from './agent-channel-selection'
 
 describe('历史会话模型有效性', () => {
   test('已停用模型不静默替换为其它模型', () => {
@@ -112,5 +112,47 @@ describe('resolveAgentModelSelection', () => {
       channelId: 'claude',
       modelId: 'claude-sonnet-4-6',
     })
+  })
+})
+
+describe('resolveAgentRuntimeSelection 内核跟着渠道走', () => {
+  const piOnly = { ...channel('deepseek', 'deepseek', ['deepseek-flash']), agentRuntimes: ['pi' as const] }
+  const claudeCapable = { ...channel('claude', 'anthropic', ['claude-sonnet-4-6']), agentRuntimes: ['pi' as const, 'claude' as const] }
+
+  test('默认 claude 但只有 Pi 渠道时回退 Pi，不再判定成没有 Agent 渠道', () => {
+    expect(resolveAgentRuntimeSelection([piOnly], 'claude', [])).toEqual({
+      runtime: 'pi',
+      channelId: 'deepseek',
+      modelId: 'deepseek-flash',
+    })
+  })
+
+  test('当前内核有可用渠道时保持用户选择的内核', () => {
+    expect(resolveAgentRuntimeSelection([piOnly, claudeCapable], 'claude', ['claude'])).toEqual({
+      runtime: 'claude',
+      channelId: 'claude',
+      modelId: 'claude-sonnet-4-6',
+    })
+  })
+
+  test('Pi 内核无可用渠道时回退 Claude', () => {
+    const claudeOnly = { ...channel('claude', 'anthropic', ['claude-sonnet-4-6']), agentRuntimes: ['claude' as const] }
+    expect(resolveAgentRuntimeSelection([claudeOnly], 'pi', [])).toEqual({
+      runtime: 'claude',
+      channelId: 'claude',
+      modelId: 'claude-sonnet-4-6',
+    })
+  })
+
+  test('两个内核都没有可用渠道时返回 null', () => {
+    expect(resolveAgentRuntimeSelection([{ ...piOnly, enabled: false }], 'claude', [])).toBeNull()
+    expect(resolveAgentRuntimeSelection([], 'claude', [])).toBeNull()
+  })
+
+  test('回退时沿用当前会话已绑定的渠道与模型', () => {
+    expect(resolveAgentRuntimeSelection([piOnly], 'claude', [], {
+      channelId: 'deepseek',
+      modelId: 'deepseek-flash',
+    })).toEqual({ runtime: 'pi', channelId: 'deepseek', modelId: 'deepseek-flash' })
   })
 })

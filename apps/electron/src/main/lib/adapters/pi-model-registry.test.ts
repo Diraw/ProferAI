@@ -202,6 +202,25 @@ describe('Pi runtime xAI API Key provider', () => {
     expect(result.model.id).toBe('grok-4.6-relay')
     expect(result.model.baseUrl).toBe('https://relay.example.com/v1')
   })
+
+  test('Given 只支持 Chat Completions 的 Grok 中转 When buildModel Then 注册 openai-completions 而非 Responses', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      ...BASE_PI_AGENT_OPTIONS,
+      sessionId: 'session-xai-chat-completions',
+      apiKey: 'relay-test-key',
+      provider: 'xai',
+      xaiCredentialMode: 'api-key',
+      xaiApiProtocol: 'chat-completions',
+      baseUrl: 'https://relay.example.com/v1/chat/completions',
+      model: 'grok-4.3',
+    })
+
+    expect(result.model.provider).toBe('xai')
+    expect(result.model.api).toBe('openai-completions')
+    expect(result.model.id).toBe('grok-4.3')
+    expect(result.model.baseUrl).toBe('https://relay.example.com/v1')
+  })
 })
 
 describe('Pi runtime Ollama 双协议注册', () => {

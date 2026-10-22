@@ -10,6 +10,7 @@ import {
   selectMruFallbackId,
 } from '@profer/shared'
 import { assertSafeBrowserDestination, assertSafeBrowserSubresourceDestination, assertSafeBrowserUrl } from './browser-policy'
+import { installDistrustedCertificateGuard } from './browser-certificate-policy'
 import { basename, extname } from 'node:path'
 import { createAuthorizedPreviewUrl, createViewerPreviewUrl, isAuthorizedPreviewProtocol, viewerPreviewThemeSignature, type ViewerPreviewTheme } from './browser-preview-service'
 import { resolveAppThemeIsDark } from './app-theme-service'
@@ -782,16 +783,15 @@ export class BrowserController {
   private installSessionGuards(browserSession: Session): void {
     if (this.guardedSessions.has(browserSession)) return
     this.guardedSessions.add(browserSession)
-    browserSession.setPermissionRequestHandler((_contents, permission, callback) => {
-      // 放开剪贴板读写（用户已确认）：页面可通过 navigator.clipboard 复制/粘贴。
-      // Chromium 中 clipboard-read 同时覆盖读取与净化写入；clipboard-sanitized-write 另加兜底。
-      // 其余权限（摄像头、地理位置、通知、midi 等）一律拒绝。
-      if (permission === 'clipboard-read' || permission === 'clipboard-sanitized-write') {
-        callback(true)
-        return
-      }
+    browserSession.setPermissionRequestHandler((_contents, _permission, callback) => {
+      // 安全边界：受管网页不获得任何浏览器权限（摄像头、地理位置、通知、midi 等）。
+      // 剪贴板曾经放行 clipboard-read / clipboard-sanitized-write，但任意页面可借此读取
+      // 用户刚复制的密码、验证码与私钥；2026-10-22 起一律拒绝。
+      // 用户自己的 Ctrl+C / 右键复制走浏览器默认行为，不经过权限 API，不受影响。
       callback(false)
     })
+    // Electron 收不到 Chrome 的 CRLSet 推送，泄露 CA 的拉黑必须自己做。
+    installDistrustedCertificateGuard(browserSession, { cacheDir: app.getPath('userData') })
     browserSession.webRequest.onBeforeRequest((details, callback) => {
       let protocol = ''
       try { protocol = new URL(details.url).protocol } catch { callback({ cancel: true }); return }
