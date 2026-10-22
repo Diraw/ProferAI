@@ -111,9 +111,9 @@ import { resolveAuthorizedRemoteFilePath } from './remote-file-access'
 import { loadWorkspaceHeatmapDaily } from './workspace-heatmap-query'
 import { RemoteAgentEventLog, type RemoteAgentEventRecord } from './remote-agent-event-log'
 import { RemoteAgentReplayRegistry, type RemoteReplayRecord } from './remote-agent-replay-registry'
-import { REMOTE_PROTOCOL, isPrivateHost, type RemoteProfile } from '@profer/shared'
+import { REMOTE_PROTOCOL, createCompactPairingQr, isPrivateHost, type RemoteProfile } from '@profer/shared'
 import { authenticateRemote, getConnectionProfile, listBindings, loadRemoteToken, pairDevice, pairingManager, refreshPairing, revokeBinding, protectSecret, revealSecret } from './remote-identity'
-import { getFrpStatus, getFrpPublicEndpoint, getFrpConfig, startFrp, stopFrp, startFrpIfConfigured, ensureFrpReady } from './remote-frp-service'
+import { getFrpStatus, getFrpPublicEndpoint, startFrp, stopFrp, ensureFrpReady } from './remote-frp-service'
 import { RemoteLifecycleQueue, closeOwnedHttp } from './remote-lifecycle'
 const remoteLifecycle = new RemoteLifecycleQueue()
 import { RemoteRelayClient, type RemoteRelaySink } from './remote-relay-client'
@@ -146,9 +146,12 @@ async function startRemoteFrpNow(rotate = false): Promise<import('./remote-frp-s
 export function rotateRemoteTls(): Promise<import('./remote-frp-service').FrpStatus> { return startRemoteFrp(true) }
 export async function getRemotePairingQr(): Promise<{ dataUrl: string; expiresAt: number }> {
   if (!listenAddress) throw new Error('请先开启移动模式')
-  const qr = refreshPairing(getRemoteProfile())
+  const profile = getRemoteProfile()
+  const qr = refreshPairing(profile)
+  // 只放配对必需字段：v/d/h/c/x。完整 profile 在 paired 响应里返回，避免二维码行列过多。
+  const compact = createCompactPairingQr(profile, qr.pairingCode, qr.expiresAt)
   const QRCode = (await import('qrcode')).default
-  return { dataUrl: await QRCode.toDataURL(JSON.stringify(qr), { width: 360, margin: 2, errorCorrectionLevel: 'M' }), expiresAt: qr.expiresAt }
+  return { dataUrl: await QRCode.toDataURL(JSON.stringify(compact), { width: 320, margin: 2, errorCorrectionLevel: 'M' }), expiresAt: qr.expiresAt }
 }
 export function getRemotePairingAudit() { return pairingManager.getAudit() }
 export function getRemoteBindings() { return listBindings() }
@@ -1924,7 +1927,7 @@ async function startRemoteServiceReady(): Promise<string | null> {
     const done = (): void => { server.removeListener('error', done); server.removeListener('listening', done); resolve(listenAddress) }
     server.once('error', done); server.once('listening', done)
   })
-  if (address) { const c = getFrpConfig(); if (c?.startOnLaunch) { try { if (publicMode(c) === 'system') await startFrpIfConfigured(getPort()); else await startRemoteFrpNow() } catch { remoteError = 'FRP 自动启动失败，请检查草稿、托管材料或 TLS 身份' } } }
+  // 当前阶段不启用 FRP 内网穿透：不再按草稿自动拉起 frpc，二维码只包含局域网端点。
   return address
 }
 function startRemoteServiceNow(): string | null {

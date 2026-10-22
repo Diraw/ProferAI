@@ -56,7 +56,8 @@ export function lanEndpoints(interfaces: ReturnType<typeof networkInterfaces>, p
 }
 export function getConnectionProfile(port: number, publicEndpoint?: string | RemoteEndpoint): RemoteProfile {
   const id = loadIdentity()
-  const endpoints = lanEndpoints(networkInterfaces(), port)
+  // 当前阶段收缩二维码体积：只带一个局域网地址。多网卡/多端点回退等公网方案恢复时再加。
+  const endpoints = lanEndpoints(networkInterfaces(), port).slice(0, 1)
   if (publicEndpoint) endpoints.push(validateEndpoint(typeof publicEndpoint === 'string' ? { url: publicEndpoint, scope: 'public' } : publicEndpoint))
   if (!endpoints.length) endpoints.push(validateEndpoint({ url: `ws://127.0.0.1:${port}/ws`, scope: 'lan' }))
   const candidate: RemoteProfile = { schemaVersion: endpoints.some((e) => e.trustMode) ? 2 : 1, deviceId: id.deviceId, deviceName: id.deviceName, endpoints, updatedAt: profileCache?.updatedAt ?? Date.now() }

@@ -12,7 +12,7 @@ export function RemotePairingSettings(): React.ReactElement {
   React.useEffect(() => { const update = () => setRemaining(Math.max(0, Math.ceil(((qr?.expiresAt ?? 0) - Date.now()) / 1000))); update(); const timer = setInterval(update, 1000); return () => clearInterval(timer) }, [qr])
   return <div className="space-y-3 px-4 py-3">
     <div className="flex flex-wrap items-center gap-4">
-      {qr && remaining > 0 ? <img src={qr.dataUrl} alt="Pocket 一次性配对二维码" className="size-64 max-w-full bg-white" /> : <span className="text-sm">二维码已过期</span>}
+      {qr && remaining > 0 ? <img src={qr.dataUrl} alt="Pocket 一次性配对二维码" className="size-56 max-w-full bg-white" /> : <span className="text-sm">二维码已过期</span>}
       <div className="flex items-center gap-2 text-sm"><span className="tabular-nums">{remaining} 秒</span><Button variant="outline" disabled={busy} onClick={() => void refresh()}><RefreshCw className="size-4" />刷新配对码</Button></div>
     </div>
     {bindings.map((b) => <div key={b.id} className="flex items-center justify-between gap-2 text-sm"><span className="truncate">{b.name}</span><Button variant="ghost" size="icon" title="撤销设备凭据" onClick={() => { void window.electronAPI.revokeRemoteBinding(b.id).then(() => window.electronAPI.getRemoteBindings()).then(setBindings) }}><Unplug className="size-4" /></Button></div>)}

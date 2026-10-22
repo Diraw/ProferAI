@@ -40,9 +40,9 @@ test('Node production TLS listener: profile readiness, pairing/auth/commands and
     // 模拟可信本机 QR 发布；仅持有本次隔离 pairing code。
     await remote.getRemotePairingQr(); const pairingModule = globalThis.__isolatedPairingManager
     const qr = pairingModule
-    assert.ok(qr?.pairingCode)
-    const pairing = connect(cert); await pairing.next('remote_hello'); pairing.ws.send(JSON.stringify({ type: 'pair', deviceId: profile.deviceId, pairingCode: qr.pairingCode })); const paired = await pairing.next('paired'); assert.ok(paired.credential)
-    const duplicate = connect(cert); await duplicate.next('remote_hello'); const rejected = new Promise(resolve => duplicate.ws.once('close', resolve)); duplicate.ws.send(JSON.stringify({ type: 'pair', deviceId: profile.deviceId, pairingCode: qr.pairingCode })); assert.equal(await rejected, 4001)
+    assert.equal(qr?.v, 2); assert.ok(qr?.c); assert.ok(qr?.h)
+    const pairing = connect(cert); await pairing.next('remote_hello'); pairing.ws.send(JSON.stringify({ type: 'pair', deviceId: profile.deviceId, pairingCode: qr.c })); const paired = await pairing.next('paired'); assert.ok(paired.credential)
+    const duplicate = connect(cert); await duplicate.next('remote_hello'); const rejected = new Promise(resolve => duplicate.ws.once('close', resolve)); duplicate.ws.send(JSON.stringify({ type: 'pair', deviceId: profile.deviceId, pairingCode: qr.c })); assert.equal(await rejected, 4001)
     const live = connect(cert); await live.next('remote_hello'); live.ws.send(JSON.stringify({ type: 'authenticate', deviceId: profile.deviceId, credential: paired.credential })); assert.equal((await live.next('hello')).profile.deviceId, profile.deviceId)
     live.ws.send('{"type":"ping"}'); assert.equal((await live.next('pong')).kind, 'pong'); live.ws.send('{"type":"list_sessions","_cmdId":"production-test"}'); const result = await live.next('command_result'); assert.equal(result.ok, true); assert.equal(result.requestId, 'production-test')
     const closed = new Promise(resolve => live.ws.once('close', resolve)); await remote.startRemoteFrp(); await closed; assert.equal(remote.getRemoteProfile().endpoints.find(e => e.scope === 'public').pin.value, endpoint.pin.value)

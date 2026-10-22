@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { PairingManager, createBinding, secretHash } from './remote-pairing'
-import { parsePairingQr, parseRemoteProfile, validateEndpoint, type RemoteProfile } from '@profer/shared'
+import { createCompactPairingQr, parseCompactPairingQr, parsePairingQr, parseRemoteProfile, validateEndpoint, type RemoteProfile } from '@profer/shared'
 import { parse } from 'smol-toml'
 import { createHash } from 'node:crypto'
 import { deploymentFiles, renderDeploymentInstructions, renderFrpcToml, selectFrpAsset, validateArchiveEntry, validateFrpConfig, verifySha256, type FrpConfig, type FrpServerAsset } from './remote-frp-core'
@@ -50,6 +50,30 @@ describe('QR schema and single-use pairing', () => {
     expect(() => validateEndpoint({ url: 'ws://169.254.1.2/ws', scope: 'lan' })).toThrow()
     expect(() => parseRemoteProfile({ ...profile, endpoints: [...profile.endpoints, profile.endpoints[0]] })).toThrow('重复')
     expect(() => parseRemoteProfile({ ...profile, deviceId: '!' })).toThrow()
+  })
+})
+describe('compact pairing QR', () => {
+  test('roundtrips required fields and stays small', () => {
+    const now = Date.now(); const m = new PairingManager(() => now); const qr = m.refresh(profile)
+    const compact = createCompactPairingQr(profile, qr.pairingCode, now + 300000)
+    expect(JSON.stringify(compact).length).toBeLessThan(200)
+    const parsed = parseCompactPairingQr(compact, now)
+    expect(parsed.deviceId).toBe(profile.deviceId)
+    expect(parsed.endpoints).toEqual([{ url: 'ws://192.168.1.2:7788/ws', scope: 'lan' }])
+    expect(parsed.pairingCode).toBe(qr.pairingCode)
+    expect(parsePairingQr(JSON.stringify(compact), now).pairingCode).toBe(qr.pairingCode)
+  })
+  test('rejects bad host, code, expiry and unknown keys', () => {
+    const now = Date.now(); const m = new PairingManager(() => now); const code = m.refresh(profile).pairingCode
+    const base = createCompactPairingQr(profile, code, now + 300000)
+    for (const h of ['', '192.168.1.2', 'ws://192.168.1.2:7788', '192.168.1.2:7788/ws', 'remote.example.com:7788', '192.168.1.2:0']) {
+      expect(() => parseCompactPairingQr({ ...base, h }, now)).toThrow()
+    }
+    expect(() => parseCompactPairingQr({ ...base, c: 'bad' }, now)).toThrow()
+    expect(() => parseCompactPairingQr({ ...base, x: Math.floor(now / 1000) - 1 }, now)).toThrow('过期')
+    expect(() => parseCompactPairingQr({ ...base, x: Math.floor(now / 1000) + 400 }, now)).toThrow()
+    expect(() => parseCompactPairingQr({ ...base, token: 'SECRET' }, now)).toThrow()
+    expect(() => parseCompactPairingQr({ ...base, v: 1 }, now)).toThrow()
   })
 })
 describe('FRP configuration, official assets and deployment', () => {

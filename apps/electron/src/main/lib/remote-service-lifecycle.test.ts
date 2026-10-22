@@ -13,13 +13,15 @@ mock.module('./remote-frp-service', () => ({ getFrpStatus: () => ({ running: fal
 const remote = await import('./remote-service')
 async function freePort(): Promise<number> { const server = createServer(); await new Promise<void>((r) => server.listen(0, '127.0.0.1', r)); const port = (server.address() as { port: number }).port; await new Promise<void>((r) => server.close(() => r())); return port }
 afterAll(async () => { await remote.stopRemoteService(); if (previous.config === undefined) delete process.env.PROFER_CONFIG_DIR; else process.env.PROFER_CONFIG_DIR = previous.config; if (previous.sdk === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous.sdk; if (previous.port === undefined) delete process.env.PROFER_REMOTE_PORT; else process.env.PROFER_REMOTE_PORT = previous.port; rmSync(root, { recursive: true, force: true }) })
-test('real remote-service fast restart waits for owned FRP exit and HTTP shutdown', async () => {
+test('real remote-service fast restart shuts down HTTP without auto-starting FRP', async () => {
   const first = await freePort(); const second = await freePort(); process.env.PROFER_REMOTE_PORT = String(first)
   await remote.setRemoteServiceEnabled(true); expect(remote.getRemoteServiceStatus().running).toBe(true)
+  // 当前阶段不启用 FRP：即使草稿里 startOnLaunch=true，也不能自动拉起 frpc。
+  expect(events).toEqual([])
   process.env.PROFER_REMOTE_PORT = String(second); const restart = remote.restartRemoteService(); const again = remote.restartRemoteService()
-  await Bun.sleep(5); expect(events).toEqual([`start-${first}`, 'stopping'])
+  await Bun.sleep(5); expect(events).toEqual(['stopping'])
   await restart; await again
-  expect(events).toEqual([`start-${first}`, 'stopping', 'exited', `start-${second}`, 'stopping', 'exited', `start-${second}`])
+  expect(events.some((event) => event.startsWith('start-'))).toBe(false)
   expect((await fetch(`http://127.0.0.1:${second}/health`)).status).toBe(200)
   await remote.stopRemoteService(); expect(remote.getRemoteServiceStatus().running).toBe(false)
 }, 15000)

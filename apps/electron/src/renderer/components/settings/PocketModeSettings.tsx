@@ -4,7 +4,6 @@ import { toast } from 'sonner'
 import { Button } from '@profer/ui/primitives/button'
 import { Input } from '@profer/ui/primitives/input'
 import { SettingsCard, SettingsSection, SettingsToggle } from './primitives'
-import { RemoteFrpSettings } from './RemoteFrpSettings'
 import { RemotePairingSettings } from './RemotePairingSettings'
 import type { PocketModeStatus } from '../../../types'
 import { IntegrationSettingsFeedback } from './IntegrationSettingsFeedback'
@@ -318,12 +317,10 @@ export function PocketModeSettings(): React.ReactElement {
           </SettingsCard>
           <div className="mt-3 flex gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
             <Wifi className="mt-0.5 size-4 shrink-0 text-amber-600" />
-            <span>公网入口须配置可信 WSS 域名；关闭开关会立即断开移动端连接并停止本应用 FRP。</span>
+            <span>当前版本只支持同一局域网内连接；手机与电脑需要连在同一个 Wi-Fi / 路由器下。公网穿透暂未开放。</span>
           </div>
         </SettingsSection>
       )}
-
-      <RemoteFrpSettings />
 
       {/* 安卓版 App 扫码下载：指向官网 profer.cn 域名直链，任何场景都可用，不依赖移动模式是否开启。 */}
       <SettingsSection

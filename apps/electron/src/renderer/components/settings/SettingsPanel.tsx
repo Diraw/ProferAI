@@ -28,7 +28,6 @@ import {
   UserRound,
   Blocks,
   FlaskConical,
-  Server,
   SlidersHorizontal,
   Search,
 } from "lucide-react";
@@ -112,10 +111,9 @@ const EXPERIENCE_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "composer-toolbar", label: "输入工具栏", icon: <SlidersHorizontal size={16} />, searchTerms: ["工具栏", "排序", "显示", "隐藏", "输入区", "Chat", "Agent"] },
 ];
 
-/** 连接：远程连接 / 自建 FRP / 代理 */
+/** 连接：远程连接 / 代理（公网 FRP 暂不开放） */
 const CONNECTION_GROUP_ITEMS: SettingsTabItem[] = [
   { id: "bots", label: "远程连接", icon: <Bot size={16} />, searchTerms: ["机器人", "Bot", "飞书", "钉钉", "微信", "远程", "工作区", "默认工作区", "绑定"] },
-  { id: "frp-guide", label: "自建 FRP 教程", icon: <Server size={16} />, searchTerms: ["FRP", "frps", "frpc", "自建", "服务器", "教程"] },
   { id: "proxy", label: "代理设置", icon: <Network size={16} />, searchTerms: ["网络代理", "HTTP proxy", "HTTPS proxy", "代理地址", "端口"] },
 ];
 

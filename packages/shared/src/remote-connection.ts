@@ -63,10 +63,57 @@ export function assertProfileTrustUnchanged(previous: RemoteProfile | undefined,
   if (previous && previous.deviceId !== next.deviceId && !previous.deviceId.startsWith('legacy-')) throw new Error('设备身份变化')
 }
 export function parseRemoteProfile(input: unknown): RemoteProfile { return profile(record(input, PROFILE_KEYS)) }
+/**
+ * 精简配对二维码（v2）：只放配对必需字段，避免多端点/pin 把二维码撑到几十行列。
+ * 字段：v=2、d=deviceId、h=host:port、c=pairingCode、x=过期时间（Unix 秒）。
+ */
+export interface CompactPairingQr { v: 2; d: string; h: string; c: string; x: number }
+const COMPACT_QR_KEYS = ['v', 'd', 'h', 'c', 'x']
+function compactHost(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 128 || /[\/?#@\s]/.test(value)) throw new Error('连接端点无效')
+  let url: URL
+  try { url = new URL(`ws://${value}/ws`) } catch { throw new Error('连接端点无效') }
+  const port = Number(url.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || url.pathname !== '/ws' || url.search || url.username || url.password) throw new Error('连接端点无效')
+  return url.host
+}
+export function createCompactPairingQr(profile: RemoteProfile, pairingCode: string, expiresAt: number): CompactPairingQr {
+  const endpoint = profile.endpoints.find((e) => e.scope === 'lan' && e.url.startsWith('ws://'))
+  if (!endpoint) throw new Error('缺少局域网端点')
+  const url = new URL(endpoint.url)
+  if (!url.port || url.pathname !== '/ws' || url.search || url.username || url.password) throw new Error('连接端点无效')
+  if (!/^[a-f0-9]{64}$/.test(pairingCode)) throw new Error('配对码无效')
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) throw new Error('配对码已过期')
+  return { v: 2, d: profile.deviceId, h: url.host, c: pairingCode, x: Math.floor(expiresAt / 1000) }
+}
+export function parseCompactPairingQr(input: unknown, now = Date.now()): PairingQr {
+  const p = record(input, COMPACT_QR_KEYS)
+  if (p.v !== 2 || typeof p.d !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(p.d) ||
+    typeof p.c !== 'string' || !/^[a-f0-9]{64}$/.test(p.c) ||
+    typeof p.x !== 'number' || !Number.isSafeInteger(p.x) || p.x <= 0) throw new Error('二维码无效')
+  const host = compactHost(p.h)
+  const expiresAt = p.x * 1000
+  const issuedAt = expiresAt - PAIRING_TTL_MS
+  if (issuedAt > now + 30_000) throw new Error('二维码无效')
+  if (expiresAt <= now) throw new Error('二维码已过期，请在电脑刷新')
+  const endpoint = validateEndpoint({ url: `ws://${host}/ws`, scope: 'lan' })
+  return {
+    schemaVersion: 1,
+    deviceId: p.d,
+    deviceName: '电脑',
+    updatedAt: issuedAt,
+    endpoints: [endpoint],
+    kind: 'profer-pairing',
+    pairingCode: p.c,
+    issuedAt,
+    expiresAt,
+  }
+}
 export function parsePairingQr(text: string, now = Date.now()): PairingQr {
   if (new TextEncoder().encode(text).length > 8192) throw new Error('二维码过大')
   let input: unknown
   try { input = JSON.parse(text) } catch { throw new Error('二维码损坏') }
+  if (input && typeof input === 'object' && (input as { v?: unknown }).v === 2) return parseCompactPairingQr(input, now)
   const p = record(input, QR_KEYS)
   const parsed = profile(p)
   if (p.kind !== 'profer-pairing' || typeof p.pairingCode !== 'string' || !/^[a-f0-9]{64}$/.test(p.pairingCode) || typeof p.issuedAt !== 'number' || typeof p.expiresAt !== 'number' || !Number.isSafeInteger(p.issuedAt) || !Number.isSafeInteger(p.expiresAt) || p.issuedAt < 0 || p.expiresAt - p.issuedAt !== PAIRING_TTL_MS || p.issuedAt > now + 30_000) throw new Error('二维码无效')
