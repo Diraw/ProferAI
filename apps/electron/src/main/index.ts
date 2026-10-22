@@ -503,7 +503,9 @@ function createWindow(): void {
     },
     ...titleBarOptions,
   })
-  // 主界面默认放大到 110%；使用 webContents 缩放，避免 CSS zoom 破坏有限布局区域。
+  // 主界面保持 100% 页面缩放：非整数缩放（如 110%）会与系统 DPI 相乘得到 1.375，
+  // Chromium 会把 border-radius 圆角光栅成 45° 斜切（圆角被“切掉”）。
+  // 详见 DEFAULT_MAIN_WINDOW_ZOOM_FACTOR 注释。
   mainWindow.webContents.setZoomFactor(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR)
   // GPU 合成/光栅状态落日志：GPU 进程崩溃后 Chromium 会静默降级到软件合成且不自动恢复，
   // 表现为动画与流式输出掉到个位数帧率。没有这条日志时，这种降级会被误判成「渲染代码慢」，

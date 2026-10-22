@@ -9,8 +9,16 @@
 import type { BrowserWindow, Point } from 'electron'
 
 export const DEFAULT_TRAFFIC_LIGHT_POSITION: Point = { x: 18, y: 18 }
-/** 桌面主界面默认缩放；⌘0 也应回到此倍率，而非 Chromium 的 100%。 */
-export const DEFAULT_MAIN_WINDOW_ZOOM_FACTOR = 1.1
+/**
+ * 桌面主界面默认缩放；⌘0 也应回到此倍率。
+ *
+ * ⚠️ 必须保持 1（或整数倍）：非整数页面缩放会与系统 DPI 相乘，得到 1.375
+ * （110% × 125%）这类非整数合成缩放，Chromium 在这种组合下会把
+ * `border-radius` 的圆角光栅化成 45° 斜切（表现为「圆角被切掉/往内折叠」）。
+ * 独立 BrowserView（zoom=1，DPR 1.25）与系统 Chrome 均不复现，只有主窗口
+ * 及其 iframe 内联预览（继承页面缩放）会中招。
+ */
+export const DEFAULT_MAIN_WINDOW_ZOOM_FACTOR = 1
 
 export function resolveTrafficLightPosition(zoomFactor: number, base = DEFAULT_TRAFFIC_LIGHT_POSITION): Point {
   const scale = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1
@@ -38,7 +46,7 @@ export function adjustWindowZoom(win: BrowserWindow, delta: number): void {
   setWindowZoomLevel(win, Math.max(-9, Math.min(9, win.webContents.getZoomLevel() + delta)))
 }
 
-/** 将主界面恢复到 Profer 设定的默认缩放，并同步 macOS 原生红绿灯。 */
+/** 将主界面恢复到 Profer 设定的默认缩放（100%），并同步 macOS 原生红绿灯。 */
 export function resetWindowZoom(win: BrowserWindow): void {
   if (win.isDestroyed()) return
   win.webContents.setZoomFactor(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR)

@@ -5,8 +5,8 @@ test('macOS 红绿灯在标准缩放下保持默认位置', () => {
   expect(resolveTrafficLightPosition(1)).toEqual(DEFAULT_TRAFFIC_LIGHT_POSITION)
 })
 
-test('主窗口默认缩放为 110%，用于启动和 ⌘0 重置', () => {
-  expect(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR).toBe(1.1)
+test('主窗口默认缩放为 100%，避免非整数缩放把圆角光栅成斜切', () => {
+  expect(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR).toBe(1)
 })
 
 test('macOS 红绿灯位置随页面缩放倍率同步放大并取整', () => {
