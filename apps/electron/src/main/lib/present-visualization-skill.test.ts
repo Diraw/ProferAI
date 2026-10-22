@@ -74,7 +74,7 @@ describe('present-visualization Skill：按需注入', () => {
       const result = routeSkillsForTask(snapshot, { userMessage: message })
       expect(result.selected.map(item => item.slug)).toContain(SLUG)
       expect(result.selected.find(item => item.slug === SLUG)?.reason).toBe('configured-keyword')
-      expect(result.prompt).toContain('先选最小合适形式')
+      expect(result.prompt).toContain('## Step 1: Choose the Smallest Suitable Form')
     }
   })
 
@@ -83,9 +83,9 @@ describe('present-visualization Skill：按需注入', () => {
     for (const message of ['帮我讲解一下快速排序是怎么工作的', '模拟一下 TCP 三次握手的过程', '一步步推导一遍这个公式', 'walk me through how quicksort partitions the array']) {
       const result = routeSkillsForTask(snapshot, { userMessage: message })
       expect(result.selected.map(item => item.slug)).toContain(SLUG)
-      expect(result.prompt).toContain('教学/讲解场景')
-      expect(result.prompt).toContain('每步只变一个东西')
-      expect(result.prompt).toContain('公式与数学符号')
+      expect(result.prompt).toContain('## Teaching/Explanation: When Students Need to')
+      expect(result.prompt).toContain('Change only one thing per step')
+      expect(result.prompt).toContain('Formulas and Mathematical Symbols')
     }
   })
 
@@ -119,7 +119,7 @@ describe('present-visualization Skill：按需注入', () => {
     for (const message of ['帮我总结这份合同.pdf 的关键条款', '不要图表，用文字说明就够了', '你好']) {
       const result = routeSkillsForTask(snapshot, { userMessage: message })
       expect(result.selected.map(item => item.slug)).not.toContain(SLUG)
-      expect(result.prompt).not.toContain('先选最小合适形式')
+      expect(result.prompt).not.toContain('## Step 1: Choose the Smallest Suitable Form')
     }
   })
 
@@ -129,7 +129,7 @@ describe('present-visualization Skill：按需注入', () => {
     expect(noTool.skills[0]?.blocked).toBe('tool-unavailable')
     const explicit = routeSkillsForTask(noTool, { userMessage: '/skill:present-visualization 画个柱状图' })
     expect(explicit.prompt).toContain('tool-unavailable')
-    expect(explicit.prompt).not.toContain('先选最小合适形式')
+    expect(explicit.prompt).not.toContain('## Step 1: Choose the Smallest Suitable Form')
 
     const groupOff = await createSkillRoutingSnapshot(fixture({ disabledToolGroups: ['preview'] }, [VIZ_TOOL]))
     expect(groupOff.skills[0]?.blocked).toBe('tool-group-disabled')

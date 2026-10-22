@@ -3,7 +3,7 @@ import { buildAgentPlatformPrompt } from './agent-platform-prompt'
 
 describe('agent platform prompt overlay', () => {
   const candidates = [{
-    rootPath: '/Users/mac/profer/profer-main',
+    rootPath: '/Users/alice/project',
     name: 'proma',
     type: 'git-repository',
     packageName: 'proma',
@@ -14,7 +14,7 @@ describe('agent platform prompt overlay', () => {
     const prompt = buildAgentPlatformPrompt({
       platform: 'darwin',
       shellPath: '/bin/zsh',
-      agentCwd: '/Users/mac/.profer/agent-workspaces/profer/session-1',
+      agentCwd: '/Users/alice/.profer/agent-workspaces/profer/session-1',
       projectCandidates: candidates,
       isPiRuntime: true,
     })
@@ -23,7 +23,7 @@ describe('agent platform prompt overlay', () => {
     expect(prompt).toContain('当前 Agent shell：/bin/zsh')
     expect(prompt).toContain('当前执行环境是 POSIX shell')
     expect(prompt).toContain('不要把其他操作系统的命令')
-    expect(prompt).toContain('/Users/mac/profer/profer-main')
+    expect(prompt).toContain('/Users/alice/project')
     expect(prompt).toContain('不要默认仓库根目录存在 `src`')
     expect(prompt).toContain('path + edits[].oldText/newText')
     expect(prompt).toContain('不要把多个检查拼成含 `;` 的复合命令')
@@ -33,7 +33,7 @@ describe('agent platform prompt overlay', () => {
   test('Pi macOS overlay reports shell_not_found instead of claiming zsh when Bash is unavailable', () => {
     const prompt = buildAgentPlatformPrompt({
       platform: 'darwin',
-      agentCwd: '/Users/mac/session-1',
+      agentCwd: '/Users/alice/session-1',
       isPiRuntime: true,
     })
 

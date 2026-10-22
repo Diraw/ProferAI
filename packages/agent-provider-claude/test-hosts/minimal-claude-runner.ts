@@ -131,7 +131,7 @@ async function scenarioStreamAndCallbacks(): Promise<string> {
     equal(models, ['runner-model'], '模型确认回调')
     equal(contextWindows, [200_000], '上下文窗口回调')
     check(double.state.options!.includePartialMessages === false, 'SDK 仍需 includePartialMessages: false')
-    check(double.state.options!.toolUseConcurrency === 1, 'SDK 仍需串行工具并发')
+    check(!('toolUseConcurrency' in double.state.options!), '不得传 SDK 不识别的 toolUseConcurrency（会被静默忽略）')
     return '3 条消息按顺序透传；session id / 模型 / 上下文窗口回调齐全；terminal 后主动结束 iterator'
   } finally {
     adapter.dispose()

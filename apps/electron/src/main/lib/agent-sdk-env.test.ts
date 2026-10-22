@@ -37,9 +37,9 @@ const credentials = {
 const baseOptions = {
   proxyUrl: 'http://127.0.0.1:7890',
   platform: 'darwin' as NodeJS.Platform,
-  processEnv: { PATH: '/usr/bin:/bin', HOME: '/Users/mac' } as NodeJS.ProcessEnv,
+  processEnv: { PATH: '/usr/bin:/bin', HOME: '/Users/alice' } as NodeJS.ProcessEnv,
   bundledCliPath: '/Applications/Profer.app/Contents/Resources/bin/profer',
-  sdkConfigDir: '/Users/mac/.profer-dev/sdk-config',
+  sdkConfigDir: '/Users/alice/.profer-dev/sdk-config',
 }
 
 describe('buildAgentSdkEnv 平台语义', () => {
@@ -47,8 +47,8 @@ describe('buildAgentSdkEnv 平台语义', () => {
     const env = await buildAgentSdkEnv(credentials, baseOptions)
 
     expect(env.PATH).toBe('/usr/bin:/bin')
-    expect(env.HOME).toBe('/Users/mac')
-    expect(env.CLAUDE_CONFIG_DIR).toBe('/Users/mac/.profer-dev/sdk-config')
+    expect(env.HOME).toBe('/Users/alice')
+    expect(env.CLAUDE_CONFIG_DIR).toBe('/Users/alice/.profer-dev/sdk-config')
     expect(env.PROFER_CLI).toBe('/Applications/Profer.app/Contents/Resources/bin/profer')
     expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('64000')
     expect(env.CLAUDE_CODE_ENABLE_TASKS).toBe('true')
@@ -62,7 +62,7 @@ describe('buildAgentSdkEnv 平台语义', () => {
 
   test('Given Linux When 构造 SDK env Then 与 macOS 同形（不注入 Windows shell）', async () => {
     const env = await buildAgentSdkEnv(credentials, { ...baseOptions, platform: 'linux' })
-    expect(env.CLAUDE_CONFIG_DIR).toBe('/Users/mac/.profer-dev/sdk-config')
+    expect(env.CLAUDE_CONFIG_DIR).toBe('/Users/alice/.profer-dev/sdk-config')
     expect(env.CLAUDE_CODE_SHELL).toBeUndefined()
     expect(env.CLAUDE_BASH_NO_LOGIN).toBeUndefined()
   })

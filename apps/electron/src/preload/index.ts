@@ -33,6 +33,7 @@ import type {
   StreamCompleteEvent,
   StreamErrorEvent,
   StreamToolActivityEvent,
+  StreamUserEvent,
   AttachmentSaveInput,
   AttachmentSaveResult,
   FileDialogResult,
@@ -265,6 +266,8 @@ export interface ElectronAPI {
   pasteAgentBrowserClipboard: (input: import('@profer/shared').BrowserTabInput) => Promise<import('@profer/shared').BrowserTranslateResult>
   /** 订阅受管网页下载被拦截的脱敏事件。 */
   onAgentBrowserDownloadBlocked: (callback: (event: import('@profer/shared').BrowserDownloadBlockedEvent) => void) => () => void
+  /** 订阅原生网页上「关闭拆分视图」浮标的点击（主进程绘制，renderer 负责解散组合）。 */
+  onSplitViewCloseClicked: (callback: (event: import('@profer/shared').BrowserSplitViewCloseEvent) => void) => () => void
   /**
    * 订阅「用户在浏览器列的文件预览里划词」。
    * 选区本身发生在无 preload 的沙箱 viewer 页，只能由主进程转投过来。
@@ -712,6 +715,9 @@ export interface ElectronAPI {
 
   /** 订阅流式工具活动事件 */
   onStreamToolActivity: (callback: (event: StreamToolActivityEvent) => void) => () => void
+
+  /** 订阅用户消息已持久化事件（桌面/移动端发送的公告） */
+  onStreamUser: (callback: (event: StreamUserEvent) => void) => () => void
 
   // ===== Agent 会话管理相关 =====
 
@@ -1750,6 +1756,11 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on(AGENT_IPC_CHANNELS.BROWSER_DOWNLOAD_BLOCKED, listener)
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.BROWSER_DOWNLOAD_BLOCKED, listener)
   },
+  onSplitViewCloseClicked: (callback: (event: import('@profer/shared').BrowserSplitViewCloseEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: import('@profer/shared').BrowserSplitViewCloseEvent) => callback(payload)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.SPLIT_VIEW_CLOSE_CLICKED, listener)
+    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.SPLIT_VIEW_CLOSE_CLICKED, listener)
+  },
   onAgentBrowserLocalFileSelection: (
     callback: (event: import('@profer/shared').BrowserLocalFileSelectionEvent) => void,
   ) => {
@@ -2317,6 +2328,12 @@ const electronAPI: ElectronAPI = {
     const listener = (_: unknown, event: StreamToolActivityEvent): void => callback(event)
     ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, listener)
     return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, listener) }
+  },
+
+  onStreamUser: (callback: (event: StreamUserEvent) => void) => {
+    const listener = (_: unknown, event: StreamUserEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_USER, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_USER, listener) }
   },
 
   // Agent 会话管理
@@ -3735,7 +3752,7 @@ declare global {
       sendResult: (id: string, result: import('@profer/shared').AgentPreviewRenderOutput) => void
       sendError: (id: string, payload: { code?: string; message?: string }) => void
       notifyReady: () => void
-      capture: (id: string) => Promise<string>
+      capture: (id: string) => Promise<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>
     }
   }
 }
@@ -3753,7 +3770,7 @@ const agentPreviewAPI = {
     ipcRenderer.send('agent-preview:error', id, payload)
   },
   notifyReady: () => ipcRenderer.send('agent-preview:ready'),
-  capture: (id: string) => ipcRenderer.invoke('agent-preview:capture', id) as Promise<string>,
+  capture: (id: string) => ipcRenderer.invoke('agent-preview:capture', id) as Promise<{ data: string; mediaType: 'image/jpeg' | 'image/png' }>,
 }
 
 // iframe 内容（HTML/PDF）不需要也不能获得主进程预览控制能力。

@@ -21,7 +21,7 @@ describe('agent tool input validation', () => {
 
   test('does not touch Windows paths on Windows or POSIX paths everywhere', () => {
     expect(validateToolPathPlatform('LS', { path: 'C:\\Users\\alex\\dev' }, 'win32')).toBeNull()
-    expect(validateToolPathPlatform('LS', { path: '/Users/mac/profer' }, 'darwin')).toBeNull()
+    expect(validateToolPathPlatform('LS', { path: '/Users/alice/project' }, 'darwin')).toBeNull()
     expect(validateToolPathPlatform('LS', { path: 'relative/dir' }, 'darwin')).toBeNull()
   })
 

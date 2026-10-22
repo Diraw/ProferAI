@@ -5,14 +5,14 @@ import type { AttachedDirectoryProjectCandidate } from './attached-directory-pro
 describe('buildPiAdditionalDirectoriesPrompt', () => {
   test('为 Pi 注入用户授权的绝对目录', () => {
     const prompt = buildPiAdditionalDirectoriesPrompt([
-      'C:\\Users\\yuan\\.profer\\agent-workspaces\\profer',
-      'C:\\Users\\yuan\\.profer\\agent-workspaces\\profer\\workspace-files',
+      'C:\\Users\\alice\\.profer\\agent-workspaces\\profer',
+      'C:\\Users\\alice\\.profer\\agent-workspaces\\profer\\workspace-files',
     ])
 
     expect(prompt).toContain('<attached_directories>')
     expect(prompt).toContain('请直接使用绝对路径')
-    expect(prompt).toContain('<directory index="1">C:\\Users\\yuan\\.profer\\agent-workspaces\\profer</directory>')
-    expect(prompt).toContain('<directory index="2">C:\\Users\\yuan\\.profer\\agent-workspaces\\profer\\workspace-files</directory>')
+    expect(prompt).toContain('<directory index="1">C:\\Users\\alice\\.profer\\agent-workspaces\\profer</directory>')
+    expect(prompt).toContain('<directory index="2">C:\\Users\\alice\\.profer\\agent-workspaces\\profer\\workspace-files</directory>')
   })
 
   test('检测到项目时注入候选与任务路由规则', () => {
@@ -23,15 +23,13 @@ describe('buildPiAdditionalDirectoriesPrompt', () => {
       sourceDirectory: 'D:\\REPO',
       name: 'AAAI学习大师',
       relativePath: 'AAAI学习大师',
+      packageName: 'aaai',
+      repositoryRoot: 'D:\\REPO',
     }]
 
     const prompt = buildPiAdditionalDirectoriesPrompt(['D:\\REPO'], candidates)
     expect(prompt).toContain('<detected_project_candidates>')
-    expect(prompt).toContain('<root>D:\\REPO\\AAAI学习大师</root>')
-    expect(prompt).toContain('<type>obsidian-vault</type>')
-    expect(prompt).toContain('<name>AAAI学习大师</name>')
-    expect(prompt).toContain('<relative_to_attached_directory>AAAI学习大师</relative_to_attached_directory>')
-    expect(prompt).toContain('repository_root')
+    expect(prompt).toContain('- AAAI学习大师（obsidian-vault）：D:\\REPO\\AAAI学习大师，package=aaai，repo=D:\\REPO')
     expect(prompt).toContain('唯一语义匹配候选')
   })
 

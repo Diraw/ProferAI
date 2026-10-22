@@ -73,7 +73,7 @@ const PROJECT_TITLE_DOUBLE_CLICK_DELAY_MS = 500
 const PROJECT_SESSION_RECENT_WINDOW_MS = 3 * 86_400_000
 /** 点击"显示更多"时每次额外展开的会话数量 */
 const PROJECT_SESSION_EXPAND_STEP = 10
-/** 置顶区最多占用约 6 条会话的高度，超过后在置顶区内部滚动 */
+/** Chat「置顶」区最多占用约 6 条会话的高度，超过后在置顶区内部滚动 */
 const PINNED_SESSION_VISIBLE_LIMIT = 6
 const PINNED_SESSION_ROW_HEIGHT_PX = 32
 export const PINNED_SESSION_MAX_HEIGHT = PINNED_SESSION_VISIBLE_LIMIT * PINNED_SESSION_ROW_HEIGHT_PX
@@ -141,7 +141,7 @@ export function RailRecentButton({
             />
             {item.isAutomation
               ? <Clock size={14} className="text-foreground/40" />
-              : <span className="text-[13px] font-semibold leading-none">{item.initial}</span>
+              : <span className="text-[14px] font-semibold leading-none">{item.initial}</span>
             }
           </button>
         </TooltipTrigger>
@@ -351,7 +351,7 @@ export function SessionItemActions({
       <span
         title={`最后更新：${new Date(updatedAt).toLocaleString('zh-CN')}`}
         className={cn(
-          'absolute inset-y-0 right-0 block w-full text-right text-[11px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
+          'absolute inset-y-0 right-0 block w-full text-right text-[12px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
           forceVisible ? 'opacity-0' : 'opacity-100 group-hover:opacity-0',
         )}
       >
@@ -642,12 +642,12 @@ export const ConversationItem = React.memo(function ConversationItem({
                 onKeyDown={handleKeyDown}
                 onBlur={saveTitle}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full bg-transparent text-[13px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
+                className="w-full bg-transparent text-[14px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
                 maxLength={100}
               />
             ) : (
               <div className={cn(
-                'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
+                'truncate text-[14px] leading-[19px] flex items-center gap-1.5',
                 active ? 'text-foreground' : 'text-foreground/80'
               )}>
                 {/* 置顶标记 */}
@@ -657,7 +657,7 @@ export const ConversationItem = React.memo(function ConversationItem({
                 {regeneratingTitle ? (
                   <>
                     <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
-                    <span className="flex-shrink-0 text-[11px] text-info">正在生成标题…</span>
+                    <span className="flex-shrink-0 text-[12px] text-info">正在生成标题…</span>
                   </>
                 ) : null}
                 <span className="truncate">{conversation.title}</span>
@@ -977,12 +977,12 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 onKeyDown={handleKeyDown}
                 onBlur={saveTitle}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full bg-transparent text-[13px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
+                className="w-full bg-transparent text-[14px] leading-5 text-foreground border-b border-primary/50 outline-none px-0 py-0"
                 maxLength={100}
               />
             ) : (
               <div className={cn(
-                'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
+                'truncate text-[14px] leading-[19px] flex items-center gap-1.5',
                 active ? 'text-foreground' : 'text-foreground/80'
               )}>
                 {showPinIcon && (
@@ -1000,7 +1000,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 {regeneratingTitle ? (
                   <>
                     <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
-                    <span className="flex-shrink-0 text-[11px] text-info">正在生成标题…</span>
+                    <span className="flex-shrink-0 text-[12px] text-info">正在生成标题…</span>
                   </>
                 ) : hasBrowser ? (
                   <Globe size={11} className="flex-shrink-0 text-foreground/40" aria-label="该会话正在使用浏览器" />
@@ -1011,7 +1011,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                   <Pencil size={11} className="flex-shrink-0 text-foreground/40" aria-label="输入框有未发送内容" />
                 )}
                 {workspaceName && (
-                  <span className="flex-shrink-0 px-1.5 py-0 rounded-full bg-primary/10 text-[10px] leading-4 workspace-badge font-medium truncate max-w-[80px]">
+                  <span className="flex-shrink-0 px-1.5 py-0 rounded-full bg-primary/10 text-[11px] leading-4 workspace-badge font-medium truncate max-w-[80px]">
                     {workspaceName}
                   </span>
                 )}
@@ -1023,7 +1023,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                       event.stopPropagation()
                       delegationSummary.onToggle()
                     }}
-                    className="flex-shrink-0 inline-flex items-center gap-0.5 text-[11px] leading-4 text-foreground/45 hover:text-foreground/65 transition-colors"
+                    className="flex-shrink-0 inline-flex items-center gap-0.5 text-[12px] leading-4 text-foreground/45 hover:text-foreground/65 transition-colors"
                   >
                     <ChevronRight
                       size={10}
@@ -1279,7 +1279,11 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   // 非活跃部分仍保留原"最近 3 天 + 至多 5 条"预览策略，作为额外补充展示。
   // 用户点击"显示更多"会在折叠基线之上每次再额外展开 PROJECT_SESSION_EXPAND_STEP 条。
   const treeItems = buildAgentSessionTrees(group.sessions)
-  const activeSessions = treeItems
+  // 置顶会话固定展示在项目内最前，不受「最近 3 天 + 至多 5 条」预览窗口限制。
+  // 委派/探索子会话即使置顶也跟随母会话层级，不单独抽到项目顶部。
+  const pinnedSessions = treeItems.filter((item) => !!item.session.pinned)
+  const unpinnedItems = treeItems.filter((item) => !item.session.pinned)
+  const activeSessions = unpinnedItems
     .filter((item) => ACTIVE_SESSION_STATUSES.has(getSessionTreeStatus(item, agentIndicatorMap)))
     .slice()
     .sort((a, b) => {
@@ -1289,28 +1293,27 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
       return b.session.updatedAt - a.session.updatedAt
     })
   const activeIds = collectTreeSessionIds(activeSessions)
-  const fillSessions = treeItems
+  const fillSessions = unpinnedItems
     .filter((item) =>
       !activeIds.has(item.session.id)
       && item.session.updatedAt >= recentCutoff
     )
     .slice(0, PROJECT_SESSION_PREVIEW_LIMIT)
-  // 先拼不含置顶项的可见列表（含 extraSessions），再判断选中会话是否已可见。
-  const collapsedSessionsWithoutPinned = [...activeSessions, ...fillSessions]
-  const collapsedIdsWithoutPinned = new Set(collapsedSessionsWithoutPinned.map((item) => item.session.id))
-  const remainingSessions = treeItems.filter((item) => !collapsedIdsWithoutPinned.has(item.session.id))
+  // 先拼不含选中会话的可见列表（含 extraSessions），再判断选中会话是否已可见。
+  const collapsedSessions = [...pinnedSessions, ...activeSessions, ...fillSessions]
+  const collapsedIds = new Set(collapsedSessions.map((item) => item.session.id))
+  const remainingSessions = unpinnedItems.filter((item) => !collapsedIds.has(item.session.id))
   const extraSessions = remainingSessions.slice(0, extraCount)
-  const sessionsWithoutPinned = [...collapsedSessionsWithoutPinned, ...extraSessions]
-  const visibleIds = collectTreeSessionIds(sessionsWithoutPinned)
-  // 仅当选中会话不在当前完整可见列表（含 extra 区）中时才置顶（如搜索结果打开旧会话），
+  const sessionsWithoutCurrent = [...collapsedSessions, ...extraSessions]
+  const visibleIds = collectTreeSessionIds(sessionsWithoutCurrent)
+  // 仅当选中会话不在当前完整可见列表（含 extra 区）中时才临时展示（如搜索结果打开旧会话），
   // 已可见则保持原位不强制置顶（#958）。
   const currentSession = activeSessionId && !visibleIds.has(activeSessionId)
     ? treeItems.find((item) => treeContainsSessionId(item, activeSessionId)) ?? null
     : null
-  const pinnedCurrent = currentSession ? [currentSession] : []
-  const sessions = pinnedCurrent.length > 0
-    ? [...activeSessions, ...pinnedCurrent, ...fillSessions, ...extraSessions]
-    : sessionsWithoutPinned
+  const sessions = currentSession
+    ? [...pinnedSessions, currentSession, ...activeSessions, ...fillSessions, ...extraSessions]
+    : sessionsWithoutCurrent
   const hiddenCount = Math.max(0, treeItems.length - sessions.length)
 
   return (
@@ -1352,7 +1355,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               onChange={(e) => setWorkspaceEditName(e.target.value)}
               onKeyDown={handleWorkspaceRenameKeyDown}
               onBlur={() => void handleWorkspaceRenameCommit()}
-              className="flex-1 min-w-0 bg-transparent text-[13px] font-medium text-foreground border-b border-primary/50 outline-none px-0.5 leading-[18px]"
+              className="flex-1 min-w-0 bg-transparent text-[14px] font-medium text-foreground border-b border-primary/50 outline-none px-0.5 leading-[19px]"
               maxLength={50}
             />
           </div>
@@ -1392,7 +1395,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
             )}
           >
             {renderWorkspaceIcon(13, 'flex-shrink-0 text-foreground/40')}
-            <span className="flex-1 min-w-0 truncate text-[13px] font-medium leading-[18px]">
+            <span className="flex-1 min-w-0 truncate text-[14px] font-medium leading-[19px]">
               {group.workspace.name}
             </span>
             <span
@@ -1536,7 +1539,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                 <button
                   type="button"
                   onClick={() => onShowMore(group.workspace.id)}
-                  className="w-full text-left px-1.5 py-1 rounded-md text-[12px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                  className="w-full text-left px-1.5 py-1 rounded-md text-[13px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
                 >
                   显示更多
                 </button>
@@ -1546,14 +1549,14 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                 <button
                   type="button"
                   onClick={() => onCollapseExtra(group.workspace.id)}
-                  className="w-full text-left px-1.5 py-1 rounded-md text-[12px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                  className="w-full text-left px-1.5 py-1 rounded-md text-[13px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
                 >
                   收起
                 </button>
               )}
             </div>
           ) : (
-            <div className="px-1.5 py-0.5 text-[12px] text-foreground/22 select-none">
+            <div className="px-1.5 py-0.5 text-[13px] text-foreground/22 select-none">
               暂无会话
             </div>
           )

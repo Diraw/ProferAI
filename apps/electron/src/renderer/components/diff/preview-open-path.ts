@@ -12,8 +12,8 @@ function normalizeWindowsDrivePath(filePath: string): string {
   const normalized = filePath
     .replace(/\\/g, '/')
     .replace(/^([A-Za-z]:)\/+/, '$1/')
-  // Markdown/file URL 在某些路径中会吞掉 `\\.`，把 `yuan.profer-dev`
-  // 还原为用户目录下的隐藏配置目录 `yuan/.profer-dev`。
+  // Markdown/file URL 在某些路径中会吞掉 `\\.`，把 `alice.profer-dev`
+  // 还原为用户目录下的隐藏配置目录 `alice/.profer-dev`。
   return normalized.replace(
     /^([A-Za-z]:\/Users\/[^/]+)\.(profer(?:-dev)?|proma(?:-dev)?)(?=\/|$)/i,
     '$1/.$2',

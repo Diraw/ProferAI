@@ -392,6 +392,8 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       model: input.modelId,
       input: [{ role: 'user', content: input.prompt }],
       max_output_tokens: 50,
+      // 与 Chat Completions 同理：显式关闭流式，避免网关返回 SSE。
+      stream: false,
     }
     const reasoningEffort = resolveReasoningProfile({ modelId: input.modelId, transport: 'openai-responses' })
       ?.encodings['openai-responses']?.effortMap.off

@@ -10,7 +10,7 @@ let channels: Channel[] = []
 let refreshedChannels: Channel[] = []
 let decrypts = 0
 let requests: Array<{ modelId: string; baseUrl: string }> = []
-let events: Array<{ topic: string; payload: { error?: string; model?: string } }> = []
+let events: Array<{ topic: string; payload: { error?: string; model?: string; message?: { id?: string; role?: string; content?: string } } }> = []
 let persisted: unknown[] = []
 let streamCalls = 0
 let titleCalls = 0
@@ -29,7 +29,7 @@ mock.module('./channel-manager', () => ({
   isCommercialMode: () => commercial, canSelfConfig: () => true,
   syncChannelsFromServer: async () => { synced += 1; channels = refreshedChannels },
 }))
-mock.module('./chat-stream-bus', () => ({ pushChatStream: (_wc: unknown, _id: string, topic: string, payload: { error?: string; model?: string }) => events.push({ topic, payload }) }))
+mock.module('./chat-stream-bus', () => ({ pushChatStream: (_wc: unknown, _id: string, topic: string, payload: { error?: string; model?: string; message?: { id?: string; role?: string; content?: string } }) => events.push({ topic, payload }) }))
 mock.module('./auth-service', () => ({
   getTeamAuthWithRefresh: async () => ({ baseUrl: 'https://fixture.invalid', token: 'fixture-token' }),
   recoverCommercialProxyAuth: async () => {
@@ -39,7 +39,7 @@ mock.module('./auth-service', () => ({
   },
 }))
 mock.module('./conversation-manager', () => ({ appendMessage: () => {},
-  appendBranchTail: (_id: string, message: unknown) => persisted.push(message),
+  appendBranchTail: (_id: string, message: Record<string, unknown>) => { const persistedMessage = { id: 'fixture-user-message', ...message }; persisted.push(persistedMessage); return persistedMessage },
   updateConversationMeta: () => {}, getConversationBranch: () => [], getConversationMeta: () => null,
   DEFAULT_CONVERSATION_TITLE: '新对话',
 }))
@@ -65,6 +65,8 @@ mock.module('@profer/core', () => ({
     return { content: 'fixture-reply' }
   },
   fetchTitle: async () => { titleCalls += 1; return titleResult },
+  fetchTitleWithRetry: async () => { titleCalls += 1; return { title: titleResult } },
+  resolveTitleBaseUrl: (_provider: string, baseUrl: string) => baseUrl,
   detectInsufficientCredits: () => null,
 }))
 const { sendMessage, generateTitle } = await import('./chat-service')
@@ -99,10 +101,17 @@ describe('Chat 服务资格与事件（完全 mock）', () => {
     expect(events.every((event) => event.payload.error?.includes('模型配置已失效'))).toBe(true)
     expect(decrypts).toBe(0); expect(requests).toHaveLength(0); expect(persisted).toHaveLength(0)
   })
-  test('正常 Chat 保留原 modelId 并推送 chunk/complete', async () => {
+  test('正常 Chat 保留原 modelId 并推送用户消息/chunk/complete', async () => {
     await sendMessage(input, null)
     expect(requests.map((request) => request.modelId)).toEqual(['model'])
-    expect(events.map((event) => event.topic)).toEqual([CHAT_IPC_CHANNELS.STREAM_CHUNK, CHAT_IPC_CHANNELS.STREAM_COMPLETE])
+    // 用户消息落盘后先广播（含真实 id），移动端才能实时看到桌面发起的指令。
+    expect(events.map((event) => event.topic)).toEqual([
+      CHAT_IPC_CHANNELS.STREAM_USER,
+      CHAT_IPC_CHANNELS.STREAM_CHUNK,
+      CHAT_IPC_CHANNELS.STREAM_COMPLETE,
+    ])
+    expect(events[0]?.payload.message).toMatchObject({ role: 'user', content: 'fixture message' })
+    expect(events[0]?.payload.message?.id).toBeTruthy()
     expect(events.at(-1)?.payload.model).toBe('model')
   })
   test('短标题与 API 标题均拒绝失效/Agent-only 绑定，不改用其它模型', async () => {

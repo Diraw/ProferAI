@@ -1,8 +1,8 @@
-import type { AgentRuntime, Channel, CodexOAuthCredentials, ProviderType, XaiOAuthCredentials } from '@profer/shared'
+import type { AgentRuntime, Channel, CodexOAuthCredentials, ProviderType, XaiApiProtocol, XaiOAuthCredentials } from '@profer/shared'
 import { PROVIDER_DEFAULT_URLS, resolveXaiCredentialMode } from '@profer/shared'
-import { getTeamAuthWithRefresh } from './auth-service'
+import { resolveEditionBearerToken } from '@profer/edition-contract'
 import { decryptApiKey, persistCodexOAuthCredentials, persistXaiOAuthCredentials, resolveChannelAgentBaseUrl, resolveCodexOAuthCredentials, resolveXaiOAuthCredentials } from './channel-manager'
-import { shouldUseCommercialBearerAuth } from './commercial-routing-policy'
+import { editionProviders } from './edition'
 import { normalizePiApi } from './adapters/pi-model-registry'
 import type { PiAgentQueryOptions } from './adapters/pi-agent-adapter'
 
@@ -19,6 +19,8 @@ export interface ResolvedRuntimeCredentials {
   xaiOAuthCredentials?: XaiOAuthCredentials
   /** xAI API Key / OAuth；其他 provider 不设置。 */
   xaiCredentialMode?: 'api-key' | 'oauth'
+  /** xAI API Key 渠道的请求协议；缺失时按 responses 处理。 */
+  xaiApiProtocol?: XaiApiProtocol
 }
 
 export type ResolveRuntimeCredentialsResult =
@@ -42,10 +44,10 @@ function resolveRuntimeBaseUrl(channel: Pick<Channel, 'provider' | 'baseUrl' | '
  * 渠道存在性/启用性仍由 Orchestrator 的既有 preflight 负责，避免改变产品错误优先级。
  */
 export async function resolveRuntimeCredentials(
-  channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode' | 'directDataPlane'>,
+  channel: Pick<Channel, 'id' | 'provider' | 'baseUrl' | 'agentBaseUrl' | 'credentialMode' | 'apiProtocol' | 'directDataPlane'>,
   runtime: AgentRuntime = 'claude',
 ): Promise<ResolveRuntimeCredentialsResult> {
-  const forceBearerAuth = shouldUseCommercialBearerAuth(channel)
+  const forceBearerAuth = editionProviders.credentials.shouldUseBearerAuth(channel)
 
   const useDirectDataPlane = forceBearerAuth && channel.directDataPlane === true
   const baseUrl = resolveRuntimeBaseUrl(channel, runtime)
@@ -67,12 +69,12 @@ export async function resolveRuntimeCredentials(
         return { ok: false, code: 'api_key_decrypt_failed' }
       }
     }
-    const auth = await getTeamAuthWithRefresh()
+    const auth = await editionProviders.account.getSession()
     if (!auth) return { ok: false, code: 'token_expired' }
     return {
       ok: true,
       credentials: {
-        apiKey: auth.proxyToken || auth.token,
+        apiKey: resolveEditionBearerToken(auth),
         baseUrl: `${auth.baseUrl}/v1/proxy`,
         provider: channel.provider,
         forceBearerAuth: true,
@@ -119,6 +121,7 @@ export async function resolveRuntimeCredentials(
           provider: channel.provider,
           forceBearerAuth: false,
           xaiCredentialMode: credentialMode,
+          xaiApiProtocol: channel.apiProtocol,
         },
       }
     }
@@ -140,7 +143,7 @@ export async function resolveRuntimeCredentials(
 export function buildPiRuntimeCredentialOptions(
   channelId: string,
   credentials: ResolvedRuntimeCredentials,
-): Pick<PiAgentQueryOptions, 'apiKey' | 'baseUrl' | 'provider' | 'codexOAuthCredentials' | 'onCodexOAuthCredentialsRefreshed' | 'xaiCredentialMode' | 'xaiOAuthCredentials' | 'onXaiOAuthCredentialsRefreshed'> {
+): Pick<PiAgentQueryOptions, 'apiKey' | 'baseUrl' | 'provider' | 'codexOAuthCredentials' | 'onCodexOAuthCredentialsRefreshed' | 'xaiCredentialMode' | 'xaiApiProtocol' | 'xaiOAuthCredentials' | 'onXaiOAuthCredentialsRefreshed'> {
   return {
     apiKey: credentials.apiKey,
     baseUrl: credentials.baseUrl,
@@ -150,6 +153,7 @@ export function buildPiRuntimeCredentialOptions(
       ? (refreshed) => persistCodexOAuthCredentials(channelId, refreshed)
       : undefined,
     xaiCredentialMode: credentials.xaiCredentialMode,
+    xaiApiProtocol: credentials.xaiApiProtocol,
     xaiOAuthCredentials: credentials.xaiOAuthCredentials,
     onXaiOAuthCredentialsRefreshed: credentials.xaiOAuthCredentials
       ? (refreshed) => persistXaiOAuthCredentials(channelId, refreshed)

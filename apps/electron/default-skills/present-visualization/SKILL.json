@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "version": "1.5.0",
+  "version": "1.5.1",
   "interface": {
-    "displayName": "会话内可视化",
-    "defaultPrompt": "把这份数据做成图表；或用可调参的交互讲清一个过程"
+    "displayName": "In-Session Visualization",
+    "defaultPrompt": "Turn this data into a chart, or explain a process with an adjustable interactive visualization"
   },
   "policy": {
     "implicit": true,
@@ -88,6 +88,8 @@
       "visual explanation",
       "interactive explanation",
       "数学公式",
+      "mathematical formula",
+      "mathematical formulas",
       "latex"
     ],
     "excludeKeywords": [
@@ -96,7 +98,15 @@
       "不用图表",
       "不要画图",
       "不要动画",
-      "不用动画"
+      "不用动画",
+      "no charts",
+      "do not visualize",
+      "don't visualize",
+      "without charts",
+      "no diagrams",
+      "no animation",
+      "do not animate",
+      "don't animate"
     ]
   },
   "dependencies": {

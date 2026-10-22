@@ -10,6 +10,7 @@ import {
   selectMruFallbackId,
 } from '@profer/shared'
 import { assertSafeBrowserDestination, assertSafeBrowserSubresourceDestination, assertSafeBrowserUrl } from './browser-policy'
+import { installDistrustedCertificateGuard } from './browser-certificate-policy'
 import { basename, extname } from 'node:path'
 import { createAuthorizedPreviewUrl, createViewerPreviewUrl, isAuthorizedPreviewProtocol, viewerPreviewThemeSignature, type ViewerPreviewTheme } from './browser-preview-service'
 import { resolveAppThemeIsDark } from './app-theme-service'
@@ -42,6 +43,23 @@ const MAX_INVALIDATED_LAYOUT_RENDERERS = 16
 const MAX_SCREENSHOT_BYTES = 3 * 1024 * 1024
 const ACTION_HIGHLIGHT_DURATION_MS = 900
 const MAX_BROWSER_SCRIPT_RESULT_CHARS = 64_000
+/** 原生网页右下角的「关闭拆分视图」浮标：DOM 盖不住 WebContentsView，只能单独绘制一层原生视图。 */
+const SPLIT_CLOSE_OVERLAY_ACTION_URL = 'https://profer.local/split-close'
+const SPLIT_CLOSE_OVERLAY_BASE_SIZE = 24
+const SPLIT_CLOSE_OVERLAY_BASE_MARGIN = 6
+const SPLIT_CLOSE_OVERLAY_HTML_URL = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center}
+button{appearance:none;box-sizing:border-box;width:100%;height:100%;padding:0;border:1px solid rgba(255,255,255,.18);border-radius:50%;background:rgba(60,64,67,.9);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background-color .12s ease}
+button:hover{background:rgba(32,33,36,.94)}
+svg{width:48%;height:48%;display:block}
+</style></head><body>
+<button type="button" aria-label="关闭拆分视图" title="关闭拆分视图（两个标签都保留）">
+<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+</button>
+<script>document.querySelector('button').addEventListener('click',function(){location.href='https://profer.local/split-close'})</script>
+</body></html>`)}`
 
 /** 受管网页使用与 Profer 一致的细滚动条；仅影响展示，不修改页面滚动行为或内容。 */
 const PROFER_BROWSER_SCROLLBAR_CSS = `
@@ -272,6 +290,10 @@ export class BrowserController {
    * 用最近一次同步值补上，可以让这些预览也跟随当前皮肤（而不是永远浅色/默认色）。
    */
   private lastKnownPreviewTheme: ViewerPreviewTheme | null = null
+  /** 原生网页右下角的退出浮标（全局单例，跟随当前可见的分屏右栏浏览器页）。 */
+  private splitCloseOverlay: WebContentsView | null = null
+  private splitCloseOverlaySessionId: string | null = null
+  private splitCloseOverlayTabId: string | null = null
 
   configureSession(sessionId: string, input: ConfigureBrowserSessionInput): void {
     const previous = this.configurations.get(sessionId)
@@ -299,7 +321,107 @@ export class BrowserController {
   }
 
   setOwnerWindow(window: BrowserWindow): void {
+    if (this.owner && this.owner !== window) this.destroySplitCloseOverlay()
     this.owner = window
+  }
+
+  /**
+   * 原生网页上的退出浮标。
+   *
+   * 受管网页是盖在 renderer 之上的 WebContentsView，DOM 按钮无法显示在它上面；
+   * 分屏右栏是浏览器页时，在网页右下角额外挂一个很小的透明原生视图，点击后通过 IPC
+   * 让 renderer 解散当前组合。只在网页可见、且 renderer 声明该页属于分屏右栏时显示。
+   */
+  private ensureSplitCloseOverlay(): WebContentsView | null {
+    if (!this.owner || this.owner.isDestroyed()) return null
+    if (this.splitCloseOverlay) return this.splitCloseOverlay
+    const overlay = new WebContentsView({
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        backgroundThrottling: false,
+      },
+    })
+    overlay.setBackgroundColor('#00000000')
+    overlay.setVisible(false)
+    overlay.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    overlay.webContents.on('will-navigate', (event, url) => {
+      if (url !== SPLIT_CLOSE_OVERLAY_ACTION_URL) return
+      event.preventDefault()
+      this.handleSplitCloseOverlayClick()
+    })
+    void overlay.webContents.loadURL(SPLIT_CLOSE_OVERLAY_HTML_URL).catch(() => undefined)
+    this.splitCloseOverlay = overlay
+    return overlay
+  }
+
+  private updateSplitCloseOverlay(
+    browserSession: BrowserSessionRecord,
+    tab: BrowserTabRecord,
+    layout: BrowserViewLayout,
+    hostBounds: { width: number; height: number },
+    visible: boolean,
+  ): void {
+    if (!visible || layout.splitViewClose !== true || !this.owner || this.owner.isDestroyed()) {
+      this.hideSplitCloseOverlay()
+      return
+    }
+    const overlay = this.ensureSplitCloseOverlay()
+    if (!overlay) {
+      this.hideSplitCloseOverlay()
+      return
+    }
+    const zoom = this.owner.webContents.getZoomFactor()
+    const scale = Number.isFinite(zoom) && zoom > 0 ? zoom : 1
+    const size = Math.max(20, Math.round(SPLIT_CLOSE_OVERLAY_BASE_SIZE * scale))
+    const margin = Math.max(2, Math.round(SPLIT_CLOSE_OVERLAY_BASE_MARGIN * scale))
+    const x = hostBounds.width - size - margin
+    const y = hostBounds.height - size - margin
+    if (x < 0 || y < 0) {
+      this.hideSplitCloseOverlay()
+      return
+    }
+    const changed = this.splitCloseOverlaySessionId !== browserSession.sessionId
+      || this.splitCloseOverlayTabId !== tab.tabId
+    if (changed) {
+      // View 只能有一个父节点：先确保从所有会话的 hostView 上摘除，再加到当前页面上方。
+      for (const session of this.sessions.values()) {
+        try { session.hostView.removeChildView(overlay) } catch { /* 不是子节点 */ }
+      }
+      try { browserSession.hostView.addChildView(overlay) } catch { /* 宿主已销毁 */ }
+      this.splitCloseOverlaySessionId = browserSession.sessionId
+      this.splitCloseOverlayTabId = tab.tabId
+    }
+    overlay.setBounds({ x, y, width: size, height: size })
+    overlay.setVisible(true)
+  }
+
+  private hideSplitCloseOverlay(): void {
+    try { this.splitCloseOverlay?.setVisible(false) } catch { /* 视图已销毁 */ }
+    this.splitCloseOverlaySessionId = null
+    this.splitCloseOverlayTabId = null
+  }
+
+  private destroySplitCloseOverlay(): void {
+    const overlay = this.splitCloseOverlay
+    this.splitCloseOverlay = null
+    this.splitCloseOverlaySessionId = null
+    this.splitCloseOverlayTabId = null
+    if (!overlay) return
+    try { overlay.setVisible(false) } catch { /* 视图已销毁 */ }
+    for (const session of this.sessions.values()) {
+      try { session.hostView.removeChildView(overlay) } catch { /* 不是子节点 */ }
+    }
+    try { overlay.webContents.close() } catch { /* 已销毁 */ }
+  }
+
+  private handleSplitCloseOverlayClick(): void {
+    const sessionId = this.splitCloseOverlaySessionId
+    const tabId = this.splitCloseOverlayTabId
+    this.hideSplitCloseOverlay()
+    if (!sessionId || !tabId || !this.owner || this.owner.isDestroyed()) return
+    this.owner.webContents.send(AGENT_IPC_CHANNELS.SPLIT_VIEW_CLOSE_CLICKED, { sessionId, tabId })
   }
 
   /**
@@ -330,6 +452,7 @@ export class BrowserController {
       this.hideAll(false)
       return
     }
+    if (sessionId !== this.foregroundSessionId) this.hideSplitCloseOverlay()
     this.hideOtherBrowserSessions(sessionId)
     // 同一会话的前台重申（如同会话内切换 Tab、分栏聚焦点击对话区）不得隐藏视图：
     // 分栏模式下两侧 BrowserViewport 不会重挂载，renderer 未必立刻重发布局，
@@ -660,16 +783,15 @@ export class BrowserController {
   private installSessionGuards(browserSession: Session): void {
     if (this.guardedSessions.has(browserSession)) return
     this.guardedSessions.add(browserSession)
-    browserSession.setPermissionRequestHandler((_contents, permission, callback) => {
-      // 放开剪贴板读写（用户已确认）：页面可通过 navigator.clipboard 复制/粘贴。
-      // Chromium 中 clipboard-read 同时覆盖读取与净化写入；clipboard-sanitized-write 另加兜底。
-      // 其余权限（摄像头、地理位置、通知、midi 等）一律拒绝。
-      if (permission === 'clipboard-read' || permission === 'clipboard-sanitized-write') {
-        callback(true)
-        return
-      }
+    browserSession.setPermissionRequestHandler((_contents, _permission, callback) => {
+      // 安全边界：受管网页不获得任何浏览器权限（摄像头、地理位置、通知、midi 等）。
+      // 剪贴板曾经放行 clipboard-read / clipboard-sanitized-write，但任意页面可借此读取
+      // 用户刚复制的密码、验证码与私钥；2026-10-22 起一律拒绝。
+      // 用户自己的 Ctrl+C / 右键复制走浏览器默认行为，不经过权限 API，不受影响。
       callback(false)
     })
+    // Electron 收不到 Chrome 的 CRLSet 推送，泄露 CA 的拉黑必须自己做。
+    installDistrustedCertificateGuard(browserSession, { cacheDir: app.getPath('userData') })
     browserSession.webRequest.onBeforeRequest((details, callback) => {
       let protocol = ''
       try { protocol = new URL(details.url).protocol } catch { callback({ cancel: true }); return }
@@ -1088,7 +1210,10 @@ export class BrowserController {
     browserSession.lastLayoutRevision = layout.revision
     const tab = browserSession.tabs.get(layout.tabId ?? browserSession.activeTabId)
     // 视口卸载与标签关闭可交错，晚到布局不应让 renderer 报错。
-    if (!tab || !this.owner || this.owner.isDestroyed()) return
+    if (!tab || !this.owner || this.owner.isDestroyed()) {
+      if (this.splitCloseOverlaySessionId === browserSession.sessionId) this.hideSplitCloseOverlay()
+      return
+    }
 
     const zoomFactor = this.owner.webContents.getZoomFactor()
     const contentBounds = this.owner.contentView.getBounds()
@@ -1137,6 +1262,8 @@ export class BrowserController {
     }
     if (visible) this.hideOtherBrowserSessions(layout.sessionId)
     if (browserSession.hostView.getVisible() !== visible) browserSession.hostView.setVisible(visible)
+    // 原生网页盖住 DOM，分屏右栏的退出浮标必须单独挂在网页上方。
+    this.updateSplitCloseOverlay(browserSession, tab, layout, hostBounds, visible)
     if (visible && !wasVisible) {
       try { tab.view.webContents.invalidate() } catch { /* 页面可能已销毁 */ }
     }
@@ -2130,6 +2257,7 @@ export class BrowserController {
     // 这样用户再次点击打开时，新的 BrowserViewport layout 可以正常显示视图。
     const browserSession = this.sessions.get(sessionId)
     if (!browserSession) return
+    if (this.splitCloseOverlaySessionId === sessionId) this.hideSplitCloseOverlay()
     browserSession.lastVisible = false
     browserSession.hostView.setVisible(false)
     for (const tab of browserSession.tabs.values()) {
@@ -2145,6 +2273,7 @@ export class BrowserController {
    * 旧会话的网页会裸奔在旧位置，脱离浏览器容器、不再受控。
    */
   hideAll(invalidateLayoutSources = true): void {
+    this.hideSplitCloseOverlay()
     this.foregroundSessionId = null
     for (const browserSession of this.sessions.values()) {
       if (invalidateLayoutSources && browserSession.lastLayoutRendererInstanceId) {
@@ -2172,6 +2301,10 @@ export class BrowserController {
    */
   private disposeSession(browserSession: BrowserSessionRecord): void {
     if (this.sessions.get(browserSession.sessionId) !== browserSession) return
+    if (this.splitCloseOverlaySessionId === browserSession.sessionId) this.hideSplitCloseOverlay()
+    if (this.splitCloseOverlay) {
+      try { browserSession.hostView.removeChildView(this.splitCloseOverlay) } catch { /* 不是子节点 */ }
+    }
     this.actionGuards.clearSession(browserSession.sessionId)
     this.sessions.delete(browserSession.sessionId)
     browserSession.lastVisible = false

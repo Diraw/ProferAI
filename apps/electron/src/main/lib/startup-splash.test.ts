@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 
-import { createCenteredStartupSplashBounds, createStartupSplashHtml } from './startup-splash'
+import { createCenteredStartupSplashBounds, createStartupSplashHtml, SPLASH_READY_TITLE } from './startup-splash'
 
 test('centers the initial Splash at one quarter of the selected display work area', () => {
   expect(createCenteredStartupSplashBounds(
@@ -36,4 +36,22 @@ test('uses the original shader and a size-synchronized canvas', () => {
   expect(html).toContain('new ResizeObserver(resize).observe(c)')
   expect(html).toContain('gl.uniform1f(continuous,0)')
   expect(html).toContain('requestAnimationFrame(draw)')
+})
+
+test('首帧提交后才回报就绪信号，避免纯色窗口先闪现', () => {
+  const html = createStartupSplashHtml(true)
+
+  expect(html).toContain(`document.title='${SPLASH_READY_TITLE}'`)
+  // 首帧 drawArrays 之后延一帧再回报，确保该帧已经交给合成器，而不是刚提交就 show
+  expect(html).toContain('gl.drawArrays(gl.TRIANGLE_STRIP,0,4);if(!readySent)requestAnimationFrame(signalReady)')
+})
+
+test('WebGL 不可用或着色器失败时仍回报就绪，不会把启动流程卡死', () => {
+  const html = createStartupSplashHtml(false)
+
+  // 四个早退分支都必须先发信号：无 WebGL 上下文 / 着色器编译失败 / 链接失败 / uniform 缺失
+  expect(html).toContain('if(!gl){signalReady();return}')
+  expect(html).toContain('if(!v||!f){signalReady();return}')
+  expect(html).toContain('if(!gl.getProgramParameter(p,gl.LINK_STATUS)){signalReady();return}')
+  expect(html).toContain('if(!b||a<0||!time||!res||!op||!seed||!theme||!continuous){signalReady();return}')
 })

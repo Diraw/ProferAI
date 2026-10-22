@@ -304,7 +304,7 @@ async function createSkin(
 }
 
 export const AGENT_SKIN_TOOL_NAME = 'create_skin'
-export const AGENT_SKIN_TOOL_DESCRIPTION = 'Create/install a Profer skin only on explicit user request. Read profer-theme-authoring Skill first. Complete skinCss needs :root tokens and local assets/ only; authorized wallpaper is copied there, CSS url("assets/<filename>"). previewPath supplies a thumbnail, otherwise wallpaper derives preview.<ext>; neither means blank thumbnail. This tool validates, installs and refreshes the library; use returned installedPath, never find/ls/recursive scan afterwards. replace only with explicit overwrite authorization.'
+export const AGENT_SKIN_TOOL_DESCRIPTION = 'Create/install a Profer skin only on explicit user request. Read profer-theme-authoring Skill first. skinCss declares Surface Contract v2: :root must assign the semantic surfaces, not only shadcn tokens — at least --shell-surface, --content-area, --sidebar-surface, --tabbar-surface, --card, --surface-raised, --surface-sunken, --surface-border, --control-surface, --input-surface, --surface-selected, --dialog, --popover, --tooltip, --message-surface; unassigned v2 surfaces inherit .dark defaults and the skin looks half-applied. Local assets/ only; authorized wallpaper is copied there, CSS url("assets/<filename>"). previewPath supplies a thumbnail, otherwise wallpaper derives preview.<ext>; neither means blank thumbnail. This tool validates, installs and refreshes the library; use returned installedPath, never find/ls/recursive scan afterwards. replace only with explicit overwrite authorization.'
 
 type AgentSkinToolContext = { agentCwd?: string; allowedRoots?: string[]; workspaceSlug?: string }
 

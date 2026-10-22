@@ -2233,6 +2233,8 @@ export const AGENT_IPC_CHANNELS = {
   OPEN_FILE_IN_BROWSER: 'agent:open-file-in-browser',
   CLOSE_BROWSER: 'agent:close-browser',
   BROWSER_STATE_CHANGED: 'agent:browser-state-changed',
+  /** 主进程 → 渲染进程：用户点击了原生网页上的分屏退出浮标。 */
+  SPLIT_VIEW_CLOSE_CLICKED: 'agent:split-view-close-clicked',
   /** 新标签页起始页数据（书签 + 最近访问 + 默认首页）。 */
   GET_BROWSER_START_PAGE: 'agent:get-browser-start-page',
   /** 新增书签，返回更新后的起始页状态。 */

@@ -15,6 +15,7 @@ import {
   type CodexOAuthCredentials,
   type ProviderType,
   type XaiOAuthCredentials,
+  type XaiApiProtocol,
   inferReasoningTransport,
   type ReasoningTransport,
   resolveReasoningCapability,
@@ -23,7 +24,7 @@ import {
   resolveProviderNativeProtocol,
   isLocalOllamaBaseUrl,
 } from '@profer/shared'
-import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeOpenAIBaseUrlForSdk } from '@profer/core/providers'
+import { assertSdkBaseUrlSupportsRouting, getProferUserAgent, normalizeAnthropicBaseUrlForSdk, normalizeGoogleBaseUrl, normalizeOpenAIBaseUrlForSdk } from '@profer/core/providers'
 import type { Api, KnownProvider, Model } from '@earendil-works/pi-ai/compat'
 import { createIsolatedModelRuntimeOptions } from './model-runtime-options'
 
@@ -56,6 +57,8 @@ export interface PiModelRegistryInput {
   codexOAuthCredentials?: CodexOAuthCredentials
   onCodexOAuthCredentialsRefreshed?: (credentials: CodexOAuthCredentials) => void | Promise<void>
   xaiCredentialMode?: 'api-key' | 'oauth'
+  /** xAI API Key 渠道的请求协议；缺失时按 responses 处理。 */
+  xaiApiProtocol?: XaiApiProtocol
   xaiOAuthCredentials?: XaiOAuthCredentials
   onXaiOAuthCredentialsRefreshed?: (credentials: XaiOAuthCredentials) => void | Promise<void>
 }
@@ -340,12 +343,17 @@ async function findPiCatalogModel(provider: ProviderType, modelId: string): Prom
  *
  * 由宿主桥接给界面，无能力返回 undefined（宿主可回退完整七档或隐藏菜单）。
  */
-export async function resolvePiReasoningCapability(provider: ProviderType, modelId: string | undefined, baseUrl?: string): Promise<ReasoningCapability | undefined> {
+export async function resolvePiReasoningCapability(
+  provider: ProviderType,
+  modelId: string | undefined,
+  baseUrl?: string,
+  xaiApiProtocol?: XaiApiProtocol,
+): Promise<ReasoningCapability | undefined> {
   if (!modelId) return undefined
 
   // 传入 baseUrl 让 deepseek/ollama 这类端点形态可变的渠道拿到与运行时
   // 一致的协议判定；否则菜单显示的档位可能在实际注入时被跳过。
-  const transport = inferReasoningTransport(provider, baseUrl)
+  const transport = inferReasoningTransport(provider, baseUrl, xaiApiProtocol)
   if (transport === 'other') return undefined
 
   const profile = resolveReasoningProfile({ modelId, transport })
@@ -485,6 +493,14 @@ function normalizePiBaseUrl(baseUrl: string | undefined, provider: ProviderType)
   // 需先还原成协议根地址，避免 Pi 重复拼接。
   if (api === 'openai-completions' || api === 'openai-responses') {
     return normalizeOpenAIBaseUrlForSdk(baseUrl)
+  }
+  if (api === 'google-generative-ai') {
+    // Pi 的 Google 实现把 baseUrl 当成“已含版本段”的协议根（
+    // @google/genai 被设为 apiVersion=""），官方 provider 的 baseUrl 就是
+    // `…/v1beta`。中转站通常只能填到域名，直接交给 SDK 会把请求发到站点根路径，
+    // 换回首页 HTML 而不是模型响应；这里补齐 /v1beta。
+    const normalized = normalizeGoogleBaseUrl(baseUrl)
+    return /\/v1beta$/i.test(normalized) ? normalized : `${normalized}/v1beta`
   }
   return baseUrl.trim().replace(/\/$/, '')
 }
@@ -818,9 +834,10 @@ export async function listXaiModels(): Promise<{ id: string; name: string }[]> {
 }
 
 /**
- * 为 xAI API Key 渠道构建隔离的 Responses provider。
+ * 为 xAI API Key 渠道构建隔离 provider。
  *
- * API Key 渠道既可以直连官方 xAI，也可以指向返回任意模型 ID 的 Responses 中转站。
+ * API Key 渠道既可以直连官方 xAI，也可以指向第三方 Grok 中转站；
+ * Responses 与 Chat Completions 两种协议由渠道的 apiProtocol 决定。
  * 因此不能只依赖 Pi 内置 xai catalog：已知模型复用 catalog 能力，未知模型在当前
  * runtime 注册保守元数据；API key 仍只写入当前 runtime 的 credential store。
  */
@@ -836,13 +853,16 @@ async function buildXaiApiKeyModel(sdk: PiSdk, input: PiModelRegistryInput) {
   const xaiModels = [...getModels('xai')]
   const catalogModel = findCatalogModelById(xaiModels, resolvedModelId)
   const baseUrl = normalizeOpenAIBaseUrlForSdk(input.baseUrl ?? catalogModel?.baseUrl ?? '')
-  if (!baseUrl) throw new Error('xAI Responses 渠道缺少 Base URL')
+  if (!baseUrl) throw new Error('xAI 渠道缺少 Base URL')
 
-  const reasoningCapabilities = compilePiReasoningCapabilities('openai-responses', resolvedModelId)
+  // 第三方 Grok 中转常只实现 Chat Completions；协议由渠道配置决定，
+  // 不能因为 provider 是 xai 就固定要求 /responses。
+  const api: Api = input.xaiApiProtocol === 'chat-completions' ? 'openai-completions' : 'openai-responses'
+  const reasoningCapabilities = compilePiReasoningCapabilities(api, resolvedModelId)
   const modelConfig = {
     id: resolvedModelId,
     name: catalogModel?.name ?? resolvedModelId,
-    api: 'openai-responses' as const,
+    api,
     reasoning: catalogModel?.reasoning ?? true,
     thinkingLevelMap: reasoningCapabilities?.thinkingLevelMap ?? catalogModel?.thinkingLevelMap,
     compat: reasoningCapabilities?.compat ?? catalogModel?.compat,
@@ -854,13 +874,13 @@ async function buildXaiApiKeyModel(sdk: PiSdk, input: PiModelRegistryInput) {
 
   modelRuntime.registerProvider('xai', {
     name: 'xAI / Grok',
-    api: 'openai-responses',
+    api,
     baseUrl,
     models: [modelConfig],
   })
 
   const model = modelRuntime.getModel('xai', resolvedModelId)
-  if (!model) throw new Error(`xAI Responses 模型注册失败: ${resolvedModelId}`)
+  if (!model) throw new Error(`xAI 模型注册失败: ${resolvedModelId}`)
   return { modelRuntime, model }
 }
 

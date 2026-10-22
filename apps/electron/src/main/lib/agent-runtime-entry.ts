@@ -14,8 +14,7 @@
  * - 原生 session ID 由宿主持久化（provider 只负责回调）；
  * - 终态未读按宿主策略在终态广播之前写入。
  *
- * 依赖全部由 `RuntimeHeadlessEntryDeps` 注入，因此入口级行为可以被真实测试直接驱动
- * （见 `runtime-migration-parity/projection-lifecycle.parity.ts`、`capability-snapshot.parity.ts`），
+ * 依赖全部由 `RuntimeHeadlessEntryDeps` 注入，因此入口级行为可以被真实测试直接驱动，
  * 不需要切片编译 `agent-service.ts`，也不需要在测试里复刻接线。
  *
  * 边界：本模块**不**注册 webContents / backlog（那是 agent-service 的 IPC 责任），
@@ -377,37 +376,42 @@ export async function runRuntimeHeadlessEntry(
       }
     }
 
-    // GAP-D1：自动命名窗口 —— 与旧链**同一判据、同一时机、同一去重与重试语义**。
+    // GAP-D1：自动命名窗口 —— 与旧链**同一判据、同一去重与重试语义**，但不再阻塞终态。
     //
-    // 位置（与旧链逐条对齐）：旧链在 `persistSDKMessages` 之后、`completeRun` 之前调用；新链对应
-    // 「消息已由 provider / 宿主持久化、终态尚未广播」，因此标题更新一定先于 `run_complete` /
-    // `STREAM_COMPLETE`，刷新回放的窗口内容也一致。
+    // 标题是增强能力：标题模型偶发慢请求/重试时，正文早已停止而 UI 仍显示
+    // 「Agent Running」。先 `projector.settle()` 广播终态，再用 setImmediate 启动命名；
+    // 标题完成后仍通过 `onTitleUpdated` 正常投影。终态顺序不再依赖标题请求耗时。
     //
     // 条件（与旧链逐条对齐）：旧链为 `!wasStoppedByUser && !capturedResultErrors?.length`，
     // 新链等价为「outcome 为 completed（未停止且未抛错）+ 最后一个 result 消息无 errors」。
     //
-    // 失败不阻断：`runSessionTitleNaming` 内部整体兜底，任何异常只记日志；这里只 `await` 一次，
-    // 与旧链一样是「终态广播前等一次命名」，不改变终态语义。
+    // 失败不阻断：`runSessionTitleNaming` 内部整体兜底，任何异常只记日志。
+    projector.settle(outcome)
+
     if (titleNaming && outcome.status === 'completed' && (readResultSignal(lastResultMessage).errors ?? []).length === 0) {
-      await runSessionTitleNaming({
-        sessionId: input.sessionId,
-        // 与旧链同一来源：Goal 等机器注入的 prompt 不用作命名来源（`titleSourceText` 覆盖）。
-        userMessage: input.titleSourceText ?? input.userMessage,
-        // 旧链的渠道/模型解析：`input.channelId` + `input.modelId || DEFAULT_MODEL_ID`。
-        channelId: input.channelId,
-        modelId: input.modelId ?? titleNaming.defaultModelId,
-        defaultTitle: titleNaming.defaultTitle,
-        getMeta: sessionId => deps.sessions.getMeta(sessionId),
-        updateMeta: (sessionId, patch) => { deps.sessions.updateMeta(sessionId, patch) },
-        // 与旧链同一个转录读取器（`agentRuntimeHost.sessions.getMessages`）；缺省只用本轮消息。
-        ...(readSessionMessages ? { readMessages: sessionId => readSessionMessages(sessionId) ?? [] } : {}),
-        generate: titleInput => titleNaming.generate(titleInput),
-        onTitleUpdated: title => titleNaming.onTitleUpdated(title),
-        logTag: RUNTIME_TITLE_LOG_TAG,
+      setImmediate(() => {
+        void runSessionTitleNaming({
+          sessionId: input.sessionId,
+          // 与旧链同一来源：Goal 等机器注入的 prompt 不用作命名来源（`titleSourceText` 覆盖）。
+          userMessage: input.titleSourceText ?? input.userMessage,
+          // 旧链的渠道/模型解析：`input.channelId` + `input.modelId || DEFAULT_MODEL_ID`。
+          channelId: input.channelId,
+          modelId: input.modelId ?? titleNaming.defaultModelId,
+          defaultTitle: titleNaming.defaultTitle,
+          getMeta: sessionId => deps.sessions.getMeta(sessionId),
+          updateMeta: (sessionId, patch) => { deps.sessions.updateMeta(sessionId, patch) },
+          // 与旧链同一个转录读取器（`agentRuntimeHost.sessions.getMessages`）；缺省只用本轮消息。
+          ...(readSessionMessages ? { readMessages: sessionId => readSessionMessages(sessionId) ?? [] } : {}),
+          generate: titleInput => titleNaming.generate(titleInput),
+          onTitleUpdated: title => titleNaming.onTitleUpdated(title),
+          logTag: RUNTIME_TITLE_LOG_TAG,
+        }).catch(error => {
+          // 自动命名永远不能变成未处理 rejection；失败只记日志。
+          console.warn(`${RUNTIME_TITLE_LOG_TAG} 自动标题生成失败:`, error)
+        })
       })
     }
 
-    projector.settle(outcome)
     return outcome
   } finally {
     clearAgentRuntimePlanMode(input.sessionId)

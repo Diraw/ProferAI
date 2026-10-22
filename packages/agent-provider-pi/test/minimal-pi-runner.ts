@@ -64,6 +64,11 @@ interface QueryOptions {
   abortSignal?: AbortSignal
   testTool?: ToolDefinition
   permissionDeny?: string
+  /** 手动压缩请求（等价于用户发 /compact）；不进 prompt 链。 */
+  compactRequest?: boolean
+  /** 续接已有 Pi 会话；用于验证跨 query 的历史与守卫状态。 */
+  resumeSessionId?: string
+  onSessionId?: (sdkSessionId: string) => void
   cwd: string
   piAgentDir: string
   piSessionDir: string
@@ -98,6 +103,7 @@ async function runPiQuery(adapter: PiAgentAdapterInstance, options: QueryOptions
       baseUrl: 'https://api.anthropic.com',
       model: 'claude-sonnet-4-5',
       permissionMode: 'auto',
+      ...(options.compactRequest ? { compactRequest: true } : {}),
       systemPrompt: '你是一个用于验证的最小 Agent。',
       piAgentDir: options.piAgentDir,
       piSessionDir: options.piSessionDir,
@@ -111,7 +117,8 @@ async function runPiQuery(adapter: PiAgentAdapterInstance, options: QueryOptions
         : options.host.permissions.canUseTool,
       ...(options.testTool ? { customTools: [options.testTool] } : {}),
       abortSignal: signal,
-      onSessionId: () => {},
+      ...(options.resumeSessionId ? { resumeSessionId: options.resumeSessionId } : {}),
+      onSessionId: (sdkSessionId: string) => options.onSessionId?.(sdkSessionId),
       onModelResolved: () => {},
       onContextWindow: () => {},
     })
@@ -359,6 +366,108 @@ function cleanupDirs(dirs: RunnerDirs): void {
   rmSync(dirs.cwd, { recursive: true, force: true })
 }
 
+/** 场景：两轮以上历史时，手动压缩不被守卫误挡，正常走完 session.compact()。 */
+export async function scenarioManualCompactionRuns(): Promise<void> {
+  const host = createMinimalPiHost()
+  const adapter = new PiAgentAdapter(host.ports)
+  const dirs = createDirs()
+  let piSessionId = ''
+  try {
+    // Pi 的 findCutPoint 按 keepRecentTokens（默认 2 万）从后往前累加，
+    // 会话太小时找不到切点、compact() 直接抛 "Nothing to compact"。
+    // 这里故意让第一轮足够长，才能走到真实压缩。
+    const longReply = '验证用的长上下文内容。'.repeat(8_000)
+    const first = await runPiQuery(adapter, {
+      script: [{ textChunks: [longReply] }],
+      host,
+      sessionId: 'minimal-compaction-runs',
+      onSessionId: (sdkSessionId) => { piSessionId = sdkSessionId },
+      ...dirs,
+    })
+    check(
+      '正常压缩：首轮完成并拿到 Pi 会话 id',
+      first.error === undefined && piSessionId.length > 0,
+      `${String(first.error ?? '')} piSessionId=${piSessionId}`,
+    )
+
+    const second = await runPiQuery(adapter, {
+      script: [{ textChunks: ['第二轮回复'] }],
+      host,
+      sessionId: 'minimal-compaction-runs',
+      resumeSessionId: piSessionId,
+      ...dirs,
+    })
+    check('正常压缩：第二轮续接同一会话', second.error === undefined, String(second.error ?? ''))
+
+    const third = await runPiQuery(adapter, {
+      script: [{ textChunks: ['压缩摘要'] }],
+      host,
+      sessionId: 'minimal-compaction-runs',
+      resumeSessionId: piSessionId,
+      compactRequest: true,
+      ...dirs,
+    })
+    const boundary = third.messages.find((m) => jsonOf(m).type === 'system' && jsonOf(m).subtype === 'compact_boundary')
+    check(
+      '正常压缩：两轮以上历史时真的执行了压缩',
+      Boolean(boundary),
+      JSON.stringify(third.messages.map(jsonOf)).slice(0, 300),
+    )
+    check(
+      '正常压缩：未被前置守卫误挡',
+      !third.messages.some((m) => jsonOf(m).subtype === 'compact_skipped'),
+      '出现了 compact_skipped',
+    )
+    const terminal = third.messages.find((m) => jsonOf(m).type === 'result')
+    check(
+      '正常压缩：以成功终态收束',
+      Boolean(terminal) && jsonOf(terminal as SDKMessage).subtype === 'success',
+      JSON.stringify(terminal ?? null).slice(0, 200),
+    )
+  } finally {
+    adapter.dispose()
+    cleanupDirs(dirs)
+  }
+}
+
+/** 场景：空会话的手动压缩被前置守卫挡下，不发摘要请求也不报错。 */
+export async function scenarioManualCompactionSkip(): Promise<void> {
+  const host = createMinimalPiHost()
+  const adapter = new PiAgentAdapter(host.ports)
+  const dirs = createDirs()
+  try {
+    const outcome = await runPiQuery(adapter, {
+      script: [],
+      host,
+      sessionId: 'minimal-compaction-skip',
+      compactRequest: true,
+      ...dirs,
+    })
+
+    const skipped = outcome.messages.find((m) => jsonOf(m).type === 'system' && jsonOf(m).subtype === 'compact_skipped')
+    check(
+      '手动压缩：不足 2 轮时发出 compact_skipped 并说明原因',
+      Boolean(skipped) && /轮有效对话/.test(String(jsonOf(skipped as SDKMessage).message ?? '')),
+      JSON.stringify(skipped ?? outcome.messages.map(jsonOf)).slice(0, 300),
+    )
+    const terminal = outcome.messages.find((m) => jsonOf(m).type === 'result')
+    check(
+      '手动压缩：跳过时仍以成功终态收束本轮',
+      Boolean(terminal) && jsonOf(terminal as SDKMessage).subtype === 'success',
+      JSON.stringify(terminal ?? null).slice(0, 200),
+    )
+    check(
+      '手动压缩：跳过时没有发起摘要调用',
+      (lastTransport?.calls.length ?? 0) === 0,
+      `calls=${lastTransport?.calls.length ?? 0}`,
+    )
+    check('手动压缩：跳过路径无异常', outcome.error === undefined, String(outcome.error ?? ''))
+  } finally {
+    adapter.dispose()
+    cleanupDirs(dirs)
+  }
+}
+
 export const allScenarios: Array<[string, () => Promise<void>]> = [
   ['real-sdk-load', scenarioRealSdkLoaded],
   ['message-flow-and-terminal', scenarioMessageFlowAndTerminal],
@@ -367,6 +476,8 @@ export const allScenarios: Array<[string, () => Promise<void>]> = [
   ['error', scenarioError],
   ['permission-deny', scenarioPermissionDeny],
   ['dispose-and-release', scenarioDispose],
+  ['manual-compaction-skip', scenarioManualCompactionSkip],
+  ['manual-compaction-runs', scenarioManualCompactionRuns],
 ]
 
 export async function runAllScenarios(): Promise<ScenarioResult[]> {

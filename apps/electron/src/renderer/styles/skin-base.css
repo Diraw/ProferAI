@@ -94,7 +94,9 @@ html[class*="skin-"] .code-block-wrapper > div:first-child {
 
 /* ===== Minimap 可见指示器 ===== */
 html[class*="skin-"] .minimap-visible-indicator {
-  background-color: var(--minimap-indicator-bg) !important;
+  /* 只有部分皮肤定义了 --minimap-indicator-bg；未定义的皮肤此前会得到无效值，
+   * 当前阅读位置的横杠直接变透明。兜底用皮肤自己的前景色。 */
+  background-color: var(--minimap-indicator-bg, hsl(var(--foreground) / 0.8)) !important;
 }
 
 /* ===== 滚动进度条（普通皮肤三态；terminal 等特殊皮肤用特例覆写） ===== */

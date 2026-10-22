@@ -118,11 +118,9 @@ import {
 } from './sidebar-utils'
 import {
   collectDelegatedDeletionSessionIds,
-  getDirectRelatedChildren,
   getSyncableDelegatedChildren,
-  hasPinnedVisibleParent,
   PROJECT_SESSION_EXPAND_STEP,
-  type AgentSessionTreeItem,
+  sortProjectSessions,
 } from './session-tree'
 import { focusEnterableViewItem } from './navigation-items'
 import type { AgentProjectGroup } from './session-items'
@@ -524,35 +522,6 @@ export function useLeftSidebar() {
   const pinnedConversations = React.useMemo(
     () => viewMode === 'active' ? conversations.filter((c) => c.pinned && !draftSessionIds.has(c.id)) : [],
     [conversations, viewMode, draftSessionIds]
-  )
-
-  /** 置顶 Agent 会话列表（仅活跃模式显示，跨项目展示，排除 draft） */
-  const pinnedAgentSessions = React.useMemo(
-    () => {
-      if (viewMode !== 'active') return []
-      const filtered = agentSessions.filter((s) =>
-        s.pinned
-        && !s.draft
-        && !draftSessionIds.has(s.id)
-        && (!s.workspaceId || visibleWorkspaceIds.has(s.workspaceId))
-        && !hasPinnedVisibleParent(s, agentSessions)
-      )
-      return sortAgentSessionsByUpdatedAtDesc(filtered)
-    },
-    [agentSessions, viewMode, draftSessionIds, visibleWorkspaceIds]
-  )
-
-  const pinnedAgentSessionTrees = React.useMemo<AgentSessionTreeItem[]>(
-    () => pinnedAgentSessions.map((session) => ({
-      session,
-      childSessions: getDirectRelatedChildren(agentSessions, session.id).filter((child) => (
-        !child.archived
-        && !child.draft
-        && !draftSessionIds.has(child.id)
-        && (!child.workspaceId || visibleWorkspaceIds.has(child.workspaceId))
-      )),
-    })),
-    [agentSessions, draftSessionIds, pinnedAgentSessions, visibleWorkspaceIds],
   )
 
   /** 对话按日期分组（根据 viewMode 过滤归档状态，排除 draft） */
@@ -1620,7 +1589,7 @@ export function useLeftSidebar() {
     return visibleWorkspaces
   }, [visibleWorkspaces, workspaceSortMode, agentSessions])
 
-  /** Agent 普通历史按项目分组（排除置顶 / 归档 / draft） */
+  /** Agent 会话按项目分组（排除归档 / draft）；项目内置顶会话排在最前 */
   const agentProjectGroups = React.useMemo<AgentProjectGroup[]>(
     () => {
       const sessionsByWorkspaceId = new Map<string, AgentSessionMeta[]>()
@@ -1628,16 +1597,13 @@ export function useLeftSidebar() {
         sessionsByWorkspaceId.set(workspace.id, [])
       }
 
-      const visibleHistory = sortAgentSessionsByUpdatedAtDesc(
+      const visibleHistory = sortProjectSessions(
         agentSessions.filter((session) =>
           !session.archived
-          && !session.pinned
           && !session.draft
           && !draftSessionIds.has(session.id)
           && (!session.workspaceId || visibleWorkspaceIds.has(session.workspaceId))
-          // 已被置顶母会话收纳的子会话留在置顶区的母会话下面，避免重复显示为项目根会话
-          && !hasPinnedVisibleParent(session, agentSessions)
-        )
+        ),
       )
 
       const defaultWsId = sortedWorkspaces.find((ws) => ws.slug === 'default')?.id ?? sortedWorkspaces[0]?.id
@@ -1845,8 +1811,6 @@ export function useLeftSidebar() {
     agentIndicatorMap,
     unviewedCompletedSessionIds,
     agentDraftIds,
-    pinnedAgentSessions,
-    pinnedAgentSessionTrees,
     agentProjectGroups,
     agentSessionGroups,
     progressiveAgentSessionGroups,

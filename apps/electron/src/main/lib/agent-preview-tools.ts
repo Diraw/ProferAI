@@ -21,6 +21,16 @@ export const AGENT_INSPECT_PREVIEW_DESCRIPTION = 'Inspect current local Markdown
 
 type RuntimeImageBlock = { type: 'image'; data: string; mimeType: string }
 type RuntimeTextBlock = { type: 'text'; text: string }
+
+/**
+ * 单次预览工具结果进入模型请求的图片预算。
+ *
+ * 渲染层允许一次生成最多 80 张（多页 PPT/PDF），但整包塞进模型请求会直接撞上网关
+ * body 上限（预览图约 463KB/张，80 张 base64 接近 50MB）。这里按张数和 base64 字节
+ * 双上限截断，模型需要更多页时用 scope=page 分批读取。
+ */
+const MAX_MODEL_PREVIEW_IMAGES = 12
+const MAX_MODEL_PREVIEW_IMAGE_BASE64_BYTES = 4 * 1024 * 1024
 export type AgentPreviewToolResult = { content: Array<RuntimeTextBlock | RuntimeImageBlock>; details: PreviewInspectionResult }
 
 export interface OpenFilePreviewContext extends PreviewInspectionContext {
@@ -82,8 +92,10 @@ export async function executeOpenFilePreviewTool(input: { filePath: string; read
   }
 }
 
-function modelSafeSummary(result: PreviewInspectionResult): Record<string, unknown> {
+function modelSafeSummary(result: PreviewInspectionResult, includedImageCount?: number): Record<string, unknown> {
   if ('error' in result) return { error: result.error }
+  const allImages = result.visual?.images ?? []
+  const visibleImages = includedImageCount === undefined ? allImages : allImages.slice(0, includedImageCount)
   return {
     file: result.file,
     changedSincePreviousRevision: result.changedSincePreviousRevision,
@@ -92,7 +104,8 @@ function modelSafeSummary(result: PreviewInspectionResult): Record<string, unkno
       ? {
           scope: result.visual.scope,
           page: result.visual.page,
-          images: result.visual.images.map(({ filename, mediaType, page, data }) => ({ filename, mediaType, page, bytes: Math.floor(data.length * 0.75) })),
+          images: visibleImages.map(({ filename, mediaType, page, data }) => ({ filename, mediaType, page, bytes: Math.floor(data.length * 0.75) })),
+          ...(visibleImages.length < allImages.length && { totalImages: allImages.length }),
         }
       : undefined,
     warnings: result.warnings,
@@ -101,11 +114,28 @@ function modelSafeSummary(result: PreviewInspectionResult): Record<string, unkno
 
 /** Claude/Pi 都消费的 runtime-neutral inspection result 转换；图片直接交给 runtime image block。 */
 export function formatAgentPreviewToolResult(result: PreviewInspectionResult): AgentPreviewToolResult {
-  const content: Array<RuntimeTextBlock | RuntimeImageBlock> = [{ type: 'text', text: JSON.stringify(modelSafeSummary(result), null, 2) }]
-  if (!('error' in result)) {
-    for (const image of result.visual?.images ?? []) {
-      content.push({ type: 'image', data: image.data, mimeType: image.mediaType })
-    }
+  const images = 'error' in result ? [] : result.visual?.images ?? []
+  const includedImages: typeof images = []
+  let includedBase64Bytes = 0
+  for (const image of images) {
+    if (includedImages.length >= MAX_MODEL_PREVIEW_IMAGES) break
+    if (includedBase64Bytes + image.data.length > MAX_MODEL_PREVIEW_IMAGE_BASE64_BYTES) break
+    includedImages.push(image)
+    includedBase64Bytes += image.data.length
+  }
+
+  const content: Array<RuntimeTextBlock | RuntimeImageBlock> = [{
+    type: 'text',
+    text: JSON.stringify(modelSafeSummary(result, includedImages.length), null, 2),
+  }]
+  for (const image of includedImages) {
+    content.push({ type: 'image', data: image.data, mimeType: image.mediaType })
+  }
+  if (includedImages.length < images.length) {
+    content.push({
+      type: 'text',
+      text: `[Profer preview budget: 本次仅返回前 ${includedImages.length}/${images.length} 张图片以控制请求体大小；其余页面请用 scope=page 指定页码继续检查。]`,
+    })
   }
   return { content, details: result }
 }

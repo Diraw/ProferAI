@@ -1,5 +1,5 @@
 import type { createStore } from 'jotai/vanilla'
-import type { AgentWorkspace } from '@profer/shared'
+import type { AgentRuntime, AgentWorkspace } from '@profer/shared'
 import type { AppSettings } from '../../types/settings'
 import {
   agentChannelIdAtom, agentModelIdAtom, agentChannelIdsAtom, agentRuntimeAtom,
@@ -8,13 +8,15 @@ import {
 } from '../atoms/agent-atoms'
 import { channelsAtom, channelsLoadedAtom } from '../atoms/chat-atoms'
 import { authStatusAtom } from '../atoms/identity-atoms'
-import { resolveAgentModelSelection } from './agent-channel-selection'
+import { resolveAgentRuntimeSelection } from './agent-channel-selection'
 import { getVisibleAgentWorkspaces, isAgentWorkspaceVisible } from './product-feature-flags'
 
 interface AgentSettingsInitializationDeps {
   getSettings: () => Promise<AppSettings>
   listWorkspaces: () => Promise<AgentWorkspace[]>
   onFailure: (error: unknown) => void
+  /** 内核回退要落盘：主进程创建 Agent 会话时读 settings.agentRuntime。 */
+  updateSettings?: (patch: { agentRuntime: AgentRuntime }) => Promise<unknown>
 }
 
 /** 启动水合只改变默认状态；目录和历史会话元数据均不由这里写回。 */
@@ -32,8 +34,15 @@ export function initializeAgentSettings(
     try {
       const channelId = store.get(agentChannelIdAtom)
       const modelId = store.get(agentModelIdAtom)
-      const selection = resolveAgentModelSelection(store.get(channelsAtom), store.get(agentRuntimeAtom),
+      const runtime = store.get(agentRuntimeAtom)
+      // 当前内核没有可用渠道时回退到渠道支持的内核（配一个渠道就该能用）。
+      const selection = resolveAgentRuntimeSelection(store.get(channelsAtom), runtime,
         store.get(agentChannelIdsAtom), channelId && modelId ? { channelId, modelId } : null)
+      if (selection && selection.runtime !== runtime) {
+        store.set(agentRuntimeAtom, selection.runtime)
+        const persist = deps.updateSettings
+        if (persist) void persist({ agentRuntime: selection.runtime }).catch(deps.onFailure)
+      }
       if (channelId !== (selection?.channelId ?? null)) store.set(agentChannelIdAtom, selection?.channelId ?? null)
       if (modelId !== (selection?.modelId ?? null)) store.set(agentModelIdAtom, selection?.modelId ?? null)
       store.set(agentSettingsReadyAtom, true)

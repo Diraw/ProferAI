@@ -138,6 +138,25 @@ describe('ChannelForm 真实事件与退出控制器接线（隔离 hook 宿主�
     return form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes(label))!
   }
 
+  test('F21：地址形态与渠道协议错配时预览明确提示', () => {
+    const cases: Array<[string, string, string, string]> = [
+      ['anthropic-compatible', 'Anthropic 端点', 'https://fixture.invalid/v1', '/v1/messages 结尾'],
+      ['openai', 'OpenAI 端点', 'https://fixture.invalid/v1/responses', '请改用「OpenAI Responses 格式」'],
+      ['openai', 'OpenAI 端点', 'https://fixture.invalid/v1/messages', '请改用「Anthropic 兼容格式」'],
+      ['openai-responses', 'OpenAI 端点', 'https://fixture.invalid/v1/chat/completions', '不要填写 Chat Completions 端点'],
+      ['google', 'OpenAI 端点', 'https://fixture.invalid/v1/chat/completions', 'Gemini 渠道应填协议根地址'],
+      ['custom', 'OpenAI 端点', 'https://fixture.invalid/v1', '已按协议根地址补全'],
+    ]
+    for (const [provider, label, url, expected] of cases) {
+      const form = setup(null)
+      ;(form.field('供应商类型').onValueChange as (value: string) => void)(provider)
+      form.render()
+      ;(form.field(label).onChange as (value: string) => void)(url)
+      form.render()
+      expect(String(form.field(label).description)).toContain(expected)
+    }
+  })
+
   test('xAI OAuth 新建读取本地目录，取消失败无普通 create，重试与重复点击只创建一次', async () => {
     const pending = deferred<Channel>()
     let attempts = 0
@@ -196,6 +215,18 @@ describe('ChannelForm 真实事件与退出控制器接线（隔离 hook 宿主�
     form.render()
     expect(await store.get(channelFormControllerAtom)!.flush()).toBe(true)
     expect(form.updates[1]).toMatchObject({ agentRuntimes: ['pi'], agentExperimentalEnabled: true })
+  })
+
+  test('xAI API Key 渠道可切换 Chat Completions 协议，预览与落盘同步', async () => {
+    const form = setup({ ...fixture, provider: 'xai', credentialMode: 'api-key', agentRuntimes: ['pi'] })
+    expect(form.field('API 协议').value).toBe('responses')
+    ;(form.field('API 协议').onValueChange as (value: string) => void)('chat-completions')
+    form.render()
+    ;(form.field('OpenAI 端点').onChange as (value: string) => void)('https://relay.example.com/v1')
+    form.render()
+    expect(String(form.field('OpenAI 端点').description)).toContain('https://relay.example.com/v1/chat/completions')
+    expect(await store.get(channelFormControllerAtom)!.flush()).toBe(true)
+    expect(form.updates[0]).toMatchObject({ apiProtocol: 'chat-completions' })
   })
 
   test('新建 Codex 读取本地目录、无需 Key/端点；重复保存只发一次授权 IPC', async () => {

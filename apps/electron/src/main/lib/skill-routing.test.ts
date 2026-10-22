@@ -181,7 +181,10 @@ describe('Skill 路由：权限先于相关性', () => {
       const skill = skills.find(item => item.slug === element.getAttribute('name'))!
       const root = element.parentNode as Element
       expect(join(root.getAttribute('path')!, element.getAttribute('location')!)).toBe(skill.filePath)
-      expect(element.textContent).toBe(description)
+      const summary = element.textContent ?? ''
+      expect(summary.startsWith('Use "quotes"')).toBe(true)
+      expect(summary.endsWith('…')).toBe(true)
+      expect(summary.length).toBeLessThanOrEqual(241)
     }
     expect(catalog).not.toContain('<xml>')
     const escapeXml = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')

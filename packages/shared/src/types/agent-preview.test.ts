@@ -33,6 +33,7 @@ describe('Agent preview contract', () => {
     expect(AGENT_PREVIEW_DEFAULT_MODE_BY_KIND.text).toBe('content')
     expect(AGENT_PREVIEW_DEFAULT_MODE_BY_KIND.presentation).toBe('both')
     expect(AGENT_PREVIEW_LIMITS.maxPages).toBeGreaterThan(0)
+    expect(AGENT_PREVIEW_LIMITS.maxTextChars).toBeLessThanOrEqual(60_000)
     expect(AGENT_PREVIEW_LIMITS.maxPayloadBytes).toBeGreaterThan(AGENT_PREVIEW_LIMITS.maxFileBytes / 2)
   })
 })

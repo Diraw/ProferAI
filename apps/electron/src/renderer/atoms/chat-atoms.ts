@@ -265,6 +265,18 @@ export const chatPendingKnowledgeReferencesAtom = atom<ChatPendingKnowledgeRefer
  */
 export const chatMessageRefreshAtom = atom<Map<string, number>>(new Map())
 
+/**
+ * 外部来源的用户消息公告 — 以 conversationId 为 key，保留最近若干条。
+ *
+ * 桌面/移动端任意一端发消息，主进程都会广播一条 STREAM_USER（含真实 id）。
+ * ChatView 按 id 去重合并：本地乐观 temp 消息原位换成真实消息，另一端发起的
+ * 消息直接追加，不再等重新打开会话才补出来。
+ */
+export const chatExternalUserMessagesAtom = atom<Map<string, ChatMessage[]>>(new Map())
+
+/** 每个对话在公告 atom 里保留的最大条数，避免长时间运行无限增长。 */
+export const CHAT_EXTERNAL_USER_MESSAGE_LIMIT = 20
+
 // ===== Agent 模式推荐 =====
 
 /** Agent 模式推荐数据（由 suggest_agent_mode 工具结果写入） */

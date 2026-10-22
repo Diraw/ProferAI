@@ -34,6 +34,48 @@ export class AgentPreviewRendererError extends Error {
 
 const RENDER_TIMEOUT_MS = 30_000
 const PREVIEW_PARTITION = 'agent-preview-hidden'
+const PREVIEW_CAPTURE_MAX_SIDE = 1600
+const PREVIEW_CAPTURE_JPEG_QUALITY = 85
+
+/** 仅暴露编码所需的最小 NativeImage 面，便于主进程单测不构造 Electron 窗口。 */
+export interface PreviewCaptureImageLike {
+  isEmpty(): boolean
+  getSize(): { width: number; height: number }
+  resize(options: { width: number; height: number; quality?: 'good' | 'better' | 'best' }): PreviewCaptureImageLike
+  toJPEG(quality: number): Buffer
+  toPNG(): Buffer
+}
+
+export interface AgentPreviewCapturePayload {
+  data: string
+  mediaType: 'image/jpeg' | 'image/png'
+}
+
+/**
+ * 预览截图编码：长边压到 1600px 后转 JPEG。
+ * 审计发现 inspect_preview 平均 463KB/张（2560×1736），远超模型视觉编码需要；
+ * 降到 1600px + JPEG 85 可显著减少图片体积与视觉 token，同时保留文档文字可读性。
+ */
+export function encodePreviewCapture(image: PreviewCaptureImageLike): AgentPreviewCapturePayload {
+  if (image.isEmpty()) {
+    return { data: image.toPNG().toString('base64'), mediaType: 'image/png' }
+  }
+  const size = image.getSize()
+  const longestSide = Math.max(size.width, size.height)
+  const scale = longestSide > PREVIEW_CAPTURE_MAX_SIDE ? PREVIEW_CAPTURE_MAX_SIDE / longestSide : 1
+  const resized = scale < 1
+    ? image.resize({
+        width: Math.max(1, Math.round(size.width * scale)),
+        height: Math.max(1, Math.round(size.height * scale)),
+        quality: 'good',
+      })
+    : image
+  const jpeg = resized.toJPEG(PREVIEW_CAPTURE_JPEG_QUALITY)
+  if (jpeg.length === 0) {
+    return { data: resized.toPNG().toString('base64'), mediaType: 'image/png' }
+  }
+  return { data: jpeg.toString('base64'), mediaType: 'image/jpeg' }
+}
 const PACKAGED_RENDERER_BASE_URL = pathToFileURL(`${join(__dirname, 'renderer')}/`).toString()
 let previewWindow: BrowserWindow | null = null
 let loaded = false
@@ -92,13 +134,13 @@ function installHandlers(): void {
   if (handlersInstalled) return
   handlersInstalled = true
   // Task payload is pushed only to the hidden window's main frame; no iframe can request it.
-  ipcMain.handle('agent-preview:capture', async (event, id: string): Promise<string> => {
+  ipcMain.handle('agent-preview:capture', async (event, id: string): Promise<AgentPreviewCapturePayload> => {
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
     if (!isMainPreviewFrame(event) || !senderWindow || senderWindow.isDestroyed() || senderWindow !== previewWindow || !pending.has(id)) {
       throw new AgentPreviewRendererError('renderer_failed', '无效的 Agent 预览截图请求')
     }
     const image = await senderWindow.webContents.capturePage()
-    return image.toPNG().toString('base64')
+    return encodePreviewCapture(image)
   })
   ipcMain.on('agent-preview:ready', (event) => {
     if (isMainPreviewFrame(event) && previewWindow && !previewWindow.isDestroyed() && event.sender.id === previewWindow.webContents.id) rendererReady = true

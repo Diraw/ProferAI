@@ -8,11 +8,11 @@
  */
 
 import * as React from 'react'
-import { useAtomValue, useSetAtom, useAtom } from 'jotai'
-import { tabsAtom, activeTabIdAtom, activeTabAtom, tabIndicatorMapAtom } from '@/atoms/tab-atoms'
+import { useAtomValue, useSetAtom, useAtom, useStore } from 'jotai'
+import { tabsAtom, activeTabIdAtom, activeTabAtom, tabIndicatorMapAtom, createBrowserTabId } from '@/atoms/tab-atoms'
 import { Panel } from '@/components/app-shell/Panel'
 import { WelcomeView } from '@/components/welcome/WelcomeView'
-import { browserPanelDismissedSessionIdsAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
+import { browserNativePaneTabIdsAtom, browserPanelDismissedSessionIdsAtom, browserStateMapAtom } from '@/atoms/browser-atoms'
 import { openBrowserTabFromPush } from '@/lib/browser-tab'
 import { isBrowserTab } from '@/atoms/tab-atoms'
 import { shouldAutoOpenBrowserFromPush } from '@/lib/browser-auto-open'
@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils'
 import { resolveContentTabId } from '@/lib/active-tab-content'
 import { WindowControlsHost } from '@/components/WindowControlsTemplate'
 import { EmptyPanePlaceholder } from './EmptyPanePlaceholder'
+import { SplitViewCloseButton } from './SplitViewCloseButton'
 import { useCloseTab } from '@/hooks/useCloseTab'
 import { useSyncActiveTabSideEffects } from '@/hooks/useSyncActiveTabSideEffects'
 import {
@@ -58,7 +59,9 @@ export function MainArea(): React.ReactElement {
   const activeTabId = useAtomValue(activeTabIdAtom)
   const setActiveTabId = useSetAtom(activeTabIdAtom)
   const activeTab = useAtomValue(activeTabAtom)
+  const store = useStore()
   const [tabGroups, setTabGroups] = useAtom(tabGroupsAtom)
+  const nativeBrowserPaneTabs = useAtomValue(browserNativePaneTabIdsAtom)
   const tabGroup = findTabGroup(tabGroups, activeTabId)
   const automationFormOpen = useAtomValue(automationFormAtom).open
   const activeView = useAtomValue(activeViewAtom)
@@ -81,8 +84,13 @@ export function MainArea(): React.ReactElement {
     ? activeTab.sessionId
     : null
   currentBrowserSessionIdRef.current = browserSessionId
+  // 当前布局里是否真的有一栏在展示浏览器页。组合两栏都算，后台组合不算。
+  const browserPaneVisible = activeTab?.type === 'browser'
+    || (tabGroup ? groupTabIds(tabGroup).some((id) => tabs.find((tab) => tab.id === id)?.type === 'browser') : false)
 
   const publishBrowserState = React.useCallback((state: BrowserViewState, options?: { autoOpen?: boolean; autoGroup?: boolean }) => {
+    // 先取旧状态：页内新开页需要在 reconcile 后判断“新页接管原分屏栏”。
+    const previousState = store.get(browserStateMapAtom).get(state.sessionId) ?? null
     // 同步浏览器内容状态（tabs/url/标题/trace 等）。状态可以保留在后台会话，
     // 但后台会话的状态推送不能改变当前会话的浏览器 Tab。
     setBrowserStateMap((previous) => { const next = new Map(previous); next.set(state.sessionId, state); return next })
@@ -97,8 +105,11 @@ export function MainArea(): React.ReactElement {
     // 只读动作推送且没有既有页 Tab：不创建（保持安静）
     if (!hasBrowserTabs && !autoOpen) return
     // Tab 化：按页 reconcile；autoOpen 时自动与对话组合并排（对话左、浏览器右，不打断对话）。
-    openBrowserTabFromPush(state, { autoGroup: autoOpen && options?.autoGroup !== false })
-  }, [browserDismissed, setBrowserStateMap])
+    openBrowserTabFromPush(state, {
+      autoGroup: autoOpen && options?.autoGroup !== false,
+      previousState,
+    })
+  }, [browserDismissed, setBrowserStateMap, store])
 
   /**
    * 订阅实时状态推送。
@@ -129,6 +140,16 @@ export function MainArea(): React.ReactElement {
     previousBrowserSessionIdRef.current = browserSessionId
   }, [activeTabId, browserSessionId])
 
+  React.useLayoutEffect(() => {
+    // 原生 WebContentsView 盖在 DOM 之上。页内新页接管分屏后立即解散时，新页的原生视图
+    // 可能已被主进程先行显示，而对应 BrowserViewport 还没来得及挂载并发布可见性，
+    // 卸载清理就不会发生，旧网页会盖在已经激活的对话上。当前布局没有任何浏览器页时
+    // 同步收起原生视图；分屏仍保留浏览器栏时不动，避免正常分屏闪黑。
+    if (!browserSessionId || browserPaneVisible) return
+    const hide = (window.electronAPI as Partial<typeof window.electronAPI>).hideAgentBrowser
+    if (typeof hide === 'function') void hide(browserSessionId)
+  }, [browserPaneVisible, browserSessionId])
+
   React.useEffect(() => {
     // Vite renderer 可在 preload 热重载前先更新；旧 bridge 时浏览器功能不可用，
     // 但绝不能让整个主界面崩溃。完整 Electron preload 就绪后会正常订阅。
@@ -136,6 +157,18 @@ export function MainArea(): React.ReactElement {
     if (typeof subscribe !== 'function') return
     return subscribe(handleBrowserStatePush)
   }, [handleBrowserStatePush])
+
+  React.useEffect(() => {
+    // 原生网页上的退出浮标由主进程绘制（DOM 盖不住 WebContentsView），点击通过 IPC 回来。
+    const subscribe = (window.electronAPI as Partial<typeof window.electronAPI>).onSplitViewCloseClicked
+    if (typeof subscribe !== 'function') return
+    return subscribe(({ sessionId, tabId }) => {
+      const topTabId = createBrowserTabId(sessionId, tabId)
+      const groups = store.get(tabGroupsAtom)
+      const group = findTabGroup(groups, topTabId)
+      if (group) store.set(tabGroupsAtom, removeTabGroup(groups, group))
+    })
+  }, [store])
 
   React.useEffect(() => {
     if (!browserSessionId) return
@@ -207,6 +240,10 @@ export function MainArea(): React.ReactElement {
   // ResizeObserver 首次回调前宽度是 0。此时必须用 CSS 等分兜底，不能把右栏写成 0px；
   // 否则初次合并会只剩一条窄边界，用户也很难命中分隔条。
   const groupGeometryReady = groupContainerWidth > GROUP_SPLIT_GAP
+  // 右栏是已挂载原生网页的浏览器 Tab 时，退出按钮由主进程的原生浮标承担；
+  // 这里必须隐藏 DOM 按钮，否则网页下方会再露出一个，形成重复。
+  const rightBrowserUsesNativePane = rightGroupTab?.type === 'browser'
+    && nativeBrowserPaneTabs.has(rightGroupTab.id)
   const rightPaneStyle: React.CSSProperties = {
     width: groupGeometryReady ? groupGeometry.rightWidth : `calc(50% - ${GROUP_SPLIT_GAP / 2}px)`,
     flexShrink: 0,
@@ -378,7 +415,13 @@ export function MainArea(): React.ReactElement {
                     />
                     <div
                       data-group-drop-right-pane="true"
-                      className="flex flex-col min-w-0 h-full relative"
+                      // 浏览器/预览直接把退出浮标叠在内容右下角；只有 Agent/Chat 的右栏
+                      // 需要为 composer 让出 32px，避免浮标压住发送按钮。原生网页的浮标
+                      // 由主进程额外绘制，DOM 按钮会被原生视图盖住，这是预期分层。
+                      className={cn(
+                        'flex flex-col min-w-0 h-full relative',
+                        (rightGroupTab?.type === 'agent' || rightGroupTab?.type === 'chat') && 'pb-8',
+                      )}
                       style={rightPaneStyle}
                       onPointerDownCapture={() => focusGroupSide('right')}
                     >
@@ -396,6 +439,12 @@ export function MainArea(): React.ReactElement {
                       )}
                     </div>
                   </>
+                )}
+
+                {/* 拆分视图退出浮标：贴在右栏右下角，点击解散组合（两个标签都保留）。
+                    原生网页有主进程绘制的同款浮标，这里让位，避免出现两个。 */}
+                {groupViewActive && tabGroup && !rightBrowserUsesNativePane && (
+                  <SplitViewCloseButton onClose={dissolveGroup} />
                 )}
 
                 {/* 合并投放区：拖动标签向下时出现，左右两半各对应一个落点。

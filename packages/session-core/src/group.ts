@@ -99,6 +99,7 @@ const NAVIGATION_BREAKING_SUBTYPES: ReadonlySet<string> = new Set([
   'permission_denied',
   'interruption_record',
   'skill_routing_notice',
+  'compact_skipped',
 ])
 
 /** 历史默认断组集合（回溯水位 / CLI outline 沿用）。 */
@@ -272,7 +273,7 @@ function navigationIdentity(group: MessageGroup): {
 /**
  * 系统消息在「消息导航」里的预览文案。
  *
- * 渲染层 MessageGroupRenderer 只渲染这 4 种 subtype（其余返回 null），且中断/技能提示另有
+ * 渲染层 MessageGroupRenderer 只渲染这几种 subtype（其余返回 null），且中断/技能/压缩提示另有
  * 文案。本模块的 getGroupPreview 是 CLI/回溯共用的历史口径，不能为了导航去改它（会扰动
  * 已有消费者），所以导航侧在这里单独镜像渲染层的分支。
  */
@@ -284,6 +285,7 @@ function navigationSystemPreview(sysMsg: SDKSystemMessage): string | null {
     case 'compacting': return null
     case 'interruption_record': return sysMsg.message ?? '任务中断'
     case 'skill_routing_notice': return sysMsg.message ?? 'Skill 未加载'
+    case 'compact_skipped': return sysMsg.message ?? '上下文压缩已跳过'
     default: return null
   }
 }
@@ -384,6 +386,26 @@ export function stripScheduledRunMarker(text: string): string {
 }
 
 /**
+ * 用户消息正文里混着若干「不是用户说的话」的上下文块：
+ * 附件清单、引用文件、引用消息/可视化/中断说明、被引用的会话清单。
+ *
+ * 预览/大纲只该显示用户真正敲的字，否则迷你地图里会冒出整段 XML
+ * （典型现场：`<quoted_context source="agent-interruption" ...`）。
+ */
+const USER_CONTEXT_BLOCK_PATTERNS = [
+  /<attached_files>[\s\S]*?<\/attached_files>\n*/g,
+  /<quoted_file[^>]*>[\s\S]*?<\/quoted_file>\n*/g,
+  /<quoted_context[^>]*>[\s\S]*?<\/quoted_context>\n*/g,
+  /<referenced_sessions>[\s\S]*?<\/referenced_sessions>\n*/g,
+] as const
+
+export function stripUserContextBlocks(text: string): string {
+  let result = text
+  for (const pattern of USER_CONTEXT_BLOCK_PATTERNS) result = result.replace(pattern, '')
+  return result.trim()
+}
+
+/**
  * 从 MessageGroup 中提取纯文本预览，供迷你地图 / outline 使用
  */
 export function getGroupPreview(group: MessageGroup): string {
@@ -392,9 +414,7 @@ export function getGroupPreview(group: MessageGroup): string {
       const iteration = (group.message as unknown as Record<string, unknown>)._goalIteration
       return typeof iteration === 'number' ? `Goal 自动迭代 · 第 ${iteration} 轮` : 'Goal 自动迭代'
     }
-    return stripScheduledRunMarker(extractUserText(group.message) ?? '')
-      .replace(/<attached_files>[\s\S]*?<\/attached_files>\n*/, '')
-      .replace(/<quoted_file[^>]*>[\s\S]*?<\/quoted_file>\n*/g, '')
+    return stripUserContextBlocks(stripScheduledRunMarker(extractUserText(group.message) ?? ''))
       .slice(0, 200)
   }
   if (group.type === 'system') {

@@ -120,12 +120,14 @@ function registerProtocolsAndHandlers(): void {
   // ClearType 是为浅色背景+深色文字设计的，在深色代码块背景下会产生彩色边缘，导致文字模糊。
   if (process.platform === 'win32') {
     app.commandLine.appendSwitch('disable-lcd-text')
-    // 原始动态 Splash 在部分 NVIDIA + D3D11 环境闪动；D3D11on12 后端已在受影响
-    // RTX 3060 Windows 环境完整显示且不闪，同时启动后的主页面正常。保留环境变量覆盖，便于其他机器 A/B。
-    const angleBackend = process.env.PROFER_ANGLE_BACKEND ?? 'd3d11on12'
-    if (['d3d11', 'd3d9', 'd3d11on12', 'gl', 'swiftshader'].includes(angleBackend)) {
+    // ANGLE 是进程级开关：它改的是整个应用（含主窗口）的 GPU 合成与光栅路径，不是只影响
+    // 启动 Splash。历史上一度默认 d3d11on12 来规避部分 NVIDIA + D3D11 环境的 Splash 闪烁，
+    // 但那等于让所有 Windows 用户为「仅存在 2.4 秒的启动动画」承担全程非默认 GPU 后端。
+    // 现在恢复为 opt-in：默认不追加任何 switch，走 Chromium 自己的后端选择。
+    const angleBackend = resolveWindowsAngleBackend()
+    if (angleBackend) {
       app.commandLine.appendSwitch('use-angle', angleBackend)
-      console.info(`[图形] ANGLE backend: ${angleBackend}`)
+      console.info(`[图形] ANGLE backend 显式指定为: ${angleBackend}`)
     }
   }
 
@@ -149,7 +151,8 @@ function registerProtocolsAndHandlers(): void {
 
 import { getSettings, updateSettings } from './lib/settings-service'
 import { resolveAppThemeIsDark } from './lib/app-theme-service'
-import { createCenteredStartupSplashBounds, createStartupSplashHtml } from './lib/startup-splash'
+import { createCenteredStartupSplashBounds, createStartupSplashHtml, SPLASH_READY_TITLE, SPLASH_REVEAL_FALLBACK_MS } from './lib/startup-splash'
+import { resolveWindowsAngleBackend, summarizeGpuFeatureStatus } from './lib/windows-graphics'
 import { handleProferFileRequest } from './lib/local-file-protocol'
 import { handleProferSkinRequest } from './lib/skin-service'
 import { disposeAgentPreviewRenderer } from './lib/agent-preview-renderer'
@@ -500,8 +503,23 @@ function createWindow(): void {
     },
     ...titleBarOptions,
   })
-  // 主界面默认放大到 110%；使用 webContents 缩放，避免 CSS zoom 破坏有限布局区域。
+  // 主界面保持 100% 页面缩放：非整数缩放（如 110%）会与系统 DPI 相乘得到 1.375，
+  // Chromium 会把 border-radius 圆角光栅成 45° 斜切（圆角被“切掉”）。
+  // 详见 DEFAULT_MAIN_WINDOW_ZOOM_FACTOR 注释。
   mainWindow.webContents.setZoomFactor(DEFAULT_MAIN_WINDOW_ZOOM_FACTOR)
+  // GPU 合成/光栅状态落日志：GPU 进程崩溃后 Chromium 会静默降级到软件合成且不自动恢复，
+  // 表现为动画与流式输出掉到个位数帧率。没有这条日志时，这种降级会被误判成「渲染代码慢」，
+  // 从而在错误的层面做优化。等页面加载完再读，保证 GPU 进程已完成能力协商。
+  mainWindow.webContents.once('did-finish-load', () => {
+    const status = app.getGPUFeatureStatus()
+    const diagnostics = summarizeGpuFeatureStatus(status)
+    if (diagnostics.degraded) {
+      console.warn(`[图形] ${diagnostics.summary}`)
+      console.warn('[图形] 完整 GPU 能力表:', JSON.stringify(status))
+      return
+    }
+    console.info(`[图形] ${diagnostics.summary}`)
+  })
   // 开发版将 renderer Console 直接镜像到 supervisor 日志，白屏/模块加载失败可无需手动打开 DevTools 即定位。
   // 对话 resize 调试日志额外落盘（异步写入）。终端 scrollback（例如 Ghostty）不可由自动化稳定回放，
   // 只持久化带专用前缀的结构化诊断，避免把正常 renderer 日志无限写入用户目录。
@@ -654,17 +672,40 @@ function createWindow(): void {
       movable: true,
       show: false,
       backgroundColor: resolveStartupSplashDark() ? '#101010' : '#f4f4f2',
-      webPreferences: { contextIsolation: true, nodeIntegration: false },
+      // 首帧信号靠页面内的 requestAnimationFrame 循环发出。窗口在 show 之前是隐藏的，
+      // 默认的后台节流会把隐藏窗口的 rAF 降频甚至暂停，那样信号永远到不了、只能等兜底超时。
+      // 这里显式关掉节流，保证首帧能在窗口显示前画完并回报。
+      webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
     })
     const splashWindow = startupSplashWindow
     splashWindow.setMenuBarVisibility(false)
     // 主窗口完成首次最大化前保持 Splash 置顶，避免 showInactive / maximize 的异步重绘露出空白主窗口。
     splashWindow.setAlwaysOnTop(true, 'floating')
 
-    splashWindow.webContents.once('did-finish-load', () => {
+    // Splash 的 WebGL 首帧是异步绘制的：did-finish-load 只代表 HTML 加载完，
+    // 此时窗口里还是 backgroundColor 纯色，先 show 再顶内容会闪一帧。
+    // 改为等页面回报「首帧已提交」再显示；页面脚本异常或 WebGL 不可用时由兜底
+    // 定时器强制显示，避免 splashShown 一直为 false 把主窗口的 showWhenReady 一起卡死。
+    let splashRevealed = false
+    let revealFallback: ReturnType<typeof setTimeout> | null = null
+    const revealSplash = (): void => {
+      if (splashRevealed || splashWindow.isDestroyed()) return
+      splashRevealed = true
+      if (revealFallback) {
+        clearTimeout(revealFallback)
+        revealFallback = null
+      }
       splashShown = true
-      startupSplashWindow?.show()
+      splashWindow.show()
       showWhenReady()
+    }
+    revealFallback = setTimeout(revealSplash, SPLASH_REVEAL_FALLBACK_MS)
+    splashWindow.webContents.on('page-title-updated', (_event, title) => {
+      if (title === SPLASH_READY_TITLE) revealSplash()
+    })
+    splashWindow.webContents.once('did-finish-load', () => {
+      // 首帧可能在 load 完成前就已提交，此时 page-title-updated 已经错过，补一次状态检查。
+      if (splashWindow.webContents.getTitle() === SPLASH_READY_TITLE) revealSplash()
     })
     void splashWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupSplashHtml(resolveStartupSplashDark()))}`)
   }

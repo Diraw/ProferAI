@@ -14,14 +14,14 @@ describe('Windows CLI 编译调用', () => {
   test('Given Windows 临时 Bun 副本 When 构造调用 Then 复用当前 Bun 并传入 compile-executable-path', () => {
     const temporaryBunPath = createTemporaryBunPath('C:\\Temp', 123, 456)
     const invocation = createBuildCliInvocation({
-      bunExecutablePath: 'C:\\Users\\yuan\\bin\\bun.exe',
+      bunExecutablePath: 'C:\\Users\\alice\\bin\\bun.exe',
       outFile: 'D:\\profer\\Profer-main\\apps\\electron\\resources\\bin\\profer.exe',
       cliEntry: 'D:\\profer\\Profer-main\\apps\\cli\\src\\index.ts',
       compileExecutablePath: temporaryBunPath,
     })
 
     expect(temporaryBunPath).toBe(join('C:\\Temp', 'bun-temp-123-456.exe'))
-    expect(invocation.command).toBe('C:\\Users\\yuan\\bin\\bun.exe')
+    expect(invocation.command).toBe('C:\\Users\\alice\\bin\\bun.exe')
     expect(invocation.args).toEqual([
       'build',
       '--compile',

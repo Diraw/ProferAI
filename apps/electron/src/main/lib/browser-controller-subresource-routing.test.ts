@@ -88,6 +88,7 @@ describe('受管浏览器子资源路由', () => {
     let handler: ((details: unknown, callback: (result: { cancel: boolean }) => void) => void) | undefined
     internals.installSessionGuards({
       setPermissionRequestHandler: () => undefined,
+      setCertificateVerifyProc: () => undefined,
       webRequest: { onBeforeRequest: (listener: typeof handler) => { handler = listener } },
       on: () => undefined,
     })
@@ -121,6 +122,7 @@ describe('受管浏览器子资源路由', () => {
     let handler: ((details: unknown, callback: (result: { cancel: boolean }) => void) => void) | undefined
     internals.installSessionGuards({
       setPermissionRequestHandler: () => undefined,
+      setCertificateVerifyProc: () => undefined,
       webRequest: { onBeforeRequest: (listener: typeof handler) => { handler = listener } },
       on: () => undefined,
     })

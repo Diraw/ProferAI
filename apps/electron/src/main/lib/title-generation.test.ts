@@ -159,7 +159,7 @@ describe('evaluateTitleSource', () => {
 
   test('Given 路径形态消息 When 判定 Then 不当作命令剥离', () => {
     // `/Users/...` 与 `/tmp/x` 都不是命令，不能被剥成半截路径
-    expect(evaluateTitleSource('/Users/mac/profer 这个目录').text).toBe('/Users/mac/profer 这个目录')
+    expect(evaluateTitleSource('/Users/alice/project 这个目录').text).toBe('/Users/alice/project 这个目录')
     expect(evaluateTitleSource('/tmp/x 这个文件').informative).toBe(true)
   })
 

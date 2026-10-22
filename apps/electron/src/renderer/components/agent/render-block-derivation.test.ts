@@ -156,4 +156,18 @@ describe('隐藏 thinking 时过程组不空占位', () => {
       expect(items[0].items.map((item) => item.block.type)).toEqual(['thinking'])
     }
   })
+
+  test('已产出图片的本地图片工具不跟随过程组折叠，图片附件始终可见', () => {
+    const derived = derive([message('m1', [thinking(), tool('image-1', 'send_local_image'), tool('tool-2'), text('最终输出')])])
+    const items = buildAssistantTurnRenderItems(derived.topLevelItems, {
+      pinnedToolUseIds: new Set(['image-1']),
+    })
+
+    expect(items.map((item) => item.type)).toEqual(['process-group', 'block', 'process-group', 'block'])
+    expect(items[1]?.type === 'block' && items[1].item.block).toMatchObject({
+      type: 'tool_use', id: 'image-1', name: 'send_local_image',
+    })
+    expect(items[0]?.type === 'process-group' && items[0].items.map((item) => item.block.type)).toEqual(['thinking'])
+    expect(items[2]?.type === 'process-group' && items[2].items.map((item) => item.block.type)).toEqual(['tool_use'])
+  })
 })

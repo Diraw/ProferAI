@@ -27,7 +27,7 @@ mock.module('./channel-manager', () => ({
   resolveXaiOAuthCredentials: async () => ({ ...codex }),
   persistXaiOAuthCredentials: () => {},
 }))
-mock.module('./auth-service', () => ({ getTeamAuthWithRefresh: teamAuth }))
+mock.module('./auth-service', () => ({ getTeamAuthWithRefresh: teamAuth, recoverCommercialProxyAuth: async () => null }))
 mock.module('./build-target', () => ({ isCommercialBuild: () => false }))
 const { buildPiRuntimeCredentialOptions, resolveRuntimeCredentials } = await import('./agent-runtime-credentials')
 const { buildModel } = await import('./adapters/pi-model-registry')

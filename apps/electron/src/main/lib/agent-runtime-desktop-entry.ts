@@ -19,8 +19,7 @@
  * | 删除 / 分叉守卫 | 由调用方负责 | 必须由本入口在任何 claim 之前拦下 |
  *
  * 依赖全部注入（不 import agent-service，避免 orchestrator → collaboration-tools → agent-service
- * 这条既有模块环），因此本模块可以被测试直接驱动：见
- * `runtime-migration-parity/desktop-entry.parity.ts`。
+ * 这条既有模块环），因此本模块可以被测试直接驱动。
  *
  * 边界（不越界声明）：
  * - **不**自己读开关；调用方（`runAgent`）先 `resolveDesktopRunChain` 再决定调不调这里。

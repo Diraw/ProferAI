@@ -16,7 +16,7 @@ export interface UpdateSource {
 /**
  * 国内主更新源：旧机静态目录 `profer.cn/profer-updates/`（阿里云，国内直连）。
  *
- * 2026-10-08：香港机 `45.114.127.232` 失联，`updates.profer.cn` 已不可达，主备顺序切回旧机。
+ * 2026-10-08：香港机失联，`updates.profer.cn` 已不可达，主备顺序切回旧机。
  */
 export const DOMESTIC_UPDATE_FEED_URL = 'https://profer.cn/profer-updates/'
 /**

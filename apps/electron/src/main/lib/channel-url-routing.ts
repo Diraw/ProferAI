@@ -103,6 +103,16 @@ export function normalizeChannelForCurrentSchema(channel: Channel): { channel: C
     changed = true
   }
 
+  // apiProtocol 只属于 xAI API Key 渠道；换供应商/切订阅 OAuth 后必须清掉，
+  // 避免旧协议残留影响后续切回时的地址预览与请求分派。
+  if (next.provider !== 'xai' && next.apiProtocol !== undefined) {
+    next = { ...next, apiProtocol: undefined }
+    changed = true
+  } else if (next.provider === 'xai' && next.credentialMode === 'oauth' && next.apiProtocol !== undefined) {
+    next = { ...next, apiProtocol: undefined }
+    changed = true
+  }
+
   if (next.provider === 'deepseek') {
     // 只迁移官方 DeepSeek 的 Anthropic 地址；用户自定义网关可能也包含
     // /anthropic，不能再被硬编码覆盖回 api.deepseek.com。

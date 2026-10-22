@@ -456,6 +456,19 @@ export interface StreamToolActivityEvent {
   activity: ChatToolActivity
 }
 
+/**
+ * 用户消息已持久化事件
+ *
+ * 发送方可能是桌面端，也可能是移动端。两端都需要把它当成「公告」合并进当前会话，
+ * 否则实时视图里只剩助手回复，用户气泡要等重新打开会话才补出来。
+ */
+export interface StreamUserEvent {
+  /** 对话 ID */
+  conversationId: string
+  /** 已写入 JSONL 的完整用户消息（带真实 id） */
+  message: ChatMessage
+}
+
 // ===== 模型选项 =====
 
 /**
@@ -600,4 +613,12 @@ export const CHAT_IPC_CHANNELS = {
   STREAM_ERROR: 'chat:stream:error',
   /** 工具活动事件（记忆工具调用/结果指示） */
   STREAM_TOOL_ACTIVITY: 'chat:stream:tool-activity',
+  /**
+   * 用户消息已持久化（含真实 id）。
+   *
+   * 桌面端发起的 Chat 消息原先只写 JSONL，不进入事件流；移动端只能靠重新打开
+   * 会话水合才看得到，实时视图里会缺一整条用户气泡。这里在落盘后广播一次，
+   * 让所有客户端按 id 合并（本地乐观副本让位，不重复）。
+   */
+  STREAM_USER: 'chat:stream:user',
 } as const

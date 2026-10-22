@@ -7,6 +7,7 @@ import type {
   ProferEvent,
   SDKMessage,
   XaiOAuthCredentials,
+  XaiApiProtocol,
   WorkspaceMcpConfig,
   AskUserRequest,
   ExitPlanModeRequest,
@@ -24,6 +25,8 @@ export interface RuntimeCredential {
   codexOAuthCredentials?: CodexOAuthCredentials
   xaiOAuthCredentials?: XaiOAuthCredentials
   xaiCredentialMode?: 'api-key' | 'oauth'
+  /** xAI API Key 渠道的请求协议；缺失时按 responses 处理。 */
+  xaiApiProtocol?: XaiApiProtocol
 }
 
 export type RuntimeCredentialResult =

@@ -12,7 +12,7 @@ import {
   getDelegatedChildStatus,
   getRelatedSessionSummary,
   getSessionTreeStatus,
-  hasPinnedVisibleParent,
+  sortProjectSessions,
   type AgentSessionTreeItem,
 } from './session-tree'
 import type { AgentSessionMeta } from '@profer/shared'
@@ -149,17 +149,23 @@ describe('getRelatedSessionSummary — 父行展开信息', () => {
   })
 })
 
-describe('hasPinnedVisibleParent — 探索分支可见性', () => {
-  test('Given 探索分支的主会话已置顶 When 判断侧栏归属 Then 分支收纳到置顶主会话下', () => {
-    const parent = makeSession({ id: 'parent', workspaceId: 'workspace-1', pinned: true })
-    const exploration = makeSession({
-      id: 'exploration',
-      workspaceId: 'workspace-1',
-      explorationParentSessionId: 'parent',
-      explorationSourceMessageId: 'assistant-message',
-    })
+describe('sortProjectSessions — 项目内置顶优先', () => {
+  test('Given 置顶会话比普通会话旧 When 排序 Then 置顶会话仍在项目最前', () => {
+    const pinnedOld = makeSession({ id: 'pinned-old', pinned: true, updatedAt: NOW - 10_000 })
+    const recent = makeSession({ id: 'recent', updatedAt: NOW })
 
-    expect(hasPinnedVisibleParent(exploration, [parent, exploration])).toBe(true)
+    expect(sortProjectSessions([recent, pinnedOld]).map((session) => session.id))
+      .toEqual(['pinned-old', 'recent'])
+  })
+
+  test('Given 多个置顶与普通会话 When 排序 Then 两组内部分别按更新时间倒序', () => {
+    const pinnedNew = makeSession({ id: 'pinned-new', pinned: true, updatedAt: NOW })
+    const pinnedOld = makeSession({ id: 'pinned-old', pinned: true, updatedAt: NOW - 20_000 })
+    const normalNew = makeSession({ id: 'normal-new', updatedAt: NOW - 5_000 })
+    const normalOld = makeSession({ id: 'normal-old', updatedAt: NOW - 30_000 })
+
+    expect(sortProjectSessions([normalOld, pinnedOld, normalNew, pinnedNew]).map((session) => session.id))
+      .toEqual(['pinned-new', 'pinned-old', 'normal-new', 'normal-old'])
   })
 })
 

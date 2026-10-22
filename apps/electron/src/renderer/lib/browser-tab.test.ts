@@ -169,6 +169,106 @@ test('切回会话恢复浏览器标签不自动建组，后续同页推送也�
   expect(store.get(tabGroupsAtom)).toEqual([])
 })
 
+test('页面内新开并激活的页接管原分屏栏，不抢正在看的会话', () => {
+  const store = getDefaultStore()
+  store.set(appModeAtom, 'agent')
+  store.set(currentAgentSessionIdAtom, 's1')
+  store.set(tabsAtom, [agentTab('s1')])
+  store.set(activeTabIdAtom, 's1')
+  store.set(tabGroupsAtom, [])
+
+  const first = state({ sessionId: 's1', activeTabId: 't1', tabs: [page('t1', '页面一')] })
+  openBrowserTabFromPush(first, { autoGroup: false })
+  store.set(tabGroupsAtom, [{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t1',
+    focusedTabId: 's1',
+  }])
+
+  const next = state({
+    sessionId: 's1',
+    activeTabId: 't2',
+    tabs: [page('t1', '页面一'), page('t2', '页面二')],
+  })
+  openBrowserTabFromPush(next, { autoGroup: false, previousState: first })
+
+  expect(store.get(tabGroupsAtom)).toEqual([{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t2',
+    focusedTabId: 's1',
+  }])
+  expect(store.get(activeTabIdAtom)).toBe('s1')
+})
+
+test('页面内新页接管时，如果原浏览器页是焦点成员，焦点跟到新页', () => {
+  const store = getDefaultStore()
+  store.set(appModeAtom, 'agent')
+  store.set(currentAgentSessionIdAtom, 's1')
+  store.set(tabsAtom, [agentTab('s1')])
+  store.set(activeTabIdAtom, '__browser__:s1:t1')
+  store.set(tabGroupsAtom, [{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t1',
+    focusedTabId: '__browser__:s1:t1',
+  }])
+
+  const first = state({ sessionId: 's1', activeTabId: 't1', tabs: [page('t1', '页面一')] })
+  openBrowserTabFromPush(first, { autoGroup: false })
+  // reconcile 会补齐 t1 顶栏 Tab；组合与激活状态保持不变
+  store.set(tabGroupsAtom, [{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t1',
+    focusedTabId: '__browser__:s1:t1',
+  }])
+  store.set(activeTabIdAtom, '__browser__:s1:t1')
+
+  const next = state({
+    sessionId: 's1',
+    activeTabId: 't2',
+    tabs: [page('t1', '页面一'), page('t2', '页面二')],
+  })
+  openBrowserTabFromPush(next, { autoGroup: false, previousState: first })
+
+  expect(store.get(tabGroupsAtom)).toEqual([{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t2',
+    focusedTabId: '__browser__:s1:t2',
+  }])
+  expect(store.get(activeTabIdAtom)).toBe('__browser__:s1:t2')
+})
+
+test('切到已有页不接管分屏栏，保留用户主动选择的页', () => {
+  const store = getDefaultStore()
+  store.set(appModeAtom, 'agent')
+  store.set(currentAgentSessionIdAtom, 's1')
+  store.set(tabsAtom, [agentTab('s1')])
+  store.set(activeTabIdAtom, 's1')
+  store.set(tabGroupsAtom, [{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t1',
+    focusedTabId: 's1',
+  }])
+
+  const first = state({
+    sessionId: 's1',
+    activeTabId: 't1',
+    tabs: [page('t1', '页面一'), page('t2', '页面二')],
+  })
+  openBrowserTabFromPush(first, { autoGroup: false })
+  const next = state({
+    sessionId: 's1',
+    activeTabId: 't2',
+    tabs: [page('t1', '页面一'), page('t2', '页面二')],
+  })
+  openBrowserTabFromPush(next, { autoGroup: false, previousState: first })
+
+  expect(store.get(tabGroupsAtom)).toEqual([{
+    leftTabId: 's1',
+    rightTabId: '__browser__:s1:t1',
+    focusedTabId: 's1',
+  }])
+})
+
 afterEach(() => {
   const store = getDefaultStore()
   store.set(appModeAtom, 'scratch')

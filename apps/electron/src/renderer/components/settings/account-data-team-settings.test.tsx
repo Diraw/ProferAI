@@ -352,7 +352,7 @@ describe('DataManagementSettings 迁移与清理安全', () => {
     expect(patches[0]).toEqual({ categories: ['agent-sessions'], orphansOnly: true, archivedBeforeDays: 0 })
     click(host.button('一键清理')); host.render(); expect(patches).toHaveLength(1)
     click(host.button('确认执行')); await tick(); host.render()
-    expect(patches[1]).toEqual({ categories: ['agent-sessions', 'sdk-config', 'workspaces', 'session-blobs'], orphansOnly: true, archivedBeforeDays: 0 })
+    expect(patches[1]).toEqual({ categories: ['agent-sessions', 'sdk-config', 'agent-checkpoints', 'workspaces', 'session-blobs'], orphansOnly: true, archivedBeforeDays: 0 })
   })
   test('归档自动清理写失败保留原值与确认，用户可在同一确认重试', async () => {
     let writes = 0
@@ -378,4 +378,26 @@ test('SSR 分层/响应式结构保持', () => {
   expect(subscription).toContain('minmax(min(100%,180px),1fr)')
   const panel = readFileSync(new URL('./SettingsPanel.tsx', import.meta.url), 'utf8')
   expect(panel).not.toContain('team management settings')
+})
+
+test('文件检查点分类展示已归档占用，回收是独立的显式动作', async () => {
+  const patches: unknown[] = []
+  api({
+    getStorageStats: async () => ({
+      totalBytes: 4096, calculatedAt: 1,
+      categories: [{
+        key: 'agent-checkpoints', label: '文件检查点', bytes: 4096, count: 10,
+        orphanBytes: 0, orphanCount: 0, hasOrphans: false,
+        archivedBytes: 4096, archivedCount: 10, archivedSessions: 2,
+      }],
+    }),
+    cleanupStorage: async (options: unknown) => { patches.push(options); return { freedBytes: 4096, deletedCount: 2, errors: [] } },
+  })
+  const host = mount(childComponent(DataManagementSettings, 'StorageSection')); await tick(); host.render()
+  // 归档占用必须在面板上可见：这正是「归档不省空间」的误解来源
+  expect(host.text()).toContain('2 个已归档会话占')
+  click(host.button('回收已归档')); host.render()
+  expect(patches).toHaveLength(0)          // 先弹确认，不得直接删
+  click(host.button('确认执行')); await tick(); host.render()
+  expect(patches[0]).toEqual({ categories: ['agent-checkpoints'], orphansOnly: false, archivedBeforeDays: 0, includeArchivedSessions: true })
 })

@@ -211,6 +211,7 @@ import {
   appendSDKMessages,
   updateAgentSessionMeta,
   deleteAgentSession,
+  getAgentSessionDeletionOrder,
   migrateChatToAgentSession,
   moveSessionToWorkspace,
   forkAgentSession,
@@ -2300,6 +2301,7 @@ export function registerIpcHandlers(): void {
     AGENT_IPC_CHANNELS.DELETE_SESSION,
     async (_, id: string): Promise<void> => {
       return agentSessionDeletionCoordinator.delete(id, {
+        getDeletionOrder: getAgentSessionDeletionOrder,
         beginDeletion: beginAgentSessionDeletion,
         endDeletion: endAgentSessionDeletion,
         stopAndWait: stopAgentAndWait,
@@ -2611,6 +2613,7 @@ export function registerIpcHandlers(): void {
 
       for (const sessionId of affectedSessionIds) {
         await agentSessionDeletionCoordinator.delete(sessionId, {
+          getDeletionOrder: getAgentSessionDeletionOrder,
           beginDeletion: beginAgentSessionDeletion,
           endDeletion: endAgentSessionDeletion,
           stopAndWait: stopAgentAndWait,

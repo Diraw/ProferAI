@@ -40,25 +40,44 @@ const LIMIT = LIMIT_INDEX >= 0 ? Number(args[LIMIT_INDEX + 1]) : 100;
 const GH_REPO = 'Yuan-lai-ru-ci/ProferAI';
 const FILE_NAME = 'releases.json';
 
-const TARGETS = [
-  {
+function requireEnv(name, hint) {
+  const value = (process.env[name] || '').trim();
+  if (!value) throw new Error(`缺少环境变量 ${name}：${hint}`);
+  return value;
+}
+
+function assertSafeTarget(target) {
+  if (!/^[A-Za-z0-9.-]+$/.test(target.host)) throw new Error(`更新源主机非法: ${target.host}`);
+  if (!/^[A-Za-z0-9._-]+$/.test(target.user)) throw new Error(`更新源用户非法: ${target.user}`);
+  if (!/^\d{2,5}$/.test(String(target.port))) throw new Error(`更新源端口非法: ${target.port}`);
+  if (!/^[A-Za-z0-9._/-]+$/.test(target.dir)) throw new Error(`更新源目录非法: ${target.dir}`);
+  return target;
+}
+
+let targetsCache = null;
+/** 生产主机信息只来自环境变量；只在需上传/校验时才解析，纯生成不要求配置。 */
+function getTargets() {
+  if (targetsCache) return targetsCache;
+  const targets = [assertSafeTarget({
     label: '新机',
-    host: process.env.PROFER_UPDATE_SSH_HOST || '45.114.127.232',
-    user: process.env.PROFER_UPDATE_SSH_USER || 'root',
-    port: process.env.PROFER_UPDATE_SSH_PORT || '41235',
+    host: requireEnv('PROFER_UPDATE_SSH_HOST', '国内更新源主机'),
+    user: requireEnv('PROFER_UPDATE_SSH_USER', '国内更新源 SSH 用户'),
+    port: process.env.PROFER_UPDATE_SSH_PORT || '22',
     dir: process.env.PROFER_UPDATE_DIR || '/var/www/updates.profer.cn',
     url: 'https://updates.profer.cn/releases.json',
-  },
-];
-if (!process.env.PROFER_UPDATE_SKIP_LEGACY) {
-  TARGETS.push({
-    label: '旧机',
-    host: process.env.PROFER_UPDATE_LEGACY_SSH_HOST || '47.109.108.57',
-    user: process.env.PROFER_UPDATE_LEGACY_SSH_USER || 'ecs-user',
-    port: process.env.PROFER_UPDATE_LEGACY_SSH_PORT || '22',
-    dir: process.env.PROFER_UPDATE_LEGACY_DIR || '/usr/share/nginx/html/profer-updates',
-    url: 'https://profer.cn/profer-updates/releases.json',
-  });
+  })];
+  if (process.env.PROFER_UPDATE_SKIP_LEGACY !== '1') {
+    targets.push(assertSafeTarget({
+      label: '旧机',
+      host: requireEnv('PROFER_UPDATE_LEGACY_SSH_HOST', '旧更新源主机；已退役可设 PROFER_UPDATE_SKIP_LEGACY=1'),
+      user: requireEnv('PROFER_UPDATE_LEGACY_SSH_USER', '旧更新源 SSH 用户'),
+      port: process.env.PROFER_UPDATE_LEGACY_SSH_PORT || '22',
+      dir: process.env.PROFER_UPDATE_LEGACY_DIR || '/usr/share/nginx/html/profer-updates',
+      url: 'https://profer.cn/profer-updates/releases.json',
+    }));
+  }
+  targetsCache = targets;
+  return targets;
 }
 
 /**
@@ -152,13 +171,13 @@ function verify(target) {
 
   if (UPLOAD) {
     console.log(`=== 上传 ${FILE_NAME} ===`);
-    if (!VERIFY_ONLY) for (const target of TARGETS) uploadTo(target, OUT_FILE);
+    if (!VERIFY_ONLY) for (const target of getTargets()) uploadTo(target, OUT_FILE);
   }
 
   // 只在真的写了服务器（上传）或显式要求校验时才验证，纯生成不该因为远端还没有文件而报错。
   if (UPLOAD || VERIFY_ONLY) {
     console.log(`=== 校验 ${FILE_NAME} ===`);
-    for (const target of TARGETS) verify(target);
+    for (const target of getTargets()) verify(target);
   }
   console.log(`${FILE_NAME} 处理完成`);
 })().catch((error) => {

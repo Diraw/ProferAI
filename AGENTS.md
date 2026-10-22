@@ -18,61 +18,123 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 Profer 是一个集成通用 AI Agent 的下一代人工智能软件，采用 Electron 桌面应用架构。脱胎于开源项目 Proma (github.com/ErlichLiu/Proma)，经深度改造而来。
 
-> **改名记录**：2026-06-21 从 Proma 改名为 Profer。应用名/数据目录/GitHub 仓库均已更名。代码包名 `@proma/*` 保持不变。
+> **改名记录**：2026-06-21 从 Proma 改名为 Profer。应用名/数据目录/GitHub 仓库均已更名；代码包名已同步改为 `@profer/*`（不再保留 `@proma/*` 作用域）。
 
 ## Monorepo 结构
 
 Bun workspace monorepo：
 
 ```
-proma-v2/
+profer/
 ├── packages/
-│   ├── shared/        # 共享类型、IPC 通道常量、配置、工具函数 (v0.1.31)
-│   ├── core/          # AI Provider 适配器、代码高亮服务 (v0.2.11)
-│   ├── session-core/  # headless session 读取/分组/搜索/渲染 (v0.1.0)
-│   └── ui/            # 共享 UI 组件 (CodeBlock, MermaidBlock) (v0.1.9)
+│   ├── shared/                # 共享类型、IPC 通道常量、配置、工具函数 (v0.1.46)
+│   ├── core/                  # AI Provider 适配器、SSE、代码高亮服务 (v0.2.12)
+│   ├── ui/                    # 共享 UI 组件 (CodeBlock, MermaidBlock) (v0.2.0)
+│   ├── session-core/          # headless session 读取/分组/搜索/渲染 (v0.1.1)
+│   ├── session-store/         # Node-only 会话持久化：索引/消息/事件/工作区存储与操作契约 (v0.1.0)
+│   ├── project-core/          # headless 项目编排：图构建、状态回放、查询 (v0.1.0)
+│   ├── agent-runtime/         # 宿主无关的 Agent 执行契约与运行时生命周期工具 (v0.1.0)
+│   ├── agent-provider-claude/ # Claude Agent SDK provider：query 流、权限、后台任务 (v0.1.0)
+│   ├── agent-provider-pi/     # Pi Agent SDK provider：完整适配器、消息转换、Pi 工具集成 (v0.1.0)
+│   ├── agent-fabric/          # Agent Node / Task Graph / Capability / Policy 契约与纯函数 (v0.1.0)
+│   ├── edition-contract/      # 发行版能力契约：账号会话/代管凭据路由/发行版标识，不依赖 Electron (v0.1.0)
+│   ├── office-engine/         # DOCX/PPTX/XLSX 双平面版式解析引擎 (v0.1.0)
+│   └── plugin-api/            # 第三方插件公开契约 (v0.1.1)
 └── apps/
-    └── electron/      # Electron 桌面应用 (v0.12.69)
-        └── src/
-            ├── main/       # 主进程 + 服务层 (main/lib/)
-            ├── preload/    # IPC 上下文桥接
-            └── renderer/   # React UI (Vite + Tailwind + Radix UI)
+    ├── electron/              # Electron 桌面应用 (v0.16.10)
+    │   └── src/
+    │       ├── main/          # 主进程 + 服务层 (main/lib/)
+    │       ├── preload/       # IPC 上下文桥接
+    │       └── renderer/      # React UI (Vite + Tailwind + Radix UI)
+    └── cli/                   # 命令行工具：会话渐进式读取 list/info/outline/search/export (v0.1.1)
 ```
 
-**包命名规范**：`@proma/*` 作用域（`@proma/core`、`@proma/shared`、`@proma/ui`、`@proma/electron`）
+**包命名规范**：`@profer/*` 作用域（`@profer/core`、`@profer/shared`、`@profer/ui`、`@profer/electron` 等，共 13 个 `packages/*` + 2 个 `apps/*`）
 
 **依赖管理**：package.json 中使用 `workspace:*` 引用内部包
 
 ### 包职责详解
 
-#### @proma/shared (v0.1.31)
-- **导出模块**：`./types`、`./config`、`./utils`、`./constants/permission-rules`
+#### @profer/shared (v0.1.46)
+- **导出模块**：`.`、`./types`、`./config`、`./utils`
 - **关键类型**：`AgentMessage`、`ChatMessage`、`Channel`、`PermissionRequest`、`FeishuConfig`
 - **依赖**：无运行时依赖（仅 TypeScript）
 
-#### @proma/core (v0.2.11)
-- **导出模块**：`./providers`、`./highlight`、`./types`、`./utils`
+#### @profer/core (v0.2.12)
+- **导出模块**：`.`、`./providers`、`./highlight`
 - **关键功能**：Provider 适配器注册表、代码高亮（Shiki）
-- **依赖**：`@proma/shared`、`shiki`
+- **依赖**：`@profer/shared`、`highlight.js`、`shiki`
 - **Peer 依赖**：`@anthropic-ai/claude-agent-sdk`、`@anthropic-ai/sdk`、`@modelcontextprotocol/sdk`
 
-#### @proma/session-core (v0.1.0)
-- **职责**：headless 核心——读取、分组、搜索、渲染 Proma Agent 会话。Electron 应用、proma CLI 和未来查询界面的单一事实来源
-- **导出模块**：`./index`（`group`、`outline`、`read`、`search`、`select`、`transcript`、`render-markdown`、`thinking-tags`、`tokens`）、`./node`（文件系统读取 + session 列表）
-- **依赖**：`@proma/shared`
-
-#### @proma/ui (v0.1.9)
+#### @profer/ui (v0.2.0)
 - **关键组件**：共享 React UI 组件库
-- **依赖**：`@proma/core`、`beautiful-mermaid`、`mermaid`、`shiki`
+- **导出模块**：`.`、`./primitives/*`、`./lib/*`、`./hooks/*`
+- **依赖**：`@profer/core`、`beautiful-mermaid`、`mermaid`、`shiki`、Radix UI 系列
 - **Peer 依赖**：`react@^18.3.0`、`react-dom@^18.3.0`
 
-#### @proma/electron (v0.12.69)
+#### @profer/session-core (v0.1.1)
+- **职责**：headless 核心——读取、分组、搜索、渲染 Profer Agent 会话。Electron 应用、profer CLI 和未来查询界面的单一事实来源
+- **导出模块**：`.`（`group`、`outline`、`read`、`search`、`select`、`transcript`、`render-markdown`、`thinking-tags`、`tokens`）、`./node`（文件系统读取 + session 列表）
+- **依赖**：`@profer/shared`
+
+#### @profer/session-store (v0.1.0)
+- **职责**：Node-only 的会话持久化层——会话索引、消息/事件、工作区与 blob 文件的读写契约与操作；不读 Electron `app.getPath`、不持有 provider SDK，运行时路径由宿主（`apps/electron/src/main/lib/session-store-host.ts`）注入
+- **导出模块**：`.`（`contracts`、`paths`、index / message / metadata / blob / event / workspace / file / session store、`operations`）
+- **依赖**：`@profer/project-core`、`@profer/session-core`、`@profer/shared`
+
+#### @profer/project-core (v0.1.0)
+- **职责**：headless 项目编排——图构建、状态回放和查询；由 Electron 应用、CLI 和未来查询界面共用
+- **导出模块**：`.`
+- **依赖**：`@profer/shared`
+
+#### @profer/agent-runtime (v0.1.0)
+- **职责**：宿主无关的 Agent 执行契约与纯运行时生命周期工具（协调器、运行所有权、重试、错误模式、outcome）
+- **导出模块**：`.`、`./error-patterns`、`./runtime-guards`、`./runtime-routing-adapter`
+- **依赖**：`@profer/shared`
+
+#### @profer/agent-provider-claude (v0.1.0)
+- **职责**：Claude Agent SDK provider——宿主无关的 query 流、权限、后台任务与进程生命周期适配
+- **导出模块**：`.`、`./background-task-manager`、`./task-events`、`./write-target-guard`
+- **依赖**：`@anthropic-ai/claude-agent-sdk@0.3.201`、`@profer/agent-runtime`、`@profer/core`、`@profer/shared`
+
+#### @profer/agent-provider-pi (v0.1.0)
+- **职责**：宿主无关的 Pi Agent SDK provider——完整适配器、消息转换与 Pi 工具集成
+- **导出模块**：`.`、`./pi-agent-adapter`、`./ports`、`./pi/*`、`./host/minimal-pi-host`
+- **依赖**：`@profer/agent-runtime`、`@profer/core`、`@profer/shared`、`typebox`、`undici`
+- **Peer 依赖**：`@earendil-works/pi-agent-core`、`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`（均为 `0.86.1`）
+
+#### @profer/agent-fabric (v0.1.0)
+- **职责**：Agent Node / Task Protocol / Task Graph / Capability / Policy / Event / Artifact / Result 统一契约与纯函数行为（状态机、策略收窄、事件重放、审批绑定）；不绑定 Electron、Claude SDK 或 Pi runtime
+- **导出模块**：`.`
+- **依赖**：无运行时依赖
+
+#### @profer/edition-contract (v0.1.0)
+- **职责**：发行版能力契约——账号会话、代管凭据路由与发行版标识；执行链只依赖本包，不直接依赖商业模块。Electron 侧的装配点在 `apps/electron/src/main/lib/edition/`
+- **导出模块**：`.`
+- **依赖**：`@profer/shared`
+
+#### @profer/office-engine (v0.1.0)
+- **职责**：DOCX / PPTX / XLSX 双平面版式解析（语义重排平面 + 归一化空间拓扑平面，带引用锚点），零第三方依赖
+- **导出模块**：`.`、`./node`（Node-only 运行时）
+- **依赖**：`@profer/shared`
+
+#### @profer/plugin-api (v0.1.1)
+- **职责**：第三方插件公开契约（含 `PROFER_PLUGIN_IPC_CHANNELS`）
+- **导出模块**：`.`
+- **依赖**：无运行时依赖
+
+#### @profer/electron (v0.16.10)
 - **职责**：Electron 桌面应用主体，集成所有包
 - **关键依赖**：
-  - `@anthropic-ai/claude-agent-sdk@0.3.153` - Agent SDK
+  - `@anthropic-ai/claude-agent-sdk@0.3.201` - Agent SDK
+  - `electron@^43.2.0` - 桌面框架
   - `@larksuiteoapi/node-sdk` - 飞书集成
   - Radix UI、TipTap、Tailwind CSS
   - 文件解析：`pdf-parse`、`officeparser`、`word-extractor`
+
+#### @profer/cli (v0.1.1)
+- **职责**：命令行工具——面向有限上下文的 Agent 消费者，提供会话的渐进式读取（`list` / `info` / `outline` / `search` / `export`）
+- **依赖**：`@profer/session-core`、`@profer/shared`（bin：`profer`）
 
 ## 常用命令
 
@@ -135,7 +197,7 @@ bun run generate:icons    # 生成应用图标
 |------|------|------|
 | **运行时** | Bun | 1.2.5+ |
 | **语言** | TypeScript | 5.0.0+ |
-| **桌面框架** | Electron | 39.5.1 |
+| **桌面框架** | Electron | 43.2.0 |
 | **前端框架** | React | 18.3.1 |
 | **状态管理** | Jotai | 2.17.1 |
 | **UI 组件** | Radix UI | 最新 |
@@ -148,7 +210,7 @@ bun run generate:icons    # 生成应用图标
 | **构建工具** | Vite | 6.0.3 |
 | **打包工具** | esbuild | 0.24.0+ |
 | **分发工具** | Electron Builder | 25.1.8 |
-| **Agent SDK** | @anthropic-ai/claude-agent-sdk | 0.3.153 |
+| **Agent SDK** | @anthropic-ai/claude-agent-sdk | 0.3.201 |
 | **飞书 SDK** | @larksuiteoapi/node-sdk | 最新 |
 
 ## 核心架构
@@ -157,12 +219,12 @@ bun run generate:icons    # 生成应用图标
 
 类型定义 → 主进程处理 → Preload 桥接 → 渲染进程调用：
 
-1. **类型 & 常量**：`@proma/shared` 定义 IPC 通道名称常量和请求/响应类型
-2. **主进程处理**：`main/ipc.ts`（57KB）注册 `ipcMain.handle()` 处理器，调用 `main/lib/` 服务
-3. **Preload 桥接**：`preload/index.ts` 通过 `contextBridge.exposeInMainWorld` 暴露类型安全的 API
+1. **类型 & 常量**：`@profer/shared` 定义 IPC 通道名称常量和请求/响应类型
+2. **主进程处理**：`main/ipc.ts`（4682 行）注册 `ipcMain.handle()` 处理器，调用 `main/lib/` 服务；实际 `ipcMain.handle` 共 522 处（另有 8 处 `ipcMain.on`），其中 `ipc.ts` 248 处，其余分散在 35 个 `main/lib/` 子模块（planning / global-skill / channel / feishu / plugins 等，最大单文件 21 处）
+3. **Preload 桥接**：`preload/index.ts`（3760 行）通过 `contextBridge.exposeInMainWorld` 暴露类型安全的 API；`ElectronAPI` 接口顶层 538 个成员（其中 7 个是 `auth` / `knowledge` / `globalSkill` / `skillMaster` 等分组对象），按分组展开后共 585 个键、其中 578 个是可调用方法
 4. **渲染进程**：通过 `window.electronAPI.*` 调用，Jotai atoms 中封装调用逻辑
 
-添加新 IPC 通道时，需要同步修改这四个位置。
+添加新 IPC 通道时，需要同步修改这四个位置。`packages/shared/src/types/*.ts` 与 `packages/plugin-api` 共声明 23 个 `*_IPC_CHANNELS` 常量组、461 条通道字符串（AST 统计，全部为字面量）。
 
 #### 主要 IPC 通道组
 
@@ -184,13 +246,15 @@ bun run generate:icons    # 生成应用图标
 
 | 服务 | 职责 |
 |------|------|
-| `agent-orchestrator.ts` | Agent 核心编排层（193KB）：并发守卫、渠道查找、环境变量构建、SDK 路径解析、消息持久化、事件流处理、错误处理、自动标题生成 |
-| `agent-collaboration-tools.ts` | Agent 协作委派工具（64KB）：10 个 MCP 工具（delegate_agent / delegate_agents / wait_for_delegations / list_delegations / get_delegation_results / stop_delegation / stop_delegations / answer_delegation_question / continue_delegation / list_available_agent_models），子会话创建、等待、管理和恢复 |
-| `adapters/claude-agent-adapter.ts` | Claude Agent SDK 适配器（56KB）：实现 AgentProviderAdapter 接口，长生命周期消息通道，支持 streamInput 持久化、工具权限注入、thinking signature 错误处理 |
-| `adapters/pi-agent-adapter.ts` | Pi Agent SDK 适配器（117KB）：Pi 运行时消息通道、内置产品工具注册、AskUserQuestion 闭环 |
-| `agent-session-manager.ts` | Agent 会话管理（119KB）：SDK 消息持久化、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
-| `agent-prompt-builder.ts` | Agent 系统提示词构建（24KB）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
-| `agent-service.ts` | Agent headless 运行服务（39KB）：无界面 Agent 运行、协作子会话执行 |
+| `agent-orchestrator.ts` | Agent 核心编排层（约 3860 行）：并发守卫、渠道查找、环境变量构建、SDK 路径解析、消息持久化、事件流处理、错误处理、自动标题生成 |
+| `agent-collaboration-tools.ts` | Agent 协作委派工具（1607 行）：10 个 MCP 工具（delegate_agent / delegate_agents / wait_for_delegations / list_delegations / get_delegation_results / stop_delegation / stop_delegations / answer_delegation_question / continue_delegation / list_available_agent_models），子会话创建、等待、管理和恢复 |
+| `adapters/claude-agent-adapter.ts` | 转发门面（387 字节）：`export * from '@profer/agent-provider-claude'`，保留旧入口供 agent-service / agent-orchestrator 与既有测试不改调用点；完整实现（2427 行，含 streamInput 持久化、工具权限注入、thinking signature 错误处理）在 `packages/agent-provider-claude` |
+| `adapters/pi-agent-adapter.ts` | 转发门面（1362 字节）：继承并注入 Electron 宿主事实（渠道账号策略 / xAI OAuth 凭据），其余导出转发到 `@profer/agent-provider-pi`；完整实现（7841 行，含内置产品工具注册、AskUserQuestion 闭环）在 `packages/agent-provider-pi` |
+| `agent-session-manager.ts` | Agent 会话管理（3054 行）：SDK 消息持久化（经 `@profer/session-store`）、会话元数据 CRUD、JSONL 存储、委派子会话元数据 |
+| `agent-session-index.ts` | 转发门面（2 行）：索引 store 的实际实现已移入 `@profer/session-store`，这里只 re-export 保留旧调用点 |
+| `session-store-host.ts` | 宿主适配（31 行）：把 Electron 运行时路径（config / sessions / workspaces / checkpoints，经 `config-paths` 解析）注入 `@profer/session-store`；存储包自身不读 `app.getPath` |
+| `agent-prompt-builder.ts` | Agent 系统提示词构建（348 行）：动态上下文构建、内置 Agent 构建、工作区上下文注入 |
+| `agent-service.ts` | Agent 运行服务入口（约 1300 行）：`runAgent()` 按 `agent-runtime-desktop-switch.ts` 的判定分流到桌面 runtime 链或旧编排器；含无界面运行与协作子会话执行 |
 | `agent-headless-runner-registry.ts` | Headless runner 注册表：管理协作委派的 Agent 运行实例生命周期 |
 | `agent-model-selection.ts` | 协作委派模型选择验证：确保委派子会话使用已启用的合法模型 |
 | `agent-permission-service.ts` | Agent 权限管理：工具权限检查、权限模式管理 |
@@ -200,6 +264,7 @@ bun run generate:icons    # 生成应用图标
 | `chat-service.ts` | Chat 流式调用编排（38KB）：Provider 适配器集成、消息持久化、AbortController |
 | `conversation-manager.ts` | 对话管理（37KB）：对话 CRUD、JSONL 消息存储（parentId-tree）、置顶、上下文分割、活跃分支 activePath、forkBranchAt 分叉 |
 | `channel-manager.ts` | 渠道管理（82KB）：渠道 CRUD、API Key AES-256-GCM 加密（safeStorage）、连接测试、模型获取 |
+| `edition/index.ts` | 发行版装配点（25 行）：按发行版向执行链注入 account（会话/恢复）与 credentials（代管路由/代管 Bearer）实现；商业模块只在此处汇编 |
 
 #### 集成服务
 
@@ -273,16 +338,16 @@ bun run generate:icons    # 生成应用图标
 
 - **`app-shell/`**：三面板布局（LeftSidebar | NavigatorPanel | MainContentPanel），侧边栏含模式切换、置顶对话、日期分组列表、流式指示器、余额显示、委派子会话树形折叠
 - **`chat/`**：聊天核心 — ChatView（消息加载/流式订阅）、ChatHeader（模型选择/上下文设置）、ChatInput（Tiptap 富文本编辑器）、ChatMessages（消息列表/自动滚动）、ParallelChatMessages（并排模式）
-- **`agent/`**：Agent 模式 — AgentView（160KB，纯展示 + 交互，IPC 监听已提升到全局）、AgentHeader（渠道/模型选择）、AgentMessages（消息列表 + 工具活动）、SDKMessageRenderer（78KB，SDK 消息渲染，含协作工具 UI）、SidePanel（67KB，右侧面板）、PermissionBanner/AskUserBanner（权限/问答请求 UI）、MentionList（@ 提及文件/工作区）、ProcessBlockGroup（工具调用分组展示）、TaskProgressCard（任务进度卡片）；工作区切换器已随工作区模型收敛移除
-- **`agent-skills/`**：Agent 技能全屏管理视图 — AgentSkillsView（35KB，Skills + MCP 管理）、SkillCard/SkillDetailSheet/McpCard/McpDetailSheet、ImportSkillDialog、useAgentSkillsData
+- **`agent/`**：Agent 模式 — AgentView（3595 行，纯展示 + 交互，IPC 监听已提升到全局）、AgentHeader（渠道/模型选择）、AgentMessages（消息列表 + 工具活动）、SDKMessageRenderer（83KB，SDK 消息渲染，含协作工具 UI）、SidePanel（67KB，右侧面板）、PermissionBanner/AskUserBanner（权限/问答请求 UI）、MentionList（@ 提及文件/工作区）、ProcessBlockGroup（工具调用分组展示）、TaskProgressCard（任务进度卡片）；工作区切换器已随工作区模型收敛移除
+- **`agent-skills/`**：Agent 技能全屏管理视图 — AgentSkillsView（982 行，Skills + MCP 管理）、SkillCard/SkillDetailSheet/McpCard/McpDetailSheet、ImportSkillDialog、useAgentSkillsData
 - **`settings/`**：设置面板（30+ 个组件） — GeneralSettings、AppearanceSettings（含经典/现代风格切换）、ChannelSettings/ChannelForm、AgentSettings、McpServerForm、AboutSettings、FeishuSettings、DingTalkSettings、WeChatSettings、PromptSettings、ToolSettings、MemorySettings、ShortcutSettings、VoiceInputSettings、ProxySettings、MigrationSettings、StorageSettings、CreditsSettings（积分与用量）、BrandManager（Logo/品牌定制）、BotHubSettings/BotDefaultSettings、UpdateDialog、ReleaseNotesViewer；含 `primitives/` 可复用表单组件（团队工作区设置页已随团队运行时移除）
 - **`file-browser/`**：文件浏览器 — FileBrowser（工作区文件树浏览）
-- **`diff/`**：Diff 与 Markdown 编辑器 — DiffView/DiffTabContent（55KB，并排 diff 展示）、PreviewPanel/PreviewTabContent（Markdown 预览）、MarkdownRichEditor/MarkdownEditorToolbar（富文本编辑）、MarkdownToc（目录导航）、PreviewFindBar（预览内搜索）、WorktreeSelector
+- **`diff/`**：Diff 与 Markdown 编辑器 — DiffView/DiffTabContent（DiffTabContent 1310 行，并排 diff 展示）、PreviewPanel/PreviewTabContent（Markdown 预览）、MarkdownRichEditor/MarkdownEditorToolbar（富文本编辑）、MarkdownToc（目录导航）、PreviewFindBar（预览内搜索）、WorktreeSelector
 - **`ai-elements/`**：AI 展示组件 — Markdown 渲染、代码块、Mermaid 图、推理折叠、上下文分割线、富文本输入
-- **`automation/`**：定时任务 UI — AutomationsListView（12KB，任务列表）、AutomationFormView（45KB，任务编辑表单）
+- **`automation/`**：定时任务 UI — AutomationsListView（347 行，任务列表）、AutomationFormView（1221 行，任务编辑表单）
 - **`auth/`**：认证 — LoginDialog、JoinWorkspaceDialog
-- **`scratch-pad/`**：草稿本 — ScratchPadView（14KB）
-- **`quick-task/`**：快速任务窗口 — QuickTaskApp（17KB）
+- **`scratch-pad/`**：草稿本 — ScratchPadView（340 行）
+- **`quick-task/`**：快速任务窗口 — QuickTaskApp（462 行）
 - **`onboarding/`**：新手引导 — OnboardingView
 - **`tutorial/`**：教程横幅 — TutorialBanner
 - **`welcome/`**：欢迎页 — WelcomeView、WelcomeEmptyState
@@ -392,8 +457,9 @@ bun run generate:icons    # 生成应用图标
     - node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**/*
     - node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/**/*
     - node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**/*
-    - "!node_modules/@proma/**"
+    - "!node_modules/@profer/**"
   ```
+  > 注：`apps/electron/electron-builder.yml` 的这条排除规则已于 2026-10-18 从 `@proma` 订正为 `@profer`；改名后旧规则不再匹配任何目录，会把 workspace symlink 一并打进包。
 - SDK 主包和同级平台子包会被复制到 `app/node_modules/@anthropic-ai/`，Node.js 的模块解析能从 `app/dist/main.cjs` 找到
 - `agent-orchestrator.ts` 中 `resolveSDKCliPath()` 解析到 SDK 主包入口后，沿 `..` 到 `@anthropic-ai/` 同级目录，再拼 `claude-agent-sdk-${platform}-${arch}/{claude|claude.exe}` 得到 binary 路径
 
@@ -482,7 +548,7 @@ node scripts/push-release.cjs X.Y.Z
 
 ## Agent SDK 集成架构
 
-基于 `@anthropic-ai/claude-agent-sdk@0.3.153` 实现 Agent 模式，与 Chat 模式并行。
+基于 `@anthropic-ai/claude-agent-sdk@0.3.201` 实现 Agent 模式，与 Chat 模式并行。
 
 ### 核心流程
 
@@ -502,7 +568,7 @@ React UI 更新
 
 ### 关键组件
 
-#### agent-orchestrator.ts（核心编排层，71KB）
+#### agent-orchestrator.ts（核心编排层，约 3860 行）
 - **并发守卫**：同一会话不允许并行请求
 - **渠道管理**：查找渠道 + API Key 解密
 - **环境构建**：环境变量 + SDK 路径解析
@@ -511,7 +577,7 @@ React UI 更新
 - **错误处理**：SDK 错误映射 + 重试逻辑
 - **自动标题**：首次对话自动生成标题
 
-#### agent-prompt-builder.ts（提示词构建，18KB）
+#### agent-prompt-builder.ts（提示词构建，348 行）
 - **系统提示词生成**：基于工作区配置
 - **动态上下文构建**：注入工作区信息
 - **内置 Agent 构建**：预定义 Agent 配置
@@ -523,7 +589,7 @@ React UI 更新
 ### 关键设计
 
 - **SDK 调用**：`sdk.query({ prompt, options: { apiKey, model, permissionMode, cwd, abortController } })`
-- **事件转换**：`convertSDKMessage()`（`@proma/shared`）将 SDK 原始消息转为统一的 `AgentEvent` 类型
+- **事件转换**：`convertSDKMessage()`（`@profer/shared`）将 SDK 原始消息转为统一的 `AgentEvent` 类型
 - **工具匹配**：`packages/shared/src/agent/tool-matching.ts` — 无状态 `ToolIndex` + `extractToolStarts` / `extractToolResults` 解析工具调用
 - **状态管理**：`applyAgentEvent()` 纯函数更新 `AgentStreamState`，支持流式增量更新
 - **全局 IPC 监听**：`useGlobalAgentListeners`（`renderer/hooks/`）在 `main.tsx` 顶层挂载，通过 `useStore()` 直接操作 atoms，永不销毁。确保页面切换（如设置页）时流式输出、权限请求不丢失
@@ -554,7 +620,7 @@ React UI 更新
 - `0.3.142`: SDK/headless 默认使用 Task 工具（`TaskCreate` / `TaskUpdate` / `TaskGet` / `TaskList`）替代已废弃的 `TodoWrite`；MCP server 默认后台连接，慢连接会在 `init` 中呈现 `pending`
 - `0.3.143`: `@anthropic-ai/sdk` 与 `@modelcontextprotocol/sdk` 改为 peerDependencies；bun/npm/pnpm 会自动安装
 
-### 共享类型（`@proma/shared`）
+### 共享类型（`@profer/shared`）
 
 - `AgentEvent`：Agent 事件（text / tool_start / tool_result / done / error）
 - `AgentSessionMeta`：会话元数据（id / title / channelId / workspaceId）
@@ -580,7 +646,7 @@ React UI 更新
 
 - ✅ **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Kimi、智谱、MiniMax、豆包、通义千问、Google、自定义端点
 - ✅ **Agent SDK 集成**：基于 Claude Agent SDK 的完整 Agent 模式
-- ✅ **飞书集成**：消息同步、任务通知、OAuth 认证（68KB 核心服务）
+- ✅ **飞书集成**：消息同步、任务通知、OAuth 认证（2555 行核心服务）
 - ✅ **工作区管理**：多工作区隔离、MCP Server 配置、Agent 技能全屏管理、团队文件管理
 - ✅ **权限系统**：工具权限检查、用户确认流程
 - ✅ **Automation 定时任务**：持久化调度、运行历史、手动运行、失败保护、飞书通知

@@ -114,10 +114,43 @@ interface BuildAssistantTurnRenderItemsOptions {
   isStreaming?: boolean
   completedToolResultIds?: Set<string>
   /**
+   * 需要始终直接显示的工具调用（例如已产出图片附件的 send_local_image）。
+   * 这些块不能跟随思考/工具过程一起自动折叠，否则结构化附件会对用户不可见。
+   */
+  pinnedToolUseIds?: Set<string>
+  /**
    * 上层是否展示 thinking 块；显式 false 时把 thinking 从可见块里剔除。
    * 缺省 true 保持旧行为（不传的调用方不受影响）。
    */
   showThinking?: boolean
+}
+
+function buildProcessAndPinnedItems<T extends IndexedContentBlock>(
+  blocks: T[],
+  pinnedToolUseIds?: Set<string>,
+): AssistantTurnRenderItem<T>[] {
+  if (!pinnedToolUseIds || pinnedToolUseIds.size === 0) {
+    return blocks.length > 0 ? [{ type: 'process-group', items: blocks }] : []
+  }
+
+  const items: AssistantTurnRenderItem<T>[] = []
+  let processItems: T[] = []
+  const flushProcessItems = (): void => {
+    if (processItems.length > 0) items.push({ type: 'process-group', items: processItems })
+    processItems = []
+  }
+
+  for (const item of blocks) {
+    const block = item.block
+    if (block.type === 'tool_use' && typeof block.id === 'string' && pinnedToolUseIds.has(block.id)) {
+      flushProcessItems()
+      items.push({ type: 'block', item })
+    } else {
+      processItems.push(item)
+    }
+  }
+  flushProcessItems()
+  return items
 }
 
 export function buildCompletedToolResultIds(turnMessages: SDKMessage[]): Set<string> {
@@ -251,11 +284,11 @@ export function buildAssistantTurnRenderItems(
     && areToolsBeforeIndexCompleted(renderBlocks, outputSplit.textStartIndex, options.completedToolResultIds)
 
   if (options.isStreaming && hasProcessBlock && !canSplitStreamingFinalOutput) {
-    return [{ type: 'process-group', items: visibleBlocks }]
+    return buildProcessAndPinnedItems(visibleBlocks, options.pinnedToolUseIds)
   }
 
   if (outputSplit === null) {
-    return [{ type: 'process-group', items: visibleBlocks }]
+    return buildProcessAndPinnedItems(visibleBlocks, options.pinnedToolUseIds)
   }
 
   const { textStartIndex, textEndIndex } = outputSplit
@@ -270,8 +303,7 @@ export function buildAssistantTurnRenderItems(
     if (item) processItems.push(item)
   }
 
-  const items: AssistantTurnRenderItem[] = []
-  if (processItems.length > 0) items.push({ type: 'process-group', items: processItems })
+  const items: AssistantTurnRenderItem[] = buildProcessAndPinnedItems(processItems, options.pinnedToolUseIds)
   for (let index = textStartIndex; index <= textEndIndex; index++) {
     const item = visibleBlocks[index]
     if (item) items.push({ type: 'block', item })

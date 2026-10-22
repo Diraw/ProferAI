@@ -10,6 +10,16 @@
  */
 export type XaiCredentialMode = 'api-key' | 'oauth'
 
+/**
+ * xAI API Key 渠道的请求协议。
+ *
+ * - `responses`：xAI 官方推荐端点，也是历史默认值。
+ * - `chat-completions`：只实现 `/chat/completions` 的第三方 Grok 中转。
+ *
+ * 订阅 OAuth 走 Pi 内置 xAI provider，不受该字段影响。
+ */
+export type XaiApiProtocol = 'responses' | 'chat-completions'
+
 // AGENT_COMPATIBLE_PROVIDERS 从能力描述符派生（运行时依赖，单向）
 import { PROVIDER_CAPABILITIES } from './provider-capability'
 
@@ -180,6 +190,18 @@ export function isChannelEnabledForRuntime(
   return modes.includes(runtime)
 }
 
+/**
+ * 该渠道是否可用于任一 Agent 内核。
+ *
+ * 渠道列表、默认 Agent 渠道派生等「有没有 Agent 能力」的场景必须用这个判据：
+ * 主推 Pi 之后，渠道是否进入 Agent 列表不能再由 Claude 内核单独决定。
+ */
+export function isChannelEnabledForAnyRuntime(
+  channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'>,
+): boolean {
+  return isChannelEnabledForRuntime(channel, 'pi') || isChannelEnabledForRuntime(channel, 'claude')
+}
+
 /** 解析 xAI 渠道的认证模式；历史渠道按密文内容兼容识别。 */
 export function resolveXaiCredentialMode(mode: XaiCredentialMode | undefined, secret: string): XaiCredentialMode {
   // 结构化 OAuth 凭据优先，避免坏配置把 refresh token 当作 API Key 发到 Chat。
@@ -187,8 +209,13 @@ export function resolveXaiCredentialMode(mode: XaiCredentialMode | undefined, se
   return mode === 'oauth' ? 'oauth' : 'api-key'
 }
 
-/** xAI API Key 模式可使用 Pi 原生 provider；订阅 OAuth 仅在显式实验开关开启时进入 Agent。 */
-/** @deprecated 语义上等价于「该渠道是否勾选了 Claude 内核」，保留供旧调用方使用。 */
+/**
+ * @deprecated 语义上等价于「该渠道是否勾选了 Claude 内核」。
+ *
+ * Claude 已不是主推内核，这个别名会把只勾选 Pi 的渠道（典型是 xAI）判成不可用。
+ * 判断「能否用于 Agent」请改用 `isChannelEnabledForAnyRuntime`；判断具体内核请用
+ * `isChannelEnabledForRuntime`。新代码不要再调用本函数。
+ */
 export function isAgentEnabledForChannel(
   channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'>,
 ): boolean {
@@ -365,6 +392,8 @@ export interface Channel {
   baseUrl: string
   /** xAI 认证模式；缺失时兼容识别历史 OAuth 渠道。 */
   credentialMode?: XaiCredentialMode
+  /** xAI API Key 渠道的请求协议；缺失时按 responses（官方推荐）处理。 */
+  apiProtocol?: XaiApiProtocol
   /** xAI Agent 实验开关；仅对 xAI 渠道生效，默认关闭。 */
   agentExperimentalEnabled?: boolean
   /** Agent 模式 Anthropic 兼容端点（为空则自动推导） */
@@ -404,6 +433,7 @@ export interface ChannelCreateInput {
   provider: ProviderType
   baseUrl: string
   credentialMode?: XaiCredentialMode
+  apiProtocol?: XaiApiProtocol
   agentExperimentalEnabled?: boolean
   agentBaseUrl?: string
   /** 该渠道允许用于哪些 Agent 内核；不传则按 provider 规则推导。 */
@@ -422,6 +452,7 @@ export interface ChannelUpdateInput {
   provider?: ProviderType
   baseUrl?: string
   credentialMode?: XaiCredentialMode
+  apiProtocol?: XaiApiProtocol
   agentExperimentalEnabled?: boolean
   agentBaseUrl?: string
   /** 该渠道允许用于哪些 Agent 内核。 */
@@ -490,6 +521,8 @@ export interface FetchModelsInput {
   baseUrl: string
   /** 明文 API Key */
   apiKey: string
+  /** xAI API Key 渠道的请求协议；不传时按 responses 处理。 */
+  apiProtocol?: XaiApiProtocol
   /** 连接测试可选：验证指定模型生成；未指定时仅检查模型目录。 */
   modelId?: string
   /** 连接测试可选：Claude 使用独立 Anthropic 端点，Pi 使用渠道原生协议。 */

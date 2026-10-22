@@ -65,7 +65,6 @@ import {
   persistCodexOAuthCredentials,
   resolveCodexOAuthCredentials,
 } from './channel-manager'
-import { getTeamAuthWithRefresh, recoverCommercialProxyAuth } from './auth-service'
 import { AgentEventBus } from './agent-event-bus'
 import { createAgentQueryPreparationPort, createAgentRunOwnershipRegistry, createAgentRunOwnershipView, createAgentRunRejectionError, createAgentStreamDrainController, readAgentStreamNext, waitForRetryDelay } from '@profer/agent-runtime'
 import type { AgentRunOwnershipRegistry, AgentRunOwnershipView, AgentRuntimeQuery, AgentRuntimeQueryPreparationPort, AgentStreamDrainState } from '@profer/agent-runtime'
@@ -94,14 +93,15 @@ import {
 import { appendGraphEvent } from './project-graph-service'
 import { injectAgentCollaborationMcpServer, registerCollaborationEventBus, stopDelegationsForParent } from './agent-collaboration-tools'
 import { setHeadlessAgentRunner, setAgentStopper } from './agent-headless-runner-registry'
-import { getAdapter, fetchTitle } from '@profer/core'
+import { getAdapter, resolveTitleBaseUrl, fetchTitleWithRetry } from '@profer/core'
+import { resolveEditionBearerToken } from '@profer/edition-contract'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { generateCodexTitle } from './adapters/pi-codex-title-generator'
-import { buildTitlePrompt, buildWindowTitlePrompt, createWindowFallbackTitle, sanitizeGeneratedTitle } from './title-generation'
+import { buildTitlePrompt, buildWindowTitlePrompt, sanitizeGeneratedTitle } from './title-generation'
 import { collectSessionTitleSources, runSessionTitleNaming } from './agent-session-title-naming'
 import type { SessionTitleNamingLogger } from './agent-session-title-naming'
-import { shouldUseCommercialBearerAuth } from './commercial-routing-policy'
+import { editionProviders } from './edition'
 import {
   appendSDKMessages,
   lockAgentSessionRuntime,
@@ -517,16 +517,21 @@ export class AgentOrchestrator {
    *
    * 使用 Provider 适配器系统，支持所有渠道。任何错误返回 null。
    */
-  async generateTitle(input: AgentGenerateTitleInput): Promise<string | null> {
+  async generateTitle(input: AgentGenerateTitleInput, options?: { onFailure?: (reason: string) => void }): Promise<string | null> {
     const { userMessage, channelId, contextMessages } = input
     // SDK 回报的模型名可能是 `deepseek-v4-pro[1m]` 这类 1M 变体：该后缀只对 Claude Agent SDK
     // 有意义，发给供应商 API 会指向不存在的模型。标题请求必须用真实模型 ID。
     const modelId = strip1MContextSuffix(input.modelId)
-    // 多轮窗口路径：概括前几轮主题，不许照抄某一条原文；单条路径保留旧 prompt。
-    const fallbackTitle = createWindowFallbackTitle(contextMessages && contextMessages.length > 0 ? contextMessages : [userMessage])
     const titlePrompt = contextMessages && contextMessages.length > 0
       ? buildWindowTitlePrompt(contextMessages)
       : buildTitlePrompt(userMessage)
+    // 失败必须返回 null 并把原因交给调用方：本地「首条消息前 20 字」兜底会伪装成
+    // 模型命名（并重新锁定标题），让用户以为重命名成功但其实没生效。
+    const fail = (reason: string): null => {
+      options?.onFailure?.(reason)
+      console.warn(`[Agent 标题生成] ${reason}`)
+      return null
+    }
     console.log('[Agent 标题生成] 开始生成标题:', {
       channelId,
       modelId,
@@ -538,14 +543,13 @@ export class AgentOrchestrator {
       const channels = listChannels()
       const channel = channels.find((c) => c.id === channelId)
       if (!channel) {
-        console.warn('[Agent 标题生成] 渠道不存在:', channelId)
-        return null
+        return fail(`渠道不存在: ${channelId}`)
       }
 
       if (channel.provider === 'xai') {
         // xAI subscription uses Pi's provider-specific OAuth transport; title generation's
         // generic channel adapter only understands API keys.
-        return null
+        return fail('xAI 订阅渠道暂不支持标题生成')
       }
 
       if (channel.provider === 'openai-codex') {
@@ -563,31 +567,31 @@ export class AgentOrchestrator {
             console.log(`[Agent 标题生成] ChatGPT OAuth 语义标题生成成功: "${title}"`)
             return title
           }
-          console.warn('[Agent 标题生成] ChatGPT OAuth 返回空标题，使用本地标题兜底')
+          console.warn('[Agent 标题生成] ChatGPT OAuth 返回空标题')
         } catch (error) {
           console.warn('[Agent 标题生成] ChatGPT OAuth 语义标题生成失败:', error)
         }
-        return fallbackTitle
+        return fail('ChatGPT OAuth 未返回可用标题')
       }
 
       let apiKey: string
       let proxyBaseUrl = ''
-      if (shouldUseCommercialBearerAuth(channel)) {
-        const auth = await getTeamAuthWithRefresh()
+      if (editionProviders.credentials.shouldUseBearerAuth(channel)) {
+        const auth = await editionProviders.account.getSession()
         if (!auth) {
-          console.warn('[Agent 标题生成] 团队账号登录已过期，使用本地标题兜底')
-          return fallbackTitle
+          return fail('团队账号登录已过期')
         }
         const proxyPath = (this.adapter.isAnthropicProxyProvider?.(channel.provider) ?? true) ? '/v1/proxy/messages' : '/v1/proxy/chat'
         proxyBaseUrl = `${auth.baseUrl}${proxyPath}`
-        apiKey = auth.proxyToken || auth.token
+        apiKey = resolveEditionBearerToken(auth)
       } else {
         apiKey = decryptApiKey(channelId)
       }
 
-      const providerAdapter = getAdapter(channel.provider)
+      const providerAdapter = getAdapter(channel.provider, channel.apiProtocol)
+      const titleBaseUrl = proxyBaseUrl || resolveTitleBaseUrl(channel.provider, channel.baseUrl, channel.apiProtocol) || channel.baseUrl
       const request = providerAdapter.buildTitleRequest({
-        baseUrl: proxyBaseUrl || channel.baseUrl,
+        baseUrl: titleBaseUrl,
         apiKey,
         modelId,
         prompt: titlePrompt,
@@ -596,24 +600,21 @@ export class AgentOrchestrator {
 
       const proxyUrl = await getEffectiveProxyUrl()
       const fetchFn = getFetchFn(proxyUrl)
-      const title = await fetchTitle(request, providerAdapter, fetchFn)
-      if (!title) {
-        console.warn('[Agent 标题生成] API 返回空标题，使用本地标题兜底')
-        return fallbackTitle
+      const title = await fetchTitleWithRetry(request, providerAdapter, fetchFn)
+      if (!title.title) {
+        return fail(title.diagnostics?.reason ?? '标题模型没有返回可用结果')
       }
 
-      const cleaned = sanitizeGeneratedTitle(title)
+      const cleaned = sanitizeGeneratedTitle(title.title)
       if (!cleaned) {
-        console.warn('[Agent 标题生成] 标题清洗后为空，使用本地标题兜底')
-        return fallbackTitle
+        return fail('标题清洗后为空')
       }
       const result = cleaned
 
       console.log(`[Agent 标题生成] 生成标题成功: "${result}"`)
       return result
     } catch (error) {
-      console.warn('[Agent 标题生成] 生成失败，使用本地标题兜底:', error)
-      return fallbackTitle
+      return fail(`生成失败: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -684,14 +685,15 @@ export class AgentOrchestrator {
       throw new Error('重新生成标题失败：当前会话没有可用于生成标题的有效用户消息')
     }
 
+    let failureReason = ''
     const title = await this.generateTitle({
       userMessage: sources[0] ?? '',
       channelId,
       modelId,
       contextMessages: sources,
-    })
+    }, { onFailure: (reason) => { failureReason = reason } })
     if (!title) {
-      throw new Error('重新生成标题失败：标题模型没有返回可用结果')
+      throw new Error(`重新生成标题失败：${failureReason || '标题模型没有返回可用结果'}`)
     }
 
     const latestMeta = this.sessionPort.getMeta(sessionId)
@@ -820,7 +822,7 @@ export class AgentOrchestrator {
           m.type === 'user' ||
           m.type === 'result' ||
           (m.type === 'system' &&
-            ['compact_boundary', 'permission_denied'].includes((m as import('@profer/shared').SDKSystemMessage).subtype ?? '')),
+            ['compact_boundary', 'permission_denied', 'compact_skipped'].includes((m as import('@profer/shared').SDKSystemMessage).subtype ?? '')),
       )
       .filter((m) => {
       // Pi partial 仅用于实时预览；即使未来调用方误传，也不能污染 JSONL 历史。
@@ -1119,6 +1121,10 @@ export class AgentOrchestrator {
         _createdAt: Date.now(),
       } as unknown as SDKMessage
       this.sessionPort.appendMessages(sessionId, [userSDKMsg])
+      // 运行中的用户输入只有本地乐观气泡是不够的：手机端（Pocket）没有这份本地状态，
+      // 只能靠事件流看到电脑端发起的指令。桌面渲染层不消费 user 文本事件、乐观气泡
+      // 按 uuid 去重，因此这里广播不会在电脑上产生重复气泡。
+      this.eventPort.emit(sessionId, { kind: 'sdk_message', message: userSDKMsg })
     }
     await callbacks.onRunStarted?.({ startedAt: streamStartedAt })
       const completeRun = (messages?: AgentMessage[], opts?: CompleteOptions): void => {
@@ -2291,7 +2297,7 @@ export class AgentOrchestrator {
         if (relayTokenRecoveryAttempted || (!runtimeCredentials.forceBearerAuth && channel.directDataPlane !== true)) return false
         relayTokenRecoveryAttempted = true
 
-        const recovered = await recoverCommercialProxyAuth()
+        const recovered = await editionProviders.account.recoverSession()
         if (!recovered) return false
 
         // 直连 canary 失败时同步一次渠道目录，将该用户切回 Relay；旧 Relay 令牌仍由服务端控制。
@@ -3055,13 +3061,15 @@ export class AgentOrchestrator {
           this.persistSDKMessages(sessionId, accumulatedMessages, Date.now() - queryStartedAt)
 
           if (!wasStoppedByUser && !capturedResultErrors?.length) {
-            await this.autoGenerateTitle(
-              sessionId,
-              input.titleSourceText ?? userMessage,
-              channelId,
-              resolvedModel,
-              callbacks,
-            )
+            // 自动命名是增强能力，不能占用终态路径：标题模型偶发慢请求/重试时，
+            // 文本早已停止而 UI 仍显示「Agent Running」。这里推迟到下一轮事件循环，
+            // 让 completeRun → owner finally → STREAM_COMPLETE 先走完；标题生成完成后
+            // 仍通过 onTitleUpdated 正常投影。
+            const titleSource = input.titleSourceText ?? userMessage
+            const titleModelId = resolvedModel
+            setImmediate(() => {
+              void this.autoGenerateTitle(sessionId, titleSource, channelId, titleModelId, callbacks)
+            })
           }
 
           try {
@@ -3845,6 +3853,8 @@ export class AgentOrchestrator {
       } as unknown as SDKMessage
       try {
         this.sessionPort.appendMessages(sessionId, [persistMsg])
+        // 追加消息同样要进事件流：手机端要靠它看到电脑端在运行中补发的指令。
+        this.eventPort.emit(sessionId, { kind: 'sdk_message', message: persistMsg })
       } catch (persistError) {
         // 注入已成功，uuid 必须保留（幂等短路），否则重试会重复注入；JSONL 缺口由会话文件后续 append 兜底。
         console.error(`[Agent 编排] 已注入消息持久化失败 (uuid=${uuid}, sessionId=${sessionId}):`, persistError)

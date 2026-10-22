@@ -1,65 +1,65 @@
 ---
 name: lark-delivery
 description: >
-  飞书/Lark 云端交付流程。用户要求把长报告、方案、会议纪要、项目文档、表格、多维表格或日程写入/更新飞书时触发；
-  也适用于“同步到飞书”“生成飞书文档”“更新 Base/多维表格”“安排日程”“查我的日历”“给我飞书链接”等表达。先用官方 Lark CLI/MCP 的 --help 或工具发现确认当前可用命令，再查询目标、执行最小写入，并只回传真实生成的 URL。
+  Lark cloud-delivery workflow. Trigger when the user asks to write or update long reports, proposals, meeting minutes, project documents, spreadsheets, Base tables, or calendar events in Lark;
+  also applies to requests such as "sync to Lark," "create a Lark document," "update Base/multidimensional tables," "schedule an event," "check my calendar," or "give me a Lark link." First use the official Lark CLI/MCP `--help` or tool discovery to confirm available commands, then query the target, make the smallest required write, and return only an actual generated URL.
 group: profer
-version: "1.1.0"
+version: "1.1.1"
 ---
 
 # Lark Delivery
 
-你负责把用户明确要求沉淀到飞书/Lark 的内容可靠交付到云端。使用 Profer 已配置的官方 Lark CLI 或官方 Lark OpenAPI MCP；不要重复实现飞书 OpenAPI，也不要把 Bot 消息桥接当成用户云盘权限。
+You reliably deliver content that the user explicitly wants to preserve in Lark to the cloud. Use the official Lark CLI or official Lark OpenAPI MCP configured in Profer. Do not reimplement the Lark OpenAPI, and do not treat the Bot message bridge as access to the user's cloud drive.
 
-## 身份与凭据边界
+## Identity and Credential Boundaries
 
-- 飞书 Bot 仅用于收发消息、附件、流式卡片和把最终摘要/链接回复到聊天；它不等于用户云文档权限。
-- 云文档、Base/多维表格、Sheets、日历事件和忙闲信息等资源必须使用用户 OAuth 或已配置的官方 MCP 身份。
-- 绝不读取、要求用户在对话中粘贴、复制到日志/Skill/文档或最终回复的 token、refresh token、App Secret、Cookie、Authorization header。
-- 设置页或 CLI 诊断显示“未登录”“需重新授权”时，明确提示用户在 Profer 设置的「飞书云端能力」中登录；不要伪造可用状态。
+- The Lark Bot is only for sending and receiving messages, attachments, streaming cards, and replying to chat with the final summary/link; it does not grant the user's cloud-document permissions.
+- Resources such as cloud documents, Base/multidimensional tables, Sheets, calendar events, and free/busy information must use the user's OAuth identity or a configured official MCP identity.
+- Never read, ask the user to paste into chat, copy into logs/Skills/documents, or include in the final response any token, refresh token, App Secret, Cookie, or Authorization header.
+- If the settings page or CLI diagnostics display "not logged in" or "reauthorization required," clearly tell the user to log in under "Lark cloud capabilities" in Profer settings; do not pretend access is available.
 
-## 交付决策
+## Delivery Decisions
 
-1. **短结果**（通常少于约 1 屏、用户未要求归档）：直接在当前聊天回复，不额外创建云文档。
-2. **长结果或需协作留档**（报告、方案、调研、会议纪要、教程、任务清单）：优先创建或更新飞书云文档，并在聊天中给简短摘要与真实链接。
-3. **结构化数据**（多行记录、字段明确、需要筛选、状态跟踪、多人持续维护）：优先 Base/多维表格；只有用户明确偏好电子表格或数据天然是二维计算表时才用 Sheets。
-4. **已有目标链接/名称**：先查询、解析并确认目标，再更新；不得因为查找失败而新建同名重复资源。
+1. **Short results** (usually less than about one screen, with no user request to archive): reply directly in the current chat without creating an extra cloud document.
+2. **Long results or content that needs a collaborative record** (reports, proposals, research, meeting minutes, tutorials, task lists): preferably create or update a Lark cloud document, then provide a brief summary and the real link in chat.
+3. **Structured data** (multiple records, explicit fields, filtering, status tracking, ongoing collaboration): prefer Base/multidimensional tables; use Sheets only when the user explicitly prefers a spreadsheet or the data is inherently a two-dimensional calculation table.
+4. **Existing target link/name**: query, resolve, and confirm the target first, then update it; do not create a same-named duplicate resource because a lookup failed.
 
-## 操作流程
+## Operating Procedure
 
-### 1. 先发现能力，不猜命令
+### 1. Discover Capabilities First; Do Not Guess Commands
 
-- 优先使用本会话已发现的官方 Lark MCP 工具。
-- 使用 CLI 时先运行 `lark-cli --help`，再运行目标子命令的 `--help`；CLI 版本不同，命令、参数和输出格式可能变化。
-- 仅使用帮助中确认存在的命令和参数；不要依据记忆或网上片段拼接写入命令。
-- 写入前确认用户 OAuth 状态。命令失败时保留可交付的本地 Markdown/CSV/JSON 结果，不要假装已写入云端。
+- Prefer official Lark MCP tools already discovered in this session.
+- When using the CLI, first run `lark-cli --help`, then run `--help` for the target subcommand. Commands, parameters, and output formats may vary between CLI versions.
+- Use only commands and parameters confirmed by the help output; do not assemble write commands based on memory or snippets from the web.
+- Confirm the user's OAuth status before writing. If a command fails, preserve a deliverable local Markdown/CSV/JSON result; do not pretend it was written to the cloud.
 
-### 2. 查询后最小化写入
+### 2. Query First, Then Minimize Writes
 
-- 对已有文档/Base/Sheet：先读取或查询标题、URL、ID、当前内容/字段，并确认匹配用户目标。
-- 对日历操作：先查询主日历和目标时间段；创建或更新事件前确认时区、开始/结束时间、重复规则和参与者，避免重复预约。
-- 更新时只修改用户请求的段落、记录或字段；保留无关内容。
-- 对新资源：使用清晰标题、结构化正文/字段，避免仅把聊天原文无格式粘贴进去。
-- 对 Base 先确认 table 与字段；必要时只新增缺失字段。批量写入前核对记录数，避免重复创建。
+- For an existing document/Base/Sheet: first read or query its title, URL, ID, current content/fields, and confirm it matches the user's target.
+- For calendar operations: first query the primary calendar and target time range. Before creating or updating an event, confirm the time zone, start/end time, recurrence rules, and participants to avoid duplicate bookings.
+- When updating, modify only the paragraphs, records, or fields requested by the user; preserve unrelated content.
+- For new resources: use a clear title and structured body/fields rather than pasting chat text without formatting.
+- For Base, confirm the table and fields first; add only missing fields if needed. Before bulk writes, verify the record count to avoid duplicates.
 
-### 3. 验证与回传
+### 3. Verify and Return
 
-- 成功后从 **实际 CLI/MCP 响应** 提取资源 URL；可额外读取一次来确认资源确实可访问。
-- 不存在真实 URL 时，明确写“已执行但未取得可验证链接”，并给出可恢复下一步；绝不编造 `feishu.cn`/`larksuite.com` URL。
-- 长结果的最终消息格式：一句摘要 + URL；短结果继续直接回复。
-- 飞书 Bot 通道中的最终回复同样保留真实 URL，供现有 Bridge 原样回写。
+- On success, extract the resource URL from the **actual CLI/MCP response**; optionally read it once more to confirm that the resource is accessible.
+- If there is no actual URL, clearly write "completed, but no verifiable link was obtained" and give a recoverable next step; never fabricate a `feishu.cn`/`larksuite.com` URL.
+- Final-message format for long results: one-sentence summary + URL; continue replying directly for short results.
+- The final reply in the Lark Bot channel must also retain the real URL so the existing Bridge can write it back verbatim.
 
-## 失败与恢复
+## Failure and Recovery
 
-- 未登录/授权过期：说明需要在设置页重新授权，不尝试绕过 OAuth。
-- 权限不足：说明目标操作需要的资源权限或范围；不要反复重试写入。
-- 网络、CLI/MCP 或远程写入失败：保留本地内容，报告已完成的本地部分及失败步骤。
-- 云端写入成功但消息回传失败：不要再创建资源；在本地结果中保存真实 URL，等待可恢复回传。
-- 日历事件写入成功但未返回可验证事件 ID/链接时，不得声称已完成预约；保留请求参数和错误信息供重试前核对。
+- Not logged in / authorization expired: explain that authorization must be renewed in settings; do not try to bypass OAuth.
+- Insufficient permissions: explain the resource permission or scope required for the target operation; do not repeatedly retry the write.
+- Network, CLI/MCP, or remote-write failure: preserve the local content and report which local parts are complete and which step failed.
+- If the cloud write succeeded but message delivery failed: do not create the resource again; save the real URL in the local result and wait for a recoverable delivery path.
+- If a calendar event was written successfully but no verifiable event ID/link was returned, do not claim the booking is complete; retain the request parameters and error information for review before retrying.
 
-## Artifact 约定
+## Artifact Convention
 
-成功将长结果交付到飞书时，在最终结果中附带以下机器可识别标记；其中 URL 必须是实际返回值，且不得包含敏感参数：
+After successfully delivering a long result to Lark, include the following machine-readable marker in the final result. The URL must be the actual returned value and must not contain sensitive parameters:
 
 ```text
 <profer_artifacts>
@@ -69,4 +69,4 @@ version: "1.1.0"
 </profer_artifacts>
 ```
 
-如果没有成功写入云端，不输出该标记。
+Do not output this marker if the cloud write did not succeed.

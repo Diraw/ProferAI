@@ -180,14 +180,22 @@ Profer is a Bun workspace monorepo:
 ```text
 profer/
 ├── packages/
-│   ├── shared/         # Shared types, IPC contracts, config
-│   ├── core/           # Provider adapters, SSE, syntax highlighting
-│   ├── project-core/   # Project / workspace domain
-│   ├── session-core/   # Session domain
-│   └── ui/             # Shared React components
+│   ├── shared/                # Shared types, IPC contracts, config, utils
+│   ├── core/                  # Provider adapters, SSE, syntax highlighting
+│   ├── ui/                    # Shared React component library
+│   ├── session-core/          # Headless session read / group / search / render
+│   ├── session-store/         # Node-only session persistence: index, messages, events, workspace blobs
+│   ├── project-core/          # Headless project orchestration: graph build, state replay, query
+│   ├── agent-runtime/         # Host-independent agent execution contracts and runtime lifecycle
+│   ├── agent-provider-claude/ # Claude Agent SDK provider: query stream, permissions, background tasks
+│   ├── agent-provider-pi/     # Pi Agent SDK provider: adapter, message conversion, Pi tools
+│   ├── agent-fabric/          # Agent Node / Task Graph / Capability / Policy contracts
+│   ├── edition-contract/      # Edition capability contract: account session, managed credentials, edition id
+│   ├── office-engine/         # DOCX / PPTX / XLSX dual-plane layout parsing engine
+│   └── plugin-api/            # Public contracts for third-party plugins
 └── apps/
-    ├── electron/       # Electron desktop app
-    └── cli/            # CLI tools
+    ├── electron/              # Electron desktop app
+    └── cli/                   # CLI: progressive session reading (list / info / outline / search / export)
 ```
 
 ### Setup

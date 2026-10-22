@@ -1,102 +1,102 @@
 ---
 name: session-cleaner
-description: 把 Profer 会话 JSONL 清洗为干净可读的 Markdown 对话，并支持对超长会话的渐进式读取（概览 / 大纲 / 搜索 / 按 turn 区间导出），避免一次性全量读撑爆上下文。当用户提到"清洗会话""解析对话文件""提取对话上下文""过滤流式冗余""导出会话 Markdown""把会话转成对话""整理 agent-sessions""看某个会话讲了什么"时使用此技能。
-version: 2.0.1
+description: Clean Profer session JSONL into readable Markdown conversations and support progressive reading of oversized sessions (overview / outline / search / export by turn range), avoiding context exhaustion from loading everything at once. Use this skill when the user mentions "clean a session", "parse a session file", "extract session context", "filter streaming noise", "export a session to Markdown", "convert a session into a conversation", "organize agent-sessions", or "see what a session was about".
+version: 2.0.2
 license: AGPL-3.0-only
 ---
 
 # Session Cleaner
 
-把 `~/.profer/agent-sessions/<id>.jsonl` 里被流式快照污染过的会话，清洗为干净 Markdown 对话。
+Clean sessions in `~/.profer/agent-sessions/<id>.jsonl` that have been polluted by streaming snapshots into clean Markdown conversations.
 
-本技能是 `profer` CLI 的**薄封装**：所有解析 / 快照去重 / 渲染逻辑都在 `@profer/session-core`（仓库内唯一真源），由 `profer session` 命令暴露。技能本身不解析 JSONL，只负责教你按正确的顺序调用 CLI。
+This skill is a **thin wrapper** around the `profer` CLI: all parsing, snapshot deduplication, and rendering logic lives in `@profer/session-core` (the repository's single source of truth) and is exposed by the `profer session` command. The skill itself does not parse JSONL; it only teaches you to invoke the CLI in the correct order.
 
-> 历史：v1 曾自带一份 Python parser（独立重抄会话格式，会随内部格式漂移）。v2 起改为调用仓库内的 `profer` CLI，格式知识只存一处。
+> History: v1 included a Python parser (an independently duplicated copy of the session format that drifted as the internal format changed). Starting with v2, it calls the `profer` CLI in the repository so format knowledge is stored in one place.
 
-## 为什么要渐进式读取
+## Why reading progressively matters
 
-会话 JSONL 可能非常大（实测单个会话原始文件可达 50MB）。直接全量清洗再读进上下文会瞬间撑爆 token。正确做法是**先看结构、再定位、最后只取需要的片段**：
+Session JSONL may be very large (a single raw session file has been observed at 50MB). Cleaning the entire file and loading it into context at once can exhaust the token budget immediately. The correct approach is to **inspect the structure first, locate the relevant area next, and take only the required fragment last**:
 
-1. `profer session info <id>` —— 看体量：turn 数、估算 tokens、字节数。先判断"能不能整篇读"。
-2. `profer session outline <id>` —— 看地图：每个 turn 一行（角色 + 预览 + 工具概览 + tokens）。定位感兴趣的 turn 下标。
-3. `profer session search <关键词> <id>` —— 找内容：返回命中的 turn 下标 + 片段。
-4. `profer session export <id> --turns A-B` —— 只导出需要的 turn 区间到上下文。
+1. `profer session info <id>` — inspect size: turn count, estimated tokens, and byte count. Decide first whether the whole session can be read.
+2. `profer session outline <id>` — inspect the map: one line per turn (role + preview + tool summary + tokens). Locate the turn indexes of interest.
+3. `profer session search <keyword> <id>` — find content: returns matching turn indexes + snippets.
+4. `profer session export <id> --turns A-B` — export only the required turn range into context.
 
-**只有在 `info` 显示体量很小（比如估算 tokens < 几千）时，才直接 `export <id>` 全量读。** CLI 内置护栏：未指定 turn 区间且输出超过 50KB 时会拒绝直接输出，改为落盘并提示你用 `--turns`。
+**Only when `info` shows a small size (for example, estimated tokens < a few thousand) should you directly run `export <id>` to read the entire session.** The CLI has a built-in guard: when no turn range is specified and output exceeds 50KB, it refuses to print directly, writes the result to disk, and prompts you to use `--turns`.
 
-## 命令速查
+## Command quick reference
 
 ```bash
-# 列出会话（按更新时间降序）
+# List sessions (descending by update time)
 profer session list [--limit N] [--workspace W]
 
-# 体量/结构概览——决定怎么读之前先跑这个
+# Size/structure overview — run this before deciding how to read
 profer session info <id|path>
 
-# turn 级地图：每 turn 一行
+# Turn-level map: one line per turn
 profer session outline <id|path> [--offset K] [--limit N]
 
-# 会话内搜索关键词，返回命中 turn 下标 + 片段
-profer session search <关键词> <id|path> [--context N] [--limit N] [--case-sensitive]
+# Search a keyword within a session; returns matching turn indexes + snippets
+profer session search <keyword> <id|path> [--context N] [--limit N] [--case-sensitive]
 
-# 导出干净 Markdown（窗口化）
-profer session export <id|path> --turns 5-12       # 只导出第 5~12 个 turn
-profer session export <id|path> --head 4           # 前 4 个 turn
-profer session export <id|path> --tail 4           # 后 4 个 turn
-profer session export <id|path> --out cleaned/x.md # 落盘存档（不受护栏限制）
-profer session export <id|path> --stdout           # 强制全量输出（绕过护栏，谨慎）
+# Export clean Markdown (windowed)
+profer session export <id|path> --turns 5-12       # Export only turns 5-12
+profer session export <id|path> --head 4           # First 4 turns
+profer session export <id|path> --tail 4           # Last 4 turns
+profer session export <id|path> --out cleaned/x.md # Save an archive (not subject to the guard)
+profer session export <id|path> --stdout           # Force full output (use with caution; bypasses the guard)
 
-# 所有命令都支持 --json 输出机器可读结果
+# All commands support --json for machine-readable results
 profer session info <id> --json
 ```
 
-## 典型工作流
+## Typical workflow
 
-**场景：用户问"上一个会话我们讨论了什么 X"**
+**Scenario: the user asks "What did we discuss about X in the previous session?"**
 
 ```bash
-# 1. 找到会话
+# 1. Find the session
 profer session list --limit 5
-# 2. 看体量（假设很大）
+# 2. Inspect size (assume it is large)
 profer session info <id>
-# 3. 搜关键词定位
+# 3. Search for the keyword
 profer session search "X" <id>
-#    → 命中 #7 #12
-# 4. 只导出命中邻域
+#    → matches #7 #12
+# 4. Export the neighborhood around matches only
 profer session export <id> --turns 6-13
 ```
 
-**场景：用户要把某个小会话整篇转成 Markdown 存档**
+**Scenario: the user wants to archive a small session as a complete Markdown file**
 
 ```bash
-profer session info <id>          # 确认体量不大
+profer session info <id>          # Confirm it is small
 profer session export <id> --out cleaned/<id>.clean.md
 ```
 
-## 输出形态
+## Output shape
 
-清洗后的 Markdown 按角色分段（`## 用户` / `## 助手`），工具调用压缩为单行 `> [工具: name args]`（连续相同调用折叠为 `×N`），thinking 与原始 tool_result 全部丢弃：
+Cleaned Markdown is divided into sections by role (`## User` / `## Assistant`). Tool calls are compressed into single lines such as `> [Tool: name args]` (consecutive identical calls are folded as `×N`), while thinking and raw tool results are discarded:
 
 ```markdown
-## 用户
+## User
 
-帮我配置机器人图标...
+Help me configure a robot icon...
 
-## 助手
+## Assistant
 
-我来先探索代码库。
+I will explore the codebase first.
 
-> [工具: Read file_path=/a/b.ts]
-> [工具: Bash command=ls assets ×3]
+> [Tool: Read file_path=/a/b.ts]
+> [Tool: Bash command=ls assets ×3]
 ```
 
-## CLI 定位
+## CLI location
 
-- **打包版（生产）**：`profer` 二进制随桌面 App 分发，应在 PATH 上或由运行时注入（见 PR4）。优先直接 `profer session ...`。
-- **开发/源码环境**：若 `profer` 不在 PATH，用 `bun <repo>/apps/cli/src/index.ts session ...` 直接跑源码。
-- **配置目录**：CLI 默认读 `~/.profer`；开发模式数据在 `~/.profer-dev`，加 `--dev` 或设 `PROFER_DEV=1`。
+- **Packaged build (production)**: the `profer` binary is distributed with the desktop App and should be on PATH or injected by the runtime (see PR4). Prefer calling `profer session ...` directly.
+- **Development/source environment**: if `profer` is not on PATH, run the source directly with `bun <repo>/apps/cli/src/index.ts session ...`.
+- **Configuration directory**: the CLI reads `~/.profer` by default; development-mode data is in `~/.profer-dev`, so add `--dev` or set `PROFER_DEV=1`.
 
-## 实现要点（供维护者）
+## Implementation notes (for maintainers)
 
-- 解析 / 快照去重 / 渲染全部在 `@profer/session-core`，CLI 只是命令路由。修 bug 或改格式去改 core，不要在本技能里加解析逻辑。
-- 格式细节（流式快照碎片化、message.id 合并、旧扁平格式归一）见 `references/cli-usage.md` 与 core 包源码。
+- Parsing, snapshot deduplication, and rendering all live in `@profer/session-core`; the CLI only routes commands. Fix bugs or change formats in core, not by adding parsing logic to this skill.
+- Format details (streaming snapshot fragmentation, `message.id` merging, and normalization of legacy flat formats) are documented in `references/cli-usage.md` and the core package source.

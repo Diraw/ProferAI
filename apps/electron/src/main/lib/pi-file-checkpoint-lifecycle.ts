@@ -5,8 +5,7 @@
  * - 旧路径把检查点生命周期写在 `agent-orchestrator.ts` 里：每轮开始前
  *   `createPiFileCheckpoint(sessionId, agentCwd, getPiCheckpointsDir())`（try/catch，失败只告警），
  *   然后在 `onPiEntryBindings(bindings)` 回调里把本轮检查点绑定到 assistant entry、顺带 prune/keep。
- * - 新 runtime 路径（coordinator）**没有**任何 checkpoint 概念（可执行断言见
- *   `runtime-migration-parity/resume-callbacks.parity.ts`），
+ * - 新 runtime 路径（coordinator）**没有**任何 checkpoint 概念，
  *   `agent-runtime-native-session-persistence.ts` 只提供 `resolveCheckpointPatch` 的**注入位**。
  *
  * 本模块就是那个「宿主持有并注入」的实现：把创建 / 绑定 / 回收 / keep 规则从旧编排器内部

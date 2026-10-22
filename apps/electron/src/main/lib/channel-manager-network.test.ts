@@ -118,8 +118,19 @@ describe('F14：请求超时与测试能力边界', () => {
       responder = async () => json(provider === 'google' ? { candidates: [{ content: { parts: [{ text: 'fixture' }] } }] } : provider === 'openai' ? { choices: [{ message: { content: 'fixture' } }] } : { output: [{ type: 'message', content: [{ text: 'fixture' }] }] })
       expect((await testChannelDirect(input(provider, { modelId: 'manual-fixture' }))).success).toBe(true)
     }
-    expect(requests.map(({ url }) => new URL(url).pathname)).toEqual(['/v1/chat/completions', '/v1/responses', '/v1/v1beta/models/manual-fixture:generateContent'])
+    expect(requests.map(({ url }) => new URL(url).pathname)).toEqual(['/v1/chat/completions', '/v1/responses', '/v1beta/models/manual-fixture:generateContent'])
     expect(requests.every(({ init }) => init.method === 'POST' && init.signal instanceof AbortSignal)).toBe(true)
+  })
+
+  test('Given xAI 渠道选择 Chat Completions When 测试 Then 请求 /chat/completions 而非 /responses', async () => {
+    responder = async () => json({ choices: [{ message: { content: 'fixture' } }] })
+    expect((await testChannelDirect(input('xai', { modelId: 'grok-4.3', apiProtocol: 'chat-completions' }))).success).toBe(true)
+    expect(new URL(requests[0]!.url).pathname).toBe('/v1/chat/completions')
+
+    requests.length = 0
+    responder = async () => json({ output: [{ type: 'message', content: [{ text: 'fixture' }] }] })
+    expect((await testChannelDirect(input('xai', { modelId: 'grok-4.3' }))).success).toBe(true)
+    expect(new URL(requests[0]!.url).pathname).toBe('/v1/responses')
   })
 
   test('Given Pi/Claude 双端点 When 指定 runtime Then 分别检查对应协议且明确标注 Claude', async () => {
@@ -173,7 +184,7 @@ describe('F15：严格模型目录与完整分页', () => {
       responder = async () => json(payload)
       expect((await fetchModels(input('ollama'))).success).toBe(false)
     }
-    for (const item of [{ name: 'models/' }, { name: 'fixture' }, { name: 'models/x', displayName: 5 },
+    for (const item of [{ name: 'models/' }, { name: '' }, { name: ' ' }, { name: 'models/x', displayName: 5 },
       { name: 'models/x', supportedGenerationMethods: 'generateContent' }]) {
       responder = async () => json({ models: [item] })
       expect((await fetchModels(input('google'))).success).toBe(false)
@@ -214,6 +225,51 @@ describe('F15：严格模型目录与完整分页', () => {
     expect(new URL(requests[1]!.url).searchParams.get('key')).toBe('fixture&key')
     expect(new URL(requests[1]!.url).searchParams.get('route')).toBe('fixture')
     expect(requests[1]!.init.signal).toBe(requests[0]!.init.signal)
+  })
+
+  test('Given 第三方 Gemini 网关简化目录 When 发现 Then 接受裸模型ID与缺失能力声明', async () => {
+    responder = async () => json({
+      models: [
+        { name: 'gemini-3.7-flash', displayName: 'gemini-3.7-flash' },
+        { name: 'gemini-3.1-pro-preview', supportedGenerationMethods: null },
+        { name: 'models/gemini-official', supportedGenerationMethods: ['generateContent'] },
+        { name: 'text-embedding', supportedGenerationMethods: ['embedContent'] },
+        { name: 'gemini-null-fields', displayName: null, supportedGenerationMethods: null },
+      ],
+      // 网关把“无下一页”写成 null，不能当成缺失游标的损坏分页。
+      nextPageToken: null,
+    })
+    const result = await fetchModels(input('google', { baseUrl: 'https://fixture.invalid' }))
+    expect(result.success).toBe(true)
+    expect(result.models.map((model) => model.id)).toEqual([
+      'gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-official', 'gemini-null-fields',
+    ])
+    expect(new URL(requests[0]!.url).pathname).toBe('/v1beta/models')
+    // null 游标不得触发第二页请求。
+    expect(requests).toHaveLength(1)
+  })
+
+  test('Given 目录校验失败 When 发现/测试 Then 透出具体原因且不泄Key', async () => {
+    spyOn(console, 'error').mockImplementation(() => {})
+    responder = async () => json({ models: [{ name: 'models/x', supportedGenerationMethods: 'generateContent' }] })
+    expect((await fetchModels(input('google'))).message).toContain('Google 模型生成能力结构无效')
+    expect((await testChannelDirect(input('google'))).message).toContain('Google 模型生成能力结构无效')
+    responder = async () => { throw new Error('upstream key=fixture-key rejected') }
+    const message = (await fetchModels(input('google'))).message
+    expect(message).toContain('key=***')
+    expect(message).not.toContain('fixture-key')
+  })
+
+  test('Given Google 端点误填 /v1 When 目录/生成 Then 统一剥到原生 /v1beta', async () => {
+    responder = async ({ url }) => new URL(url).pathname.endsWith('/models')
+      ? json({ models: [{ name: 'gemini-fixture', supportedGenerationMethods: null }] })
+      : json({ candidates: [{ content: { parts: [{ text: 'fixture' }] } }] })
+    const fixture = input('google', { baseUrl: 'https://fixture.invalid/v1/?route=fixture#anchor' })
+    expect((await fetchModels(fixture)).success).toBe(true)
+    expect(new URL(requests[0]!.url).pathname).toBe('/v1beta/models')
+    expect(new URL(requests[0]!.url).searchParams.get('route')).toBe('fixture')
+    expect((await testChannelDirect({ ...fixture, modelId: 'gemini-fixture' })).success).toBe(true)
+    expect(new URL(requests[1]!.url).pathname).toBe('/v1beta/models/gemini-fixture:generateContent')
   })
 
   test('Given 缺失/循环游标、第二页错误、未知 OpenAI 分页 When 发现 Then 整体失败', async () => {

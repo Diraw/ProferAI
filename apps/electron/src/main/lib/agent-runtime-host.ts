@@ -17,6 +17,8 @@ import type {
   ProcessRegistrationPort,
 } from '@profer/agent-runtime'
 import type { AgentRuntime, AgentSessionMeta, AgentSendInput, SDKMessage, AgentStreamPayload, ProferPermissionMode } from '@profer/shared'
+import type { SessionStore } from '@profer/session-store'
+import { createElectronSessionStore } from './session-store-host'
 import { appendSDKMessages, getAgentSessionMessages, getAgentSessionMeta, getAgentSessionSDKMessages, updateAgentSessionMeta, lockAgentSessionRuntime } from './agent-session-manager'
 import { resolveRuntimeCredentials } from './agent-runtime-credentials'
 import { getChannelById } from './channel-manager'
@@ -832,12 +834,15 @@ export function createElectronAgentRuntimeQuery(input: AgentSendInput, options: 
 export interface ElectronAgentHost {
   ports: AgentRuntimePorts
   sessions: SessionPort
+  sessionStore: SessionStore
   credentials: CredentialPort
   resources: ResourcePort
 }
 
 export function createElectronAgentHost(options: ElectronAgentHostOptions = {}): ElectronAgentHost {
   const sessions = createElectronSessionPort()
+  const sessionStore = createElectronSessionStore()
+
   const credentials = createElectronCredentialPort()
   const events = options.eventBus ? createElectronEventBusPort(options.eventBus) : undefined
   // 预览端口只构造一次：它既是 runtime 的 ports.preview，也是产品预览能力（agent-preview）的资源。
@@ -860,6 +865,7 @@ export function createElectronAgentHost(options: ElectronAgentHostOptions = {}):
   const permissions = createElectronPermissionPort(options.permission)
   return {
     sessions,
+    sessionStore,
     credentials,
     resources,
     ports: {

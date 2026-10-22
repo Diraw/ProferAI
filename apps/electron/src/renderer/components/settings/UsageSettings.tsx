@@ -127,6 +127,7 @@ export function UsageSettings(): React.ReactElement {
     && compactThresholdDraftNumber > 0
     && viewportHeight < compactThresholdDraftNumber
   const [archiveAfterDays, setArchiveAfterDays] = React.useState<number>(7)
+  const [archiveKeepRecent, setArchiveKeepRecent] = React.useState<number>(3)
   const [settingsLoading, setSettingsLoading] = React.useState(true)
   const [settingsError, setSettingsError] = React.useState<string | null>(null)
   const [compactErrors, setCompactErrors] = React.useState<Partial<Record<keyof ComposerCompactModeSettings, string>>>({})
@@ -255,6 +256,7 @@ export function UsageSettings(): React.ReactElement {
     try {
       const settings = await window.electronAPI.getSettings()
       setArchiveAfterDays(settings.archiveAfterDays ?? 7)
+      setArchiveKeepRecent(settings.archiveKeepRecentPerWorkspace ?? 3)
       setUserMessagePosition(settings.userMessagePosition === 'left' ? 'left' : 'right')
       setPreviewOpenMode(settings.previewModePreference === 'split' ? 'split' : 'tab')
       setCompactViewportHeightDraft(String(normalizeCompactViewportHeight(settings.inputCompactViewportHeight)))
@@ -351,6 +353,25 @@ export function UsageSettings(): React.ReactElement {
     } catch (error) {
       console.error('[使用偏好] 更新归档天数失败:', error)
       toast.error('自动归档设置保存失败，请重试')
+    } finally {
+      setArchiveSaving(false)
+    }
+  }
+
+  /** 更新每个工作区的保留会话数 */
+  const handleArchiveKeepRecentChange = async (value: string): Promise<void> => {
+    if (settingsLoading || settingsError || archiveSaving) return
+    const keep = parseInt(value, 10)
+    if (![0, 1, 3, 5, 10].includes(keep)) return
+    const previous = archiveKeepRecent
+    setArchiveSaving(true)
+    setArchiveKeepRecent(keep)
+    try {
+      await window.electronAPI.updateSettings({ archiveKeepRecentPerWorkspace: keep })
+    } catch (error) {
+      console.error('[使用偏好] 更新保留会话数失败:', error)
+      setArchiveKeepRecent(previous)
+      toast.error('保留会话数保存失败，请重试')
     } finally {
       setArchiveSaving(false)
     }
@@ -472,7 +493,7 @@ export function UsageSettings(): React.ReactElement {
         <SettingsCard>
           <SettingsRow
             label="自动归档"
-            description="超过指定天数未更新的对话将自动归档（置顶对话除外）"
+            description="超过指定天数未更新的会话将从列表里收纳起来（置顶、进行中、有未完成任务的除外）。归档只改变显示与排序，不释放磁盘空间；需要回收请到「数据管理 → 存储用量」。"
           >
             <Select disabled={settingsLoading || Boolean(settingsError) || archiveSaving} value={String(archiveAfterDays)} onValueChange={handleArchiveDaysChange}>
               <SelectTrigger aria-label="自动归档" className="w-[120px] h-8 text-[13px]">
@@ -484,6 +505,23 @@ export function UsageSettings(): React.ReactElement {
                 <SelectItem value="14">14 天</SelectItem>
                 <SelectItem value="30">30 天</SelectItem>
                 <SelectItem value="60">60 天</SelectItem>
+              </SelectContent>
+            </Select>
+          </SettingsRow>
+          <SettingsRow
+            label="每个工作区保留"
+            description="按最后活跃时间保留最近若干个会话，这些会话即使超时也不会自动归档；定时任务、委派子会话不占名额"
+          >
+            <Select disabled={settingsLoading || Boolean(settingsError) || archiveSaving} value={String(archiveKeepRecent)} onValueChange={handleArchiveKeepRecentChange}>
+              <SelectTrigger aria-label="每个工作区保留会话数" className="w-[120px] h-8 text-[13px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">不保留</SelectItem>
+                <SelectItem value="1">1 个</SelectItem>
+                <SelectItem value="3">3 个</SelectItem>
+                <SelectItem value="5">5 个</SelectItem>
+                <SelectItem value="10">10 个</SelectItem>
               </SelectContent>
             </Select>
           </SettingsRow>

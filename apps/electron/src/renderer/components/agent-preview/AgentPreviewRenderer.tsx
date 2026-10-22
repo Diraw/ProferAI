@@ -156,7 +156,8 @@ function AgentPreviewApp(): React.ReactElement {
             await preview.viewer.goToSheet(page - 1)
             await settleViewer()
           }
-          images.push({ data: await window.agentPreviewAPI!.capture(task.id), mediaType: 'image/png', page })
+          const capture = await window.agentPreviewAPI!.capture(task.id)
+          images.push({ data: capture.data, mediaType: capture.mediaType, page })
         }
         const warnings: string[] = []
         if (task.scope === 'overview' && preview.pageCount > pages.length) warnings.push(`概览仅包含前 ${pages.length} 页（共 ${preview.pageCount} 页）；可用 scope=all 或 scope=page 继续检查。`)
