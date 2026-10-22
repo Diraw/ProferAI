@@ -237,10 +237,13 @@ function isAgentEligibleChannel(channel: Pick<Channel, 'provider' | 'enabled' | 
 }
 
 /**
- * 模型行上的「1M」勾选。
+ * 模型行上的「1M 上下文」开关。
  *
  * 显示的是**生效结果**：自动判定的模型（如已验证的 DeepSeek V4）也会显示为开启。
  * 实线边 = 自动判定，虚线边 = 用户手动强开 / 强关；点击写入显式偏好。
+ *
+ * 可辨识性要求：带文字标签和状态圆点，开启/关闭在配色与圆点填充上都有区别，
+ * 避免只靠一个 10px 的「1M」小字让用户看不出这是可点的开关。
  */
 function Model1MToggle({
   model,
@@ -257,20 +260,29 @@ function Model1MToggle({
     <button
       type="button"
       aria-pressed={state.enabled}
+      aria-label={`1M 上下文（${state.enabled ? '已开启' : '已关闭'}）`}
       title={state.title}
       onClick={(event) => {
         event.stopPropagation()
         onToggle(model.id)
       }}
       className={cn(
-        'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium leading-4 transition-colors',
+        'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4 transition-colors',
+        'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-focus/15',
         state.enabled
-          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-          : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground',
+          ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:border-emerald-400/40 dark:bg-emerald-400/15 dark:text-emerald-300 dark:hover:bg-emerald-400/25'
+          : 'border-border bg-muted/60 text-foreground/70 hover:border-foreground/25 hover:bg-muted hover:text-foreground',
         state.source !== 'auto' && 'border-dashed',
       )}
     >
-      1M
+      <span
+        aria-hidden="true"
+        className={cn(
+          'size-1.5 shrink-0 rounded-full transition-colors',
+          state.enabled ? 'bg-emerald-500 dark:bg-emerald-400' : 'border border-current bg-transparent',
+        )}
+      />
+      <span>1M 上下文</span>
     </button>
   )
 }
@@ -1247,7 +1259,11 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       {/* 已启用模型 */}
       <SettingsSection
         title="已启用模型"
-        description={enabledModels.length > 0 ? `${enabledModels.length} 个模型` : undefined}
+        description={
+          enabledModels.length > 0
+            ? `${enabledModels.length} 个模型 · 点右侧「1M 上下文」可切换长上下文窗口`
+            : undefined
+        }
       >
         <SettingsCard divided={false}>
           {enabledModels.length === 0 ? (
