@@ -54,7 +54,9 @@ export function buildExternalAgentRunActivation(
       content: input.currentStreamState?.content ?? '',
       toolActivities: input.currentStreamState?.toolActivities ?? [],
       model: input.modelId ?? input.currentStreamState?.model,
-      startedAt: input.startedAt,
+      startedAt: input.currentStreamState?.running && input.currentStreamState.startedAt !== undefined
+        ? input.currentStreamState.startedAt
+        : input.startedAt,
     },
   }
 }

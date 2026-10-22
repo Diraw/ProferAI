@@ -153,7 +153,7 @@ describe('会话导航索引 · 与渲染层一致性（真实会话文件）', 
     copyFileSync(REAL, join(configPaths.getAgentSessionsDir(), 'real.jsonl'))
 
     const index = nav.getAgentSessionNavigationIndex('real')
-    expect(index.total).toBe(16)
+    expect(index.total).toBe(24)
     expect(index.entries.filter((e) => e.role === 'status')).toHaveLength(3)
     // 每条要么有 id，要么有可回退的 matchKey。
     for (const entry of index.entries) {

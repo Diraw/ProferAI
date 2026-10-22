@@ -53,6 +53,7 @@ import type {
   AgentSendInput,
   AgentStreamEvent,
   AgentStreamCompletePayload,
+  AgentRuntimeRestoreSnapshot,
   UpdateAgentInterruptStateInput,
   AgentWorkspace,
   AgentGenerateTitleInput,
@@ -155,6 +156,7 @@ import type {
   TrayOpenAgentSessionData,
 } from '../types'
 import { QUICK_TASK_IPC_CHANNELS, TRAY_IPC_CHANNELS, VOICE_DICTATION_IPC_CHANNELS } from '../types'
+import { createComposerApi } from './composer-api'
 
 /**
  * 暴露给渲染进程的 API 接口定义
@@ -171,7 +173,40 @@ export interface ElectronAPI {
   /** 获取宿主操作系统和 CPU 架构，供安装包选择使用 */
   getPlatformInfo: () => { platform: NodeJS.Platform; arch: string }
 
-  // ===== 运行时相关 =====
+  /** 输入区工具栏按业务域收敛的宿主能力；底层仍复用现有 IPC channel。 */
+  composer: {
+    chat: {
+      updateModel: (id: string, modelId?: string, channelId?: string) => Promise<ConversationMeta>
+      openFileDialog: () => Promise<FileDialogResult>
+      listKnowledgeItems: () => Promise<KnowledgeItem[]>
+    }
+    agent: {
+      updateModel: (id: string, channelId?: string, modelId?: string) => Promise<AgentSessionMeta>
+      updatePermissionMode: (sessionId: string, mode: ProferPermissionMode, expectedRevision?: number) => Promise<AgentSessionMeta>
+      updateOpenAIThinkingLevel: (sessionId: string, level: AgentThinkingLevel | null) => Promise<AgentSessionMeta>
+      updateEffort: (sessionId: string, effort: AgentEffort | null) => Promise<AgentSessionMeta>
+      updateRuntime: (sessionId: string, runtime: AgentRuntime) => Promise<AgentSessionMeta>
+      listPresets: (workspaceSlug?: string, includeInactiveGlobal?: boolean) => Promise<AgentPreset[]>
+      rebindPreset: (sessionId: string, reference: PresetReference, expectedRevision?: number) => Promise<AgentSessionMeta>
+      openFileDialog: () => Promise<FileDialogResult>
+      openFolderDialog: () => Promise<{ path: string; name: string } | null>
+      getReasoningCapability: (provider: ProviderType, modelId: string | undefined, baseUrl?: string) => Promise<ReasoningCapability | undefined>
+      getGraphSummary: (sessionId: string) => Promise<import('@profer/project-core').GraphSummary>
+      attachDirectory: (input: AgentAttachDirectoryInput) => Promise<string[]>
+    }
+    tools: {
+      list: () => Promise<ChatToolInfo[]>
+      updateState: (toolId: string, state: ChatToolState) => Promise<void>
+    }
+    voice: {
+      getSettings: () => Promise<VoiceDictationSettings>
+      toggle: () => Promise<void>
+    }
+    settings: {
+      update: (updates: Partial<AppSettings>) => Promise<AppSettings>
+    }
+  }
+
 
   /**
    * 获取运行时状态
@@ -943,7 +978,7 @@ export interface ElectronAPI {
   renameSkillEntry: (workspaceSlug: string, skillSlug: string, fromRelative: string, toRelative: string) => Promise<void>
 
   /** 刷新 renderer 后重新绑定并回放仍在运行的 Agent 流 */
-  restoreActiveAgentStreams: () => Promise<string[]>
+  restoreActiveAgentStreams: () => Promise<AgentRuntimeRestoreSnapshot[]>
 
   /** 读取授权文件当前 SHA-256 revision，供正式 viewer 加载前后校验。 */
   getAgentFilePreviewRevision: (filePath: string, access?: import('@profer/shared').FileAccessOptions) => Promise<string | null>
@@ -983,7 +1018,7 @@ export interface ElectronAPI {
   /** 查询某 Pi 模型可用的推理档位能力（renderer 思考档位菜单动态展示）。 */
   getPiReasoningCapability: (provider: ProviderType, modelId: string | undefined, baseUrl?: string) => Promise<ReasoningCapability | undefined>
 
-  /** 切换空闲会话的 Agent runtime；跨 runtime 时清除旧 SDK session ID。 */
+  /** 首次发送前选择 Agent runtime；已运行及历史会话永久绑定。 */
   updateSessionAgentRuntime: (sessionId: string, runtime: AgentRuntime) => Promise<AgentSessionMeta>
 
   /** 获取工作区记忆摘要 */
@@ -1624,6 +1659,8 @@ let _settingsPromise: Promise<AppSettings> | null = null
 
 const electronAPI: ElectronAPI = {
   listVisualizations: (sessionId) => ipcRenderer.invoke(VISUALIZATION_IPC.LIST, sessionId),
+  composer: createComposerApi(ipcRenderer),
+
   readVisualization: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.READ, input),
   readVisualizationViewState: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.VIEW_STATE, input),
   saveVisualizationViewState: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.SAVE_VIEW_STATE, input),

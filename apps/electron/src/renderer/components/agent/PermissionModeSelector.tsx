@@ -31,6 +31,7 @@ import type { ProferPermissionMode } from '@profer/shared'
 import { PROFER_PERMISSION_MODE_CONFIG } from '@profer/shared'
 import { updatePlanModeSessionSet } from '@/lib/agent-plan-mode'
 import { useSessionSettingMutation } from '@/lib/use-session-setting-mutation'
+import { updateComposerPermissionMode } from '@/domains/composer/composer-api'
 import {
   buildPermissionModeMenu,
   canSelectPermissionMode,
@@ -139,7 +140,7 @@ export function PermissionModeSelector({
     )
 
     void mutate({
-      execute: (expectedRevision) => window.electronAPI.updateSessionPermissionMode(sessionId, nextMode, expectedRevision),
+      execute: (expectedRevision) => updateComposerPermissionMode(sessionId, nextMode, expectedRevision),
       applyAuthoritative: (updated) => {
         if (requestSequence !== latestLocalRequestRef.current) return
         setModeMap((prev: Map<string, ProferPermissionMode>) => {

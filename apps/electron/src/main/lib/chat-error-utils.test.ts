@@ -28,4 +28,17 @@ describe('normalizeChatStreamError', () => {
       message: 'xai API 错误 (401): invalid api key',
     })
   })
+
+  test('custom 渠道 404 换成可操作的端点定位提示', () => {
+    expect(normalizeChatStreamError('custom', new Error('custom API 错误 (404): 404 page not found'))).toEqual({
+      message: '请求地址未匹配到上游接口（404）：OpenAI 兼容格式渠道的地址需指向 /chat/completions（例如 https://host/v1/chat/completions），同时确认模型 ID 在该渠道可用。',
+      errorTitle: '请求地址可能不正确',
+    })
+  })
+
+  test('内置渠道 404 保留原始文案（地址由 adapter 拼装，404 另有成因）', () => {
+    expect(normalizeChatStreamError('openai', new Error('openai API 错误 (404): model not found'))).toEqual({
+      message: 'openai API 错误 (404): model not found',
+    })
+  })
 })

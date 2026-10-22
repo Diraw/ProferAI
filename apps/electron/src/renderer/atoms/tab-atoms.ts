@@ -515,6 +515,47 @@ export function closeTab(
   return { tabs: newTabs, activeTabId: newActiveTabId, mru: nextMru }
 }
 
+/**
+ * 批量关闭标签页（「关闭其他 / 关闭所有」）。
+ *
+ * 逐次调用 `closeTab` 必须在前一步的结果上继续，否则每次都会拿到同一份过期快照、
+ * 最后一次覆盖前面全部结果。这里在同一份工作副本上按传入顺序串行推进，
+ * 并对每一步应用与单 Tab 关闭一致的同类回退，返回最终状态与真正被关闭的 Tab。
+ */
+export function closeTabs(
+  tabs: TabItem[],
+  activeTabId: string | null,
+  tabIds: readonly string[],
+  mru: readonly string[] = [],
+): { tabs: TabItem[]; activeTabId: string | null; mru: string[]; closedTabs: TabItem[] } {
+  let workingTabs = tabs
+  let workingActiveTabId = activeTabId
+  let workingMru = [...mru]
+  const closedTabs: TabItem[] = []
+
+  for (const tabId of tabIds) {
+    const closingTab = workingTabs.find((t) => t.id === tabId)
+    // 已被前一步连带关闭（如作为会话的工作 Tab）的 id 直接跳过。
+    if (!closingTab) continue
+    const result = closeTab(workingTabs, workingActiveTabId, tabId, workingMru)
+    // Scratch Pad 不可关闭：closeTab 原样返回同一份 tabs 引用，不当作「已关闭」。
+    if (result.tabs === workingTabs) continue
+    const fallbackTabId = selectSameModeCloseFallback(
+      result.tabs,
+      closingTab,
+      result.activeTabId !== workingActiveTabId,
+      workingMru,
+      result.activeTabId,
+    )
+    workingTabs = result.tabs
+    workingActiveTabId = fallbackTabId ?? result.activeTabId
+    workingMru = result.mru
+    closedTabs.push(closingTab)
+  }
+
+  return { tabs: workingTabs, activeTabId: workingActiveTabId, mru: workingMru, closedTabs }
+}
+
 /** 重排标签顺序（Scratch Pad 固定在第 0 位） */
 export function reorderTabs(
   tabs: TabItem[],

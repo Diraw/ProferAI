@@ -15,7 +15,7 @@ import { PluginMessageActions } from '@/components/plugins/PluginEntries'
 import * as React from 'react'
 import { extractUserText, isUserInputMessage } from '@profer/session-core'
 import { isGoalIterationMessage } from '@profer/shared'
-import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, RefreshCw, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
+import { Bot, Loader2, AlertTriangle, FileText, FileImage, Download, Split, GitFork, Undo2, RotateCw, Pencil, Plus, Minimize2, Wrench, Settings, ExternalLink, Quote, Clock, Wallet, Cpu, PackageOpen, Target } from 'lucide-react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
@@ -140,22 +140,6 @@ function formatSystemToolName(toolName: string): string {
     return `${parts[1]} / ${parts.slice(2).join('__')}`
   }
   return toolName
-}
-
-/** 任务中断记录行：居中、低饱和的记录（复用 CompactBoundaryDivider 的分隔线思路），不打断消息流 */
-function InterruptionRecordNotice({ message }: { message: SDKSystemMessage }): React.ReactElement {
-  const label = typeof message.message === 'string' && message.message.length > 0
-    ? message.message
-    : '任务中断'
-  return (
-    <div className="flex items-center gap-3 my-4 px-1">
-      <div className="flex-1 h-px bg-border/40" />
-      <span className="shrink-0 text-[11px] text-muted-foreground/70 px-2 py-0.5 rounded-full border border-border/30 bg-muted/20">
-        — {label} —
-      </span>
-      <div className="flex-1 h-px bg-border/40" />
-    </div>
-  )
 }
 
 /** 用户点名的 Skill 被门禁拦下时的提示：原因直接给用户看，不依赖模型转述。 */
@@ -829,6 +813,12 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
     () => applyRenderWindow(renderItems, DEFAULT_RENDER_WINDOW, { processFoldCount: processFoldGate.foldCount }),
     [renderItems, processFoldGate.foldCount],
   )
+  const summaryProcessBlocks = React.useMemo(() => {
+    const processItem = renderItems.find((item) => item.type === 'process-group')
+    return processItem?.type === 'process-group'
+      ? processItem.items.map((item) => item.block)
+      : []
+  }, [renderItems])
   const firstReplyIndex = React.useMemo(
     () => windowedItems.findIndex((item) => item.type !== 'process-group'),
     [windowedItems],
@@ -928,6 +918,7 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
                 <ProcessBlockGroup
                   key="process-group"
                   blocks={groupBlocks}
+                  summaryBlocks={summaryProcessBlocks}
                   scrollAnchorId={`${getGroupId(turn)}:process`}
                   isStreaming={isStreaming}
                   keepExpandedAfterComplete={processGroupsKeepExpanded}
@@ -1133,7 +1124,7 @@ export function SDKMessageRenderer({
       return <PermissionDeniedNotice message={sysMsg} />
     }
     if (subtype === 'interruption_record') {
-      return <InterruptionRecordNotice message={sysMsg} />
+      return null
     }
     if (subtype === 'skill_routing_notice') {
       return <SkillRoutingNotice message={sysMsg} />
@@ -1320,7 +1311,115 @@ function ScheduledRunBadge(): React.ReactElement {
   )
 }
 
-function UserInputMessage({ message, basePath, basePaths, onRegenerate }: { message: SDKUserMessage; basePath?: string; basePaths?: string[]; onRegenerate?: () => void }): React.ReactElement {
+/**
+ * 「修改重发」提交时回传的内容。
+ *
+ * `userMessageUuid` 用于上层解析回退锚点（锚点跟着被修改的这条消息走，而不是固定认最后一条）；
+ * `text` 是编辑后的正文；`preservedPrefix` 是正文之前的附件/引用/草稿标记，重发时原样拼回，
+ * 避免改一条带附件的历史消息时丢掉上下文。
+ */
+export interface EditResendRequest {
+  userMessageUuid: string
+  text: string
+  preservedPrefix: string
+}
+
+/**
+ * 用户消息的原地编辑表单（「修改重发」的编辑态）。
+ *
+ * 直接**复用用户消息自己的气泡与排版**：容器用 `UserMessageContent` 同一套 `rounded-[10px] bg-primary/10 px-3.5 py-2.5`，
+ * 文本域用正文同一套字号/行高（`--md-preview-font-size` + `leading-[1.6]`），且文本域自身无内边距，
+ * 所以进入编辑态时字的大小、行距和起点位置都不变——不是另起一个框。
+ *
+ * 文本域最小 3 行，内容变长自动长高；Enter 发送 / Esc 取消。
+ */
+function UserInlineEditForm({
+  initialText,
+  onSubmit,
+  onCancel,
+}: {
+  initialText: string
+  onSubmit: (text: string) => void
+  onCancel: () => void
+}): React.ReactElement {
+  const [value, setValue] = React.useState(initialText)
+  const textareaRef = React.useRef<HTMLTextAreaElement>(null)
+  const canSubmit = value.trim().length > 0
+
+  // 最小 3 行，内容长了就跟着长（不用内部滚动条，也不让用户拖高度）
+  React.useLayoutEffect(() => {
+    const element = textareaRef.current
+    if (!element) return
+    element.style.height = 'auto'
+    element.style.height = `${element.scrollHeight}px`
+  }, [value])
+
+  const handleSubmit = React.useCallback((): void => {
+    if (!canSubmit) return
+    onSubmit(value)
+  }, [canSubmit, onSubmit, value])
+
+  return (
+    <div className="w-full rounded-[10px] bg-primary/10 px-3.5 py-2.5">
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            onCancel()
+          } else if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault()
+            handleSubmit()
+          }
+        }}
+        className="w-full min-h-[72px] resize-none overflow-hidden bg-transparent p-0 text-[length:var(--md-preview-font-size,15px)] leading-[1.6] text-foreground outline-none placeholder:text-foreground/35"
+        placeholder="编辑消息..."
+        autoFocus
+      />
+      <div className="mt-2 flex items-center justify-end gap-1.5">
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          取消
+        </Button>
+        <Button
+          variant="default"
+          size="sm"
+          onClick={handleSubmit}
+          disabled={!canSubmit}
+          title="会回退到这条消息并重发，其后的对话会被截断"
+        >
+          发送
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 从用户消息的原始文本里切出「正文之前」的部分（附件/引用/草稿标记），
+ * 修改重发时原样拼回，避免改一条带附件的历史消息时丢掉上下文。
+ *
+ * `text` 来自 `parseAttachedFiles`（已剥离标记的正文），所以用它的最后出现位置作为切点。
+ */
+export function splitUserMessagePrefix(rawText: string, text: string): string {
+  if (!text) return ''
+  const textStart = rawText.lastIndexOf(text)
+  return textStart >= 0 ? rawText.slice(0, textStart).trimEnd() : ''
+}
+
+function UserInputMessage({ message, basePath, basePaths, onEdit, isEditing = false, onSubmitEdit, onCancelEdit }: {
+  message: SDKUserMessage
+  basePath?: string
+  basePaths?: string[]
+  /** 点击「修改重发」：上层把这条消息置为原地编辑态（入参是消息 uuid）。 */
+  onEdit?: (userMessageUuid: string) => void
+  /** 这条消息是否处于原地编辑态（编辑框就渲染在消息里，与 Chat 一致）。 */
+  isEditing?: boolean
+  /** 提交原地编辑：回传编辑后的正文与需要保留的附件前缀。 */
+  onSubmitEdit?: (request: EditResendRequest) => void
+  onCancelEdit?: () => void
+}): React.ReactElement {
   const userProfile = useAtomValue(userProfileAtom)
   const rawText = extractUserText(message) ?? ''
   const isScheduledRun = rawText.includes(SCHEDULED_RUN_MARKER)
@@ -1331,9 +1430,9 @@ function UserInputMessage({ message, basePath, basePaths, onRegenerate }: { mess
 
   return (
     <Message from="user">
-      <div className="flex items-start gap-2.5 mb-2.5">
+      <div className="flex items-start gap-2.5 mb-2.5 group-[.user-message-right]:flex-row-reverse">
         <UserAvatar avatar={userProfile.avatar} size={35} />
-        <div className="flex flex-col justify-between h-[35px]">
+        <div className="flex flex-col justify-between h-[35px] group-[.user-message-right]:items-end">
           <span className="text-sm font-semibold text-foreground/60 leading-none">{userProfile.userName}</span>
           {(meta.createdAt || isScheduledRun) && (
             <span className="flex items-center gap-2 leading-none">
@@ -1372,15 +1471,27 @@ function UserInputMessage({ message, basePath, basePaths, onRegenerate }: { mess
             ))}
           </div>
         )}
-        {text && <UserMessageContent basePath={basePath} basePaths={basePaths}>{text}</UserMessageContent>}
+        {text && (isEditing ? (
+          <UserInlineEditForm
+            initialText={text}
+            onSubmit={(nextText) => onSubmitEdit?.({
+              userMessageUuid: message.uuid as string,
+              text: nextText,
+              preservedPrefix: splitUserMessagePrefix(rawText, text),
+            })}
+            onCancel={() => onCancelEdit?.()}
+          />
+        ) : (
+          <UserMessageContent basePath={basePath} basePaths={basePaths}>{text}</UserMessageContent>
+        ))}
       </MessageContent>
-      {text && (
-        <MessageActions className="pl-[46px] mt-0.5">
+      {text && !isEditing && (
+        <MessageActions revealOnHover className="pl-[46px] mt-0.5 group-[.user-message-right]:pl-0 group-[.user-message-right]:pr-[46px]">
           <CopyButton content={text} copyAsPlainText />
-          {/* 重新生成：只挂在会话最后一条用户消息下，截断最后一轮后重发该消息 */}
-          {onRegenerate && (
-            <MessageAction tooltip="重新生成" onClick={onRegenerate}>
-              <RefreshCw className="size-4" />
+          {/* 修改重发：每一条用户消息都可进入原地编辑（对齐 Chat）；编辑框就在消息里，不进 composer */}
+          {onEdit && typeof message.uuid === 'string' && message.uuid.length > 0 && (
+            <MessageAction tooltip="修改重发" onClick={() => onEdit(message.uuid as string)}>
+              <Pencil className="size-4" />
             </MessageAction>
           )}
         </MessageActions>
@@ -1616,8 +1727,14 @@ export interface MessageGroupRendererProps {
   onRetryInNewSession?: () => void
   /** 压缩上下文回调（仅 prompt_too_long 错误使用） */
   onCompact?: () => void
-  /** 会话最后一条用户消息的重新生成回调（仅该条消息显示入口，点击后需回退截断再重发） */
-  onRegenerateLastUserMessage?: () => void
+  /** 「修改重发」入口：任意用户消息都可进入原地编辑态（编辑框就在消息里，与 Chat 一致）。 */
+  onEditUserMessage?: (userMessageUuid: string) => void
+  /** 提交原地编辑（上层回退到该消息并重发编辑后的内容）。 */
+  onSubmitEditUserMessage?: (request: EditResendRequest) => void
+  /** 取消原地编辑。 */
+  onCancelEditUserMessage?: () => void
+  /** 当前处于原地编辑态的消息 uuid。 */
+  editingUserMessageUuid?: string | null
   /** 是否正在流式输出中（隐藏操作栏） */
   isStreaming?: boolean
   /** 是否被用户中断 */
@@ -1697,16 +1814,6 @@ export function getGroupNavKey(group: MessageGroup): string {
   return `${role}:${subtype}:${createdAt}`
 }
 
-/**
- * 会话最后一条用户消息的 group id。
- *
- * Goal 自动迭代分隔条不是用户发言，不计入；供「重新生成」入口判定只挂在这一条下。
- */
-export function getLatestUserGroupId(groups: MessageGroup[]): string | undefined {
-  const last = groups.findLast((group) => group.type === 'user' && !isGoalIterationMessage(group.message))
-  return last ? getGroupId(last) : undefined
-}
-
 /** 预览文本最大长度（user 与 assistant-turn 共用） */
 const GROUP_PREVIEW_LIMIT = 200
 
@@ -1748,7 +1855,7 @@ export function getGroupPreview(group: MessageGroup): string {
   return preview.slice(0, GROUP_PREVIEW_LIMIT)
 }
 
-function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, onRegenerateLastUserMessage, isStreaming, stoppedByUser, sessionModelId, showThinking, isLatestAssistantTurn }: MessageGroupRendererProps): React.ReactElement | null {
+function MessageGroupRendererView({ sessionId, group, allMessages, historicalTaskSubjects, basePath, basePaths, onFork, onExplore, onRewind, onRetry, onRetryInNewSession, onCompact, onEditUserMessage, onSubmitEditUserMessage, onCancelEditUserMessage, editingUserMessageUuid, isStreaming, stoppedByUser, sessionModelId, showThinking, isLatestAssistantTurn }: MessageGroupRendererProps): React.ReactElement | null {
   const groupId = getGroupId(group)
   // 主进程导航索引与本地 DOM 的共同匹配键（无 uuid 的系统消息靠它对上号）。
   const navKey = getGroupNavKey(group)
@@ -1764,7 +1871,15 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
     }
     return (
       <div data-message-id={groupId} data-message-nav-key={navKey} data-message-role="user">
-        <UserInputMessage message={group.message} basePath={basePath} basePaths={basePaths} onRegenerate={onRegenerateLastUserMessage} />
+        <UserInputMessage
+          message={group.message}
+          basePath={basePath}
+          basePaths={basePaths}
+          onEdit={onEditUserMessage}
+          isEditing={editingUserMessageUuid != null && group.message.uuid === editingUserMessageUuid}
+          onSubmitEdit={onSubmitEditUserMessage}
+          onCancelEdit={onCancelEditUserMessage}
+        />
       </div>
     )
   }
@@ -1776,7 +1891,8 @@ function MessageGroupRendererView({ sessionId, group, allMessages, historicalTas
     // visible indicator is rendered at the list tail by AgentMessages from isCompacting.
     if (subtype === 'compacting') return null
     if (subtype === 'permission_denied') return <div data-message-id={groupId} data-message-nav-key={navKey}><PermissionDeniedNotice message={group.message} /></div>
-    if (subtype === 'interruption_record') return <div data-message-id={groupId} data-message-nav-key={navKey}><InterruptionRecordNotice message={group.message} /></div>
+    // 中断记录保留在消息数据中供恢复/续接使用，但不在会话正文显示。
+    if (subtype === 'interruption_record') return null
     if (subtype === 'skill_routing_notice') return <div data-message-id={groupId} data-message-nav-key={navKey}><SkillRoutingNotice message={group.message} /></div>
     return null
   }
@@ -1869,5 +1985,8 @@ export const MessageGroupRenderer = React.memo(MessageGroupRendererView, (prev, 
     && prev.onRetry === next.onRetry
     && prev.onRetryInNewSession === next.onRetryInNewSession
     && prev.onCompact === next.onCompact
-    && prev.onRegenerateLastUserMessage === next.onRegenerateLastUserMessage
+    && prev.onEditUserMessage === next.onEditUserMessage
+    && prev.onSubmitEditUserMessage === next.onSubmitEditUserMessage
+    && prev.onCancelEditUserMessage === next.onCancelEditUserMessage
+    && prev.editingUserMessageUuid === next.editingUserMessageUuid
 })

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Model, OpenAICodexResponsesOptions } from '@earendil-works/pi-ai/compat'
-import type { Dispatcher } from 'undici'
+import type { PiRequestProxyDispatcher as Dispatcher } from './pi-request-proxy'
 import {
   completeCodexTitleRequest,
   extractCodexResponseText,

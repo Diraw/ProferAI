@@ -102,25 +102,34 @@ export function VisualizationResultInline({ record, sessionId }: { record: Visua
       return next
     })
   }
+  // 可视化在会话流里是一个独立对象，不是回复正文的延续：外框沿用代码块/Mermaid 的
+  // 「描边 + 头部栏」表达（同一个 34px 头部、同一套 muted 头部底色），这样它自带边界感，
+  // 又不需要为可视化另立一套设计语言。描边取不透明的 --border、内容区垫一层 --muted/20：
+  // 浅色主题下 --muted 与白底几乎同色，只有实描边能真的把块从正文里划出来。
+  // 表面/描边/文字全部走 token，换肤与明暗自动跟随。
   return <section ref={ref} data-visualization-id={record.id} aria-label={record.title} className="my-4 min-w-0">
-    <div className="flex items-center justify-between gap-2 pb-2 text-xs text-muted-foreground/60">
-      <span className="min-w-0 truncate">{record.format === 'chart' ? '图表' : record.title}</span>
-      <button type="button" aria-label="导出 HTML" title="导出 HTML" onClick={() => {
-        void (async () => {
-          await window.electronAPI.saveVisualizationViewState({ sessionId: owner, id: record.id, revision: record.revision, state })
-          await window.electronAPI.exportVisualization({ sessionId: owner, id: record.id, revision: record.revision })
-        })().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '导出失败'))
-      }} className="rounded p-1 text-muted-foreground/60 hover:bg-muted hover:text-foreground"><Download className="size-3.5" /></button>
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="flex h-[34px] items-center justify-between gap-2 bg-muted/60 px-2 text-xs text-muted-foreground">
+        <span className="min-w-0 truncate font-medium select-none">{record.format === 'chart' ? '图表' : record.title}</span>
+        <button type="button" aria-label="导出 HTML" title="导出 HTML" onClick={() => {
+          void (async () => {
+            await window.electronAPI.saveVisualizationViewState({ sessionId: owner, id: record.id, revision: record.revision, state })
+            await window.electronAPI.exportVisualization({ sessionId: owner, id: record.id, revision: record.revision })
+          })().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : '导出失败'))
+        }} className="flex shrink-0 items-center rounded px-1.5 py-0.5 transition-colors hover:bg-foreground/10 hover:text-foreground"><Download className="size-3.5" /></button>
+      </div>
+      <div className="bg-muted/20 p-3">
+        <div style={{ height }} className="relative">
+          {content && !error ? content.record.chart ? <React.Suspense fallback={<p className="py-6 text-sm text-muted-foreground">正在加载图表…</p>}><NativeVisualizationChart key={key} spec={content.record.chart} content={content} state={state} onState={updateState} onQuote={setSelectedQuote} onHeight={updateHeight} /></React.Suspense> : <VisualizationHost content={content} state={state} onState={updateState} onQuote={setSelectedQuote} onInteraction={() => scroll?.pause()} onError={setError} onHeight={updateHeight} onWheel={(_, deltaY) => {
+            const viewport = scroll?.scrollRef.current
+            if (viewport) scroll?.navigate(viewport.scrollTop + deltaY, false)
+          }} className="block h-full w-full border-0" /> : <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+            <p className="max-w-lg text-sm text-muted-foreground">{record.summary}</p>
+            {error ? <><p role="alert" className="text-xs text-destructive">{error}</p><button type="button" onClick={() => { setError(null); setReload((value) => value + 1) }} className="flex items-center gap-1 text-xs"><RotateCcw className="size-3" />重新加载</button></> : <p className="text-xs text-muted-foreground">正在加载交互视图…</p>}
+          </div>}
+        </div>
+      </div>
+      {selectedQuote && <div className="flex items-center justify-between gap-2 border-t border-border px-2 py-1.5 text-xs"><span className="truncate text-muted-foreground">已选中：{selectedQuote.label}</span><button type="button" onClick={quote} className="shrink-0 rounded bg-muted px-3 py-1">引用到会话</button></div>}
     </div>
-    <div style={{ height }} className="relative">
-      {content && !error ? content.record.chart ? <React.Suspense fallback={<p className="py-6 text-sm text-muted-foreground">正在加载图表…</p>}><NativeVisualizationChart key={key} spec={content.record.chart} content={content} state={state} onState={updateState} onQuote={setSelectedQuote} onHeight={updateHeight} /></React.Suspense> : <VisualizationHost content={content} state={state} onState={updateState} onQuote={setSelectedQuote} onInteraction={() => scroll?.pause()} onError={setError} onHeight={updateHeight} onWheel={(_, deltaY) => {
-        const viewport = scroll?.scrollRef.current
-        if (viewport) scroll?.navigate(viewport.scrollTop + deltaY, false)
-      }} className="block h-full w-full border-0" /> : <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-        <p className="max-w-lg text-sm text-muted-foreground">{record.summary}</p>
-        {error ? <><p role="alert" className="text-xs text-destructive">{error}</p><button type="button" onClick={() => { setError(null); setReload((value) => value + 1) }} className="flex items-center gap-1 text-xs"><RotateCcw className="size-3" />重新加载</button></> : <p className="text-xs text-muted-foreground">正在加载交互视图…</p>}
-      </div>}
-    </div>
-    {selectedQuote && <div className="flex items-center justify-between gap-2 pt-2 text-xs"><span className="truncate text-muted-foreground">已选中：{selectedQuote.label}</span><button type="button" onClick={quote} className="shrink-0 rounded bg-muted px-3 py-1">引用到会话</button></div>}
   </section>
 }

@@ -12,7 +12,7 @@ import { writeFile } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
-import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, isAgentRuntime, isChannelEnabledForRuntime, isProferPermissionMode, normalizePathForCompare, DEFAULT_PRESET_ID, type AgentThinkingLevel, type AgentEffort, PLANNING_CONFLICT_ERROR, type Todo, type TodoListQuery, type CalendarEvent, type CalendarEventListQuery, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type StartTodoAgentInput, type StartTodoAgentResult, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type SnoozePlanningReminderInput, type TodoAgentSessionActivation, type ProviderType, type ReasoningCapability, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult, type OtherWorkspacePresetsGroup, type PresetReference, type PresetReferenceReport, type PresetScopeRebindResult } from '@profer/shared'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, AGENT_PRESET_IPC_CHANNELS, INSTALLER_IPC_CHANNELS, CHAT_TOOL_IPC_CHANNELS, AUTOMATION_IPC_CHANNELS, RECOMMENDATION_IPC_CHANNELS, PLANNING_IPC_CHANNELS, AUTH_IPC_CHANNELS, canSelectAgentSessionRuntime, AGENT_SESSION_RUNTIME_LOCKED_MESSAGE, normalizeAgentRuntime, isAgentRuntime, isChannelEnabledForRuntime, isProferPermissionMode, normalizePathForCompare, DEFAULT_PRESET_ID, type AgentThinkingLevel, type AgentEffort, PLANNING_CONFLICT_ERROR, type Todo, type TodoListQuery, type CalendarEvent, type CalendarEventListQuery, type CreateTodoInput, type UpdateTodoInput, type CreateCalendarEventInput, type UpdateCalendarEventInput, type StartTodoAgentInput, type StartTodoAgentResult, type CreatePlanningGroupInput, type UpdatePlanningGroupInput, type PlanningGroup, type PlanningGroupScope, type PlanningTag, type PlanningReminder, type ActivePlanningReminder, type SnoozePlanningReminderInput, type TodoAgentSessionActivation, type ProviderType, type ReasoningCapability, type AgentPreset, type AgentPresetCreateInput, type AgentPresetUpdateInput, type AgentPresetImportResult, type OtherWorkspacePresetsGroup, type PresetReference, type PresetReferenceReport, type PresetScopeRebindResult } from '@profer/shared'
 import { SETTINGS_IPC_CHANNELS, SKIN_IPC_CHANNELS } from '../types'
 import { registerRuntimeGitIpc } from './lib/runtime-git-ipc'
 import { getBuildTarget } from './lib/build-target'
@@ -2221,7 +2221,7 @@ export function registerIpcHandlers(): void {
   // renderer 刷新后重新绑定所有仍活跃的 Agent 流，并回放本轮实时事件。
   ipcMain.handle(
     AGENT_IPC_CHANNELS.RESTORE_ACTIVE_STREAMS,
-    async (event): Promise<string[]> => restoreActiveAgentStreams(event.sender),
+    async (event): Promise<import('@profer/shared').AgentRuntimeRestoreSnapshot[]> => restoreActiveAgentStreams(event.sender),
   )
   ipcMain.handle(AGENT_IPC_CHANNELS.FILE_PREVIEW_REVISION, async (event, filePath: string, access?: FileAccessOptions | string[]): Promise<string | null> => {
     assertSensitiveAgentIpcSender(event)
@@ -3114,7 +3114,7 @@ export function registerIpcHandlers(): void {
     },
   )
 
-  // 空闲会话切换 runtime，并同步更新新会话默认值；跨 Claude/Pi 时绝不复用另一 runtime 的 SDK 会话 ID。
+  // 首次发送前选择 runtime；正式会话永久绑定，旧会话及原生恢复资产不迁移。
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_SESSION_AGENT_RUNTIME,
     async (event, sessionId: string, runtime: AgentRuntime): Promise<AgentSessionMeta> => {
@@ -3125,9 +3125,11 @@ export function registerIpcHandlers(): void {
       if (!isAgentRuntime(runtime)) throw new Error(`无效的 Agent runtime: ${String(runtime)}`)
       const current = getAgentSessionMeta(sessionId)
       if (!current) throw new Error(`Agent 会话不存在: ${sessionId}`)
-      if (isAgentSessionActive(sessionId)) throw new Error('Agent 正在运行，完成后再切换内核')
+      if (normalizeAgentRuntime(current.agentRuntime) === runtime) return current
+      if (!canSelectAgentSessionRuntime(current)) throw new Error(AGENT_SESSION_RUNTIME_LOCKED_MESSAGE)
+      if (isAgentSessionActive(sessionId)) throw new Error('Agent 已开始运行，内核选择已固定')
 
-      // updateAgentSessionMeta 在跨 runtime 时会清理 SDK/fork/resume 字段；切换前必须保存完整快照。
+      // 仅空会话可选内核；设置写入失败时还原选择，保持 revision 单调。
       const previousRuntime = snapshotAgentRuntimeMeta(current)
       const updated = updateAgentSessionMeta(sessionId, { agentRuntime: runtime })
       try {
@@ -3135,7 +3137,7 @@ export function registerIpcHandlers(): void {
         publishAgentSessionProjection(updated)
         return updated
       } catch (error) {
-        // 不使用普通 update helper：它会把恢复 runtime 视为一次切换并再次清空快照字段。
+        // 回滚空会话的内核选择，主进程 guard 不允许回滚已经开始运行的会话。
         try {
           const restored = restoreAgentRuntimeMeta(sessionId, previousRuntime)
           publishAgentSessionProjection(restored)

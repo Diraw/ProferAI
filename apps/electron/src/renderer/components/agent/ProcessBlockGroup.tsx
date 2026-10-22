@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { ChevronRight } from 'lucide-react'
+import { shouldRestartProcessCollapse } from './process-fold-state'
 import { cn } from '@/lib/utils'
 import { getToolDisplayName, getToolIcon } from './tool-utils'
 import type {
@@ -23,11 +24,13 @@ interface ProcessBlockGroupProps {
    * 只有内容真正不在 DOM 里（收起完成后）才推进才不会造成可见重排。
    */
   onContentVisibilityChange?: (visible: boolean) => void
+  /** 用于摘要与工具图标的完整过程块；未传时退化为当前可见 blocks。 */
+  summaryBlocks?: SDKContentBlock[]
   children: React.ReactNode
 }
 
 const MAX_PROCESS_GROUP_ICONS = 4
-const PROCESS_GROUP_COLLAPSE_DURATION_MS = 500
+const PROCESS_GROUP_COLLAPSE_DURATION_MS = 220
 const PROCESS_GROUP_AUTO_COLLAPSE_SOUND_DELAY_MS = 900
 const PROCESS_GROUP_AUTO_COLLAPSE_COUNTDOWN_SECONDS = 3
 
@@ -76,7 +79,7 @@ export function buildProcessGroupToolNames(blocks: SDKContentBlock[]): string[] 
   return toolNames
 }
 
-export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExpandedAfterComplete, isMessageTail = false, onContentVisibilityChange, children }: ProcessBlockGroupProps): React.ReactElement {
+export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExpandedAfterComplete, isMessageTail = false, onContentVisibilityChange, summaryBlocks, children }: ProcessBlockGroupProps): React.ReactElement {
   const shouldExpandByDefault = !!isStreaming || keepExpandedAfterComplete
   const [expanded, setExpanded] = React.useState(shouldExpandByDefault)
   const [shouldRenderContent, setShouldRenderContent] = React.useState(shouldExpandByDefault)
@@ -84,9 +87,8 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
   const userToggledRef = React.useRef(false)
   const wasStreamingRef = React.useRef(!!isStreaming)
   const autoCollapseTimersRef = React.useRef<number[]>([])
-  // 1.7.2 折叠自锁：上一轮结束已调度折叠倒计时；折叠完成后不再被 streaming 分支重新展开。
-  // 队列无缝衔接时 streaming false 窗口极短，新一轮 true 分支会 clearAutoCollapseTimers() + 重新展开，
-  // 导致上一轮折叠被取消——用这两个 ref 锁住「已调度的折叠」不被撤销。
+  // 自动折叠只属于一次已确认结束的输出。若过程中短暂失去 streaming，恢复时会在上方分支撤销它，
+  // 防止旧 timer 在新输出期间卸载内容。
   const collapseScheduledRef = React.useRef(false)
   const collapseDoneRef = React.useRef(false)
   const contentRef = React.useRef<HTMLDivElement>(null)
@@ -98,15 +100,28 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
   }, [])
 
   React.useEffect(() => {
-    // 1.7.2：已完成一次自动折叠——此后不参与 streaming 驱动的展开/折叠（除非用户手动展开）
-    if (collapseDoneRef.current) return
+    // 已完成态在非流式期间保持稳定；重新进入流式必须先走下方恢复分支，撤销旧折叠状态。
+    if (collapseDoneRef.current && !isStreaming) return
 
     if (isStreaming || keepExpandedAfterComplete) {
-      // 新一轮 streaming 开始：若上一轮已调度折叠，不取消它、也不重新展开
-      if (collapseScheduledRef.current) {
+      // 任意一次 false 都可能只是输出中断/恢复或终态落盘之间的过渡。
+      // 重新进入流式必须撤销旧自动折叠；否则旧 timer 会在新输出期间突然卸载过程内容。
+      if (isStreaming && shouldRestartProcessCollapse({
+        active: true,
+        collapseScheduled: collapseScheduledRef.current,
+        collapseDone: collapseDoneRef.current,
+      })) {
+        clearAutoCollapseTimers()
+        setCollapseCountdown(null)
+        collapseScheduledRef.current = false
+        collapseDoneRef.current = false
+        userToggledRef.current = false
+        setExpanded(true)
+        setShouldRenderContent(true)
         wasStreamingRef.current = true
         return
       }
+
       clearAutoCollapseTimers()
       setCollapseCountdown(null)
       if (isStreaming && !wasStreamingRef.current) {
@@ -157,15 +172,21 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
   }, [clearAutoCollapseTimers])
 
   // 上报内容是否真的在 DOM 里。用 shouldRenderContent 而不是 expanded：
-  // 折叠动画期间内容还挂着，动画跑完（约 500ms）卸载后才算不可见。
+  // 折叠动画期间内容还挂着，动画结束卸载后才算不可见。
   React.useEffect(() => {
     onContentVisibilityChange?.(shouldRenderContent)
   }, [shouldRenderContent, onContentVisibilityChange])
 
-  // 折叠前测量实际高度，用于丝滑的 height 过渡（子元素不 reflow，只裁剪边界）
+  // 折叠前测量一次高度；减少动态效果时直接卸载，避免无意义的布局动画和等待。
   React.useEffect(() => {
     if (expanded) {
       setShouldRenderContent(true)
+      setMeasuredHeight(undefined)
+      return
+    }
+
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      setShouldRenderContent(false)
       setMeasuredHeight(undefined)
       return
     }
@@ -188,10 +209,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
   }, [expanded])
 
   const summary = React.useMemo(
-    () => buildProcessGroupSummary(blocks),
-    [blocks],
+    () => buildProcessGroupSummary(summaryBlocks ?? blocks),
+    [summaryBlocks, blocks],
   )
-  const toolNames = React.useMemo(() => buildProcessGroupToolNames(blocks), [blocks])
+  const toolNames = React.useMemo(
+    () => buildProcessGroupToolNames(summaryBlocks ?? blocks),
+    [summaryBlocks, blocks],
+  )
   const visibleToolNames = toolNames.slice(0, MAX_PROCESS_GROUP_ICONS)
   const hiddenToolCount = Math.max(0, toolNames.length - visibleToolNames.length)
 
@@ -209,7 +233,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
           key={React.isValidElement(child) ? child.key : i}
           className={cn(
             dimmed && 'opacity-80',
-            isStreaming && 'animate-in fade-in slide-in-from-top-1 duration-200',
+            isStreaming && 'motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-top-1 motion-safe:duration-200',
           )}
         >
           {child}
@@ -222,6 +246,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
       <button
         data-scroll-anchor={scrollAnchorId}
         type="button"
+        aria-expanded={expanded}
         className={cn(
           'flex max-w-full items-center gap-2 py-0.5 text-left transition-opacity group',
           'hover:opacity-70',
@@ -238,7 +263,7 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
       >
         <ChevronRight
           className={cn(
-            'size-3 shrink-0 text-muted-foreground/40 transition-transform duration-150',
+            'size-3 shrink-0 text-muted-foreground/40 motion-safe:transition-transform motion-safe:duration-150',
             expanded && 'rotate-90',
           )}
         />
@@ -272,13 +297,13 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
       {shouldRenderContent && (
         <div
           ref={contentRef}
-          className="overflow-hidden"
+          className="overflow-hidden motion-reduce:!transition-none"
           style={{
             height: measuredHeight !== undefined ? `${measuredHeight}px` : 'auto',
             opacity: expanded ? 1 : 0,
             transition: measuredHeight !== undefined
-              ? `height ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out, opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`
-              : `opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-in-out`,
+              ? `height ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-out, opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-out`
+              : `opacity ${PROCESS_GROUP_COLLAPSE_DURATION_MS}ms ease-out`,
           }}
         >
           <div className="space-y-2">

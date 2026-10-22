@@ -34,6 +34,7 @@ import { navigationController } from '@/lib/navigation-controller'
 import { cn } from '@/lib/utils'
 import { ChannelPlanQuotaBadge } from './ChannelPlanQuotaBadge'
 import { AgentComposerToolTooltip, getAgentComposerToolTriggerClass } from '@/components/ai-elements/composer/ComposerTool'
+import { updateChatComposerModel } from '@/domains/composer/composer-api'
 import { isChannelEnabledForChat, type Channel, type ModelOption } from '@profer/shared'
 import { getChannelProtocol, getChannelSource, getOfficialChannelDisplayName, isOfficialChannel, isModelFamilyChannel, supportsChannelProtocol, type ChannelProtocol } from '@/lib/channel-model-groups'
 
@@ -299,7 +300,7 @@ export function ModelSelector({
     selectionInFlightRef.current = true
     setSaving(true)
     const generation = selectionGenerationRef.current
-    window.electronAPI.updateConversationModel(conversationId, option.modelId, option.channelId)
+    updateChatComposerModel(conversationId, option.modelId, option.channelId)
       .then((updated) => {
         if (generation !== selectionGenerationRef.current) return
         setConversations((prev) => prev.map((conversation) => conversation.id === updated.id ? updated : conversation))

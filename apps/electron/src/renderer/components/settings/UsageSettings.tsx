@@ -21,6 +21,7 @@ import {
   SettingsRow,
   SettingsToggle,
   SettingsInput,
+  SettingsSegmentedControl,
 } from './primitives'
 import {
   Select,
@@ -60,10 +61,13 @@ import {
   updateShowCreditsInSidebar,
   stickyUserMessageEnabledAtom,
   updateStickyUserMessageEnabled,
+  userMessagePositionAtom,
   longTextPasteAsAttachmentEnabledAtom,
   updateLongTextPasteAsAttachmentEnabled,
   richTextRenderingEnabledAtom,
   updateRichTextRenderingEnabled,
+  previewOpenModeAtom,
+  updatePreviewOpenMode,
   composerCompactModeAtom,
 } from '@/atoms/ui-preferences'
 import {
@@ -92,7 +96,7 @@ import { applyUnreadModeTransition } from '@/lib/agent-unread-transition'
 import type { AgentUnreadMode } from '@/lib/agent-unread-gate'
 import { VoiceInputSettings } from './VoiceInputSettings'
 import { Button } from '@profer/ui/primitives/button'
-import type { NotificationSoundId, NotificationSoundType, NotificationSoundSettings } from '@/types/settings'
+import type { NotificationSoundId, NotificationSoundType, NotificationSoundSettings, PreviewOpenMode } from '@/types/settings'
 
 export function UsageSettings(): React.ReactElement {
   const [notificationsEnabled, setNotificationsEnabled] = useAtom(notificationsEnabledAtom)
@@ -101,8 +105,10 @@ export function UsageSettings(): React.ReactElement {
   const [customSounds, setCustomSounds] = useAtom(customNotificationSoundsAtom)
   const [showCreditsInSidebar, setShowCreditsInSidebar] = useAtom(showCreditsInSidebarAtom)
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
+  const [userMessagePosition, setUserMessagePosition] = useAtom(userMessagePositionAtom)
   const [longTextPasteAsAttachmentEnabled, setLongTextPasteAsAttachmentEnabled] = useAtom(longTextPasteAsAttachmentEnabledAtom)
   const [richTextRenderingEnabled, setRichTextRenderingEnabled] = useAtom(richTextRenderingEnabledAtom)
+  const [previewOpenMode, setPreviewOpenMode] = useAtom(previewOpenModeAtom)
   const [autoPreviewEnabled, setAutoPreviewEnabled] = useAtom(autoPreviewEnabledAtom)
   const [processGroupsKeepExpanded, setProcessGroupsKeepExpanded] = useAtom(agentProcessGroupsKeepExpandedAtom)
   // 「手动确认已读」开关：开启态未读需要用户确认才清除（见 `requirements.md` §3.2）。
@@ -127,6 +133,7 @@ export function UsageSettings(): React.ReactElement {
   const [compactSaving, setCompactSaving] = React.useState<keyof ComposerCompactModeSettings | null>(null)
   const compactSavingRef = React.useRef(false)
   const [archiveSaving, setArchiveSaving] = React.useState(false)
+  const [messagePositionSaving, setMessagePositionSaving] = React.useState(false)
 
   // 添加自定义音效弹窗状态
   const [addSoundOpen, setAddSoundOpen] = React.useState(false)
@@ -248,6 +255,8 @@ export function UsageSettings(): React.ReactElement {
     try {
       const settings = await window.electronAPI.getSettings()
       setArchiveAfterDays(settings.archiveAfterDays ?? 7)
+      setUserMessagePosition(settings.userMessagePosition === 'left' ? 'left' : 'right')
+      setPreviewOpenMode(settings.previewModePreference === 'split' ? 'split' : 'tab')
       setCompactViewportHeightDraft(String(normalizeCompactViewportHeight(settings.inputCompactViewportHeight)))
       setCompactMinHeightDraft(String(normalizeCompactMinHeight(settings.inputCompactMinHeight)))
       setCompactMaxHeightDraft(String(normalizeCompactMaxHeight(settings.inputCompactMaxHeight)))
@@ -259,6 +268,31 @@ export function UsageSettings(): React.ReactElement {
     }
   }, [])
   React.useEffect(() => { void loadSettings() }, [loadSettings])
+
+  /** 切换文件预览打开方式：先更新本地态保证交互即时，再落盘。 */
+  const handlePreviewOpenModeChange = (value: string): void => {
+    const mode: PreviewOpenMode = value === 'split' ? 'split' : 'tab'
+    setPreviewOpenMode(mode)
+    void updatePreviewOpenMode(mode)
+  }
+
+  /** 保存用户消息位置；失败时恢复当前布局，避免设置看似成功但未落盘。 */
+  const handleUserMessagePositionChange = async (value: string): Promise<void> => {
+    if (!['left', 'right'].includes(value) || settingsLoading || Boolean(settingsError) || messagePositionSaving) return
+    const position = value as 'left' | 'right'
+    const previous = userMessagePosition
+    setMessagePositionSaving(true)
+    setUserMessagePosition(position)
+    try {
+      await window.electronAPI.updateSettings({ userMessagePosition: position })
+    } catch (error) {
+      console.error('[使用偏好] 更新用户消息位置失败:', error)
+      setUserMessagePosition(previous)
+      toast.error('用户消息位置保存失败，请重试')
+    } finally {
+      setMessagePositionSaving(false)
+    }
+  }
 
   // 绕过会吞错的旧 helper：落盘成功才更新全局显示，失败保留原草稿以便失焦重试。
   const saveCompactHeight = async (field: keyof ComposerCompactModeSettings, value: number, commitDraft: (value: string) => void): Promise<void> => {
@@ -471,6 +505,14 @@ export function UsageSettings(): React.ReactElement {
               updateStickyUserMessageEnabled(checked)
             }}
           />
+          <SettingsSegmentedControl
+            label="用户消息位置"
+            description="选择用户头像、用户名和消息气泡显示在对话的哪一侧"
+            value={userMessagePosition}
+            onValueChange={(value) => { void handleUserMessagePositionChange(value) }}
+            options={[{ value: 'left', label: '左侧' }, { value: 'right', label: '右侧' }]}
+            disabled={settingsLoading || Boolean(settingsError) || messagePositionSaving}
+          />
           <SettingsToggle
             label="手动确认已读"
             description="开启后会话完成即产生未读（即使你正在看），打开或切换标签页不再自动清除；在最新一轮回复操作栏点「确认已读」，或用侧边栏会话菜单切换。关闭时保持现有行为。"
@@ -490,6 +532,14 @@ export function UsageSettings(): React.ReactElement {
             description="Agent 编辑文件时自动在右侧打开预览"
             checked={autoPreviewEnabled}
             onCheckedChange={setAutoPreviewEnabled}
+          />
+          <SettingsSegmentedControl
+            label="预览打开方式"
+            description="「独立标签页」把文件预览开成一个单独的标签页；「与对话分屏」让预览标签自动与所属会话左右并排，边看文件边对话。仅影响你主动打开的预览；Agent 自动预览的跟随行为不变。"
+            value={previewOpenMode}
+            onValueChange={handlePreviewOpenModeChange}
+            options={[{ value: 'tab', label: '独立标签页' }, { value: 'split', label: '与对话分屏' }]}
+            disabled={settingsLoading || Boolean(settingsError)}
           />
           <SettingsToggle
             label="输出完保持展开"

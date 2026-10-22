@@ -4,8 +4,10 @@ export interface SessionUpdateBatcherOptions {
 }
 
 /**
- * 将同一帧内同一会话的高频更新合并为一次提交。
+ * 将短时间内同一会话的高频更新合并为一次提交。
  * 每个 session 独立排队，批处理不会把一个会话的更新写到另一个会话。
+ * 使用定时器而不是 requestAnimationFrame：窗口后台时没有可依赖的绘制帧，
+ * 但移动端消息仍必须及时写入 renderer 状态。
  */
 export function createSessionUpdateBatcher<T>(
   flush: (sessionId: string, updates: readonly T[]) => void,
@@ -14,12 +16,10 @@ export function createSessionUpdateBatcher<T>(
   const pending = new Map<string, T[]>()
   const scheduled = new Map<string, number>()
   const schedule = options.schedule ?? ((callback: () => void) => {
-    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback)
     return setTimeout(callback, 16) as unknown as number
   })
   const cancel = options.cancel ?? ((handle: number) => {
-    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(handle)
-    else clearTimeout(handle)
+    clearTimeout(handle)
   })
 
   const flushSession = (sessionId: string): void => {

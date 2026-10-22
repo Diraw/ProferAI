@@ -43,4 +43,17 @@ describe('受管浏览器 URL 策略', () => {
     expect(isSafeBrowserSubresourceUrl('https://user:pass@example.com/app.js')).toBe(false)
     expect(isSafeBrowserSubresourceUrl('not a url')).toBe(false)
   })
+
+  test('顶层 URL 未知时只拦私网子资源，绝不整页 cancel', async () => {
+    // 回归：定位不到标签时 topLevelUrl 曾是空串，`new URL('')` 抛错被当成 cancel，
+    // 页面所有 CSS/图片/脚本一并加载失败，只剩裸 HTML（主文档正常）。
+    const css = 'https://profer.cn/_astro/about.GXzutYYl.css'
+    await expect(assertSafeBrowserSubresourceDestination(css, '')).resolves.toBe(css)
+    await expect(assertSafeBrowserSubresourceDestination(css, null)).resolves.toBe(css)
+    await expect(assertSafeBrowserSubresourceDestination(css, undefined)).resolves.toBe(css)
+    await expect(assertSafeBrowserSubresourceDestination(css, 'not a url')).resolves.toBe(css)
+    // 顶层未知也不能放松：指向本机/私网的子资源依旧拒绝。
+    await expect(assertSafeBrowserSubresourceDestination('http://127.0.0.1:3000/admin', '')).rejects.toThrow('不允许加载本机或私网子资源')
+    await expect(assertSafeBrowserSubresourceDestination('http://192.168.1.10/api', null)).rejects.toThrow('不允许加载本机或私网子资源')
+  })
 })

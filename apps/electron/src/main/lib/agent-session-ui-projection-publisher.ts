@@ -11,6 +11,11 @@ export function configureAgentSessionProjectionPublisher(eventBus: AgentEventBus
   projectionEventBus = eventBus
 }
 
+/** 投影发布器是否已接线。宿主在可选广播点（如内核锁定投影）用它避免在未接线环境下抛错。 */
+export function hasAgentSessionProjectionPublisher(): boolean {
+  return projectionEventBus !== null
+}
+
 function emitProjection(sessionId: string, payload: AgentStreamPayload): void {
   if (!projectionEventBus) throw new Error('Agent session projection publisher 尚未初始化')
   projectionEventBus.emit(sessionId, payload)

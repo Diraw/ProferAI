@@ -14,6 +14,7 @@ import * as React from 'react'
 import { getDefaultStore, useStore } from 'jotai'
 import { previewFileMapAtom, previewFilesByTabAtom, type PreviewFile } from '@/atoms/preview-atoms'
 import { agentSessionPathMapAtom } from '@/atoms/agent-atoms'
+import { previewOpenModeAtom } from '@/atoms/ui-preferences'
 import { isAbsoluteFilePath } from '@/lib/file-utils'
 import {
   activeTabIdAtom,
@@ -22,6 +23,7 @@ import {
   openTab,
   tabsAtom,
 } from '@/atoms/tab-atoms'
+import { planPreviewSplit, tabGroupsAtom } from '@/atoms/tab-group-atoms'
 
 /** Jotai store 类型（从 useStore 推导，避免直接 import 内部 Store 类型） */
 type JotaiStore = ReturnType<typeof useStore>
@@ -63,7 +65,8 @@ function normalizePreviewFile(store: JotaiStore, sessionId: string, file: Previe
  * 打开（或聚焦）一个文件预览 Tab。所有文件预览的唯一入口：
  * - 归一化路径，更新会话「最近文件」指针（高亮/聚焦刷新/PPTX 回执使用）；
  * - 写入该 Tab 的完整 PreviewFile 元数据（PreviewTabContent 按 tabId 读取）；
- * - 每文件一个 Tab，重复打开同一文件 = 聚焦既有 Tab（元数据仍会刷新）。
+ * - 每文件一个 Tab，重复打开同一文件 = 聚焦既有 Tab（元数据仍会刷新）；
+ * - 用户主动打开且设置为「与对话分屏」时，额外把该预览与所属会话摆成左右并排。
  *
  * activate 默认 true；后台打开（如自动预览推送）传 false，由调用方决定是否并排组合。
  */
@@ -94,10 +97,41 @@ export function openFilePreviewTab(
     })
     store.set(tabsAtom, result.tabs)
   }
-  if (options.activate !== false) {
+  const userInitiated = options.activate !== false
+  if (userInitiated) {
     store.set(activeTabIdAtom, tabId)
   }
+  applyPreviewOpenMode(store, sessionId, tabId, userInitiated)
   return tabId
+}
+
+/**
+ * 「与对话分屏」模式：把刚打开的预览 Tab 与所属会话摆成左右并排。
+ *
+ * 只在用户主动打开时强制成组——自动预览推送沿用既有 planFollowWorkTab 的
+ * 「只在用户正看着该会话时跟随」语义，不抢视图。会话入口 Tab 尚未打开、
+ * 或用户已把会话/预览编进别的组合时保持原样（见 planPreviewSplit）。
+ */
+function applyPreviewOpenMode(
+  store: JotaiStore,
+  sessionId: string,
+  previewTabId: string,
+  userInitiated: boolean,
+): void {
+  if (!userInitiated) return
+  if (store.get(previewOpenModeAtom) !== 'split') return
+  const tabs = store.get(tabsAtom)
+  if (!tabs.some((tab) => tab.id === sessionId)) return
+  const plan = planPreviewSplit({
+    groups: store.get(tabGroupsAtom),
+    tabs,
+    agentTabId: sessionId,
+    workTabId: previewTabId,
+    focus: 'preview',
+  })
+  if (!plan) return
+  store.set(tabGroupsAtom, plan.groups)
+  store.set(activeTabIdAtom, plan.focusedTabId)
 }
 
 /** 模块级入口（与 usePanelAutoLayout 的模块级函数同一模式），供非 React 上下文调用。 */

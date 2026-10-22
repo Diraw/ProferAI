@@ -76,8 +76,18 @@ export const GROUP_ELIGIBLE_TAB_TYPES: readonly string[] = ['agent', 'chat', 'pr
 /** 组合内分栏缝宽度，与浏览器/预览分栏保持一致 */
 export const GROUP_SPLIT_GAP = 8
 
-/** 单栏最小可用宽度，对齐 panel-layout 的 CONVERSATION_MIN_WIDTH */
+/** 单栏最小可用宽度（首选值），对齐 panel-layout 的 CONVERSATION_MIN_WIDTH */
 export const GROUP_MIN_PANE_WIDTH = 420
+
+/**
+ * 分栏缝的最小可调区间（占可用宽的比例）。
+ *
+ * 两栏最小宽把可调区间挤到比它还窄时，放宽的是**最小栏宽**而不是可调区间：
+ * 0.25 表示比例至少能从 0.375 拖到 0.625。典型触发场景：窗口 1510 + 侧栏 300 +
+ * 文件面板 300 → 主区容器约 862px，两栏各 420px 只剩 ±7px 可调（看起来就是"线拖不动"）。
+ * 只影响渲染几何；窗口预算（mainAreaNeed）仍按 CONVERSATION_MIN_WIDTH 判定。
+ */
+export const GROUP_MIN_ADJUSTABLE_BAND = 0.25
 
 /** 右栏占比的拖拽边界 */
 export const GROUP_MIN_RATIO = 0.25
@@ -293,6 +303,55 @@ export function planFollowWorkTab(input: {
 }
 
 /**
+ * 「预览与对话分屏」：把会话与其预览标签摆成左右并排（会话在左、预览在右）。
+ *
+ * 与 planFollowWorkTab 的区别：不要求用户此刻正看着该会话（用户主动打开预览时强制生效），
+ * 且允许替换对侧「同会话的预览」。
+ *
+ * 以下情况返回 null，由调用方退化为普通标签页聚焦：
+ * - 会话与预览是同一个标签；
+ * - 会话已入组，但对侧是别的标签（用户自己摆的布局，不抢）；
+ * - 预览已入组而会话不在同一组（用户已把预览编进别的组合）。
+ */
+export function planPreviewSplit(input: {
+  groups: TabGroupsState
+  tabs: readonly TabItem[]
+  agentTabId: string
+  workTabId: string
+  focus: 'agent' | 'preview'
+}): { groups: TabGroupsState; focusedTabId: string } | null {
+  const { groups, tabs, agentTabId, workTabId, focus } = input
+  if (!agentTabId || !workTabId || agentTabId === workTabId) return null
+  const focusedTabId = focus === 'preview' ? workTabId : agentTabId
+  const agentGroup = findTabGroup(groups, agentTabId)
+
+  if (!agentGroup) {
+    // 预览已被用户编进别的组合 → 尊重既有布局
+    if (findTabGroup(groups, workTabId)) return null
+    const created = createGroup(agentTabId, workTabId, focusedTabId)
+    return created ? { groups: replaceTabGroup(groups, null, created), focusedTabId } : null
+  }
+
+  // 预览与会话已在同一组合：只切焦点
+  if (isGroupMember(agentGroup, workTabId)) return { groups, focusedTabId }
+
+  const agentSide = groupSideOf(agentGroup, agentTabId)
+  if (!agentSide) return null
+  const otherTabId = agentSide === 'left' ? agentGroup.rightTabId : agentGroup.leftTabId
+  const otherTab = otherTabId ? tabs.find((tab) => tab.id === otherTabId) : null
+  // 只在对侧空闲、或对侧本来就是同一会话的预览（可被最新文件替换）时改写
+  const replaceable = !otherTabId || (otherTab?.type === 'preview' && otherTab.sessionId === agentTabId)
+  if (!replaceable) return null
+
+  const next = createGroup(
+    agentSide === 'left' ? agentTabId : workTabId,
+    agentSide === 'left' ? workTabId : agentTabId,
+    focusedTabId,
+  )
+  return next ? { groups: replaceTabGroup(groups, agentGroup, next), focusedTabId } : null
+}
+
+/**
  * 合并手势的落点语义（无组合时）：
  * - 被拖标签就是当前激活标签（"只有一个会话"）：只把它放进落点那一栏，**另一栏留空**，
  *   等用户自己挑对照会话——不自动补位；
@@ -473,7 +532,11 @@ export interface GroupSplitGeometry {
 
 /**
  * 由容器宽度与比例算出两栏像素宽，并把比例限制在「两栏都不小于最小宽度」的区间内。
- * 容器过窄（可用宽装不下两个最小宽）时退化为等分，由调用方决定是否提示。
+ *
+ * 两栏最小宽是**首选**约束，不是硬约束：当它会把分栏缝的可调区间挤到
+ * GROUP_MIN_ADJUSTABLE_BAND 以下（含可用宽装不下两栏最小宽、clamp 区间反转的情况）时，
+ * 让位给保底可调区间——「分栏缝始终可用」是组合分栏的既定契约，
+ * 宁可让两栏临时窄于 CONVERSATION_MIN_WIDTH，也不能出现"线能拖、两栏不动"的死区。
  */
 export function resolveGroupSplitGeometry(
   containerWidth: number,
@@ -488,14 +551,12 @@ export function resolveGroupSplitGeometry(
   }
 
   const base = clampGroupRatio(ratio)
-  // 两栏最小宽都放不下时 clamp 区间会反转；此时等分，避免负宽度或抖动。
-  if (available < minPaneWidth * 2) {
-    const rightWidth = available / 2
-    return { rightWidth, leftWidth: available - rightWidth, ratio: 0.5 }
-  }
-
-  const lower = minPaneWidth / available
-  const upper = 1 - minPaneWidth / available
+  // 首选下限 = 两栏最小宽对应的占比；保底下限 = 保住可调区间时的占比。
+  // 取两者较小值：容器够宽时完全是前者（两栏都不小于 420），
+  // 容器偏窄时由后者接管（区间至少横跨 GROUP_MIN_ADJUSTABLE_BAND，不会锁死）。
+  const minPaneShare = minPaneWidth / available
+  const lower = Math.min(minPaneShare, (1 - GROUP_MIN_ADJUSTABLE_BAND) / 2)
+  const upper = 1 - lower
   const effective = Math.max(lower, Math.min(upper, base))
   const rightWidth = available * effective
   return { rightWidth, leftWidth: available - rightWidth, ratio: effective }
