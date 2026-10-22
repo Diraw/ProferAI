@@ -1,5 +1,16 @@
 [
   {
+    "id": "RE_kwDOTfo-884ZEr6K",
+    "tag_name": "v0.16.12",
+    "name": "Profer v0.16.12",
+    "body": "# Profer v0.16.12\r\n\r\n## 安全\r\n\r\n- **内置浏览器补上证书吊销通道**：Chrome 通过组件更新在数小时内拉黑私钥泄露的中间 CA（2026-10-17 eMudhra 事件），Electron 不走这条通道，内置浏览器的 CRLSet 停留在构建时。现在用 SPKI SHA-256 黑名单补上：基线对齐 Go 1.27.3 的 `distrustedSPKIHashes`（CVE-2026-111943），启动时从 Profer Server 拉取吊销列表并缓存，之后每 6 小时刷新，拉取失败继续用基线与上次缓存。\r\n- **网页权限收紧**：受管网页不再获得任何浏览器权限，包括此前放行的 `clipboard-read` / `clipboard-sanitized-write`——任意页面可借此读取用户刚复制的密码、验证码与私钥。用户自己的 Ctrl+C / 右键复制走浏览器默认行为，不受影响。\r\n- **安装包拉起路径校验**：`shell.openPath` 能拉起任意可执行文件，而路径来自渲染层。现在必须是安装包缓存目录内的常规文件，解析符号链接后仍须落在目录内，归属判断用 `path.relative`（Windows 大小写不敏感）而不是字符串前缀。\r\n\r\n## 新增\r\n\r\n- **xAI API Key 渠道可选 Chat Completions 协议**：第三方 Grok 中转常常只实现 `/chat/completions`。渠道新增 `apiProtocol` 字段，地址预览、端点错配提示、连接测试与 Pi 推理能力都跟随选择；订阅 OAuth 固定走 Pi 内置 provider，切到 OAuth 或换供应商时会清掉协议残留，避免影响后续地址预览与请求分派。\r\n- **计划模式 Bash 只读判定升级**：先做结构检查（换行、重定向、`&&`/`||`/`;`、子 shell、`$(...)`、反引号、进程替换、后台执行），这些结构会让命令名白名单失效；再按引号感知的 token 判定 git 只读命令。解释器内联执行（`python -c`、`node -e`）、`sh -c`、`env VAR=x cmd`、`xargs`/`tee`/`dd`/`open`/`osascript`、`rg --pre`、`find -fprint`、awk 的 `system()` 一律按写操作处理。\r\n- **移动端工具图片改为引用下发**：Pocket 只接收图片引用（路径 + 文件名 + MIME，单次最多 4 张），字节按需用 `read_file_as_data_url` 拉取，工具结果图片不再走 base64 通道，避免每帧重发撑爆 WebSocket 与重放日志。\r\n\r\n## 修复\r\n\r\n- **存储回收误删侧车文件**：`agent-sessions` 目录里同一会话可能有 `{id}.jsonl`、`{id}-graph.jsonl`、`{id}-pi-harness.jsonl` 三种文件，此前按文件名去掉 `.jsonl` 判定孤儿，侧车文件永远命中不了 UUID 索引。现在先剥后缀回到 `baseSessionId` 再判定，统计与清理口径一致；解析不出的文件只计总量、不参与删除。\r\n- **渠道 Agent 可用性判据**：新增 `isChannelEnabledForAnyRuntime`，只勾选 Pi 内核的渠道（典型是 xAI）不再被 `isAgentEnabledForChannel` 判成不可用；渠道列表与默认 Agent 渠道派生统一改用新判据。\r\n\r\n## 优化\r\n\r\n- **Windows 图形**：ANGLE 后端恢复为 opt-in（`PROFER_ANGLE_BACKEND` 显式指定才追加 switch），默认走 Chromium 自己的后端选择，不再让所有 Windows 用户为 2.4 秒的启动动画承担全程非默认 GPU 路径。新增 GPU 合成/光栅状态日志，GPU 进程崩溃后 Chromium 会静默降级到软件合成且不自动恢复，有了这条日志才不会把掉帧误判成渲染代码慢。\r\n- **启动闪屏**：改为等页面回报首帧已提交再显示，消除「先显示纯色再顶内容」的一帧闪烁；页面脚本异常或 WebGL 不可用时由兜底定时器强制显示，避免主窗口被一起卡住。\r\n- **模型行「1M 上下文」开关**：从 10px 的「1M」小字改为带状态圆点的标签按钮，开启为实心绿点 + 绿色底、关闭为空心点 + 中性底，补 `aria-label`、`aria-pressed` 与键盘焦点环；已启用模型区块描述补充操作提示。\r\n\r\n## 重构\r\n\r\n- 移除 `check:boundaries` 脚本与已迁移的 parity 测试（约 8600 行），边界检查由各包自己的测试覆盖。\r\n- `xAI Responses provider` 更名并支持双协议，`resolvePiReasoningCapability` / `inferReasoningTransport` 接收渠道协议参数。\r\n\r\n## 升级提示\r\n\r\n- macOS 仍为 `darwin-arm64` 无签名（ad-hoc）、无公证验收包；Intel、Developer ID 与公证均未完成，从浏览器直接下载 DMG 首次安装仍会被 Gatekeeper 拦。\r\n- 内置浏览器不再放行剪贴板权限：网页内的「复制」按钮若依赖 Clipboard API 会失效，用户手动复制不受影响。\r\n",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-22T11:50:23Z",
+    "published_at": "2026-10-22T11:51:55Z",
+    "html_url": "https://github.com/Yuan-lai-ru-ci/ProferAI/releases/tag/v0.16.12"
+  },
+  {
     "id": "RE_kwDOTfo-884Y7Hkm",
     "tag_name": "v0.16.11",
     "name": "Profer v0.16.11",
