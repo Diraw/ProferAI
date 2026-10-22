@@ -29,6 +29,47 @@ function projectThinkingForPocket(text: unknown, partial: boolean): Record<strin
 }
 
 /**
+ * 移动端只接收图片引用（路径 + 文件名 + MIME），字节按需用 `read_file_as_data_url` 拉取。
+ * 工具结果里的图片（send_local_image / generate_image 的结构化 details）不走 base64 通道，
+ * 否则每帧重发图片会撑爆 WebSocket 与重放日志。
+ */
+const POCKET_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+const POCKET_IMAGE_LIMIT = 4
+
+type PocketImageRef = { path: string; filename: string; mediaType: string }
+
+function collectPocketImageRefs(
+  value: unknown,
+  found: PocketImageRef[] = [],
+  depth = 0,
+  seen = new Set<object>(),
+): PocketImageRef[] {
+  if (!value || typeof value !== 'object' || depth > 4 || found.length >= POCKET_IMAGE_LIMIT) return found
+  const record = value as Record<string, unknown>
+  if (seen.has(record)) return found
+  seen.add(record)
+
+  const candidates: unknown[] = []
+  if (record.image !== undefined) candidates.push(record.image)
+  if (Array.isArray(record.imageAttachments)) candidates.push(...record.imageAttachments)
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const image = candidate as Record<string, unknown>
+    const path = typeof image.localPath === 'string' ? image.localPath.trim() : ''
+    const filename = typeof image.filename === 'string' ? image.filename.trim() : ''
+    const mediaType = typeof image.mediaType === 'string' ? image.mediaType : ''
+    if (!path || !filename || !POCKET_IMAGE_MEDIA_TYPES.has(mediaType)) continue
+    if (found.some((item) => item.path === path)) continue
+    found.push({ path, filename, mediaType })
+    if (found.length >= POCKET_IMAGE_LIMIT) break
+  }
+
+  // Claude MCP 把 details 包在 structuredContent 里，Pi 直接放在顶层。
+  for (const key of ['output', 'details', 'structuredContent']) collectPocketImageRefs(record[key], found, depth + 1, seen)
+  return found
+}
+
+/**
  * Pocket 只需要渲染正文、工具活动摘要和有界的思考预览，不需要工具入参/结果或 SDK 内部字段。
  * 该投影在远程出口使用，避免完整 SDK 消息进入 WebSocket、重放日志和移动端缓存。
  */
@@ -84,12 +125,19 @@ export function projectSdkMessageForPocket(message: SDKMessage): SDKMessage {
   if (message.type === 'user') {
     const inner = record.message && typeof record.message === 'object' ? record.message as Record<string, unknown> : {}
     const content = Array.isArray(inner.content) ? inner.content : []
+    // 图片附件挂在工具结果消息的顶层 `tool_use_result` 上，移动端按 tool_result 块绑定渲染。
+    const imageRefs = collectPocketImageRefs(record.tool_use_result ?? record.toolUseResult)
     const projectedContent = content.flatMap((block): Array<Record<string, unknown>> => {
       if (!block || typeof block !== 'object') return []
       const item = block as Record<string, unknown>
       if (item.type === 'text' && typeof item.text === 'string') return [{ type: 'text', text: item.text }]
       if (item.type === 'tool_result' && typeof item.tool_use_id === 'string') {
-        return [{ type: 'tool_result', tool_use_id: item.tool_use_id, ...(item.is_error === true ? { is_error: true } : {}) }]
+        return [{
+          type: 'tool_result',
+          tool_use_id: item.tool_use_id,
+          ...(item.is_error === true ? { is_error: true } : {}),
+          ...(imageRefs.length > 0 ? { images: imageRefs } : {}),
+        }]
       }
       return []
     })

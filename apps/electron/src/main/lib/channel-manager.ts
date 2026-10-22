@@ -24,7 +24,7 @@ import type {
   ProviderType,
   XaiOAuthCredentials,
 } from '@profer/shared'
-import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApiToken, isAgentEnabledForChannel, isCodexCredentialExpired, isLocalOllamaBaseUrl, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveProviderNativeProtocol, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
+import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApiToken, isChannelEnabledForAnyRuntime, isCodexCredentialExpired, isLocalOllamaBaseUrl, isXaiCredentialExpired, parseCodexCredentials, parseXaiCredentials, resolveProviderNativeProtocol, resolveXaiCredentialMode, serializeCodexCredentials, serializeXaiCredentials, supportsProviderPlanQuota } from '@profer/shared'
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { assertSdkBaseUrlSupportsRouting, isAnthropicShapedEndpoint, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveAnthropicModelsUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
@@ -172,6 +172,7 @@ function assertChannelsConfig(value: unknown): asserts value is ChannelsConfig {
       || (channel.agentRuntimes !== undefined && (!Array.isArray(channel.agentRuntimes)
         || channel.agentRuntimes.some((mode) => mode !== 'pi' && mode !== 'claude')))
       || (channel.credentialMode !== undefined && channel.credentialMode !== 'oauth' && channel.credentialMode !== 'api-key')
+      || (channel.apiProtocol !== undefined && channel.apiProtocol !== 'responses' && channel.apiProtocol !== 'chat-completions')
       || (channel.agentExperimentalEnabled !== undefined && typeof channel.agentExperimentalEnabled !== 'boolean')) {
       throw new Error('渠道配置包含无效渠道')
     }
@@ -540,7 +541,7 @@ export async function syncChannelsFromServer(serverBaseUrl: string, accessToken:
       if (settings.agentChannelIds && settings.agentChannelIds.length > 0) {
         // 静默跳过
       } else {
-        const agentCapableChannels = config.channels.filter((c) => isAgentEnabledForChannel(c))
+        const agentCapableChannels = config.channels.filter((c) => isChannelEnabledForAnyRuntime(c))
         const agentIds = agentCapableChannels.map((c) => c.id)
         const firstAgent = agentCapableChannels[0]
         const firstModel = firstAgent?.models?.find((m) => m.enabled)
@@ -625,6 +626,8 @@ export function createChannel(input: ChannelCreateInput): Channel {
     provider: input.provider,
     baseUrl: input.baseUrl,
     ...(input.provider === 'xai' && input.credentialMode ? { credentialMode: input.credentialMode } : {}),
+    // 订阅 OAuth 走 Pi 内置 provider，协议不可切；只有 API Key 渠道保留用户选择。
+    ...(input.provider === 'xai' && input.credentialMode !== 'oauth' && input.apiProtocol ? { apiProtocol: input.apiProtocol } : {}),
     ...(input.provider === 'xai' && input.agentExperimentalEnabled ? { agentExperimentalEnabled: true } : {}),
     agentBaseUrl: input.agentBaseUrl,
     ...(input.agentRuntimes ? { agentRuntimes: input.agentRuntimes } : {}),
@@ -733,8 +736,14 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
     provider: nextProvider,
     baseUrl: nextBaseUrl,
     ...(nextProvider === 'xai'
-      ? { credentialMode: input.credentialMode ?? existing.credentialMode, agentExperimentalEnabled: input.agentExperimentalEnabled ?? existing.agentExperimentalEnabled }
-      : { credentialMode: undefined, agentExperimentalEnabled: undefined }),
+      ? {
+          credentialMode: input.credentialMode ?? existing.credentialMode,
+          apiProtocol: (input.credentialMode ?? existing.credentialMode) === 'oauth'
+            ? undefined
+            : input.apiProtocol ?? existing.apiProtocol,
+          agentExperimentalEnabled: input.agentExperimentalEnabled ?? existing.agentExperimentalEnabled,
+        }
+      : { credentialMode: undefined, apiProtocol: undefined, agentExperimentalEnabled: undefined }),
     agentBaseUrl: nextAgentBaseUrl,
     // 未显式传入时保留原勾选；老配置的推导由 normalizeChannelForCurrentSchema 负责。
     agentRuntimes: input.agentRuntimes !== undefined ? input.agentRuntimes : existing.agentRuntimes,
@@ -1018,7 +1027,7 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
       case 'anthropic':
         return await testAnthropicCompatible(channel.baseUrl, apiKey, proxyUrl, channel.provider)
       case 'openai':
-        return await testOpenAICompatible(channel.baseUrl, apiKey, proxyUrl)
+        return await testOpenAICompatible(channel.baseUrl, apiKey, proxyUrl, undefined, channel.provider, undefined, channel.apiProtocol)
       case 'google':
         return await testGoogle(channel.baseUrl, apiKey, proxyUrl)
       default:
@@ -1106,12 +1115,20 @@ async function testAnthropicCompatible(
 /**
  * 测试 OpenAI 兼容 API 连接（OpenAI / Custom）
  */
-async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: string, modelId?: string, provider: ProviderType = 'openai', signal?: AbortSignal): Promise<ChannelTestResult> {
+async function testOpenAICompatible(
+  baseUrl: string,
+  apiKey: string,
+  proxyUrl?: string,
+  modelId?: string,
+  provider: ProviderType = 'openai',
+  signal?: AbortSignal,
+  apiProtocol?: 'responses' | 'chat-completions',
+): Promise<ChannelTestResult> {
   if (!modelId?.trim()) {
     const result = await fetchOpenAICompatibleModels(baseUrl, apiKey, proxyUrl, signal)
     return { success: result.success, message: result.success ? '模型目录可达（未验证模型生成）' : result.message }
   }
-  const responsesApi = provider === 'openai-responses' || provider === 'xai'
+  const responsesApi = provider === 'openai-responses' || (provider === 'xai' && apiProtocol !== 'chat-completions')
   const url = responsesApi ? resolveOpenAIResponsesUrl(baseUrl) : resolveOpenAIChatCompletionsUrl(baseUrl, provider)
   const fetchFn = getFetchFn(proxyUrl)
 
@@ -1710,7 +1727,7 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
     if (input.runtime) {
       const runtimeUrl = input.runtime === 'claude'
         ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
-        : resolveProviderNativeProtocol(input.provider, input.baseUrl) === 'anthropic-messages'
+        : resolveProviderNativeProtocol(input.provider, input.baseUrl, input.apiProtocol) === 'anthropic-messages'
           ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
           : input.baseUrl
       try {
@@ -1746,7 +1763,7 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
       case 'anthropic':
         return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider, input.modelId, signal)
       case 'openai':
-        return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl, input.modelId, input.provider, signal)
+        return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl, input.modelId, input.provider, signal, input.apiProtocol)
       case 'google':
         return await testGoogle(input.baseUrl, input.apiKey, proxyUrl, input.modelId, signal)
       default:

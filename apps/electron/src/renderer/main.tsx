@@ -222,6 +222,7 @@ function AgentSettingsInitializer(): null {
   useEffect(() => initializeAgentSettings(store, {
     getSettings: window.electronAPI.getSettings,
     listWorkspaces: window.electronAPI.listAgentWorkspaces,
+    updateSettings: window.electronAPI.updateSettings,
     onFailure: (error) => console.error('[AgentSettings] 启动设置加载失败:', error),
   }), [store])
 

@@ -28,7 +28,7 @@ import { agentGoalAtomFamily, getGoalActions, GOAL_STATUS_LABELS, goalEditorAtom
 import { ContextUsageBadge } from './ContextUsageBadge'
 import { resolvePlanQuotaChannelId } from './context-usage-badge-channel'
 import { supportsChannelPlanQuota } from '@/lib/channel-plan-quota'
-import { isAgentModelSelectionValid, nextAgentChannelIdsAfterModelSelect } from '@/lib/agent-channel-selection'
+import { isAgentModelSelectionValid, nextAgentChannelIdsAfterModelSelect, resolveAgentRuntimeSelection } from '@/lib/agent-channel-selection'
 import { PermissionBanner } from './PermissionBanner'
 import { RuntimeProcessPanel } from './RuntimeProcessPanel'
 import { BackgroundTaskControls } from './BackgroundTaskControls'
@@ -129,7 +129,7 @@ import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { activeViewAtom } from '@/atoms/active-view'
 import { activeTabIdAtom } from '@/atoms/tab-atoms'
 import { openExplorationBranchTab } from '@/lib/exploration-tab'
-import { channelsAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
+import { channelsAtom, channelsLoadedAtom, thinkingExpandedAtom } from '@/atoms/chat-atoms'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { AgentSessionProvider } from '@/contexts/session-context'
@@ -641,6 +641,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const [pendingFiles, setPendingFiles] = useAtom(agentPendingFilesAtomFamily(sessionId))
   const workspaces = useAtomValue(agentWorkspacesAtom)
   const globalChannels = useAtomValue(channelsAtom)
+  const channelsLoaded = useAtomValue(channelsLoadedAtom)
   const capabilitiesVersion = useAtomValue(workspaceCapabilitiesVersionAtom)
 
   // 加载当前工作区的 Agent 预设列表（预设为工作区级；失败静默留空由 UI 兑底）。
@@ -1789,6 +1790,22 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
       requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-input-mode="agent"] .ProseMirror')?.focus())
     }
   }, [backgroundWaiting, sessionAgentRuntime, sessionId, sessionMeta, setAgentRuntime, setAgentSessions, streaming])
+
+  /**
+   * 未开始会话的内核跟着可用渠道走。
+   *
+   * 会话可能在默认内核下建成，而唯一渠道只勾了另一个内核（典型：新装默认 claude +
+   * 只勾 Pi 的 DeepSeek 渠道）。首次发送前自动对齐到渠道支持的内核，
+   * 不让用户面对「渠道明明配了却说没配」的空转。开始运行/已固定后不再自动切换。
+   */
+  React.useEffect(() => {
+    if (!channelsLoaded || !sessionMeta || !canSelectAgentSessionRuntime(sessionMeta)) return
+    if (streaming || backgroundWaiting || runtimeSwitchInFlight || hasAvailableModel) return
+    const selection = resolveAgentRuntimeSelection(globalChannels, sessionAgentRuntime, agentChannelIds, null)
+    if (!selection || selection.runtime === sessionAgentRuntime) return
+    void handleAgentRuntimeChange(selection.runtime)
+  }, [channelsLoaded, sessionMeta, streaming, backgroundWaiting, runtimeSwitchInFlight, hasAvailableModel,
+    globalChannels, sessionAgentRuntime, agentChannelIds, handleAgentRuntimeChange])
 
   /** 构建 externalSelectedModel 给 ModelSelector */
   const computedSelectedModel = React.useMemo(() => {

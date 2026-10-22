@@ -97,6 +97,7 @@ export function createElectronProviderQueryPreparation(
         codexOAuthCredentials: credentials.codexOAuthCredentials,
         xaiOAuthCredentials: credentials.xaiOAuthCredentials,
         xaiCredentialMode: credentials.xaiCredentialMode,
+        xaiApiProtocol: credentials.xaiApiProtocol,
         ...(permissionMode ? { permissionMode } : {}),
         systemPrompt: typeof systemPrompt === 'string' ? systemPrompt : systemPrompt.append ?? input.prompt,
         ...(prepared.tools !== undefined ? { customTools: [...prepared.tools] } : {}),

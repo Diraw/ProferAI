@@ -1,5 +1,38 @@
 [
   {
+    "id": "RE_kwDOTfo-884ZEr6K",
+    "tag_name": "v0.16.12",
+    "name": "Profer v0.16.12",
+    "body": "# Profer v0.16.12\r\n\r\n## 安全\r\n\r\n- **内置浏览器补上证书吊销通道**：Chrome 通过组件更新在数小时内拉黑私钥泄露的中间 CA（2026-10-17 eMudhra 事件），Electron 不走这条通道，内置浏览器的 CRLSet 停留在构建时。现在用 SPKI SHA-256 黑名单补上：基线对齐 Go 1.27.3 的 `distrustedSPKIHashes`（CVE-2026-111943），启动时从 Profer Server 拉取吊销列表并缓存，之后每 6 小时刷新，拉取失败继续用基线与上次缓存。\r\n- **网页权限收紧**：受管网页不再获得任何浏览器权限，包括此前放行的 `clipboard-read` / `clipboard-sanitized-write`——任意页面可借此读取用户刚复制的密码、验证码与私钥。用户自己的 Ctrl+C / 右键复制走浏览器默认行为，不受影响。\r\n- **安装包拉起路径校验**：`shell.openPath` 能拉起任意可执行文件，而路径来自渲染层。现在必须是安装包缓存目录内的常规文件，解析符号链接后仍须落在目录内，归属判断用 `path.relative`（Windows 大小写不敏感）而不是字符串前缀。\r\n\r\n## 新增\r\n\r\n- **xAI API Key 渠道可选 Chat Completions 协议**：第三方 Grok 中转常常只实现 `/chat/completions`。渠道新增 `apiProtocol` 字段，地址预览、端点错配提示、连接测试与 Pi 推理能力都跟随选择；订阅 OAuth 固定走 Pi 内置 provider，切到 OAuth 或换供应商时会清掉协议残留，避免影响后续地址预览与请求分派。\r\n- **计划模式 Bash 只读判定升级**：先做结构检查（换行、重定向、`&&`/`||`/`;`、子 shell、`$(...)`、反引号、进程替换、后台执行），这些结构会让命令名白名单失效；再按引号感知的 token 判定 git 只读命令。解释器内联执行（`python -c`、`node -e`）、`sh -c`、`env VAR=x cmd`、`xargs`/`tee`/`dd`/`open`/`osascript`、`rg --pre`、`find -fprint`、awk 的 `system()` 一律按写操作处理。\r\n- **移动端工具图片改为引用下发**：Pocket 只接收图片引用（路径 + 文件名 + MIME，单次最多 4 张），字节按需用 `read_file_as_data_url` 拉取，工具结果图片不再走 base64 通道，避免每帧重发撑爆 WebSocket 与重放日志。\r\n\r\n## 修复\r\n\r\n- **存储回收误删侧车文件**：`agent-sessions` 目录里同一会话可能有 `{id}.jsonl`、`{id}-graph.jsonl`、`{id}-pi-harness.jsonl` 三种文件，此前按文件名去掉 `.jsonl` 判定孤儿，侧车文件永远命中不了 UUID 索引。现在先剥后缀回到 `baseSessionId` 再判定，统计与清理口径一致；解析不出的文件只计总量、不参与删除。\r\n- **渠道 Agent 可用性判据**：新增 `isChannelEnabledForAnyRuntime`，只勾选 Pi 内核的渠道（典型是 xAI）不再被 `isAgentEnabledForChannel` 判成不可用；渠道列表与默认 Agent 渠道派生统一改用新判据。\r\n\r\n## 优化\r\n\r\n- **Windows 图形**：ANGLE 后端恢复为 opt-in（`PROFER_ANGLE_BACKEND` 显式指定才追加 switch），默认走 Chromium 自己的后端选择，不再让所有 Windows 用户为 2.4 秒的启动动画承担全程非默认 GPU 路径。新增 GPU 合成/光栅状态日志，GPU 进程崩溃后 Chromium 会静默降级到软件合成且不自动恢复，有了这条日志才不会把掉帧误判成渲染代码慢。\r\n- **启动闪屏**：改为等页面回报首帧已提交再显示，消除「先显示纯色再顶内容」的一帧闪烁；页面脚本异常或 WebGL 不可用时由兜底定时器强制显示，避免主窗口被一起卡住。\r\n- **模型行「1M 上下文」开关**：从 10px 的「1M」小字改为带状态圆点的标签按钮，开启为实心绿点 + 绿色底、关闭为空心点 + 中性底，补 `aria-label`、`aria-pressed` 与键盘焦点环；已启用模型区块描述补充操作提示。\r\n\r\n## 重构\r\n\r\n- 移除 `check:boundaries` 脚本与已迁移的 parity 测试（约 8600 行），边界检查由各包自己的测试覆盖。\r\n- `xAI Responses provider` 更名并支持双协议，`resolvePiReasoningCapability` / `inferReasoningTransport` 接收渠道协议参数。\r\n\r\n## 升级提示\r\n\r\n- macOS 仍为 `darwin-arm64` 无签名（ad-hoc）、无公证验收包；Intel、Developer ID 与公证均未完成，从浏览器直接下载 DMG 首次安装仍会被 Gatekeeper 拦。\r\n- 内置浏览器不再放行剪贴板权限：网页内的「复制」按钮若依赖 Clipboard API 会失效，用户手动复制不受影响。\r\n",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-22T11:50:23Z",
+    "published_at": "2026-10-22T11:51:55Z",
+    "html_url": "https://github.com/Yuan-lai-ru-ci/ProferAI/releases/tag/v0.16.12"
+  },
+  {
+    "id": "RE_kwDOTfo-884Y7Hkm",
+    "tag_name": "v0.16.11",
+    "name": "Profer v0.16.11",
+    "body": "# Profer v0.16.11\r\n\r\n## 新增\r\n\r\n- **存储用量纳入文件检查点**：Pi 每轮编辑前的基线快照此前完全不在统计范围，`du ~/.profer` 与设置页数字能差出几个 GB。现在「存储用量」新增「文件检查点」分类，复制引擎按清单体积计、git 引擎的共享仓库单独精确统计，中断残留按实际占用兜底。\r\n- **回收已归档会话的检查点**：归档只做收纳、不释放空间，这块占用最大的往往是「已归档但还活着」的会话。清理拆成「孤儿目录」与「已归档会话」两个互不重叠的范围，后者需要单独点击确认，删除后这些会话仍可打开继续对话，但不能再把文件回退到更早轮次。\r\n- **自动归档增加工作区保留名额**：每个工作区按最后活跃时间保留最近 N 个会话（默认 3，0 = 关闭），保留名额不参与超时归档；置顶、草稿、运行中/分叉中、任务图仍有未完成节点的会话逐条豁免。\r\n- **消息迷你地图按对话轮导航**：从按消息条数改为按轮回跳转。\r\n- **分屏页原生关闭浮标**：分屏右栏网页的关闭入口改由主进程在原生视图上绘制，避免出现两个关闭按钮；页内新开页会接管原分屏位置，不抢对侧会话。\r\n- **Pocket 远程能力补齐**：用户消息在落盘后进入事件流，移动端不再只能看到助手回复；新增工具列表/开关、附件保存等远程命令，工具信息只下发开关与说明，不暴露凭据与执行器配置。\r\n- **Pocket 有界思考预览**：移动端可以显示思考过程，partial 帧只带尾部 800 字符、final 帧 2000 字符（均保留结尾），避免每 60ms 重发全文。\r\n\r\n## 修复\r\n\r\n- **Pi 上下文压缩系列**：\r\n  - 历史图片按新旧分层压缩（最近 2 张高清、其余低清，总 base64 预算 6MB），覆盖恢复会话后的首轮与工具续轮。\r\n  - 工具结果除单条 8k 截断外增加 20 万字符聚合预算，同一条助手回复派生的并行工具结果算一组；超预算的旧组原文落盘，消息里只留路径与 2k 预览，模型可按需读回。\r\n  - 手动压缩加三类前置守卫（轮次过少、上一次未返回、5 分钟内连续压缩熔断），不再白烧摘要调用。\r\n  - 只读工具改回全局并行调度（实测 3 个 200ms 工具 613ms → 204ms），写工具保持串行；`write` 增加读前校验，避免静默覆盖用户在编辑器里的改动。\r\n- **自动标题失败可诊断**：失败返回结构化原因（状态码 + 响应片段），不再静默写回「首条消息前 20 字」伪装成功；兼容网关忽略 `stream:false` 返回 SSE 的情况，标题 Base URL 复用主链路端点归一化，修复「聊天正常、标题失败」。自动标题也不再阻塞轮次结束。\r\n- **第三方 Gemini 网关兼容**：兼容非官方网关的目录结构与端点形态。\r\n- **Agent 预览**：截图返回真实 mediaType（此前类型标错会导致渲染失败），预览文本上限降到 50k；导航预览清洗内部上下文块。\r\n- **侧栏**：修复经典皮肤侧栏底色与迷你地图指示器；统一侧栏字号层级；置顶会话改为项目内优先排序。\r\n- **Claude**：删除无效的 `toolUseConcurrency` 选项。\r\n\r\n## 安全\r\n\r\n- 发布脚本改为强制环境变量，去掉仓库内的主机/用户/端口默认值；`ssh`/`scp` 统一 `StrictHostKeyChecking=yes`。\r\n- 配置目录权限收紧到 0700，`device.json` 与 `remote-token.json` 到 0600；`.gitignore` 覆盖 `.env.*`；清理文档、默认 Skill 与测试夹具中的开发机绝对路径。\r\n\r\n## 重构\r\n\r\n- 抽出 `edition-contract` 并把商业装配点收敛到唯一入口；新增 `@profer/session-store` 并接入 Electron 宿主。\r\n- 移除未使用的 PPT 风格包与版式引擎、未引用的旧组件与项目指令遗留实现。\r\n- 修正打包 workspace 排除作用域，兼容本地自签名。\r\n\r\n## 升级提示\r\n\r\n- macOS 仍为 `darwin-arm64` 无签名（ad-hoc）、无公证验收包；Intel、Developer ID 与公证均未完成，从浏览器直接下载 DMG 首次安装仍会被 Gatekeeper 拦。\r\n- Windows PowerShell 专用测试需在 Windows 主机执行；本机 macOS 验证跳过相关 Windows 专用测试。\r\n",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-20T05:54:29Z",
+    "published_at": "2026-10-20T08:16:29Z",
+    "html_url": "https://github.com/Yuan-lai-ru-ci/ProferAI/releases/tag/v0.16.11"
+  },
+  {
+    "id": "RE_kwDOTfo-884Ywjhm",
+    "tag_name": "v0.16.10",
+    "name": "Profer v0.16.10",
+    "body": "# Profer v0.16.10\r\n\r\n## 修复\r\n\r\n- 修复 Agent 会话事件的宿主路由键：统一使用 agent 会话 id，不再从内核原生会话 id 推断。此前 `sdk_message` 会在 EventBus 转发层查不到绑定而被静默丢弃，表现为 UI 失去逐字出流、终态与刷新回放一起丢。\r\n- 修复 headless 运行的桌面终态回执缺失：`run_complete` / `run_error` 现在同时走 EventBus 与 renderer 专用通道；运行中刷新时不再跳过已结束但有 backlog 的会话。\r\n- 修复 Agent 消息持久化口径：只把用户可见转录写入历史，内部流控制消息仅实时投影，并补齐 `_createdAt` / `_channelModelId` / `_durationMs` 归一化。\r\n\r\n## 优化\r\n\r\n- 桌面 runtime 开关改为**显式 opt-in**：只有显式设为 `1` 才走新的宿主无关 Runtime，缺省与 `0` 均回到旧编排器，便于发布后止损。\r\n- 矮窗口下输入框紧凑档空内容高度由 101px 调整为 81px。\r\n\r\n## 新增\r\n\r\n- 设置新增「用户消息位置」（左 / 右）。\r\n- 设置新增「文件预览打开方式」：独立标签页（默认）或与对话左右分屏；分屏模式下用户主动打开预览会与会话并排，自动预览推送仍保持「只在正看着该会话时跟随」。\r\n\r\n## 调整\r\n\r\n- Agent 不再读取系统剪贴板，仅保留写入能力；相关 Pi / Claude 工具桥接、能力组清单与压缩描述同步清理。\r\n\r\n## 升级提示\r\n\r\n- macOS 仍为 `darwin-arm64` 无签名、无公证验收包；Intel、Developer ID 与公证未完成。\r\n- Windows PowerShell 专用测试需在 Windows 主机执行；本机 macOS 验证跳过相关 Windows 专用测试。\r\n",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-16T20:06:40Z",
+    "published_at": "2026-10-16T21:09:43Z",
+    "html_url": "https://github.com/Yuan-lai-ru-ci/ProferAI/releases/tag/v0.16.10"
+  },
+  {
     "id": "RE_kwDOTfo-884YXmYY",
     "tag_name": "v0.16.2",
     "name": "Profer v0.16.2",

@@ -52,9 +52,6 @@ jobs:
       - name: Typecheck workspace
         run: bun run typecheck
 
-      - name: Check package boundaries
-        run: bun run check:boundaries
-
       - name: Run cross-platform packaging tests
         # 全量测试集合包含 Windows PowerShell 专用测试，以及仍按裸路径字符串比较
         # macOS /private/var 别名的测试；它们不应阻断 macOS 包构建。

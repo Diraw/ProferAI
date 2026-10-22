@@ -71,3 +71,31 @@ export function resolveAgentModelSelection(
 
   return null
 }
+
+export interface AgentRuntimeSelection extends AgentModelSelection {
+  runtime: AgentRuntime
+}
+
+/**
+ * 内核跟着可用渠道走：当前内核没有任何可用渠道时，回退到另一个内核。
+ *
+ * 典型场景是新装默认 `agentRuntime = claude`，而用户只配了只勾 Pi 内核的渠道
+ * （DeepSeek 等非 Anthropic 白名单 provider 只会推导出 `['pi']`）。
+ * 以前这里会解析成「没有 Agent 渠道」，把已经配好的渠道判成没配；
+ * 配一个渠道就该能用，内核由渠道能力决定。
+ *
+ * 只有两个内核都没有可用渠道时才返回 null。
+ */
+export function resolveAgentRuntimeSelection(
+  channels: Channel[],
+  preferredRuntime: AgentRuntime,
+  claudeChannelIds: string[],
+  current?: AgentModelSelection | null,
+): AgentRuntimeSelection | null {
+  const preferred = resolveAgentModelSelection(channels, preferredRuntime, claudeChannelIds, current)
+  if (preferred) return { runtime: preferredRuntime, ...preferred }
+
+  const fallbackRuntime: AgentRuntime = preferredRuntime === 'pi' ? 'claude' : 'pi'
+  const fallback = resolveAgentModelSelection(channels, fallbackRuntime, claudeChannelIds, current)
+  return fallback ? { runtime: fallbackRuntime, ...fallback } : null
+}

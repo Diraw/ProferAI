@@ -37,7 +37,7 @@ import {
   PROVIDER_DEFAULT_URLS,
   PROVIDER_LABELS,
   inferAgentRuntimeModes,
-  isAgentEnabledForChannel,
+  isChannelEnabledForAnyRuntime,
   isChannelEnabledForRuntime,
   resolveProviderNativeProtocol,
 } from '@profer/shared'
@@ -50,6 +50,7 @@ import type {
   ChannelTestResult,
   FetchModelsResult,
   ProviderType,
+  XaiApiProtocol,
 } from '@profer/shared'
 import { isAnthropicShapedEndpoint, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl } from '@profer/core'
 import { getProviderLogo } from '@/lib/model-logo'
@@ -137,7 +138,7 @@ function getOllamaNetworkScope(baseUrl: string): string {
  * 复用真实 adapter 的端点解析函数，完整端点与 query 不重复拼接，
  * 与运行时 channel-manager / AnthropicAdapter 的规范化逻辑保持一致。
  */
-function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
+function buildPreviewUrl(baseUrl: string, provider: ProviderType, xaiApiProtocol: XaiApiProtocol = 'responses'): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, '')
   if (provider === 'ollama') {
     return `${trimmed.replace(/\/v1$/, '')}/v1/chat/completions（Agent: /v1/messages）`
@@ -175,7 +176,14 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
   if (ANTHROPIC_PROTOCOL_PROVIDERS.has(provider)) {
     return resolveAnthropicMessagesUrl(baseUrl, provider)
   }
-  if (provider === 'xai' || provider === 'openai-responses') return resolveOpenAIResponsesUrl(baseUrl, provider)
+  if (provider === 'xai') {
+    // xAI 支持两套协议；预览必须跟随用户选择，不能把 Chat Completions 渠道
+    // 展示成 /responses，否则用户会以为中转站不兼容。
+    return xaiApiProtocol === 'chat-completions'
+      ? resolveOpenAIChatCompletionsUrl(baseUrl, provider)
+      : resolveOpenAIResponsesUrl(baseUrl, provider)
+  }
+  if (provider === 'openai-responses') return resolveOpenAIResponsesUrl(baseUrl, provider)
   if (provider === 'google') return `${normalizeGoogleBaseUrl(trimmed)}${PROVIDER_CHAT_PATHS[provider]}`
   return resolveOpenAIChatCompletionsUrl(baseUrl, provider)
 }
@@ -187,7 +195,7 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType): string {
  * 会得到 `/v1/responses/chat/completions`），用户要到真正聊天失败才发现。
  * 预览里必须说清楚，而不是展示一个看起来很正常的 URL。
  */
-function describeEndpointMismatch(baseUrl: string, provider: ProviderType): string {
+function describeEndpointMismatch(baseUrl: string, provider: ProviderType, xaiApiProtocol: XaiApiProtocol = 'responses'): string {
   const raw = baseUrl.trim().replace(/\/+$/, '')
   if (!raw) return ''
   const path = (() => {
@@ -209,7 +217,10 @@ function describeEndpointMismatch(baseUrl: string, provider: ProviderType): stri
   if ((provider === 'openai' || provider === 'deepseek') && /\/responses$/.test(path)) {
     return '；这是 Responses 协议的端点，请改用「OpenAI Responses 格式」渠道'
   }
-  if ((provider === 'xai' || provider === 'openai-responses') && /\/chat\/completions$/.test(path)) {
+  if (provider === 'xai' && xaiApiProtocol === 'chat-completions' && /\/responses$/.test(path)) {
+    return '；当前选择 Chat Completions 协议，不要填写 /responses 端点'
+  }
+  if ((provider === 'openai-responses' || (provider === 'xai' && xaiApiProtocol !== 'chat-completions')) && /\/chat\/completions$/.test(path)) {
     return '；此渠道使用 Responses 协议，不要填写 Chat Completions 端点'
   }
   return ''
@@ -222,14 +233,17 @@ const AUTO_SAVE_DELAY = 600
 const AUTO_DISCOVERY_DELAY = 700
 
 function isAgentEligibleChannel(channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'>): boolean {
-  return isChannelEnabledForRuntime(channel, 'pi') || isAgentEnabledForChannel(channel)
+  return isChannelEnabledForAnyRuntime(channel)
 }
 
 /**
- * 模型行上的「1M」勾选。
+ * 模型行上的「1M 上下文」开关。
  *
  * 显示的是**生效结果**：自动判定的模型（如已验证的 DeepSeek V4）也会显示为开启。
  * 实线边 = 自动判定，虚线边 = 用户手动强开 / 强关；点击写入显式偏好。
+ *
+ * 可辨识性要求：带文字标签和状态圆点，开启/关闭在配色与圆点填充上都有区别，
+ * 避免只靠一个 10px 的「1M」小字让用户看不出这是可点的开关。
  */
 function Model1MToggle({
   model,
@@ -246,20 +260,29 @@ function Model1MToggle({
     <button
       type="button"
       aria-pressed={state.enabled}
+      aria-label={`1M 上下文（${state.enabled ? '已开启' : '已关闭'}）`}
       title={state.title}
       onClick={(event) => {
         event.stopPropagation()
         onToggle(model.id)
       }}
       className={cn(
-        'shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium leading-4 transition-colors',
+        'inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium leading-4 transition-colors',
+        'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-focus/15',
         state.enabled
-          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-          : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground',
+          ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:border-emerald-400/40 dark:bg-emerald-400/15 dark:text-emerald-300 dark:hover:bg-emerald-400/25'
+          : 'border-border bg-muted/60 text-foreground/70 hover:border-foreground/25 hover:bg-muted hover:text-foreground',
         state.source !== 'auto' && 'border-dashed',
       )}
     >
-      1M
+      <span
+        aria-hidden="true"
+        className={cn(
+          'size-1.5 shrink-0 rounded-full transition-colors',
+          state.enabled ? 'bg-emerald-500 dark:bg-emerald-400' : 'border border-current bg-transparent',
+        )}
+      />
+      <span>1M 上下文</span>
     </button>
   )
 }
@@ -272,6 +295,8 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const [provider, setProvider] = React.useState<ProviderType>(channel?.provider ?? 'anthropic')
   const [baseUrl, setBaseUrl] = React.useState(channel?.baseUrl ?? PROVIDER_DEFAULT_URLS.anthropic)
   const [credentialMode, setCredentialMode] = React.useState<'api-key' | 'oauth'>(channel?.credentialMode ?? 'api-key')
+  // xAI API Key 渠道的请求协议：官方默认 Responses，第三方 Grok 中转可切 Chat Completions。
+  const [apiProtocol, setApiProtocol] = React.useState<XaiApiProtocol>(channel?.apiProtocol ?? 'responses')
   const [oauthConfigured, setOauthConfigured] = React.useState(channel?.provider === 'xai' && channel.credentialMode === 'oauth')
   const [agentExperimentalEnabled, setAgentExperimentalEnabled] = React.useState(channel?.provider === 'xai' && (channel.agentRuntimes ?? inferAgentRuntimeModes(channel)).includes('pi'))
   const [agentBaseUrl, setAgentBaseUrl] = React.useState(channel?.agentBaseUrl ?? '')
@@ -380,7 +405,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       void window.electronAPI.cancelChannelRequest(id).catch(() => {})
     }
   }, [])
-  const requestKey = JSON.stringify([provider, baseUrl, apiKey, credentialMode])
+  const requestKey = JSON.stringify([provider, baseUrl, apiKey, credentialMode, apiProtocol])
   const requestKeyRef = React.useRef(requestKey)
   requestKeyRef.current = requestKey
   const testKey = JSON.stringify([requestKey, agentBaseUrl, agentRuntimes, models.find((model) => model.enabled)?.id])
@@ -424,9 +449,9 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     name, provider, baseUrl, agentRuntimes, models, enabled,
     ...(agentBaseUrlEditedRef.current ? { agentBaseUrl: agentBaseUrl.trim() } : {}),
     ...(provider === 'xai' && (credentialMode !== 'oauth' || oauthConfigured)
-      ? { credentialMode, agentExperimentalEnabled } : {}),
+      ? { credentialMode, agentExperimentalEnabled, ...(credentialMode !== 'oauth' ? { apiProtocol } : {}) } : {}),
     ...(!oauthCredentials && keyEdited && apiKey.trim() ? { apiKey } : {}),
-  }), [name, provider, baseUrl, agentBaseUrl, agentRuntimes, models, enabled, credentialMode, agentExperimentalEnabled, oauthConfigured, oauthCredentials, keyEdited, apiKey])
+  }), [name, provider, baseUrl, agentBaseUrl, agentRuntimes, models, enabled, credentialMode, apiProtocol, agentExperimentalEnabled, oauthConfigured, oauthCredentials, keyEdited, apiKey])
   const draftRef = React.useRef(draft)
   draftRef.current = draft
   const baselineRef = React.useRef<ChannelUpdateInput>(draft)
@@ -543,6 +568,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     autoDiscoveryKeyRef.current = null
     modelsUserEditedRef.current = false
     setCredentialMode('api-key')
+    setApiProtocol('responses')
     setOauthConfigured(false)
     setAgentExperimentalEnabled(false)
     // 换供应商通常意味着换协议；按新供应商重推内核勾选，用户可再手改
@@ -637,6 +663,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         provider,
         baseUrl,
         apiKey,
+        ...(provider === 'xai' && credentialMode !== 'oauth' ? { apiProtocol } : {}),
         ...(claudeOnly ? { runtime: 'claude' as const, agentBaseUrl } : {}),
       })
 
@@ -654,7 +681,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       activeNetworkRequestsRef.current.delete(networkId)
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) setFetchingModels(false)
     }
-  }, [canDiscoverModels, provider, baseUrl, apiKey, agentRuntimes, agentBaseUrl])
+  }, [canDiscoverModels, provider, baseUrl, apiKey, apiProtocol, credentialMode, agentRuntimes, agentBaseUrl])
 
   /** 手动「从供应商获取」：覆盖上一次结果提示，并记下尝试键避免与自动发现重复请求 */
   const handleFetchModels = (): void => {
@@ -711,6 +738,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
         const result = await window.electronAPI.testChannelDirect({
           requestId: networkId,
           provider, baseUrl, apiKey, runtime,
+          ...(provider === 'xai' && credentialMode !== 'oauth' ? { apiProtocol } : {}),
           ...(selectedModel ? { modelId: selectedModel } : {}),
           ...(runtime === 'claude' ? { agentBaseUrl } : {}),
         })
@@ -816,7 +844,11 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       baseUrl,
       agentBaseUrl: agentBaseUrl.trim() || undefined,
       agentRuntimes,
-      ...(provider === 'xai' && { credentialMode, agentExperimentalEnabled }),
+      ...(provider === 'xai' && {
+        credentialMode,
+        agentExperimentalEnabled,
+        ...(credentialMode !== 'oauth' ? { apiProtocol } : {}),
+      }),
       apiKey,
       models,
       enabled,
@@ -863,7 +895,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     creationRef.current = operation
     try { return await operation }
     finally { if (creationRef.current === operation) creationRef.current = null }
-  }, [name, provider, baseUrl, agentBaseUrl, agentRuntimes, credentialMode, agentExperimentalEnabled, apiKey, models, enabled, saving, oauthCredentials, onAgentEligibilityChange])
+  }, [name, provider, baseUrl, agentBaseUrl, agentRuntimes, credentialMode, apiProtocol, agentExperimentalEnabled, apiKey, models, enabled, saving, oauthCredentials, onAgentEligibilityChange])
 
   /** 创建渠道（仅新建模式） */
   const handleCreate = async (): Promise<void> => {
@@ -1039,6 +1071,19 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               description="API Key 由 xAI API 计费；订阅 OAuth 使用 SuperGrok 或 X Premium。"
             />
           )}
+          {provider === 'xai' && credentialMode !== 'oauth' && (
+            <SettingsSelect
+              label="API 协议"
+              disabled={oauthLoggingIn || saving}
+              value={apiProtocol}
+              onValueChange={(value) => setApiProtocol(value as XaiApiProtocol)}
+              options={[
+                { value: 'responses', label: 'Responses（xAI 官方推荐）' },
+                { value: 'chat-completions', label: 'Chat Completions（第三方中转）' },
+              ]}
+              description="官方 API 与支持 Responses 的中转选第一项；只实现 /chat/completions 的 Grok 中转选第二项。"
+            />
+          )}
           {/* Agent 内核勾选：能不能用由用户决定，不按渠道类型加门禁 */}
           <SettingsToggle
             label="Pi 模式"
@@ -1062,8 +1107,8 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
               placeholder="https://api.example.com/v1"
               description={baseUrl.trim()
                 ? provider === 'ollama'
-                  ? `预览：${buildPreviewUrl(baseUrl, provider)}；${getOllamaNetworkScope(baseUrl)}${describeEndpointMismatch(baseUrl, provider)}`
-                  : `预览：${buildPreviewUrl(baseUrl, provider)}${describeEndpointMismatch(baseUrl, provider)}`
+                  ? `预览：${buildPreviewUrl(baseUrl, provider, apiProtocol)}；${getOllamaNetworkScope(baseUrl)}${describeEndpointMismatch(baseUrl, provider, apiProtocol)}`
+                  : `预览：${buildPreviewUrl(baseUrl, provider, apiProtocol)}${describeEndpointMismatch(baseUrl, provider, apiProtocol)}`
                 : undefined}
             />
           )}
@@ -1214,7 +1259,11 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       {/* 已启用模型 */}
       <SettingsSection
         title="已启用模型"
-        description={enabledModels.length > 0 ? `${enabledModels.length} 个模型` : undefined}
+        description={
+          enabledModels.length > 0
+            ? `${enabledModels.length} 个模型 · 点右侧「1M 上下文」可切换长上下文窗口`
+            : undefined
+        }
       >
         <SettingsCard divided={false}>
           {enabledModels.length === 0 ? (

@@ -280,3 +280,106 @@ describe('归档数据清理 · Pi 原生会话文件', () => {
     expect(result.deletedCount).toBe(2)
   })
 })
+
+// ─── Agent 会话文件（消息 + 侧车）────────────────────────────────────────────
+
+/** 在 agent-sessions 目录里写一个指定文件名的会话文件，返回其绝对路径 */
+function writeSessionFile(fileName: string, content: string): string {
+  const path = join(configPaths.getAgentSessionsDir(), fileName)
+  writeFileSync(path, content)
+  return path
+}
+
+const agentSessionsCategory = async (): Promise<{ bytes: number; count: number; orphanBytes: number; orphanCount: number }> => {
+  const stats = await storageService.calculateStorageStats()
+  const category = stats.categories.find((c) => c.key === 'agent-sessions')
+  expect(category).toBeDefined()
+  return category!
+}
+
+describe('会话文件名解析', () => {
+  test('Given 消息文件与两种侧车 When 解析 Then 回到同一个 baseSessionId', () => {
+    // UUID 本身含 '-'：绝不能按第一段切
+    const id = '0f9c1a2b-3d4e-4f5a-8b6c-7d8e9f0a1b2c'
+
+    expect(storageService.parseAgentSessionFileName(`${id}.jsonl`))
+      .toEqual({ baseSessionId: id, kind: 'messages' })
+    expect(storageService.parseAgentSessionFileName(`${id}-graph.jsonl`))
+      .toEqual({ baseSessionId: id, kind: 'graph' })
+    expect(storageService.parseAgentSessionFileName(`${id}-pi-harness.jsonl`))
+      .toEqual({ baseSessionId: id, kind: 'pi-harness' })
+  })
+
+  test('Given 非 .jsonl 或无会话 ID When 解析 Then 返回 null', () => {
+    expect(storageService.parseAgentSessionFileName('notes.txt')).toBeNull()
+    expect(storageService.parseAgentSessionFileName('session.json')).toBeNull()
+    expect(storageService.parseAgentSessionFileName('.jsonl')).toBeNull()
+    expect(storageService.parseAgentSessionFileName('-graph.jsonl')).toBeNull()
+    expect(storageService.parseAgentSessionFileName('-pi-harness.jsonl')).toBeNull()
+  })
+})
+
+describe('孤儿清理 · 会话侧车文件', () => {
+  test('Given 活跃会话带侧车、已删除会话带侧车 When 统计 Then 只把已删除会话的三个文件算孤儿', async () => {
+    const active = sessions.createAgentSession('active with sidecars')
+    writeSessionFile(`${active.id}.jsonl`, '{"type":"user"}\n')
+    writeSessionFile(`${active.id}-graph.jsonl`, '{"graph":1}\n')
+    writeSessionFile(`${active.id}-pi-harness.jsonl`, '{"harness":1}\n')
+
+    // 索引里不存在这个会话：模拟会话被删除后残留的三件套
+    const orphanId = '11111111-2222-3333-4444-555555555555'
+    writeSessionFile(`${orphanId}.jsonl`, 'x'.repeat(100))
+    writeSessionFile(`${orphanId}-graph.jsonl`, 'x'.repeat(200))
+    writeSessionFile(`${orphanId}-pi-harness.jsonl`, 'x'.repeat(300))
+
+    const category = await agentSessionsCategory()
+
+    expect(category.count).toBe(6)
+    // 关键断言：活跃会话的侧车不能计入孤儿
+    expect(category.orphanCount).toBe(3)
+    expect(category.orphanBytes).toBe(600)
+  })
+
+  test('Given 活跃会话带侧车、已删除会话带侧车 When 清理孤儿 Then 活跃三件套全保留、孤儿三件套删除', async () => {
+    const active = sessions.createAgentSession('active with sidecars')
+    const activeFiles = [
+      writeSessionFile(`${active.id}.jsonl`, '{"type":"user"}\n'),
+      writeSessionFile(`${active.id}-graph.jsonl`, '{"graph":1}\n'),
+      writeSessionFile(`${active.id}-pi-harness.jsonl`, '{"harness":1}\n'),
+    ]
+
+    const orphanId = '11111111-2222-3333-4444-555555555555'
+    const orphanFiles = [
+      writeSessionFile(`${orphanId}.jsonl`, 'x'.repeat(100)),
+      writeSessionFile(`${orphanId}-graph.jsonl`, 'x'.repeat(200)),
+      writeSessionFile(`${orphanId}-pi-harness.jsonl`, 'x'.repeat(300)),
+    ]
+
+    const result = await storageService.cleanupStorage({ categories: ['agent-sessions'], orphansOnly: true, archivedBeforeDays: 0 })
+
+    expect(result.deletedCount).toBe(3)
+    expect(result.freedBytes).toBe(600)
+    expect(result.errors).toEqual([])
+
+    // 关键安全断言：活跃会话的消息与两种侧车一个都不能少
+    for (const path of activeFiles) expect(existsSync(path)).toBe(true)
+    for (const path of orphanFiles) expect(existsSync(path)).toBe(false)
+
+    const after = await agentSessionsCategory()
+    expect(after.count).toBe(3)
+    expect(after.orphanCount).toBe(0)
+  })
+
+  test('Given 解析不出会话 ID 的 .jsonl When 统计并清理 Then 计入总量但不算孤儿、不被删除', async () => {
+    const unparsable = writeSessionFile('.jsonl', 'y'.repeat(50))
+
+    const before = await agentSessionsCategory()
+    expect(before.count).toBe(1)
+    expect(before.orphanCount).toBe(0)
+
+    const result = await storageService.cleanupStorage({ categories: ['agent-sessions'], orphansOnly: true, archivedBeforeDays: 0 })
+
+    expect(result.deletedCount).toBe(0)
+    expect(existsSync(unparsable)).toBe(true)
+  })
+})

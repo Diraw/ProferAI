@@ -6,7 +6,7 @@
  */
 
 import { createHash } from 'crypto'
-import { createWriteStream, existsSync, promises as fsp } from 'fs'
+import { createWriteStream, existsSync, promises as fsp, realpathSync, statSync } from 'fs'
 import { get as httpsGet } from 'https'
 import { get as httpGet, IncomingMessage } from 'http'
 import path from 'path'
@@ -249,13 +249,71 @@ export function cancelInstallerDownload(key: string): boolean {
 }
 
 /**
+ * 校验待拉起的安装包路径
+ *
+ * filePath 来自 renderer（经 INSTALLER_IPC_CHANNELS.LAUNCH 传入），不可信：
+ * shell.openPath 能拉起任意可执行文件，必须限制在安装包缓存目录内。
+ *
+ * 校验方式：
+ * 1. 必须是已存在的常规文件（拒绝目录、拒绝不存在）
+ * 2. 解析符号链接后仍须落在 getInstallerDir() 之内
+ * 3. 归属判断用 path.relative（Windows 下大小写不敏感），不用 startsWith 前缀比较
+ *
+ * @returns 通过校验的绝对路径（未解析符号链接的原路径，保持 openPath 语义不变）
+ */
+function resolveInstallerFile(filePath: string): string {
+  if (!filePath || filePath.includes('\0')) {
+    throw new Error('安装包路径无效：路径为空或包含非法字符')
+  }
+
+  const target = path.resolve(filePath)
+
+  let stats
+  try {
+    stats = statSync(target)
+  } catch {
+    throw new Error(`安装包不存在：${target}`)
+  }
+  if (stats.isDirectory()) {
+    throw new Error(`安装包路径指向目录，已拒绝启动：${target}`)
+  }
+  if (!stats.isFile()) {
+    throw new Error(`安装包路径不是常规文件，已拒绝启动：${target}`)
+  }
+
+  // 符号链接会被 openPath 跟随，因此用 realpath 后的真实路径判断归属
+  let realTarget: string
+  let realDir: string
+  try {
+    realTarget = realpathSync(target)
+    realDir = realpathSync(getInstallerDir())
+  } catch {
+    throw new Error(`安装包路径无法解析：${target}`)
+  }
+
+  const relative = path.relative(realDir, realTarget)
+  const escapesDir =
+    relative === '' ||
+    path.isAbsolute(relative) ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`)
+  if (escapesDir) {
+    throw new Error(`安装包路径不在安装包缓存目录内，已拒绝启动：${target}`)
+  }
+
+  return target
+}
+
+/**
  * 拉起已下载的安装程序
  *
  * Windows 下 shell.openPath 会用系统默认方式打开 .exe / .msi，
  * 等同于用户双击，由操作系统决定是否弹 UAC。
+ * 因此调用前必须先过 resolveInstallerFile 的目录白名单校验。
  */
 export async function launchInstaller(filePath: string): Promise<void> {
-  const errorMsg = await shell.openPath(filePath)
+  const target = resolveInstallerFile(filePath)
+  const errorMsg = await shell.openPath(target)
   if (errorMsg) {
     throw new Error(`无法拉起安装程序：${errorMsg}`)
   }

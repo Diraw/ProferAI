@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   isAgentEnabledForChannel,
+  isChannelEnabledForAnyRuntime,
   resolveXaiCredentialMode,
   type AgentRuntimeMode,
 } from './channel'
@@ -60,5 +61,14 @@ describe('xAI 凭据模式与 Agent 内核资格', () => {
     // 它不代表用户勾选了 Claude 内核，因此这里必须是 false。
     expect(isAgentEnabledForChannel(channel({ agentExperimentalEnabled: true }))).toBe(false)
     expect(isAgentEnabledForChannel(channel({ agentExperimentalEnabled: true, agentRuntimes: ['pi'] }))).toBe(false)
+  })
+
+  test('Given xAI 只勾选 Pi 内核 When 判断能否用于任一 Agent 内核 Then 可用', () => {
+    // 回归锁：主推 Pi 后，渠道列表/默认 Agent 渠道派生不得再用 Claude-only 判据，
+    // 否则只勾 Pi 的 xAI 会被静默移出 agentChannelIds。
+    expect(isChannelEnabledForAnyRuntime(channel({ agentRuntimes: ['pi'] }))).toBe(true)
+    expect(isChannelEnabledForAnyRuntime(channel({ agentExperimentalEnabled: true }))).toBe(true)
+    expect(isChannelEnabledForAnyRuntime(channel({ agentRuntimes: [] }))).toBe(false)
+    expect(isChannelEnabledForAnyRuntime(channel({ enabled: false, agentRuntimes: ['pi'] }))).toBe(false)
   })
 })

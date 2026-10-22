@@ -27,15 +27,17 @@ function setup() {
   store.set(authStatusAtom, { isLoggedIn: true, teamAccountId: 'a' })
   const requests: ReturnType<typeof deferred<AppSettings>>[] = []
   const failures: unknown[] = []
+  const persisted: { agentRuntime?: string }[] = []
   const cleanup = initializeAgentSettings(store, {
     getSettings: () => { const request = deferred<AppSettings>(); requests.push(request); return request.promise },
     listWorkspaces: async (): Promise<AgentWorkspace[]> => [], onFailure: (error) => failures.push(error),
+    updateSettings: async (patch) => { persisted.push(patch); return {} },
   })
   cleanups.push(cleanup)
   const flush = async () => { for (let i = 0; i < 6; i += 1) await Promise.resolve() }
   const resolve = (index: number, patch: Partial<AppSettings> = {}) => requests[index]!.resolve({ themeMode: 'system', agentRuntime: 'pi', agentChannelId: 'fixture', agentModelId: 'model', ...patch })
   const catalog = (channels: Channel[]) => { store.set(channelsAtom, channels); store.set(channelsLoadedAtom, true) }
-  return { store, requests, failures, cleanup, resolve, flush, catalog }
+  return { store, requests, failures, persisted, cleanup, resolve, flush, catalog }
 }
 
 describe('启动默认模型水合（真实 Jotai store，本地 fixture）', () => {
@@ -65,15 +67,29 @@ describe('启动默认模型水合（真实 Jotai store，本地 fixture）', ()
     for (let i = 0; i < 5; i += 1) scope.catalog([{ ...newer }])
     expect(scope.requests).toHaveLength(1)
   })
-  test('Given Claude 默认错误指向Pi-only When 初始化 Then 不认为其有效，无兼容模型时清空内存默认', async () => {
+  test('Given 默认内核 Claude 但渠道只勾了 Pi When 初始化 Then 自动回退 Pi 并落盘，配一个渠道即可用', async () => {
     const scope = setup()
     scope.catalog([fixture])
     scope.resolve(0, { agentRuntime: 'claude', agentChannelIds: ['fixture'] })
     await scope.flush()
+    expect(scope.store.get(agentRuntimeAtom)).toBe('pi')
+    expect(scope.store.get(agentChannelIdAtom)).toBe('fixture')
+    expect(scope.store.get(agentModelIdAtom)).toBe('model')
+    expect(scope.persisted).toEqual([{ agentRuntime: 'pi' }])
+    // 回退只发生一次：再次触发目录刷新不重复写设置
+    scope.catalog([{ ...fixture }])
+    await scope.flush()
+    expect(scope.persisted).toEqual([{ agentRuntime: 'pi' }])
+  })
+  test('Given 渠道无可用模型 When 初始化 Then 默认保持空且不改写内核', async () => {
+    const scope = setup()
+    scope.catalog([{ ...fixture, models: [{ id: 'model', name: 'Model', enabled: false }] }])
+    scope.resolve(0, { agentRuntime: 'claude', agentChannelIds: ['fixture'] })
+    await scope.flush()
     expect(scope.store.get(agentChannelIdAtom)).toBeNull()
     expect(scope.store.get(agentModelIdAtom)).toBeNull()
-    scope.catalog([{ ...fixture, provider: 'anthropic', agentRuntimes: ['claude'], models: [{ id: 'claude-model', name: 'Claude', enabled: true }] }])
-    expect(scope.store.get(agentModelIdAtom)).toBe('claude-model')
+    expect(scope.store.get(agentRuntimeAtom)).toBe('claude')
+    expect(scope.persisted).toEqual([])
   })
   test('Given 已水合默认 When 目录禁用/删除模型 Then 默认只选择enabled模型或清空，不写历史', async () => {
     const scope = setup()
