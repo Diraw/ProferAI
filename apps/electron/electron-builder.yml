@@ -80,6 +80,9 @@ extraResources:
   # 教程文件（教程查看器 + 欢迎对话使用）
   - from: ../../tutorial/tutorial-v2.md
     to: tutorial.md
+  # 自建 FRP 服务器教程（设置 → 连接 → 自建 FRP 教程；guide-service 打包路径 process.resourcesPath/frp-server-guide.md）
+  - from: resources/frp-server-guide.md
+    to: frp-server-guide.md
   # Profer 品牌 Logo 素材与菜单栏托盘图标（品牌素材下载、应用图标变体使用）
   - from: resources/profer-logos
     to: profer-logos

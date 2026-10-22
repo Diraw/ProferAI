@@ -22,6 +22,9 @@
  *  不依赖 Electron 主窗口 DOM，可在主进程侧独立运行。
  */
 
+import { createServer as createTlsServer, type Server as TlsServer } from 'node:https'
+import { RemoteTlsStore, validateTlsIdentity, type TlsIdentity } from './remote-tls-identity'
+import { publicMode } from './remote-frp-core'
 import { createServer, Server as HttpServer, IncomingMessage } from 'node:http'
 import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
@@ -110,7 +113,54 @@ import { getAllToolInfos } from './chat-tool-registry'
 import { updateToolState } from './chat-tool-config'
 import { RemoteAgentEventLog, type RemoteAgentEventRecord } from './remote-agent-event-log'
 import { RemoteAgentReplayRegistry, type RemoteReplayRecord } from './remote-agent-replay-registry'
+import { REMOTE_PROTOCOL, createCompactPairingQr, isPrivateHost, type RemoteProfile } from '@profer/shared'
+import { authenticateRemote, getConnectionProfile, listBindings, loadRemoteToken, pairDevice, pairingManager, refreshPairing, revokeBinding, protectSecret, revealSecret } from './remote-identity'
+import { getFrpStatus, getFrpPublicEndpoint, startFrp, stopFrp, ensureFrpReady } from './remote-frp-service'
+import { RemoteLifecycleQueue, closeOwnedHttp } from './remote-lifecycle'
+const remoteLifecycle = new RemoteLifecycleQueue()
 import { RemoteRelayClient, type RemoteRelaySink } from './remote-relay-client'
+const authenticatedClients = new WeakMap<WebSocket, string>()
+let profileTimer: ReturnType<typeof setInterval> | null = null
+let tlsServer: TlsServer | null = null
+let tlsIdentity: TlsIdentity | null = null
+const tlsSockets = new Set<WebSocket>()
+export function getRemoteProfile(): RemoteProfile {
+  let valid = false
+  try { if (tlsIdentity) { validateTlsIdentity(tlsIdentity.cert, tlsIdentity.key, tlsIdentity.publicIp); valid = true } } catch { /* 过期身份不能进入 QR */ }
+  return getConnectionProfile(getPort(), getFrpStatus().running ? getFrpPublicEndpoint(valid ? tlsIdentity?.pin : undefined, valid ? tlsIdentity?.publicIp : undefined) : undefined)
+}
+export function getRemoteTlsCertificate(): { cert: string } | undefined { return tlsIdentity && tlsServer ? { cert: tlsIdentity.cert } : undefined }
+async function closeRemoteTls(): Promise<void> { const old = tlsServer; tlsServer = null; tlsIdentity = null; for (const ws of tlsSockets) { authenticatedClients.delete(ws); ws.terminate() }; tlsSockets.clear(); if (old) await closeOwnedHttp(old) }
+export function startRemoteFrp(rotate = false): Promise<import('./remote-frp-service').FrpStatus> { return remoteLifecycle.run(() => startRemoteFrpNow(rotate)) }
+async function startRemoteFrpNow(rotate = false): Promise<import('./remote-frp-service').FrpStatus> {
+  if (!listenAddress || !wss) throw new Error('请先开启移动模式')
+  const c = await ensureFrpReady()
+  if (publicMode(c) === 'system') { await closeRemoteTls(); pairingManager.revoke(); return startFrp(getPort()) }
+  await stopFrp(); await closeRemoteTls(); pairingManager.revoke()
+  const store = new RemoteTlsStore(join(app.getPath('userData'), 'remote-tls'), protectSecret, revealSecret)
+  const id = await store.ensure(c.serverAddr, rotate)
+  const server = createTlsServer({ key: id.key, cert: id.cert, minVersion: 'TLSv1.2' }, (_req, res) => { res.writeHead(404); res.end() })
+  server.on('upgrade', (req, socket, head) => { if (req.url !== '/ws' || !wss) { socket.destroy(); return }; wss.handleUpgrade(req, socket, head, (ws) => { tlsSockets.add(ws); ws.once('close', () => tlsSockets.delete(ws)); wss?.emit('connection', ws, req) }) })
+  const port = await new Promise<number>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve((server.address() as AddressInfo).port) }) })
+  tlsServer = server; tlsIdentity = id
+  try { return await startFrp(port) } catch (error) { await closeRemoteTls(); throw error }
+}
+export function rotateRemoteTls(): Promise<import('./remote-frp-service').FrpStatus> { return startRemoteFrp(true) }
+export async function getRemotePairingQr(): Promise<{ dataUrl: string; expiresAt: number }> {
+  if (!listenAddress) throw new Error('请先开启移动模式')
+  const profile = getRemoteProfile()
+  const qr = refreshPairing(profile)
+  // 只放配对必需字段：v/d/h/c/x。完整 profile 在 paired 响应里返回，避免二维码行列过多。
+  const compact = createCompactPairingQr(profile, qr.pairingCode, qr.expiresAt)
+  const QRCode = (await import('qrcode')).default
+  return { dataUrl: await QRCode.toDataURL(JSON.stringify(compact), { width: 320, margin: 2, errorCorrectionLevel: 'M' }), expiresAt: qr.expiresAt }
+}
+export function getRemotePairingAudit() { return pairingManager.getAudit() }
+export function getRemoteBindings() { return listBindings() }
+export function removeRemoteBinding(id: string): void {
+  revokeBinding(id)
+  for (const client of wss?.clients ?? []) if (authenticatedClients.get(client) === id) client.close(4001, 'revoked')
+}
 
 /** 正式版默认监听端口 */
 export const DEFAULT_REMOTE_PORT = 7788
@@ -218,7 +268,7 @@ function broadcastAgentFrame(sessionId: string, payload: import('@profer/shared'
   })
   if (remoteRelaySink?.isOpen()) remoteRelaySink.send(frame)
   for (const client of wss?.clients ?? []) {
-    if (client.readyState !== WebSocket.OPEN) continue
+    if (client.readyState !== WebSocket.OPEN || !authenticatedClients.has(client)) continue
     const replayState = agentReplayStates.get(client)
     if (replayState?.replaying) {
       replayState.queuedLiveFrames.push(record)
@@ -460,60 +510,6 @@ function isSendMessageDuplicate(clientMessageId: string): boolean {
   return false
 }
 
-/** token 持久化文件（统一存配置目录，与 getConfigDir 一致；不再依赖进程 cwd） */
-function getTokenFilePath(): string {
-  return join(getConfigDir(), 'remote-token.json')
-}
-
-/** 远程访问 token 等同局域网凭据：只允许当前用户读写，旧文件也要收紧权限。 */
-function writeTokenFile(path: string, payload: Record<string, unknown>): void {
-  mkdirSync(getConfigDir(), { recursive: true })
-  writeFileSync(path, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 })
-  if (process.platform !== 'win32') {
-    try { chmodSync(path, 0o600) } catch { /* 只读介质/网络盘等忽略 */ }
-  }
-}
-
-/** 加载或生成访问令牌 */
-function loadOrCreateToken(): string {
-  if (process.env.PROFER_REMOTE_TOKEN) {
-    return process.env.PROFER_REMOTE_TOKEN
-  }
-  const tokenPath = getTokenFilePath()
-  try {
-    if (existsSync(tokenPath)) {
-      const raw = JSON.parse(readFileSync(tokenPath, 'utf-8'))
-      if (raw?.token) return raw.token
-    }
-  } catch {
-    /* 忽略，重新生成 */
-  }
-  // 迁移：旧版 token 写在 cwd 相对路径（PROFER_CONFIG_DIR 或 .profer-dev/remote-token.json），
-  // 与配置目录不一致会导致换目录启动后重新生成 token。此处检测旧位置并原值迁移，避免移动端重新输入。
-  const legacyDir = process.env.PROFER_CONFIG_DIR?.trim() || '.profer-dev'
-  if (resolve(legacyDir) !== getConfigDir()) {
-    try {
-      const legacyPath = join(legacyDir, 'remote-token.json')
-      if (existsSync(legacyPath)) {
-        const raw = JSON.parse(readFileSync(legacyPath, 'utf-8'))
-        if (raw?.token) {
-          writeTokenFile(tokenPath, { token: raw.token, createdAt: raw.createdAt ?? Date.now(), migratedFrom: legacyPath })
-          return raw.token
-        }
-      }
-    } catch {
-      /* 忽略，继续生成新 token */
-    }
-  }
-  const token = randomUUID().replace(/-/g, '')
-  try {
-    writeTokenFile(tokenPath, { token, createdAt: Date.now() })
-  } catch (e) {
-    console.error('[Remote] 无法持久化 token:', e)
-  }
-  return token
-}
-
 /** 是否启用远程服务（显式开关） */
 export function isRemoteEnabled(): boolean {
   if (process.env.PROFER_REMOTE === '1') return true
@@ -562,11 +558,8 @@ export function getRemoteServiceStatus(): RemoteServiceStatus {
 }
 
 /** 设置页运行时切换开关；不会修改启动参数。 */
-export function setRemoteServiceEnabled(enabled: boolean): RemoteServiceStatus {
-  runtimeEnabled = enabled
-  if (enabled) startRemoteService()
-  else stopRemoteService()
-  return getRemoteServiceStatus()
+export function setRemoteServiceEnabled(enabled: boolean): Promise<RemoteServiceStatus> {
+  return remoteLifecycle.run(async () => { runtimeEnabled = enabled; if (enabled) await startRemoteServiceReady(); else await stopRemoteServiceNow(); return getRemoteServiceStatus() })
 }
 
 /** 解析监听端口：设置页保存的端口优先，其次 PROFER_REMOTE_PORT 环境变量，最后默认 7788。 */
@@ -592,17 +585,13 @@ export function getDefaultPort(): number {
  * 热应用新端口：服务运行中则先停后启（保留启用状态，不改变启动参数）。
  * 服务未运行时仅返回当前状态（新端口会在下次启动时生效）。
  */
-export function restartRemoteService(): RemoteServiceStatus {
-  if (isStarted) {
-    stopRemoteService()
-    startRemoteService()
-  }
-  return getRemoteServiceStatus()
+export function restartRemoteService(): Promise<RemoteServiceStatus> {
+  return remoteLifecycle.run(async () => { if (isStarted) { await stopRemoteServiceNow(); await startRemoteServiceReady() }; return getRemoteServiceStatus() })
 }
 
 /** 校验 token（HTTP 或 WS 请求） */
 function checkToken(req: IncomingMessage): boolean {
-  if (!accessToken) return true // 未设置 token 时放行（fallback）
+  if (!accessToken) return false
   const url = new URL(req.url || '', 'http://localhost')
   const queryToken = url.searchParams.get('token')
   if (queryToken === accessToken) return true
@@ -2057,7 +2046,19 @@ export async function handleRemoteCommand(
  * 仅当 isRemoteEnabled() 为真时才会真正启动；否则为 no-op。
  * @returns 启动后的监听地址（未启用时返回 null）
  */
-export function startRemoteService(): string | null {
+export function startRemoteService(): Promise<string | null> { return remoteLifecycle.run(startRemoteServiceReady) }
+async function startRemoteServiceReady(): Promise<string | null> {
+  startRemoteServiceNow()
+  if (!httpServer || listenAddress) return listenAddress
+  const server = httpServer
+  const address = await new Promise<string | null>((resolve) => {
+    const done = (): void => { server.removeListener('error', done); server.removeListener('listening', done); resolve(listenAddress) }
+    server.once('error', done); server.once('listening', done)
+  })
+  // 当前阶段不启用 FRP 内网穿透：不再按草稿自动拉起 frpc，二维码只包含局域网端点。
+  return address
+}
+function startRemoteServiceNow(): string | null {
   if (isStarted) return listenAddress
   if (!isRemoteEnabled()) {
     console.log('[Remote] 未启用（设置页未开启移动模式，且 PROFER_REMOTE 未设置）')
@@ -2067,14 +2068,19 @@ export function startRemoteService(): string | null {
   remoteError = null
 
   // 初始化 token
-  accessToken = loadOrCreateToken()
+  accessToken = null
+  try { accessToken = loadRemoteToken() } catch (e) {
+    isStarted = false
+    remoteError = e instanceof Error ? e.message : '安全存储失败'
+    return null
+  }
 
   const port = getPort()
   httpServer = createServer((req, res) => {
     // 健康检查（容忍 query，如 /health?token=xxx）
     if ((req.url || '').split('?')[0] === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, time: Date.now() }))
+      res.end(JSON.stringify({ ok: true }))
       return
     }
     // 本机不再提供静态 UI 服务（原平板页面已随 tablet 线退役移除，2026-09-11）：非 /health 的 HTTP 请求一律 404。
@@ -2100,13 +2106,8 @@ export function startRemoteService(): string | null {
   }, IDLE_SWEEP_INTERVAL_MS)
   if (typeof idleSweepTimer?.unref === 'function') idleSweepTimer.unref()
 
-  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-    // 鉴权：WS 连接同样校验 token（query 或 header）
-    if (!checkToken(req)) {
-      ws.close(4001, 'unauthorized')
-      return
-    }
-    console.log('[Remote] 移动端客户端已连接')
+  const establish = (ws: WebSocket, req: IncomingMessage): void => {
+    console.log('[Remote] 移动端客户端已鉴权')
     ;(ws as WebSocket & { __lastAlive?: number }).__lastAlive = Date.now()
     const commandContext: RemoteCommandContext = {}
     const replayState: AgentReplayState = {
@@ -2190,8 +2191,53 @@ export function startRemoteService(): string | null {
       serverInstanceId,
       latestAgentEventId: remoteAgentEventLog.getLatestEventId(),
       oldestAgentEventId: remoteAgentEventLog.getOldestEventId(),
+      protocolVersion: 1,
+      deviceId: getRemoteProfile().deviceId,
+      profile: getRemoteProfile(),
     }))
+  }
+
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    const peer = req.socket.remoteAddress?.replace(/^::ffff:/, '') ?? ''
+    const legacy = ws.protocol !== REMOTE_PROTOCOL
+    if (legacy) {
+      // 旧 query 仅兼容直接私网请求，不接受代理后的旧协议。
+      if (!isPrivateHost(peer) || tlsSockets.has(ws) || req.headers.forwarded || req.headers['x-forwarded-for'] || req.headers['x-forwarded-proto'] || !checkToken(req)) { ws.close(4001, 'unauthorized'); return }
+      authenticatedClients.set(ws, 'legacy')
+      establish(ws, req)
+      return
+    }
+    ws.send(JSON.stringify({ kind: 'remote_hello', protocolVersion: 1, deviceId: getRemoteProfile().deviceId }))
+    const timer = setTimeout(() => { pairingManager.record('authentication_rejected', peer); ws.close(4001, 'authentication timeout') }, 8000)
+    ws.once('close', () => clearTimeout(timer))
+    ws.once('message', (raw: RawData) => {
+      clearTimeout(timer)
+      try {
+        if (raw.toString().length > 8192) throw new Error('invalid request')
+        const body = JSON.parse(raw.toString()) as { type?: string; deviceId?: string; pairingCode?: string; credential?: string; deviceName?: string }
+        if (body.deviceId !== getRemoteProfile().deviceId) { pairingManager.record('identity_rejected', peer); throw new Error('device mismatch') }
+        if (body.type === 'pair') {
+          if (body.deviceId !== getRemoteProfile().deviceId || typeof body.pairingCode !== 'string') throw new Error('invalid pairing')
+          const result = pairDevice(body.pairingCode, peer, body.deviceName && typeof body.deviceName === 'string' ? body.deviceName : 'Pocket')
+          ws.send(JSON.stringify({ kind: 'paired', ...result, profile: getRemoteProfile() }))
+          ws.close(1000, 'paired')
+          return
+        }
+        const binding = body.type === 'authenticate' && typeof body.credential === 'string' ? authenticateRemote(body.credential, accessToken) : null
+        if (!binding) throw new Error('unauthorized')
+        authenticatedClients.set(ws, binding)
+        establish(ws, req)
+      } catch {
+        pairingManager.record('authentication_rejected', peer)
+        ws.close(4001, 'authentication failed')
+      }
+    })
   })
+  profileTimer = setInterval(() => {
+    const profile = getRemoteProfile()
+    for (const client of wss?.clients ?? []) if (client.readyState === WebSocket.OPEN && authenticatedClients.has(client)) client.send(JSON.stringify({ kind: 'connection_profile', profile }))
+  }, 15_000)
+  profileTimer.unref()
 
   // 订阅 agentEventBus，把工作流事件广播给所有移动端客户端
   eventBusUnsubscribe = agentEventBus.on((sessionId, payload) => {
@@ -2209,7 +2255,7 @@ export function startRemoteService(): string | null {
     const frame = JSON.stringify({ kind: 'chat_event', conversationId, channel, payload })
     if (remoteRelaySink?.isOpen()) remoteRelaySink.send(frame)
     for (const client of wss?.clients ?? []) {
-      if (client.readyState === WebSocket.OPEN) {
+      if (client.readyState === WebSocket.OPEN && authenticatedClients.has(client)) {
         client.send(frame)
       }
     }
@@ -2322,7 +2368,7 @@ export function startRemoteService(): string | null {
     console.log('[Remote] Profer 移动版已启动')
     console.log(`[Remote] 本机访问:  ${listenAddress}`)
     console.log(`[Remote] 移动端访问:  http://${lanIp}:${actualPort}`)
-    console.log(`[Remote] 访问 Token: ${accessToken}（首次在移动端输入一次）`)
+    console.log('[Remote] 连接凭据已保护，请从设置页配对')
     console.log('════════════════════════════════════════════════════\n')
   })
 
@@ -2336,7 +2382,13 @@ export function startRemoteService(): string | null {
 }
 
 /** 停止 Profer Remote Service */
-export function stopRemoteService(): void {
+export function stopRemoteService(): Promise<void> { return remoteLifecycle.run(stopRemoteServiceNow) }
+async function stopRemoteServiceNow(): Promise<void> {
+  pairingManager.revoke()
+  if (profileTimer) clearInterval(profileTimer)
+  profileTimer = null
+  const frpExit = stopFrp()
+  for (const client of wss?.clients ?? []) { authenticatedClients.delete(client); client.close(1001, 'service stopped'); client.terminate() }
   remoteRelayClient?.stop()
   remoteRelayClient = null
   remoteRelaySink = null
@@ -2357,10 +2409,9 @@ export function stopRemoteService(): void {
     wss?.close()
   } catch { /* ignore */ }
   wss = null
-  try {
-    httpServer?.close()
-  } catch { /* ignore */ }
+  const server = httpServer
   httpServer = null
+  await Promise.all([frpExit, server ? closeOwnedHttp(server) : Promise.resolve(), closeRemoteTls()])
   remoteAgentEventLog.clear()
   serverInstanceId = randomUUID()
   isStarted = false

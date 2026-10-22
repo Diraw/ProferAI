@@ -968,11 +968,11 @@ async function bootstrap(): Promise<void> {
   // 远程服务（remote-service）：显式启动参数 PROFER_REMOTE=1 兼容保留；
   // 设置页开启「启用移动端连接」后，下次启动自动恢复监听（正式版与开发版一致）。
   // 开发版默认端口 7789、正式版 7788，端口已隔离，dev 与打包版并存不会互相抢占。
-  safeRun('startRemoteService', () => {
+  void safeAwait('startRemoteService', async () => {
     if (getSettings().pocketModeEnabled === true) {
-      setRemoteServiceEnabled(true)
+      await setRemoteServiceEnabled(true)
     } else {
-      startRemoteService()
+      await startRemoteService()
     }
   })
 
@@ -1193,7 +1193,17 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+let remoteExitComplete = false
+let remoteExitPending = false
+app.on('before-quit', (event) => {
+  if (!remoteExitComplete) {
+    event.preventDefault()
+    if (!remoteExitPending) {
+      remoteExitPending = true
+      void stopRemoteService().then(() => { remoteExitComplete = true; app.quit() }).catch(() => { remoteExitPending = false; dialog.showErrorBox('远控进程尚未停止', '未退出应用，请稍后重试。只会停止本应用拥有的 FRP 进程。') })
+    }
+    return
+  }
   // 标记正在退出，让 close 事件不再阻止关闭
   setQuitting()
 
@@ -1226,8 +1236,7 @@ app.on('before-quit', () => {
   stopPlanningReminderScheduler()
   // 销毁规划窗口
   destroyPlanningWindow()
-  // 停止移动端版远程服务
-  stopRemoteService()
+  // 远控 HTTP 和 owned FRP 已在退出门禁中等待清理完成。
   // 停止 Agent Fabric 本地服务
   void stopAgentFabricService()
   // 释放飞书同步防休眠

@@ -49,7 +49,11 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
   }
 
   if (tab.type === 'tutorial') {
-    return <TutorialTabContent />
+    return <MarkdownDocTab load={loadTutorialContent} errorText="教程加载失败" />
+  }
+
+  if (tab.type === 'frp-guide') {
+    return <MarkdownDocTab load={loadFrpGuideContent} errorText="教程加载失败" />
   }
 
   if (tab.type === 'chat') {
@@ -87,14 +91,18 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
   )
 }
 
-function TutorialTabContent(): React.ReactElement {
+const loadTutorialContent = (): Promise<string | null> => window.electronAPI.getTutorialContent()
+const loadFrpGuideContent = (): Promise<string | null> => window.electronAPI.getFrpGuideContent()
+
+/** 单例 markdown 文档 Tab（教程 / 自建 FRP 教程）共用的只读渲染器。 */
+function MarkdownDocTab({ load, errorText }: { load: () => Promise<string | null>; errorText: string }): React.ReactElement {
   const [content, setContent] = React.useState('')
   const [loadState, setLoadState] = React.useState<'loading' | 'ready' | 'error'>('loading')
   const tocOpen = useAtomValue(markdownTocOpenAtom)
   const scrollRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
-    window.electronAPI.getTutorialContent()
+    load()
       .then((result) => {
         if (result === null) {
           setLoadState('error')
@@ -107,14 +115,14 @@ function TutorialTabContent(): React.ReactElement {
         console.error(error)
         setLoadState('error')
       })
-  }, [])
+  }, [load])
 
   if (loadState === 'loading') {
     return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">加载中...</div>
   }
 
   if (loadState === 'error') {
-    return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">教程加载失败</div>
+    return <div className="flex h-full items-center justify-center text-xs text-muted-foreground">{errorText}</div>
   }
 
   return (

@@ -26,7 +26,7 @@ export { getFileBaseName }
 // ===== 类型定义 =====
 
 /** 标签页类型（Settings 不作为 Tab，保留独立视图） */
-export type TabType = 'chat' | 'agent' | 'scratch' | 'preview' | 'browser' | 'tutorial' | 'plugin'
+export type TabType = 'chat' | 'agent' | 'scratch' | 'preview' | 'browser' | 'tutorial' | 'frp-guide' | 'plugin'
 
 /** Scratch Pad 专用的固定 sessionId */
 export const SCRATCH_PAD_ID = '__scratch-pad__'
@@ -34,6 +34,10 @@ export const SCRATCH_PAD_ID = '__scratch-pad__'
 /** 教程 Tab 固定 ID */
 export const TUTORIAL_TAB_ID = '__tutorial__'
 export const TUTORIAL_TAB_TITLE = 'Profer 使用教程'
+
+/** 自建 FRP 服务器教程 Tab 固定 ID（与教程同属单例文档 Tab，不参与分组） */
+export const FRP_GUIDE_TAB_ID = '__frp-guide__'
+export const FRP_GUIDE_TAB_TITLE = '自建 FRP 服务器教程'
 
 /** 会话文件预览 Tab 的 ID 前缀（每文件一个 Tab）：运行时临时入口，不参与持久化 */
 const PREVIEW_TAB_PREFIX = '__preview__:'
@@ -343,16 +347,17 @@ export function openTab(
     }
   }
 
-  if (item.type === 'tutorial') {
-    const tutorialTab: TabItem = tabs.find((t) => t.id === TUTORIAL_TAB_ID) ?? {
-      id: TUTORIAL_TAB_ID,
-      type: 'tutorial',
-      sessionId: TUTORIAL_TAB_ID,
-      title: TUTORIAL_TAB_TITLE,
+  if (item.type === 'tutorial' || item.type === 'frp-guide') {
+    const docTabId = item.type === 'tutorial' ? TUTORIAL_TAB_ID : FRP_GUIDE_TAB_ID
+    const docTab: TabItem = tabs.find((t) => t.id === docTabId) ?? {
+      id: docTabId,
+      type: item.type,
+      sessionId: docTabId,
+      title: item.type === 'tutorial' ? TUTORIAL_TAB_TITLE : FRP_GUIDE_TAB_TITLE,
     }
     return {
-      tabs: tabs.some((tab) => tab.id === TUTORIAL_TAB_ID) ? tabs : [...tabs, tutorialTab],
-      activeTabId: TUTORIAL_TAB_ID,
+      tabs: tabs.some((tab) => tab.id === docTabId) ? tabs : [...tabs, docTab],
+      activeTabId: docTabId,
     }
   }
 

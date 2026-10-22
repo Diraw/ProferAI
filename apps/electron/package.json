@@ -75,7 +75,8 @@
     "@open-file-viewer/core": "^0.1.47",
     "@silurus/ooxml": "0.71.0",
     "pdfjs-dist": "^4.10.38",
-    "pptxgenjs": "4.0.1"
+    "pptxgenjs": "4.0.1",
+    "selfsigned": "5.5.0"
   },
   "optionalDependencies": {
     "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.201",
@@ -182,6 +183,8 @@
     "use-stick-to-bottom": "^1.1.2",
     "vite": "^6.0.3",
     "word-extractor": "1.0.4",
+    "smol-toml": "1.9.0",
+    "tar": "7.5.22",
     "ws": "8.21.1",
     "zod": "^4.0.0",
     "@fontsource-variable/inter": "5.2.8",

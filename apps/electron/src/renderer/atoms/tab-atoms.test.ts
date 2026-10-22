@@ -1,7 +1,20 @@
 import { expect, test } from 'bun:test'
-import { closeTab, closeTabs, createPluginTabId, getPersistableTabState, openPluginTab, openTab, selectSameModeCloseFallback, tabContextSessionId, type TabItem } from './tab-atoms'
+import { closeTab, closeTabs, createPluginTabId, getPersistableTabState, openPluginTab, openTab, selectSameModeCloseFallback, tabContextSessionId, FRP_GUIDE_TAB_ID, FRP_GUIDE_TAB_TITLE, TUTORIAL_TAB_ID, type TabItem } from './tab-atoms'
 
 const tab = (id: string): TabItem => ({ id, type: 'agent', sessionId: id, title: id })
+
+test('教程与自建 FRP 教程各自单例：互不覆盖、重复打开只聚焦、不参与持久化', () => {
+  const tutorial = openTab([], { type: 'tutorial', sessionId: TUTORIAL_TAB_ID, title: 'Profer 使用教程' })
+  expect(tutorial.activeTabId).toBe(TUTORIAL_TAB_ID)
+  const guide = openTab(tutorial.tabs, { type: 'frp-guide', sessionId: FRP_GUIDE_TAB_ID, title: FRP_GUIDE_TAB_TITLE })
+  expect(guide.activeTabId).toBe(FRP_GUIDE_TAB_ID)
+  expect(guide.tabs.map((item) => item.type)).toEqual(['tutorial', 'frp-guide'])
+  expect(guide.tabs.find((item) => item.type === 'frp-guide')?.title).toBe(FRP_GUIDE_TAB_TITLE)
+  const again = openTab(guide.tabs, { type: 'frp-guide', sessionId: FRP_GUIDE_TAB_ID, title: FRP_GUIDE_TAB_TITLE })
+  expect(again.tabs).toHaveLength(2)
+  expect(again.activeTabId).toBe(FRP_GUIDE_TAB_ID)
+  expect(getPersistableTabState(again.tabs, again.activeTabId)).toEqual({ tabs: [], activeTabId: null })
+})
 
 test('关闭当前普通标签时回退到最近访问标签而非右侧标签', () => {
   const result = closeTab([{ id: '__scratch-pad__', type: 'scratch', sessionId: '__scratch-pad__', title: 'Scratch Pad' }, tab('a'), tab('b'), tab('c')], 'c', 'c', ['c', 'b', 'a'])

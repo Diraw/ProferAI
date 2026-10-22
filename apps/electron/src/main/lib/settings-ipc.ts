@@ -86,14 +86,12 @@ export function registerSettingsIpc(): void {
     async (_event, enabled: boolean) => {
       if (typeof enabled !== 'boolean') throw new Error('移动模式开关参数无效')
       if (!enabled) {
-        const status = setRemoteServiceEnabled(false)
+        const status = await setRemoteServiceEnabled(false)
         updateSettings({ pocketModeEnabled: false })
         return status
       }
 
-      setRemoteServiceEnabled(true)
-      // listen 是异步的；状态会在 UI 随后刷新时带回地址和 Token。
-      const status = getRemoteServiceStatus()
+      const status = await setRemoteServiceEnabled(true)
       updateSettings({ pocketModeEnabled: true })
       return status
     },

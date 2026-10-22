@@ -147,7 +147,7 @@ import {
   openFileDialog,
 } from './lib/attachment-service'
 import { extractTextFromAttachment } from './lib/document-parser'
-import { getTutorialContent, createWelcomeConversation } from './lib/tutorial-service'
+import { getTutorialContent, createWelcomeConversation, getFrpGuideContent } from './lib/tutorial-service'
 import { registerUserProfileIpc } from './lib/user-profile-ipc'
 import { registerStorageIpc } from './lib/storage-ipc'
 import { registerQuickTaskIpc } from './lib/quick-task-ipc'
@@ -167,7 +167,8 @@ import { getSettings, updateSettings } from './lib/settings-service'
 import { registerSkinIpc } from './lib/skin-ipc'
 import { registerInstallerIpc } from './lib/installer-ipc'
 import { registerProxyIpc } from './lib/proxy-ipc'
-import { getRemoteServiceStatus, setRemoteServiceEnabled, restartRemoteService } from './lib/remote-service'
+import { getRemoteServiceStatus, setRemoteServiceEnabled, restartRemoteService, getRemotePairingQr, getRemoteBindings, removeRemoteBinding, getRemoteProfile, getRemotePairingAudit, startRemoteFrp, rotateRemoteTls, getRemoteTlsCertificate } from './lib/remote-service'
+import { getFrpStatus, saveFrpConfig, checkFrpReleases, installFrp, rollbackFrp, startFrp, stopFrp, exportFrpDeployment, copyFrpDeploymentInstructions, getFrpDeploymentInstructions, generateFrpMaterial, regenerateFrpMaterial, testFrpEndpoint, type FrpConfig } from './lib/remote-frp-service'
 import { updateWindowFrameAppearance } from './lib/titlebar-overlay'
 
 import { listAutomations,
@@ -1472,6 +1473,14 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  // 获取“自建 FRP 服务器”教程内容
+  ipcMain.handle(
+    CHAT_IPC_CHANNELS.GET_FRP_GUIDE_CONTENT,
+    async (): Promise<string | null> => {
+      return getFrpGuideContent()
+    }
+  )
+
   // 发送消息（触发 AI 流式响应）
   // 注意：通过 event.sender 获取 webContents 用于推送流式事件
   ipcMain.handle(
@@ -1710,6 +1719,32 @@ export function registerIpcHandlers(): void {
 
   // ===== 应用设置相关 =====
   registerSettingsIpc()
+
+  // ===== 远程连接（配对 / FRP）相关 =====
+  ipcMain.handle('remote:pairing-qr', async () => getRemotePairingQr())
+  ipcMain.handle('remote:pairing-audit', async () => getRemotePairingAudit())
+  ipcMain.handle('remote:bindings', async () => getRemoteBindings())
+  ipcMain.handle('remote:revoke', async (_event, id: string) => { if (typeof id !== 'string') throw new Error('设备ID无效'); removeRemoteBinding(id) })
+  ipcMain.handle('remote:frp', async (_event, action: string, input?: FrpConfig | string) => {
+    const remote = getRemoteServiceStatus()
+    switch (action) {
+      case 'status': return getFrpStatus()
+      case 'save': if (!input || typeof input !== 'object') throw new Error('配置无效'); return saveFrpConfig(input, remote.token)
+      case 'check': return checkFrpReleases()
+      case 'install': if (typeof input !== 'string') throw new Error('版本无效'); return installFrp(input)
+      case 'rollback': return rollbackFrp()
+      case 'start': if (!remote.running) throw new Error('请先开启移动模式'); if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return startRemoteFrp()
+      case 'rotate-tls': return rotateRemoteTls()
+      case 'generate': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return generateFrpMaterial()
+      case 'regenerate': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return regenerateFrpMaterial()
+      case 'deployment-instructions': return copyFrpDeploymentInstructions()
+      case 'deployment-instructions-text': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return getFrpDeploymentInstructions()
+      case 'stop': await stopFrp(); return getFrpStatus()
+      case 'export': if (input && typeof input === 'object') await saveFrpConfig(input, remote.token); return exportFrpDeployment()
+      case 'test': if (!remote.token) throw new Error('请先开启移动模式'); return testFrpEndpoint(getRemoteProfile(), remote.token, getRemoteTlsCertificate())
+      default: throw new Error('未知 FRP 操作')
+    }
+  })
 
   // ===== 自定义通知音效 =====
   registerNotificationSoundIpc()

@@ -599,6 +599,8 @@ export const CHAT_IPC_CHANNELS = {
   GET_TUTORIAL_CONTENT: 'chat:get-tutorial-content',
   /** 创建欢迎对话（含教程附件） */
   CREATE_WELCOME_CONVERSATION: 'chat:create-welcome-conversation',
+  /** 获取自建 FRP 服务器教程内容 */
+  GET_FRP_GUIDE_CONTENT: 'chat:get-frp-guide-content',
 
   // 流式事件（主进程 → 渲染进程推送）
   /** 内容片段 */

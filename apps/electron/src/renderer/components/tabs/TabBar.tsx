@@ -317,7 +317,7 @@ export function TabBar(): React.ReactElement {
             })
             .catch(console.error);
         }
-      } else if (tab.type === "scratch" || tab.type === "tutorial") {
+      } else if (tab.type === "scratch" || tab.type === "tutorial" || tab.type === "frp-guide") {
         setCurrentConversationId(null);
         // 个人 Agent 模式下保留 appMode，避免切到 Scratch 时收起右侧文件面板；
         if (appMode !== "agent") {

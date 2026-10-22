@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { Button } from '@profer/ui/primitives/button'
 import { Input } from '@profer/ui/primitives/input'
 import { SettingsCard, SettingsSection, SettingsToggle } from './primitives'
+import { RemotePairingSettings } from './RemotePairingSettings'
 import type { PocketModeStatus } from '../../../types'
 import { IntegrationSettingsFeedback } from './IntegrationSettingsFeedback'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@profer/ui/primitives/alert-dialog'
@@ -29,7 +30,7 @@ function ConnectionValue({ label, value, secret = false }: { label: string; valu
     <div className="flex items-center gap-3 px-4 py-3">
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-foreground">{label}</div>
-        <code className={`mt-1 block truncate text-xs text-muted-foreground ${secret ? 'select-all' : ''}`}>{value}</code>
+        <code className={`mt-1 block truncate text-xs text-muted-foreground ${secret ? 'select-all' : ''}`}>{secret ? `••••••••${value.slice(-4)}` : value}</code>
       </div>
       <Button variant="ghost" size="icon" className="shrink-0" onClick={() => void copy()} aria-label={`复制${label}`}>
         <Copy className="size-4" />
@@ -214,7 +215,7 @@ export function PocketModeSettings(): React.ReactElement {
           <AlertDialogFooter><AlertDialogCancel disabled={saving}>取消</AlertDialogCancel><AlertDialogAction disabled={saving} onClick={(event) => { event.preventDefault(); void toggle(false) }}>关闭连接</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <SettingsSection title="移动模式（试验版）" description="将 Agent 工作区连接到同一局域网内的移动设备浏览器。">
+      <SettingsSection title="移动模式（试验版）" description="通过一次性扫码配对，在局域网或自建可信 WSS 公网入口连接 Pocket。">
         <SettingsCard divided>
           <SettingsToggle
             label="启用移动端连接"
@@ -299,13 +300,14 @@ export function PocketModeSettings(): React.ReactElement {
       {status.enabled && (
         <SettingsSection
           title="连接信息"
-          description={status.running ? '请在移动设备浏览器打开以下局域网地址，并输入连接 Token。' : status.error || listenTimedOut ? '服务尚未就绪。检查端口或重试启动。' : '正在启动服务，请稍候…'}
+          description={status.running ? 'Pocket 配对' : status.error || listenTimedOut ? '服务尚未就绪。检查端口或重试启动。' : '正在启动服务，请稍候…'}
         >
           <SettingsCard divided={false}>
-            {status.running && status.lanUrl ? (
+            {status.running ? (
               <>
-                <ConnectionValue label="移动端访问地址" value={status.lanUrl} />
-                {status.token && <ConnectionValue label="连接 Token" value={status.token} secret />}
+                {status.lanUrl && <ConnectionValue label="移动端访问地址" value={status.lanUrl} />}
+                <RemotePairingSettings />
+                {status.token && <ConnectionValue label="手动兼容凭据（仅可信局域网）" value={status.token} secret />}
               </>
             ) : status.error || listenTimedOut ? (
               <IntegrationSettingsFeedback loading={saving} message={status.error || '启动等待已超时，请重试启动或更换端口。'} onRetry={() => void toggle(true)} />
@@ -315,7 +317,7 @@ export function PocketModeSettings(): React.ReactElement {
           </SettingsCard>
           <div className="mt-3 flex gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
             <Wifi className="mt-0.5 size-4 shrink-0 text-amber-600" />
-            <span>仅支持同一局域网。Token 等同连接凭据，请勿分享给不受信任的人；关闭开关会立即断开移动端连接。</span>
+            <span>当前版本只支持同一局域网内连接；手机与电脑需要连在同一个 Wi-Fi / 路由器下。公网穿透暂未开放。</span>
           </div>
         </SettingsSection>
       )}

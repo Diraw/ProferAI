@@ -13,17 +13,33 @@ import { getConversationAttachmentsDir } from './config-paths'
 import type { ConversationMeta, FileAttachment, ChatMessage } from '@profer/shared'
 
 /**
- * 获取教程文件路径
+ * 获取打包/开发环境下资源文件路径
  *
- * 开发模式：从 monorepo 根目录读取
+ * 开发模式：resources/ 经 build:resources 复制到 dist/resources/
  * 生产模式：从 extraResources 读取
  */
-function getTutorialFilePath(): string {
+function getResourceFilePath(fileName: string): string {
   if (app.isPackaged) {
-    return join(process.resourcesPath, 'tutorial.md')
+    return join(process.resourcesPath, fileName)
   }
-  // 开发模式：resources/ 经 build:resources 复制到 dist/resources/
-  return join(__dirname, 'resources/tutorial.md')
+  return join(__dirname, 'resources', fileName)
+}
+
+/** 读取 markdown 资源；不存在或读取失败返回 null。 */
+function readResource(fileName: string, label: string): string | null {
+  const filePath = getResourceFilePath(fileName)
+
+  if (!existsSync(filePath)) {
+    console.warn(`[${label}] 教程文件不存在:`, filePath)
+    return null
+  }
+
+  try {
+    return readFileSync(filePath, 'utf-8')
+  } catch (error) {
+    console.error(`[${label}] 读取教程文件失败:`, error)
+    return null
+  }
 }
 
 /**
@@ -32,19 +48,16 @@ function getTutorialFilePath(): string {
  * @returns 教程 markdown 文本，读取失败返回 null
  */
 export function getTutorialContent(): string | null {
-  const filePath = getTutorialFilePath()
+  return readResource('tutorial.md', '教程服务')
+}
 
-  if (!existsSync(filePath)) {
-    console.warn('[教程服务] 教程文件不存在:', filePath)
-    return null
-  }
-
-  try {
-    return readFileSync(filePath, 'utf-8')
-  } catch (error) {
-    console.error('[教程服务] 读取教程文件失败:', error)
-    return null
-  }
+/**
+ * 读取“自建 FRP 服务器”教程内容
+ *
+ * @returns 教程 markdown 文本，读取失败返回 null
+ */
+export function getFrpGuideContent(): string | null {
+  return readResource('frp-server-guide.md', '自建 FRP 教程服务')
 }
 
 /**

@@ -59,7 +59,7 @@ export function useSyncActiveTabSideEffects(): SyncActiveTabSideEffects {
         return
       }
 
-      if (newActiveTab.type === 'scratch' || newActiveTab.type === 'tutorial') {
+      if (newActiveTab.type === 'scratch' || newActiveTab.type === 'tutorial' || newActiveTab.type === 'frp-guide') {
         // 个人 Agent 模式下切到 Scratch Pad 时保持右侧文件面板不收起。
         setCurrentConversationId(null)
         if (appMode !== 'agent') {
