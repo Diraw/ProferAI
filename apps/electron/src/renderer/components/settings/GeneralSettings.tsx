@@ -21,6 +21,7 @@ import { detectIsWindows } from '@profer/ui'
 import { shortcutOverridesAtom } from '@/atoms/shortcut-atoms'
 import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { coachTourOpenAtom } from '@/atoms/coach-tour-atoms'
+import { replayIntroOpenAtom } from '@/atoms/intro-atoms'
 import { SHORTCUT_MAP } from '@/lib/shortcut-defaults'
 import { getAcceleratorDisplay, isMac } from '@/lib/shortcut-registry'
 import { Button } from '@profer/ui/primitives/button'
@@ -29,6 +30,7 @@ import type { RuntimeStatus } from '@profer/shared'
 export function GeneralSettings(): React.ReactElement {
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const setCoachTourOpen = useSetAtom(coachTourOpenAtom)
+  const setReplayIntroOpen = useSetAtom(replayIntroOpenAtom)
   const replayPendingRef = React.useRef(false)
   const [shellRuntimeStatus, setShellRuntimeStatus] = React.useState<RuntimeStatus | null>(null)
   const [autoLaunch, setAutoLaunch] = React.useState(false)
@@ -214,6 +216,22 @@ export function GeneralSettings(): React.ReactElement {
                   setCoachTourOpen(true)
                   window.setTimeout(() => { replayPendingRef.current = false }, 500)
                 }, 200)
+              }}
+            >
+              重新播放
+            </Button>
+          </SettingsRow>
+          <SettingsRow
+            label="首次引导"
+            description="重播欢迎页、功能导览和导入指引；不会重置任何设置或数据"
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setSettingsOpen(false)
+                window.setTimeout(() => setReplayIntroOpen(true), 200)
               }}
             >
               重新播放

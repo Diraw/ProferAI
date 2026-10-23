@@ -7,7 +7,7 @@
  * 引擎行为：
  *  - 播放期间 rAF 持续跟踪锚点 rect，侧栏收合、视图切换动画中聚光灯实时跟手
  *  - 带 view 的步骤先把主内容区切到对应视图，退出时恢复用户原视图
- *  - 点击遮罩 / → 前进，← 后退，Esc / 点击 × 退出；Tab 焦点限制在气泡内
+ *  - 点击遮罩 / → 前进，Esc / 点击 × 退出；Tab 焦点限制在气泡内
  *  - 锚点缺失（对应面板未打开）时气泡居中降级，不阻断流程
  *  - 尊重 prefers-reduced-motion：关闭聚光灯/气泡位移动画
  */
@@ -22,7 +22,7 @@ import { activeViewAtom, type ActiveView } from '@/atoms/active-view'
 import { Button } from '@profer/ui/primitives/button'
 import { cn } from '@/lib/utils'
 import { COACH_TOUR_STEPS, CURRENT_COACH_TOUR_VERSION, type CoachTourStep } from './coach-tour-steps'
-import { computeCardPosition, unionRects, type AnchorRect, type CardSize } from './coach-tour-position'
+import { computeCardLayout, unionRects, type AnchorRect, type CardSize } from './coach-tour-position'
 import { claimCoachTourOwnership } from './coach-tour-owner'
 
 /** 未测量前的气泡估算尺寸；首个 layout effect 会用真实值收敛，避免跳动 */
@@ -157,9 +157,6 @@ export function CoachTourOverlay(): React.ReactElement | null {
     }
     setStepIndex((current) => current + 1)
   }, [finish, isLast])
-  const previous = React.useCallback(() => {
-    setStepIndex((current) => Math.max(0, current - 1))
-  }, [])
 
   // 切步/退出时清掉未触发的交互前进定时器
   React.useEffect(() => {
@@ -241,7 +238,7 @@ export function CoachTourOverlay(): React.ReactElement | null {
     cardRef.current?.focus()
   }, [open, stepIndex])
 
-  // 键盘：Esc 退出，←/→ 翻步，Tab 困在气泡内（Enter/Space 留给聚焦按钮自身）
+  // 键盘：Esc 退出，→ 前进，Tab 困在气泡内（Enter/Space 留给聚焦按钮自身）
   React.useEffect(() => {
     if (!open) return
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -251,21 +248,18 @@ export function CoachTourOverlay(): React.ReactElement | null {
       } else if (event.key === 'ArrowRight') {
         event.preventDefault()
         next()
-      } else if (event.key === 'ArrowLeft') {
-        event.preventDefault()
-        previous()
       } else if (event.key === 'Tab') {
         trapTabKey(event, cardRef.current)
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, close, next, previous])
+  }, [open, close, next])
 
   if (!open || !step) return null
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  const cardPosition = computeCardPosition(rect, cardSize, step.placement, {
+  const cardLayout = computeCardLayout(rect, cardSize, step.placement, {
     width: window.innerWidth,
     height: window.innerHeight,
   })
@@ -273,7 +267,7 @@ export function CoachTourOverlay(): React.ReactElement | null {
   const frame = rect ? clampFrameToViewport(rect) : null
 
   return createPortal(
-    <div className="pointer-events-none fixed inset-0 z-[9800]">
+    <div className="titlebar-no-drag pointer-events-none fixed inset-0 z-[9800]">
       {/* 点击捕获：手动步骤为整屏点击前进；交互步骤拆成锚点四周的四块惰性挡板，镂空区放行真实点击 */}
       {!interactive && (
         <div
@@ -319,16 +313,16 @@ export function CoachTourOverlay(): React.ReactElement | null {
         />
       )}
 
-      {/* 引导气泡 */}
+      {/* 引导气泡：关闭按钮与标题同一行中线，页脚与正文用分隔线断开 */}
       <div
         ref={cardRef}
         role="dialog"
         aria-modal="true"
         aria-label={`界面引导，第 ${stepIndex + 1} 步，共 ${totalSteps} 步`}
         tabIndex={-1}
-        style={{ left: cardPosition.left, top: cardPosition.top, transition }}
+        style={{ left: cardLayout.left, top: cardLayout.top, transition }}
         className={cn(
-          'pointer-events-auto absolute w-[320px] rounded-xl border border-border bg-popover p-4 text-popover-foreground shadow-2xl outline-none',
+          'titlebar-no-drag pointer-events-auto absolute w-[344px] rounded-2xl border border-border/80 bg-popover/95 p-4 text-popover-foreground shadow-[0_28px_80px_-24px_rgba(0,0,0,0.55)] outline-none backdrop-blur-xl',
           !reduceMotion && 'animate-in fade-in-0 zoom-in-95 duration-200',
         )}
         onClick={(event) => event.stopPropagation()}
@@ -338,34 +332,34 @@ export function CoachTourOverlay(): React.ReactElement | null {
           key={step.key}
           className={cn(!reduceMotion && 'animate-in fade-in-0 slide-in-from-bottom-1 duration-200')}
         >
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[10px] tracking-[0.24em] text-muted-foreground">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[9.5px] tracking-[0.1em] text-primary">
                 {String(stepIndex + 1).padStart(2, '0')} / {String(totalSteps).padStart(2, '0')}
               </span>
-              <h3 className="text-sm font-semibold">{step.title}</h3>
+              <h3 className="truncate text-[13.5px] font-semibold">{step.title}</h3>
             </div>
             <button
               type="button"
               aria-label="退出引导"
               onClick={close}
-              className="rounded-md p-1 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+              className="-mr-1 grid size-7 shrink-0 place-items-center rounded-lg text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
             >
               <X size={14} />
             </button>
           </div>
 
-          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">{step.body}</p>
+          <p className="mt-2.5 text-[12.5px] leading-[1.7] text-muted-foreground">{step.body}</p>
 
           {interactive && (
-            <p className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-primary">
+            <p className="mt-2.5 flex items-center gap-1.5 text-[11px] font-medium text-primary">
               <span className="inline-block size-1.5 animate-pulse rounded-full bg-primary" aria-hidden="true" />
               点击高亮区域继续
             </p>
           )}
         </div>
 
-        <div className="mt-3.5 flex items-center justify-between">
+        <div className="mt-4 flex items-center justify-between border-t border-border/60 pt-3">
           {/* 步骤指示点 */}
           <div className="flex items-center gap-1.5" aria-hidden="true">
             {COACH_TOUR_STEPS.map((s, index) => (
@@ -380,14 +374,9 @@ export function CoachTourOverlay(): React.ReactElement | null {
           </div>
 
           <div className="flex items-center gap-1">
-            {stepIndex > 0 && (
-              <Button type="button" variant="ghost" size="sm" className="h-7 px-2.5 text-xs" onClick={previous}>
-                上一步
-              </Button>
-            )}
             {/* 交互步骤等用户亲自点击锚点；锚点缺失（降级）时恢复手动下一步 */}
             {!interactive && (
-              <Button type="button" size="sm" className="h-7 px-2.5 text-xs" onClick={next}>
+              <Button type="button" size="sm" className="h-7 px-3 text-xs" onClick={next}>
                 {isLast ? '完成' : '下一步'}
               </Button>
             )}

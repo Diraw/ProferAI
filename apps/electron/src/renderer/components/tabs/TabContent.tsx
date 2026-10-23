@@ -49,7 +49,7 @@ export function TabContent({ tabId }: TabContentProps): React.ReactElement {
   }
 
   if (tab.type === 'tutorial') {
-    return <MarkdownDocTab load={loadTutorialContent} errorText="教程加载失败" />
+    return <MarkdownDocTab load={loadTutorialContent} errorText="教程加载失败" docClassName="tutorial-doc" />
   }
 
   if (tab.type === 'frp-guide') {
@@ -95,7 +95,7 @@ const loadTutorialContent = (): Promise<string | null> => window.electronAPI.get
 const loadFrpGuideContent = (): Promise<string | null> => window.electronAPI.getFrpGuideContent()
 
 /** 单例 markdown 文档 Tab（教程 / 自建 FRP 教程）共用的只读渲染器。 */
-function MarkdownDocTab({ load, errorText }: { load: () => Promise<string | null>; errorText: string }): React.ReactElement {
+function MarkdownDocTab({ load, errorText, docClassName }: { load: () => Promise<string | null>; errorText: string; docClassName?: string }): React.ReactElement {
   const [content, setContent] = React.useState('')
   const [loadState, setLoadState] = React.useState<'loading' | 'ready' | 'error'>('loading')
   const tocOpen = useAtomValue(markdownTocOpenAtom)
@@ -128,14 +128,16 @@ function MarkdownDocTab({ load, errorText }: { load: () => Promise<string | null
   return (
     <div className="relative flex h-full min-h-0 overflow-hidden">
       <MarkdownToc containerRef={scrollRef as React.RefObject<HTMLElement>} contentKey={content.slice(0, 100)} enabled={tocOpen} />
-      <div ref={scrollRef} className="flex-1 min-w-0 overflow-y-auto p-8">
-        <MarkdownRichEditor
-          value={content}
-          editing={false}
-          onChange={() => {}}
-          onSave={() => {}}
-          onCancel={() => {}}
-        />
+      <div ref={scrollRef} className={docClassName ? 'flex-1 min-w-0 overflow-y-auto px-8 py-12' : 'flex-1 min-w-0 overflow-y-auto p-8'}>
+        <div className={docClassName}>
+          <MarkdownRichEditor
+            value={content}
+            editing={false}
+            onChange={() => {}}
+            onSave={() => {}}
+            onCancel={() => {}}
+          />
+        </div>
       </div>
     </div>
   )

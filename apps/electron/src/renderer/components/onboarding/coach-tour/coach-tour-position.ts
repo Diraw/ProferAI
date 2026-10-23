@@ -28,6 +28,13 @@ const SPOTLIGHT_PADDING = 8
 const CARD_GAP = 14
 const VIEWPORT_MARGIN = 12
 
+export interface CoachTourLayout {
+  left: number
+  top: number
+  /** 实际采用的方位（auto 已解析），便于调用方做朝向锚点的装饰 */
+  placement: Exclude<CoachTourPlacement, 'auto'>
+}
+
 /**
  * 计算气泡位置：
  * 1. 锚点缺失 → 视口居中（降级，不阻断流程）
@@ -41,12 +48,23 @@ export function computeCardPosition(
   placement: CoachTourPlacement,
   viewport: ViewportSize,
 ): { left: number; top: number } {
+  const { left, top } = computeCardLayout(rect, card, placement, viewport)
+  return { left, top }
+}
+
+export function computeCardLayout(
+  rect: AnchorRect | null,
+  card: CardSize,
+  placement: CoachTourPlacement,
+  viewport: ViewportSize,
+): CoachTourLayout {
   const vw = viewport.width
   const vh = viewport.height
   if (!rect) {
     return {
       left: Math.max(VIEWPORT_MARGIN, (vw - card.width) / 2),
       top: Math.max(VIEWPORT_MARGIN, (vh - card.height) / 2),
+      placement: 'bottom',
     }
   }
 
@@ -54,6 +72,7 @@ export function computeCardPosition(
     return {
       left: clamp((vw - card.width) / 2, VIEWPORT_MARGIN, vw - card.width - VIEWPORT_MARGIN),
       top: clamp(vh - card.height - VIEWPORT_MARGIN * 2, VIEWPORT_MARGIN, vh - card.height - VIEWPORT_MARGIN),
+      placement: 'bottom',
     }
   }
 
@@ -86,6 +105,7 @@ export function computeCardPosition(
   return {
     left: clamp(left, VIEWPORT_MARGIN, Math.max(VIEWPORT_MARGIN, vw - card.width - VIEWPORT_MARGIN)),
     top: clamp(top, VIEWPORT_MARGIN, Math.max(VIEWPORT_MARGIN, vh - card.height - VIEWPORT_MARGIN)),
+    placement: chosen,
   }
 }
 
