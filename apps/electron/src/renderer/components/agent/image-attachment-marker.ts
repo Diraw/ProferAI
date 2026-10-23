@@ -32,6 +32,13 @@ function parseImageValue(value: unknown): ParsedAgentImageAttachment | undefined
   return { localPath: image.localPath, filename: image.filename, mediaType: image.mediaType }
 }
 
+/** 会把图片作为本轮可见输出的受控工具。 */
+const AGENT_IMAGE_OUTPUT_TOOL_NAMES = new Set(['send_local_image', 'generate_image'])
+
+export function isAgentImageOutputToolName(name: string): boolean {
+  return AGENT_IMAGE_OUTPUT_TOOL_NAMES.has(name)
+}
+
 /** 从主进程工具结果的结构化 details 中提取图片；兼容 send_local_image 与 generate_image。 */
 export function parseAgentImageAttachmentDetails(value: unknown): ParsedAgentImageAttachment[] {
   if (!value || typeof value !== 'object') return []

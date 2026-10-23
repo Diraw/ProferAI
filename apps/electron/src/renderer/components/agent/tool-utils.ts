@@ -22,6 +22,7 @@ import {
   Globe,
   Code2,
   ImagePlus,
+  Image as ImageIcon,
   Layers,
   List,
   ListChecks,
@@ -69,6 +70,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   EnterPlanMode: Map,
   ExitPlanMode: MapPinOff,
   generate_image: ImagePlus,
+  send_local_image: ImageIcon,
   TaskOutput: Layers,
   TaskStop: OctagonX,
   AskUserQuestion: MessageCircleQuestion,
@@ -142,6 +144,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   EnterPlanMode: '正在生成计划',
   ExitPlanMode: '正在退出计划',
   generate_image: '生成图片',
+  send_local_image: '展示图片',
   TaskOutput: '获取任务输出',
   TaskStop: '停止任务',
   AskUserQuestion: '等待用户输入',
@@ -368,6 +371,12 @@ export function getInputSummary(
       if (typeof prompt === 'string') {
         return prompt.length > 80 ? prompt.slice(0, 80) + '…' : prompt
       }
+      return null
+    }
+
+    case 'send_local_image': {
+      const path = input.path
+      if (typeof path === 'string') return path.split(/[/\\]/).pop() || path
       return null
     }
 

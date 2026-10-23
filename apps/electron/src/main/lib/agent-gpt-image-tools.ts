@@ -4,10 +4,11 @@ import { isGptImageAvailable, } from './chat-tools/gpt-image-tool'
 import { generateAgentGptImage, type AgentGptImageContext } from './agent-gpt-image-service'
 import { GPT_IMAGE_QUALITIES, GPT_IMAGE_SIZES, type GptImageQuality, type GptImageSize } from './gpt-image-service'
 import { filterDisabledTools } from '@profer/shared'
+import { AGENT_IMAGE_OUTPUT_TEXT_RULE, GENERATE_IMAGE_TOOL_NAME } from './agent-image-output-contract'
 
-export const AGENT_GPT_IMAGE_TOOL_NAME = 'generate_image'
+export const AGENT_GPT_IMAGE_TOOL_NAME = GENERATE_IMAGE_TOOL_NAME
 
-const DESCRIPTION = 'Generate one image from a prompt, edit 1–4 authorized local PNG/JPEG/GIF/WebP reference files, or edit the latest successful image generated in this current Agent session with useLastGeneratedImage. useLastGeneratedImage cannot be combined with referenceImagePaths. Official mode charges 5 Profer credits only after successful delivery. Profer automatically attaches the delivered image to the conversation; do not output internal image protocol markers.'
+const DESCRIPTION = 'Generate one image from a prompt, edit 1–4 authorized local PNG/JPEG/GIF/WebP reference files, or edit the latest successful image generated in this current Agent session with useLastGeneratedImage. useLastGeneratedImage cannot be combined with referenceImagePaths. Official mode charges 5 Profer credits only after successful delivery. Profer displays the delivered image automatically; do not output Markdown images, file:// links, HTML img tags, or internal image protocol markers.'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; details?: unknown; isError?: boolean }
 
@@ -34,7 +35,7 @@ function toolResult(result: Awaited<ReturnType<typeof generateAgentGptImage>>): 
   return {
     content: [{
       type: 'text',
-      text: `图片已成功${result.edited ? '编辑' : '生成'}（1 张）${chargeHint}，并会自动显示在当前回复中。文件相对路径：${result.output.image.relativePath}。${result.revisedPrompt ? `\n修订后的提示词：${result.revisedPrompt}` : ''}\n如需将图片用于皮肤壁纸等后续文件工作流，请使用该相对路径；请用正常文字说明图片内容，不要输出任何内部图片协议标记。`,
+      text: `图片已成功${result.edited ? '编辑' : '生成'}（1 张）${chargeHint}，已附加到本轮回复。文件相对路径：${result.output.image.relativePath}。${result.revisedPrompt ? `\n修订后的提示词：${result.revisedPrompt}` : ''}\n如需将图片用于皮肤壁纸等后续文件工作流，请使用该相对路径。${AGENT_IMAGE_OUTPUT_TEXT_RULE}`,
     }],
     details: result.output,
   }

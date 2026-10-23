@@ -98,6 +98,7 @@ import { writeClipboardText } from '../clipboard-agent-tools'
 import { auditPptDelivery, planPptVisuals } from '../ppt-delivery-audit-service'
 import { sendAgentLocalImage } from '../agent-image-output-service'
 import { formatAgentImageOutputToolResult } from '../agent-image-output-tools'
+import { SEND_LOCAL_IMAGE_TOOL_DESCRIPTION, SEND_LOCAL_IMAGE_TOOL_NAME } from '../agent-image-output-contract'
 import {
   AGENT_INSPECT_PREVIEW_DESCRIPTION,
   AGENT_INSPECT_PREVIEW_TOOL_NAME,
@@ -724,9 +725,9 @@ function buildPiAgentImageOutputTools(sdk: PiSdk, ctx: PiBuiltinToolsContext): T
 
   return [
     sdk.defineTool({
-      name: 'send_local_image',
+      name: SEND_LOCAL_IMAGE_TOOL_NAME,
       label: '发送本地图片',
-      description: 'Send an existing local PNG/JPEG/GIF/WebP into the final reply. Relative paths resolve from the session cwd; absolute paths must be inside the session cwd or an authorized attached directory. Profer attaches the verified image automatically. Does not generate or edit images.',
+      description: SEND_LOCAL_IMAGE_TOOL_DESCRIPTION,
       promptSnippet: 'SendLocalImage: send an authorized existing image into the reply; relative paths resolve from the session cwd.',
       parameters: Type.Object({
         path: Type.String({ minLength: 1, maxLength: 4096 }),

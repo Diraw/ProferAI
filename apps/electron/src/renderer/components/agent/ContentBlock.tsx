@@ -28,7 +28,7 @@ import { MessageResponse } from '@/components/ai-elements/message'
 import { getToolIcon, extractFilePath } from './tool-utils'
 import { getToolPhrase } from './tool-phrase'
 import { ToolResultRenderer } from './tool-result-renderers'
-import { parseAgentImageAttachmentDetails, parseAgentImageAttachmentMarkers, type ParsedAgentImageAttachment } from './image-attachment-marker'
+import { parseAgentImageAttachmentMarkers, type ParsedAgentImageAttachment } from './image-attachment-marker'
 import { PreviewOpenButton } from './tool-result-renderers/preview-open-button'
 import { getTaskGetStatusLabel, parseTaskGetResult, type ParsedTaskGetResult } from './tool-result-renderers/task-get-result'
 import { parseTaskListResult, type ParsedTaskListItem } from './tool-result-renderers/task-list-result'
@@ -50,7 +50,6 @@ import { isGoalUpdateToolName, stripGoalResultBlocks } from '@profer/shared'
 interface ToolResultData {
   result?: string
   isError?: boolean
-  imageAttachments?: ParsedAgentImageAttachment[]
 }
 
 /** 在 allMessages 中查找匹配 toolUseId 的工具结果 */
@@ -75,12 +74,9 @@ function useToolResult(toolUseId: string, allMessages: SDKMessage[]): ToolResult
                 .map((c) => c.text)
                 .join('\n')
             }
-            const rawMessage = userMsg as unknown as Record<string, unknown>
-            const details = rawMessage.tool_use_result ?? rawMessage.toolUseResult
             return {
               result,
               isError: resultBlock.is_error,
-              imageAttachments: parseAgentImageAttachmentDetails(details),
             }
           }
         }
@@ -362,10 +358,8 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
   const toolResult = useToolResult(block.id, allMessages)
   const resultText = toolResult?.result
   const isError = toolResult?.isError === true
-  // generate_image 已有独立的持久化生成卡片；这里只让 send_local_image 的结构化附件
-  // 直接出现在工具行，避免同一张生图在时间线和工具结果中重复显示。
-  const imageAttachments = block.name === 'send_local_image' ? (toolResult?.imageAttachments ?? []) : []
-  const shouldShowResult = !!resultText || imageAttachments.length > 0
+  // 图片由 turn 级「图片输出」内容块渲染，工具行不再重复展示附件。
+  const shouldShowResult = !!resultText
   const taskGetSummary = React.useMemo(() => {
     if (block.name !== 'TaskGet' || !resultText || isError) return null
     return parseTaskGetResult(resultText)
@@ -611,14 +605,6 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
         )}
       </button>
 
-      {imageAttachments.length > 0 && (
-        <div className="ml-5.5 mt-1 mb-2 flex flex-wrap gap-3">
-          {imageAttachments.map((image, i) => (
-            <GeneratedImageThumb key={`${image.localPath}:${i}`} image={image} />
-          ))}
-        </div>
-      )}
-
       {/* 尚无结果（命令执行中/被中断）时，展开区回显完整命令。
           命令完成后由 Bash 结果块内的 `$ command` 回显，故此处不重复渲染。 */}
       {expanded && commandText && !shouldShowResult && (
@@ -648,7 +634,6 @@ function ToolUseBlock({ block, allMessages, animate = false, index = 0, dimmed =
             input={block.input}
             result={resultText ?? ''}
             isError={isError}
-            imageAttachments={[]}
             basePath={basePath}
           />
         </div>

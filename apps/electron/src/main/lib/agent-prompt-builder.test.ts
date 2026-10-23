@@ -452,7 +452,7 @@ describe('buildSystemPrompt', () => {
     expect(withoutAutomation).toContain('profer-theme-authoring')
     expect(withoutAutomation).not.toContain('10. **PPT 视觉交付门禁**')
     expect(withoutAutomation).toContain('send_local_image')
-    expect(withoutAutomation).toContain('Profer 自动附加图片')
+    expect(withoutAutomation).toContain('Profer 会自动展示图片')
     expect(withoutAutomation).not.toContain('PROMA_IMAGE_ATTACHMENT')
     expect(withoutAutomation).toContain('6. **自检习惯**')
   })

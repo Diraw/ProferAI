@@ -12,6 +12,7 @@
 import { DELEGATION_GUIDELINES, buildTaskGraphGuideline, buildPlanningTodoGuideline, buildPresetToolList, buildToolUsageGuidelines, buildWebSearchGuideline, buildBrowserGuideline } from './agent-prompt-tools'
 import { buildCoreAgentPrompt, type AgentEpistemicMode } from './agent-prompt-core'
 export type { AgentEpistemicMode } from './agent-prompt-core'
+import { AGENT_IMAGE_OUTPUT_TEXT_RULE } from './agent-image-output-contract'
 import { AGENT_PRESET_CAPABILITY_GROUPS, isAgentPresetToolGroupDisabled } from '@profer/shared'
 import type { AgentPresetToolGroup, ProferPermissionMode } from '@profer/shared'
 import { homedir } from 'node:os'
@@ -300,10 +301,10 @@ Pi 没有 Claude Agent SDK 的自动记忆后台机制，但 Profer 已为 Pi �
   const canGenerateImage = imageGroupEnabled && !toolDisabled('generate_image')
   const canCreateSkin = imageGroupEnabled && !toolDisabled('create_skin') && !!ctx.workspaceSlug && !!ctx.agentCwd
   if (canSendLocalImage) {
-    sections.push(`8. **发送既有本地图片**：用户要求把已有的 PNG/JPEG/GIF/WebP 图片放入本轮回复，且 \`send_local_image\` 可用时调用该工具。\`path\` 可用相对当前会话工作目录的路径或绝对路径，但必须位于会话工作目录或用户已授权附加目录内。Profer 自动附加图片；不要手写图片 Markdown、\`file://\` 链接或 HTML img 标签，不要发送 SVG 或未知格式，也不要构造路径绕过限制。`)
+    sections.push(`8. **发送既有本地图片**：用户要求把已有的 PNG/JPEG/GIF/WebP 图片放入本轮回复，且 \`send_local_image\` 可用时调用该工具。\`path\` 可用相对当前会话工作目录的路径或绝对路径，但必须位于会话工作目录或用户已授权附加目录内。${AGENT_IMAGE_OUTPUT_TEXT_RULE}不要发送 SVG 或未知格式，也不要构造路径绕过限制。`)
   }
   if (canGenerateImage) {
-    sections.push(`9. **AI 生图**：当实际工具列表包含 \`generate_image\` 时，用户要求画画、生成图片、P 图、修图等应直接调用该工具；需要编辑时仅可传入当前会话工作目录或用户已授权附加目录内的本地 PNG/JPEG/GIF/WebP 路径。用户说“修改上一张图”时，使用 \`useLastGeneratedImage: true\`，它只指本当前会话中最近一张成功的 Agent 生成图，不能与 \`referenceImagePaths\` 同时传入，也不适用于用户上传图、\`send_local_image\` 或其他会话的图片。工具结果会返回生成文件相对当前会话 cwd 的路径；后续文件工作（例如制作皮肤壁纸）必须使用该路径读取或复制，不要猜测文件名。制作皮肤相关的图片与 CSS 规则见 \`profer-theme-authoring\` skill。Profer 会自动把生成结果附加到当前回复；不要输出任何内部图片协议标记。不要尝试用代码、ASCII art 等伪造图片。`)
+    sections.push(`9. **AI 生图**：当实际工具列表包含 \`generate_image\` 时，用户要求画画、生成图片、P 图、修图等应直接调用该工具；需要编辑时仅可传入当前会话工作目录或用户已授权附加目录内的本地 PNG/JPEG/GIF/WebP 路径。用户说“修改上一张图”时，使用 \`useLastGeneratedImage: true\`，它只指本当前会话中最近一张成功的 Agent 生成图，不能与 \`referenceImagePaths\` 同时传入，也不适用于用户上传图、\`send_local_image\` 或其他会话的图片。工具结果会返回生成文件相对当前会话 cwd 的路径；后续文件工作（例如制作皮肤壁纸）必须使用该路径读取或复制，不要猜测文件名。制作皮肤相关的图片与 CSS 规则见 \`profer-theme-authoring\` skill。${AGENT_IMAGE_OUTPUT_TEXT_RULE}不要尝试用代码、ASCII art 等伪造图片。`)
   }
   if (canCreateSkin) {
     // 用户皮肤目录固定且在工作区之外；不给模型确定性路径，它就会用 find 从工作区一路递归搜到

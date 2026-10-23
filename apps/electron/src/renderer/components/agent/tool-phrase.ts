@@ -226,6 +226,14 @@ export function getToolPhrase(toolName: string, input: Record<string, unknown>):
       return phrase('生成图片')
     }
 
+    case 'send_local_image': {
+      const path = input.path
+      if (typeof path === 'string') {
+        return phrase(`展示图片 ${truncate(path.split(/[/\\]/).pop() || path, 40)}`)
+      }
+      return phrase('展示图片')
+    }
+
     case 'TaskOutput': {
       const taskId = input.task_id ?? input.taskId
       if (typeof taskId === 'string') return phrase(`获取任务 #${taskId} 输出`)

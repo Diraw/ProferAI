@@ -21,7 +21,8 @@ import { cn } from '@/lib/utils'
 import { parseQuotedSelectionRefs, type ParsedQuotedSelectionRef } from '@/lib/quoted-selection'
 import { ImageLightbox } from '@profer/ui/primitives/image-lightbox'
 import { ContentBlock } from './ContentBlock'
-import { parseAgentImageAttachmentDetails } from './image-attachment-marker'
+import { AgentTurnImageOutput } from './AgentTurnImageOutput'
+import { collectTurnImageOutputs } from './turn-image-outputs'
 import { TaskProgressCard } from './TaskProgressCard'
 import { TurnFileChangesSummary, buildTurnFileNameMap } from './TurnFileChangesSummary'
 import { ProcessBlockGroup } from './ProcessBlockGroup'
@@ -789,41 +790,15 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
   const completedToolResultIds = React.useMemo(() => {
     return buildCompletedToolResultIds(turn.turnMessages)
   }, [turn.turnMessages])
-  const pinnedToolUseIds = React.useMemo(() => {
-    const sendLocalImageToolIds = new Set<string>()
-    for (const message of turn.assistantMessages) {
-      for (const block of message.message?.content ?? []) {
-        if (block.type === 'tool_use' && block.name === 'send_local_image' && typeof block.id === 'string') {
-          sendLocalImageToolIds.add(block.id)
-        }
-      }
-    }
-
-    const ids = new Set<string>()
-    for (const message of turn.turnMessages) {
-      if (message.type !== 'user') continue
-      const userMessage = message as SDKUserMessage
-      const content = userMessage.message?.content
-      if (!Array.isArray(content)) continue
-      const rawMessage = userMessage as unknown as Record<string, unknown>
-      const details = rawMessage.tool_use_result ?? rawMessage.toolUseResult
-      if (parseAgentImageAttachmentDetails(details).length === 0) continue
-      for (const block of content) {
-        if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && sendLocalImageToolIds.has(block.tool_use_id)) {
-          ids.add(block.tool_use_id)
-        }
-      }
-    }
-    return ids
-  }, [turn.assistantMessages, turn.turnMessages])
+  const imageOutputsByToolUseId = React.useMemo(() => collectTurnImageOutputs(turn.turnMessages), [turn.turnMessages])
   const visualizationRecords = useAtomValue(visualizationsAtom)
   const turnVisualizations = React.useMemo(() => visualizationsForTurn(visualizationRecords.get(sessionId ?? '') ?? [], turn.turnMessages, allMessages), [visualizationRecords, sessionId, turn.turnMessages, allMessages])
   const renderItems = React.useMemo(() => {
     const items: AssistantTurnRenderItem<StableContentBlock>[] = buildAssistantTurnRenderItems(topLevelItems, {
-      isStreaming, completedToolResultIds, pinnedToolUseIds, showThinking,
+      isStreaming, completedToolResultIds, imageOutputsByToolUseId, showThinking,
     })
     return [...items, ...turnVisualizations.map((record) => ({ type: 'visualization' as const, record, identity: `visualization:${record.id}` }))]
-  }, [topLevelItems, isStreaming, completedToolResultIds, pinnedToolUseIds, showThinking, turnVisualizations])
+  }, [topLevelItems, isStreaming, completedToolResultIds, imageOutputsByToolUseId, showThinking, turnVisualizations])
   // 渲染窗口：过程与回复各自取尾部窗口，避免过程把回复挤出可视范围。
   // 展开/收起状态属于 turn；裁剪与分组保留已派生的稳定块身份。
   //
@@ -931,13 +906,21 @@ export function AssistantTurnRenderer({ sessionId: sessionIdProp, turn, allMessa
             <ExternalizedContentNotice sessionId={sessionId ?? undefined} messages={turn.turnMessages} />
             {windowedItems.map((item, itemIndex) => {
               if (item.type !== 'process-group') {
-                return <React.Fragment key={item.type === 'block' ? item.item.identity : item.identity}>
+                const identity = item.type === 'block' ? item.item.identity : item.identity
+                return <React.Fragment key={identity}>
                   {itemIndex === firstReplyIndex && foldedReplyRenderItems.length > 0 && <FoldedSegmentsRegion
                     count={foldedReplyRenderItems.length} expanded={expandedReplySegments} onExpandedChange={setExpandedReplySegments}
-                    renderRevealed={() => foldedReplyRenderItems.map((folded) => folded.type === 'block' ? renderTopLevelBlock(folded.item)
-                      : <div key={folded.identity} data-scroll-anchor={folded.identity}><VisualizationResultInline record={folded.record} sessionId={sessionId} /></div>)}
+                    renderRevealed={() => foldedReplyRenderItems.map((folded) => folded.type === 'block'
+                      ? renderTopLevelBlock(folded.item)
+                      : folded.type === 'image-output'
+                        ? <div key={folded.identity} data-scroll-anchor={folded.identity}><AgentTurnImageOutput images={folded.images} /></div>
+                        : <div key={folded.identity} data-scroll-anchor={folded.identity}><VisualizationResultInline record={folded.record} sessionId={sessionId} /></div>)}
                   />}
-                  {item.type === 'block' ? renderTopLevelBlock(item.item) : !isStreaming && <div data-scroll-anchor={item.identity}><VisualizationResultInline record={item.record} sessionId={sessionId} /></div>}
+                  {item.type === 'block'
+                    ? renderTopLevelBlock(item.item)
+                    : item.type === 'image-output'
+                      ? <div data-scroll-anchor={item.identity}><AgentTurnImageOutput images={item.images} /></div>
+                      : !isStreaming && <div data-scroll-anchor={item.identity}><VisualizationResultInline record={item.record} sessionId={sessionId} /></div>}
                 </React.Fragment>
               }
 

@@ -157,17 +157,25 @@ describe('隐藏 thinking 时过程组不空占位', () => {
     }
   })
 
-  test('已产出图片的本地图片工具不跟随过程组折叠，图片附件始终可见', () => {
+  test('图片输出工具成功后变成正文里的图片块，不再作为过程行出现', () => {
     const derived = derive([message('m1', [thinking(), tool('image-1', 'send_local_image'), tool('tool-2'), text('最终输出')])])
+    const image = { localPath: '/tmp/a.png', filename: 'a.png', mediaType: 'image/png' as const }
     const items = buildAssistantTurnRenderItems(derived.topLevelItems, {
-      pinnedToolUseIds: new Set(['image-1']),
+      imageOutputsByToolUseId: new Map([['image-1', [image]]]),
     })
 
-    expect(items.map((item) => item.type)).toEqual(['process-group', 'block', 'process-group', 'block'])
-    expect(items[1]?.type === 'block' && items[1].item.block).toMatchObject({
-      type: 'tool_use', id: 'image-1', name: 'send_local_image',
+    expect(items.map((item) => item.type)).toEqual(['process-group', 'image-output', 'block'])
+    expect(items[1]?.type === 'image-output' && items[1].images).toEqual([image])
+    expect(items[0]?.type === 'process-group' && items[0].items.map((item) => item.block.type)).toEqual(['thinking', 'tool_use'])
+  })
+
+  test('图片工具没有结构化图片时保持普通过程行（保留失败审计）', () => {
+    const derived = derive([message('m1', [tool('image-1', 'generate_image'), text('最终输出')])])
+    const items = buildAssistantTurnRenderItems(derived.topLevelItems, {
+      imageOutputsByToolUseId: new Map(),
     })
-    expect(items[0]?.type === 'process-group' && items[0].items.map((item) => item.block.type)).toEqual(['thinking'])
-    expect(items[2]?.type === 'process-group' && items[2].items.map((item) => item.block.type)).toEqual(['tool_use'])
+
+    expect(items.map((item) => item.type)).toEqual(['process-group', 'block'])
+    expect(items[0]?.type === 'process-group' && items[0].items.map((item) => item.block.type)).toEqual(['tool_use'])
   })
 })

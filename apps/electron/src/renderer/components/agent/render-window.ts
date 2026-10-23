@@ -41,8 +41,8 @@ export interface WindowedTurnItems<T extends IndexedContentBlock = IndexedConten
   foldedProcessItems: T[]
   /** 回复区被折叠的段（按原顺序） */
   foldedReplyItems: T[]
-  /** 回复区完整折叠项（含可视结果），用于保持原有展示顺序。 */
-  foldedReplyRenderItems: Array<Extract<AssistantTurnRenderItem<T>, { type: 'block' | 'visualization' }>>
+  /** 回复区完整折叠项（含可视结果/图片输出），用于保持原有展示顺序。 */
+  foldedReplyRenderItems: Array<Extract<AssistantTurnRenderItem<T>, { type: 'block' | 'visualization' | 'image-output' }>>
 }
 
 /**
@@ -68,7 +68,7 @@ export function applyRenderWindow<T extends IndexedContentBlock>(
   const replyKeepFrom = Math.max(0, replyIndexes.length - replyLimit)
   const visibleReplyIndexes = new Set(replyIndexes.slice(replyKeepFrom))
   const foldedReplyRenderItems = replyIndexes.slice(0, replyKeepFrom)
-    .map((index) => items[index] as Extract<AssistantTurnRenderItem<T>, { type: 'block' | 'visualization' }>)
+    .map((index) => items[index] as Extract<AssistantTurnRenderItem<T>, { type: 'block' | 'visualization' | 'image-output' }>)
   const foldedReplyItems: T[] = foldedReplyRenderItems.flatMap((item) => item.type === 'block' ? [item.item] : [])
 
   const windowed: AssistantTurnRenderItem<T>[] = []

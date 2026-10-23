@@ -9,6 +9,7 @@ import type {
 } from '@profer/shared'
 import { isGoalUpdateToolName } from '@profer/shared'
 import { normalizeThinkTagsInContentBlocks } from './thinking-tag-parser'
+import type { ParsedAgentImageAttachment } from './image-attachment-marker'
 
 export interface StableContentBlock extends IndexedContentBlock {
   identity: string
@@ -108,16 +109,17 @@ export interface IndexedContentBlock {
 export type AssistantTurnRenderItem<T extends IndexedContentBlock = IndexedContentBlock> =
   | { type: 'block'; item: T }
   | { type: 'visualization'; record: import('@profer/shared').VisualizationRecord; identity: string }
+  | { type: 'image-output'; toolUseId: string; images: ParsedAgentImageAttachment[]; identity: string }
   | { type: 'process-group'; items: T[] }
 
 interface BuildAssistantTurnRenderItemsOptions {
   isStreaming?: boolean
   completedToolResultIds?: Set<string>
   /**
-   * 需要始终直接显示的工具调用（例如已产出图片附件的 send_local_image）。
-   * 这些块不能跟随思考/工具过程一起自动折叠，否则结构化附件会对用户不可见。
+   * 已成功产出图片的工具调用 → 图片附件。
+   * 这类调用不再作为过程行渲染，而是在原位置输出一份独立的图片内容块。
    */
-  pinnedToolUseIds?: Set<string>
+  imageOutputsByToolUseId?: Map<string, ParsedAgentImageAttachment[]>
   /**
    * 上层是否展示 thinking 块；显式 false 时把 thinking 从可见块里剔除。
    * 缺省 true 保持旧行为（不传的调用方不受影响）。
@@ -125,32 +127,33 @@ interface BuildAssistantTurnRenderItemsOptions {
   showThinking?: boolean
 }
 
-function buildProcessAndPinnedItems<T extends IndexedContentBlock>(
-  blocks: T[],
-  pinnedToolUseIds?: Set<string>,
-): AssistantTurnRenderItem<T>[] {
-  if (!pinnedToolUseIds || pinnedToolUseIds.size === 0) {
-    return blocks.length > 0 ? [{ type: 'process-group', items: blocks }] : []
-  }
+interface PartitionedTurnBlocks<T extends IndexedContentBlock> {
+  /** 普通过程块：保持原先单一过程组的形态，不因图片输出被切成多段。 */
+  processItems: T[]
+  imageOutputs: Array<Extract<AssistantTurnRenderItem<T>, { type: 'image-output' }>>
+}
 
-  const items: AssistantTurnRenderItem<T>[] = []
-  let processItems: T[] = []
-  const flushProcessItems = (): void => {
-    if (processItems.length > 0) items.push({ type: 'process-group', items: processItems })
-    processItems = []
-  }
+function partitionProcessBlocks<T extends IndexedContentBlock>(
+  blocks: T[],
+  imageOutputsByToolUseId?: Map<string, ParsedAgentImageAttachment[]>,
+): PartitionedTurnBlocks<T> {
+  const processItems: T[] = []
+  const imageOutputs: Array<Extract<AssistantTurnRenderItem<T>, { type: 'image-output' }>> = []
 
   for (const item of blocks) {
     const block = item.block
-    if (block.type === 'tool_use' && typeof block.id === 'string' && pinnedToolUseIds.has(block.id)) {
-      flushProcessItems()
-      items.push({ type: 'block', item })
-    } else {
-      processItems.push(item)
+    const toolUse = block.type === 'tool_use' ? block as SDKToolUseBlock : undefined
+    const images = toolUse && typeof toolUse.id === 'string'
+      ? imageOutputsByToolUseId?.get(toolUse.id)
+      : undefined
+    if (images && images.length > 0 && toolUse && typeof toolUse.id === 'string') {
+      imageOutputs.push({ type: 'image-output', toolUseId: toolUse.id, images, identity: `image-output:${toolUse.id}` })
+      continue
     }
+    processItems.push(item)
   }
-  flushProcessItems()
-  return items
+
+  return { processItems, imageOutputs }
 }
 
 export function buildCompletedToolResultIds(turnMessages: SDKMessage[]): Set<string> {
@@ -284,11 +287,13 @@ export function buildAssistantTurnRenderItems(
     && areToolsBeforeIndexCompleted(renderBlocks, outputSplit.textStartIndex, options.completedToolResultIds)
 
   if (options.isStreaming && hasProcessBlock && !canSplitStreamingFinalOutput) {
-    return buildProcessAndPinnedItems(visibleBlocks, options.pinnedToolUseIds)
+    const { processItems, imageOutputs } = partitionProcessBlocks(visibleBlocks, options.imageOutputsByToolUseId)
+    return [...(processItems.length > 0 ? [{ type: 'process-group' as const, items: processItems }] : []), ...imageOutputs]
   }
 
   if (outputSplit === null) {
-    return buildProcessAndPinnedItems(visibleBlocks, options.pinnedToolUseIds)
+    const { processItems, imageOutputs } = partitionProcessBlocks(visibleBlocks, options.imageOutputsByToolUseId)
+    return [...(processItems.length > 0 ? [{ type: 'process-group' as const, items: processItems }] : []), ...imageOutputs]
   }
 
   const { textStartIndex, textEndIndex } = outputSplit
@@ -303,7 +308,11 @@ export function buildAssistantTurnRenderItems(
     if (item) processItems.push(item)
   }
 
-  const items: AssistantTurnRenderItem[] = buildProcessAndPinnedItems(processItems, options.pinnedToolUseIds)
+  const { processItems: processBlocks, imageOutputs } = partitionProcessBlocks(processItems, options.imageOutputsByToolUseId)
+  const items: AssistantTurnRenderItem[] = [
+    ...(processBlocks.length > 0 ? [{ type: 'process-group' as const, items: processBlocks }] : []),
+    ...imageOutputs,
+  ]
   for (let index = textStartIndex; index <= textEndIndex; index++) {
     const item = visibleBlocks[index]
     if (item) items.push({ type: 'block', item })
