@@ -7,6 +7,7 @@ import {
   XCircle,
   Loader2,
   FolderOpen,
+  LockKeyhole,
 } from 'lucide-react'
 import {
   Dialog,
@@ -39,6 +40,12 @@ export function MigrationImportDialog(): React.ReactElement {
     importConfirming,
     importResult,
     isV2,
+    requiresPassphrase,
+    passphrase,
+    passphraseError,
+    setPassphrase,
+    submitPassphrase,
+    cancelPassphrase,
     handleSelectImportFile,
     handleConfirmImport,
     handlePathMapping,
@@ -74,27 +81,78 @@ export function MigrationImportDialog(): React.ReactElement {
         </DialogHeader>
 
         <div className="space-y-4 mt-2">
-          {/* 阶段 1：选择文件 */}
+          {/* 阶段 1：选择文件 / 输入口令 */}
           {!importPreview && !importResult?.success && (
             <div className="flex flex-col items-center gap-4 py-6">
               <div className="w-16 h-16 rounded-2xl bg-muted/50 flex items-center justify-center">
-                <FolderOpen size={28} className="text-muted-foreground" />
-              </div>
-              <p className="text-sm text-muted-foreground text-center">
-                选择 .profer-backup 或 .profer-share 文件开始导入
-              </p>
-              <button
-                onClick={handleSelectImportFile}
-                disabled={importing}
-                className={cn(
-                  'flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-colors',
-                  'bg-primary text-primary-foreground hover:bg-primary/90',
-                  'disabled:opacity-50 disabled:cursor-not-allowed'
+                {requiresPassphrase ? (
+                  <LockKeyhole size={28} className="text-muted-foreground" />
+                ) : (
+                  <FolderOpen size={28} className="text-muted-foreground" />
                 )}
-              >
-                {importing ? <Loader2 size={16} className="animate-spin" /> : <FolderOpen size={16} />}
-                {importing ? '解析中...' : '选择文件'}
-              </button>
+              </div>
+
+              {requiresPassphrase ? (
+                <div className="w-full max-w-sm space-y-2">
+                  <p className="text-sm text-muted-foreground text-center">
+                    该备份已加密，请输入导出时设置的口令。
+                  </p>
+                  <input
+                    type="password"
+                    autoFocus
+                    value={passphrase}
+                    onChange={(event) => setPassphrase(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && passphrase.length > 0 && !importing) void submitPassphrase()
+                    }}
+                    disabled={importing}
+                    placeholder="备份口令"
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  />
+                  {passphraseError && (
+                    <p className="text-xs text-red-500">{passphraseError}</p>
+                  )}
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      onClick={submitPassphrase}
+                      disabled={importing || passphrase.length === 0}
+                      className={cn(
+                        'flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium transition-colors',
+                        'bg-primary text-primary-foreground hover:bg-primary/90',
+                        'disabled:opacity-50 disabled:cursor-not-allowed'
+                      )}
+                    >
+                      {importing ? <Loader2 size={16} className="animate-spin" /> : <LockKeyhole size={16} />}
+                      {importing ? '解密中...' : '解密并解析'}
+                    </button>
+                    <button
+                      onClick={cancelPassphrase}
+                      disabled={importing}
+                      className="px-4 py-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                    >
+                      返回
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm text-muted-foreground text-center">
+                    选择 .profer-backup 或 .profer-share 文件开始导入
+                  </p>
+                  <button
+                    onClick={handleSelectImportFile}
+                    disabled={importing}
+                    className={cn(
+                      'flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium transition-colors',
+                      'bg-primary text-primary-foreground hover:bg-primary/90',
+                      'disabled:opacity-50 disabled:cursor-not-allowed'
+                    )}
+                  >
+                    {importing ? <Loader2 size={16} className="animate-spin" /> : <FolderOpen size={16} />}
+                    {importing ? '解析中...' : '选择文件'}
+                  </button>
+                </>
+              )}
 
               {importResult && !importResult.success && (
                 <div className="flex items-center gap-1.5 text-sm text-red-500">
@@ -116,6 +174,27 @@ export function MigrationImportDialog(): React.ReactElement {
                     <p className="font-medium">检测到跨平台迁移（{importPreview.manifest.sourcePlatform} → 当前系统）</p>
                     <p className="mt-0.5 text-amber-600 dark:text-amber-500">部分 Skills 和 MCP 工具可能需要手动调整命令路径。</p>
                   </div>
+                </div>
+              )}
+
+              {/* 本机数据（personal 备份） */}
+              {importPreview.personal?.available && (
+                <div className="rounded-lg border border-border/50 bg-muted/20 px-4 py-3 space-y-2">
+                  <p className="text-sm font-medium text-foreground">同时恢复本机数据</p>
+                  <p className="text-sm text-muted-foreground">
+                    {importPreview.personal.sections.length > 0
+                      ? importPreview.personal.sections.join('、')
+                      : '本机设置与附件'}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    含会话原文 {importPreview.personal.blobCount} 段
+                    {importPreview.personal.blobBytes > 0 ? `（${formatBytes(importPreview.personal.blobBytes)}）` : ''}
+                    {importPreview.personal.missingBlobs > 0 && (
+                      <span className="text-amber-600 dark:text-amber-400">
+                        ，导出时有 {importPreview.personal.missingBlobs} 段原文已丢失
+                      </span>
+                    )}
+                  </p>
                 </div>
               )}
 
@@ -219,6 +298,26 @@ export function MigrationImportDialog(): React.ReactElement {
                 <p className="text-sm font-medium text-foreground">导入成功</p>
                 <p className="text-xs text-muted-foreground mt-1">请重启应用使所有更改生效</p>
               </div>
+              {importResult.restored && importResult.restored.length > 0 && (
+                <div className="w-full rounded-lg border border-border/50 bg-muted/20 px-4 py-3">
+                  <p className="text-sm text-muted-foreground">
+                    已恢复：{importResult.restored.join('、')}
+                  </p>
+                </div>
+              )}
+              {importResult.warnings && importResult.warnings.length > 0 && (
+                <div className="w-full flex items-start gap-2 rounded-lg border border-amber-200/70 bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
+                  <AlertTriangle size={15} className="mt-0.5 flex-shrink-0" />
+                  <div className="min-w-0 space-y-1">
+                    <p>有 {importResult.warnings.length} 条提醒：</p>
+                    <ul className="list-disc pl-4 text-xs space-y-0.5 break-all">
+                      {importResult.warnings.slice(0, 5).map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
               <button
                 onClick={() => handleOpenChange(false)}
                 className={cn(
@@ -404,4 +503,16 @@ function V2ContentSummary({ preview, workspaceMappings, localWorkspaces, onWorks
       )}
     </div>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`
 }

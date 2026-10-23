@@ -1,4 +1,14 @@
-import { dialog, ipcMain } from 'electron'
+import { dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
+
+/** 进度事件与窗口解耦：窗口已关闭时静默放弃。 */
+function forwardProgress(event: IpcMainInvokeEvent, taskId: unknown, progress: unknown): void {
+  try {
+    if (event.sender.isDestroyed()) return
+    event.sender.send('migration:progress', { taskId, ...(progress as Record<string, unknown>) })
+  } catch {
+    // 窗口关闭/渲染进程崩溃时忽略
+  }
+}
 
 export function registerMigrationIpc(): void {
   ipcMain.handle('migration:getExportPreview', async (_, workspaceId: string) => {
@@ -9,17 +19,29 @@ export function registerMigrationIpc(): void {
     const { getShareExportPreview } = await import('./migration-service')
     return getShareExportPreview()
   })
-  ipcMain.handle('migration:export', async (_, options) => {
+  ipcMain.handle('migration:inspectImportFile', async (_, filePath: string) => {
+    const { inspectImportFile } = await import('./migration-service')
+    return inspectImportFile(filePath)
+  })
+  ipcMain.handle('migration:export', async (event, options) => {
     const { exportData } = await import('./migration-service')
-    return exportData(options)
+    const { taskId, ...rest } = options ?? {}
+    return exportData({
+      ...rest,
+      onProgress: (progress) => forwardProgress(event, taskId, progress),
+    })
   })
-  ipcMain.handle('migration:exportV2', async (_, options) => {
+  ipcMain.handle('migration:exportV2', async (event, options) => {
     const { exportDataV2 } = await import('./migration-service')
-    return exportDataV2(options)
+    const { taskId, ...rest } = options ?? {}
+    return exportDataV2({
+      ...rest,
+      onProgress: (progress) => forwardProgress(event, taskId, progress),
+    })
   })
-  ipcMain.handle('migration:parseImportFile', async (_, filePath: string) => {
+  ipcMain.handle('migration:parseImportFile', async (_, filePath: string, passphrase?: string) => {
     const { parseImportFile } = await import('./migration-service')
-    return parseImportFile(filePath)
+    return parseImportFile(filePath, passphrase)
   })
   ipcMain.handle('migration:confirmImport', async (_, options) => {
     const { confirmImport } = await import('./migration-service')

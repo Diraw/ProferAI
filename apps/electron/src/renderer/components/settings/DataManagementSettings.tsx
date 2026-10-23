@@ -75,7 +75,18 @@ interface ExportResult {
   filePath?: string
   error?: string
   warnings?: string[]
+  bytes?: number
+  encrypted?: boolean
 }
+
+interface ExportProgress {
+  phase: 'preparing' | 'packing' | 'finalizing' | 'encrypting'
+  percent: number
+  bytesWritten: number
+  totalBytes: number
+}
+
+const MIN_EXPORT_PASSPHRASE = 8
 
 const COMPONENT_LABELS: Record<MigrationComponent, string> = {
   sessions: '会话记录',
@@ -83,6 +94,13 @@ const COMPONENT_LABELS: Record<MigrationComponent, string> = {
   mcp: 'MCP 配置',
   channels: '模型渠道',
   chattools: 'Chat 工具',
+}
+
+const EXPORT_PHASE_LABELS: Record<ExportProgress['phase'], string> = {
+  preparing: '准备中',
+  packing: '打包中',
+  finalizing: '收尾中',
+  encrypting: '加密中',
 }
 
 // ==================== 存储类型 ====================
@@ -175,6 +193,10 @@ function MigrationSection(): React.ReactElement {
   const [exporting, setExporting] = React.useState(false)
   const exportRef = React.useRef(false)
   const [exportResult, setExportResult] = React.useState<ExportResult | null>(null)
+  const [exportEncrypt, setExportEncrypt] = React.useState(false)
+  const [exportPassphrase, setExportPassphrase] = React.useState('')
+  const [exportProgress, setExportProgress] = React.useState<ExportProgress | null>(null)
+  const exportTaskIdRef = React.useRef<string | null>(null)
 
   const [shareDetailMode, setShareDetailMode] = React.useState<ShareDetailMode>('default')
   const [sharePreview, setSharePreview] = React.useState<ShareExportPreview | null>(null)
@@ -216,6 +238,19 @@ function MigrationSection(): React.ReactElement {
     }
   }, [exportMode, shareDetailMode, sharePreview, sharePreviewError, loadSharePreview])
 
+  React.useEffect(() => {
+    const unsubscribe = window.electronAPI.onMigrationProgress?.((progress) => {
+      if (!exportTaskIdRef.current || progress.taskId !== exportTaskIdRef.current) return
+      setExportProgress({
+        phase: progress.phase as ExportProgress['phase'],
+        percent: progress.percent,
+        bytesWritten: progress.bytesWritten,
+        totalBytes: progress.totalBytes,
+      })
+    })
+    return () => unsubscribe?.()
+  }, [])
+
   const handleExport = async (): Promise<void> => {
     if (!currentWorkspace || exportRef.current || (exportMode === 'share' && hasSkillsOrMcp && shareDetailMode === 'custom' && (!sharePreview || sharePreviewLoading || sharePreviewError))) return
     // main 将空的工作区选择解释为「全部」，这里必须明确阻断，不能扩大用户选择范围。
@@ -227,15 +262,23 @@ function MigrationSection(): React.ReactElement {
       setExportResult({ success: false, error: '请至少选择一个工作区项目；空选择不会导出全部工作区' })
       return
     }
+    if (exportMode === 'personal' && exportEncrypt && exportPassphrase.length < MIN_EXPORT_PASSPHRASE) {
+      setExportResult({ success: false, error: `加密口令至少需要 ${MIN_EXPORT_PASSPHRASE} 位` })
+      return
+    }
     exportRef.current = true
     setExporting(true)
     setExportResult(null)
+    setExportProgress(null)
+    const taskId = crypto.randomUUID()
+    exportTaskIdRef.current = taskId
 
     try {
       const outputPath = await window.electronAPI.migrationSaveFileDialog(exportMode)
       if (!outputPath) {
         exportRef.current = false
         setExporting(false)
+        exportTaskIdRef.current = null
         return
       }
 
@@ -243,6 +286,7 @@ function MigrationSection(): React.ReactElement {
         exportMode === 'personal'
           ? ['sessions', 'skills', 'mcp', 'channels', 'chattools']
           : Array.from(shareComponents)
+      const passphrase = exportMode === 'personal' && exportEncrypt ? exportPassphrase : undefined
 
       if (exportMode === 'share') {
         let workspaceSelections: Array<{ workspaceId: string; skillSlugs?: string[]; mcpServerNames?: string[] }> | undefined
@@ -268,6 +312,8 @@ function MigrationSection(): React.ReactElement {
           components,
           outputPath,
           workspaceSelections,
+          taskId,
+          passphrase,
         }) as ExportResult
         setExportResult(result)
       } else {
@@ -275,14 +321,18 @@ function MigrationSection(): React.ReactElement {
           mode: exportMode,
           components,
           outputPath,
+          taskId,
+          passphrase,
         }) as ExportResult
         setExportResult(result)
+        if (result.success && exportEncrypt) setExportPassphrase('')
       }
     } catch (err) {
       setExportResult({ success: false, error: err instanceof Error ? err.message : '导出失败' })
     } finally {
       exportRef.current = false
       setExporting(false)
+      exportTaskIdRef.current = null
     }
   }
 
@@ -360,7 +410,7 @@ function MigrationSection(): React.ReactElement {
                 onClick={() => setExportMode('personal')}
                 title="个人备份"
                 subtitle=".profer-backup"
-                description="完整备份所有数据，含 API Key，用于换机迁移"
+                description="会话与原文、规划、自动化、预设与 Skills、工作区文件，含 API Key"
               />
               <ModeCard
                 active={exportMode === 'share'}
@@ -527,11 +577,47 @@ function MigrationSection(): React.ReactElement {
           )}
 
           {exportMode === 'personal' && (
-            <div className="rounded-lg bg-muted/30 border border-border/30 px-4 py-3">
+            <div className="space-y-3 rounded-lg bg-muted/30 border border-border/30 px-4 py-3">
               <p className="text-sm text-muted-foreground">
-                将导出所有会话、Skills、MCP 配置、渠道（含 API Key）及个人设置。
-                <br />
-                请妥善保管备份文件，避免泄露其中的 API Key。
+                备份包含：会话与工具调用原文、Chat 对话与附件、规划与日程、定时任务、Agent 预设与提示词、
+                Skills（工作区与全局）、MCP 配置、渠道与 API Key、插件与皮肤、个人资料库、
+                工作区文件与记忆、个人设置。
+              </p>
+              <p className="text-xs text-muted-foreground/80">
+                不含日志、缓存、回滚检查点、Shell 快照与依赖目录（node_modules、.git 等）——这些可重建，
+                且体积往往远大于你的真实数据。
+              </p>
+
+              <label className="flex items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  checked={exportEncrypt}
+                  onChange={(event) => setExportEncrypt(event.target.checked)}
+                  disabled={exporting}
+                />
+                用口令加密备份（AES-256-GCM）
+              </label>
+
+              {exportEncrypt && (
+                <div className="space-y-1">
+                  <input
+                    type="password"
+                    value={exportPassphrase}
+                    onChange={(event) => setExportPassphrase(event.target.value)}
+                    disabled={exporting}
+                    placeholder={`口令至少 ${MIN_EXPORT_PASSPHRASE} 位`}
+                    className="w-full max-w-sm rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+                  />
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    口令无法找回；导入时需要同一口令，丢失后备份不可恢复。
+                  </p>
+                </div>
+              )}
+
+              <p className={cn('text-xs', exportEncrypt ? 'text-muted-foreground/80' : 'text-amber-600 dark:text-amber-400')}>
+                {exportEncrypt
+                  ? '归档已加密：口令之外的元数据（文件名、时间）仍可见。'
+                  : '不加密时渠道 API Key 以明文存于 zip 中，请勿上传到不受控的位置。'}
               </p>
             </div>
           )}
@@ -555,11 +641,33 @@ function MigrationSection(): React.ReactElement {
               {exporting ? '导出中...' : '选择保存位置并导出'}
             </button>
 
+            {exporting && exportProgress && (
+              <div className="w-full max-w-sm space-y-1">
+                <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-[width] duration-200"
+                    style={{ width: `${exportProgress.percent}%` }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {exportProgress.totalBytes > 0
+                    ? `${EXPORT_PHASE_LABELS[exportProgress.phase]} ${exportProgress.percent}%`
+                    : EXPORT_PHASE_LABELS[exportProgress.phase]}
+                  {exportProgress.totalBytes > 0 && (
+                    <> · 已处理 {formatBytes(exportProgress.bytesWritten)} / {formatBytes(exportProgress.totalBytes)}</>
+                  )}
+                  {exportProgress.totalBytes === 0 && exportProgress.bytesWritten > 0 && (
+                    <> · 已处理 {formatBytes(exportProgress.bytesWritten)}</>
+                  )}
+                </p>
+              </div>
+            )}
+
             {exportResult && (
               <div className={cn('flex items-center gap-1.5 text-sm', exportResult.success ? 'text-green-600' : 'text-red-500')}>
                 {exportResult.success ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
                 {exportResult.success
-                  ? `已导出至 ${exportResult.filePath ? getFileBaseName(exportResult.filePath) : ''}`
+                  ? `已导出至 ${exportResult.filePath ? getFileBaseName(exportResult.filePath) : ''}${exportResult.bytes ? `（${formatBytes(exportResult.bytes)}${exportResult.encrypted ? '，已加密' : ''}）` : ''}`
                   : exportResult.error}
               </div>
             )}
@@ -569,7 +677,7 @@ function MigrationSection(): React.ReactElement {
             <div className="flex items-start gap-2 rounded-md border border-amber-200/70 bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300">
               <AlertTriangle size={15} className="mt-0.5 flex-shrink-0" />
               <div className="min-w-0 space-y-1">
-                <p>导出已完成，但有 {exportResult.warnings.length} 个项目无法读取，已跳过。</p>
+                <p>导出已完成，但有 {exportResult.warnings.length} 条提醒。</p>
                 <p className="break-all text-xs opacity-90" title={exportResult.warnings.join('\n')}>
                   {exportResult.warnings[0]}
                   {exportResult.warnings.length > 1 ? ' 等' : ''}

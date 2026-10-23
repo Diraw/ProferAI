@@ -1,18 +1,26 @@
 /**
  * 数据迁移服务
  *
- * 支持两种导出模式：
- * - personal (.profer-backup)：个人全量备份，含解密后的 API Key 明文
- * - share (.profer-share)：团队分发，自由选择组件，凭据自动剥离
+ * 两种导出模式：
+ * - personal (.profer-backup)：本机全量备份。除会话/Skills/MCP/渠道外，还包含
+ *   会话外置原文（blobs）、规划与日程、自动化、预设、全局 Skills、插件/皮肤/资料库、
+ *   附件、工作区文件与记忆；可选口令加密（AES-256-GCM，见 backup-crypto），
+ *   不加密时渠道 API Key 以明文存于 zip 中。
+ * - share (.profer-share)：团队分发，自由选择组件，凭据自动剥离。
  *
+ * 打包/解包一律流式（zip-stream-writer / zip-stream-reader）：备份体量可达数 GB，
+ * adm-zip 的全内存模式会顶到主进程内存上限。日志、缓存、回滚检查点、依赖目录不备份。
+ *
+ * 导出进度按「已写入字节 / 预估总量」上报，经 IPC 事件驱动设置页进度条。
  * 导入时自动检测跨平台差异并提示用户处理路径映射。
  */
 
-import { existsSync, mkdirSync, cpSync, readFileSync, writeFileSync, readdirSync, rmSync, type Dirent } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, cpSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync, type Dirent } from 'node:fs'
+import { promises as fsp } from 'node:fs'
 import { join, resolve, relative, dirname, basename, isAbsolute, sep, win32, posix } from 'node:path'
 import { homedir, platform, arch, tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import AdmZip from 'adm-zip'
+import { createInterface } from 'node:readline'
 import { safeStorage } from 'electron'
 import {
   getConfigDir,
@@ -33,13 +41,38 @@ import {
   getUserProfilePath,
   getChatToolsConfigPath,
   getSdkConfigDir,
+  getAutomationsPath,
+  getAgentPresetsPath,
+  getSystemPromptsPath,
+  getBrowserStartPagePath,
+  getRecommendationsPath,
+  getPluginsIndexPath,
+  getPluginsDir,
+  getScratchPadPath,
+  getGlobalSkillsDir,
+  getWorkspaceAgentPresetsPath,
+  getWorkspaceFilesDir,
+  getPlanningDatabasePath,
+  getWeChatConfigPath,
+  getDingTalkConfigPath,
+  getFeishuConfigPath,
 } from './config-paths'
 import { listAgentWorkspaces, getAgentWorkspace, getAllWorkspaceSkills, getWorkspaceMcpConfig } from './agent-workspace-manager'
 import { listChannels, decryptApiKey } from './channel-manager'
+import { readSessionBlobRefs } from '@profer/shared'
 import type { AgentWorkspace } from '@profer/shared'
 import { writeJsonFileAtomic } from './safe-file'
 import { assertSafeSkillSegment } from './skill-path-security'
 import { copySkillDirectorySafely } from './global-skill-manager'
+import { blobPathFor, blobRootDir } from './blob-store'
+import { ZipStreamWriter } from './zip-stream-writer'
+import { extractZipEntries, readZipEntries } from './zip-stream-reader'
+import {
+  assertPassphrase,
+  decryptBackupFile,
+  encryptBackupFile,
+  isEncryptedBackup,
+} from './backup-crypto'
 
 // ─── 类型定义 ────────────────────────────────────────────────────────────────
 
@@ -53,12 +86,31 @@ export interface ExportOptions {
   /** 为空则导出全量会话 */
   sessionIds?: string[]
   outputPath: string
+  /** 个人备份口令；设置后整个归档用 AES-256-GCM 加密 */
+  passphrase?: string
+  /** 仅主进程内使用，不经 IPC 传递 */
+  onProgress?: (progress: ExportProgress) => void
+}
+
+export interface ExportProgress {
+  phase: 'preparing' | 'packing' | 'finalizing' | 'encrypting'
+  percent: number
+  /** 已处理（读入）的源字节数，与 totalBytes 同一口径 */
+  bytesWritten: number
+  /** 预估源字节总量；0 表示无法预估（分享包） */
+  totalBytes: number
 }
 
 export interface ExportResult {
   success: boolean
   filePath: string
   warnings?: string[]
+  /** 归档体积（字节，加密前） */
+  bytes?: number
+  /** 归档条目数 */
+  entries?: number
+  /** 是否为口令加密备份 */
+  encrypted?: boolean
 }
 
 export interface ExportPreview {
@@ -76,6 +128,16 @@ export interface PathCheckResult {
   suggested?: string
 }
 
+export interface PersonalImportPreview {
+  available: boolean
+  sections: string[]
+  blobCount: number
+  blobBytes: number
+  missingBlobs: number
+  /** 解包阶段发现的问题（校验和不符、条目解压失败等） */
+  warnings: string[]
+}
+
 export interface ImportPreview {
   manifest: MigrationManifest
   agentSessionCount: number
@@ -85,6 +147,7 @@ export interface ImportPreview {
   crossPlatform: boolean
   pathCheckResults: PathCheckResult[]
   tempDir: string
+  personal?: PersonalImportPreview
 }
 
 export interface ConfirmImportOptions {
@@ -114,6 +177,22 @@ interface RuntimeArtifactsManifest {
   piSessions: RuntimeArtifactRef[]
 }
 
+/**
+ * 个人备份（personal 模式）附带的「本机数据」摘要。
+ *
+ * 旧版本备份没有这个字段，导入时按「仅结构化数据」处理即可。
+ */
+export interface PersonalPayloadManifest {
+  /** 已打包分区的人类可读名称，用于导入预览与结果展示 */
+  sections: string[]
+  /** 被会话引用并成功打包的 blob 数 */
+  blobCount: number
+  /** blob 原始字节数 */
+  blobBytes: number
+  /** 会话引用了但本机找不到的 blob 数（缺失原文） */
+  missingBlobs: number
+}
+
 interface MigrationManifest {
   mode: MigrationMode
   version: string
@@ -127,6 +206,8 @@ interface MigrationManifest {
   workspaceSlug: string
   /** Claude/Pi 原生会话文件；旧备份没有此字段，导入仍按旧格式兼容。 */
   runtimeArtifacts?: RuntimeArtifactsManifest
+  /** personal 模式附带的会话原文与用户自建数据 */
+  personal?: PersonalPayloadManifest
 }
 
 // ─── v2 多工作区类型 ─────────────────────────────────────────────────────────
@@ -150,6 +231,8 @@ interface MigrationManifestV2 {
   workspaces: WorkspaceExportEntry[]
   /** Claude/Pi 原生会话文件；旧备份没有此字段，导入仍按旧格式兼容。 */
   runtimeArtifacts?: RuntimeArtifactsManifest
+  /** personal 模式附带的会话原文与用户自建数据 */
+  personal?: PersonalPayloadManifest
 }
 
 export interface ExportOptionsV2 {
@@ -158,6 +241,10 @@ export interface ExportOptionsV2 {
   outputPath: string
   sessionIds?: string[]
   workspaceSelections?: WorkspaceSelection[]
+  /** 个人备份口令；设置后整个归档用 AES-256-GCM 加密 */
+  passphrase?: string
+  /** 仅主进程内使用，不经 IPC 传递 */
+  onProgress?: (progress: ExportProgress) => void
 }
 
 export interface WorkspaceSelection {
@@ -197,6 +284,7 @@ export interface ImportPreviewV2 {
   crossPlatform: boolean
   pathCheckResults: PathCheckResult[]
   tempDir: string
+  personal: PersonalImportPreview
 }
 
 export interface WorkspaceImportMapping {
@@ -304,27 +392,46 @@ export async function exportData(options: ExportOptions): Promise<ExportResult> 
     workspaceSlug: workspace.slug,
   }
 
-  const zip = new AdmZip()
+  const passphrase = _resolvePassphrase(mode, options.passphrase)
+  const reporter = createExportReporter(options.onProgress)
+  reporter.setPhase('preparing')
+  reporter.setTotal(mode === 'personal' ? await estimatePersonalExportBytes([workspace], components) : 0)
 
-  if (components.includes('sessions')) {
-    manifest.runtimeArtifacts = _addRuntimeArtifacts(
-      zip,
-      _collectRuntimeArtifactCandidates([workspace], sessionIds),
-      warnings,
-    )
-    _addSessions(zip, workspace, sessionIds, warnings)
+  const stagingPath = passphrase ? join(tmpdir(), `profer-backup-staging-${randomUUID()}`) : outputPath
+  const writer = new ZipStreamWriter(stagingPath, { onBytesWritten: (_archiveBytes, consumedBytes) => reporter.onBytes(consumedBytes) })
+  const blobRefs = new Map<string, number>()
+
+  try {
+    reporter.setPhase('packing')
+    if (components.includes('sessions')) {
+      manifest.runtimeArtifacts = await _addRuntimeArtifacts(
+        writer,
+        _collectRuntimeArtifactCandidates([workspace], sessionIds),
+        warnings,
+      )
+      await _addSessions(writer, workspace, sessionIds, warnings, blobRefs)
+    }
+
+    if (components.includes('skills')) await _addSkills(writer, workspace, warnings)
+    if (components.includes('mcp')) await _addMcp(writer, workspace, mode)
+    if (components.includes('channels')) await _addChannels(writer, mode)
+    if (components.includes('chattools')) await _addChatTools(writer, mode)
+    await _addWorkspaceConfig(writer, workspace)
+
+    if (mode === 'personal') {
+      await _addPersonalFiles(writer)
+      manifest.personal = await _addPersonalPayload(writer, [workspace], blobRefs, warnings)
+    }
+
+    // manifest 最后写入：personal 摘要与缺失 blob 统计要等全部条目落盘后才确定。
+    reporter.setPhase('finalizing')
+    await writer.addBuffer(JSON.stringify(manifest, null, 2), 'manifest.json')
+    return await _finishExport({ writer, stagingPath, outputPath, passphrase, warnings, reporter })
+  } catch (error) {
+    await writer.abort()
+    if (passphrase) rmSync(stagingPath, { force: true })
+    throw error
   }
-
-  zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8'))
-  if (components.includes('skills')) _addSkills(zip, workspace, warnings)
-  if (components.includes('mcp')) _addMcp(zip, workspace, mode)
-  if (components.includes('channels')) _addChannels(zip, mode)
-  if (components.includes('chattools')) _addChatTools(zip, mode)
-  _addWorkspaceConfig(zip, workspace)
-  if (mode === 'personal') _addPersonalFiles(zip)
-
-  zip.writeZip(outputPath)
-  return buildExportResult(outputPath, warnings)
 }
 
 export async function exportDataV2(options: ExportOptionsV2): Promise<ExportResult> {
@@ -369,41 +476,65 @@ export async function exportDataV2(options: ExportOptionsV2): Promise<ExportResu
     workspaces: workspaceEntries,
   }
 
-  const zip = new AdmZip()
+  const passphrase = _resolvePassphrase(mode, options.passphrase)
+  const reporter = createExportReporter(options.onProgress)
+  reporter.setPhase('preparing')
+  reporter.setTotal(mode === 'personal'
+    ? await estimatePersonalExportBytes(targetWorkspaces.map((entry) => entry.workspace), components)
+    : 0)
 
-  if (components.includes('sessions')) {
-    manifest.runtimeArtifacts = _addRuntimeArtifacts(
-      zip,
-      _collectRuntimeArtifactCandidates(targetWorkspaces.map((t) => t.workspace), sessionIds),
-      warnings,
-    )
-    _addSessionsMultiWorkspace(zip, targetWorkspaces.map((t) => t.workspace), sessionIds, warnings)
-  }
+  const stagingPath = passphrase ? join(tmpdir(), `profer-backup-staging-${randomUUID()}`) : outputPath
+  const writer = new ZipStreamWriter(stagingPath, { onBytesWritten: (_archiveBytes, consumedBytes) => reporter.onBytes(consumedBytes) })
+  const blobRefs = new Map<string, number>()
 
-  zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8'))
-
-  if (components.includes('skills')) {
-    for (const { workspace, skillSlugs } of targetWorkspaces) {
-      _addSkillsV2(zip, workspace, skillSlugs, warnings)
+  try {
+    reporter.setPhase('packing')
+    if (components.includes('sessions')) {
+      manifest.runtimeArtifacts = await _addRuntimeArtifacts(
+        writer,
+        _collectRuntimeArtifactCandidates(targetWorkspaces.map((t) => t.workspace), sessionIds),
+        warnings,
+      )
+      await _addSessionsMultiWorkspace(writer, targetWorkspaces.map((t) => t.workspace), sessionIds, warnings, blobRefs)
     }
-  }
 
-  if (components.includes('mcp')) {
-    for (const { workspace, mcpServerNames } of targetWorkspaces) {
-      _addMcpV2(zip, workspace, mode, mcpServerNames)
+    if (components.includes('skills')) {
+      for (const { workspace, skillSlugs } of targetWorkspaces) {
+        await _addSkillsV2(writer, workspace, skillSlugs, warnings)
+      }
     }
+
+    if (components.includes('mcp')) {
+      for (const { workspace, mcpServerNames } of targetWorkspaces) {
+        await _addMcpV2(writer, workspace, mode, mcpServerNames)
+      }
+    }
+
+    for (const { workspace } of targetWorkspaces) {
+      await _addWorkspaceConfigV2(writer, workspace)
+    }
+
+    if (components.includes('channels')) await _addChannels(writer, mode)
+    if (components.includes('chattools')) await _addChatTools(writer, mode)
+
+    if (mode === 'personal') {
+      await _addPersonalFiles(writer)
+      manifest.personal = await _addPersonalPayload(
+        writer,
+        targetWorkspaces.map((entry) => entry.workspace),
+        blobRefs,
+        warnings,
+      )
+    }
+
+    reporter.setPhase('finalizing')
+    await writer.addBuffer(JSON.stringify(manifest, null, 2), 'manifest.json')
+    return await _finishExport({ writer, stagingPath, outputPath, passphrase, warnings, reporter })
+  } catch (error) {
+    await writer.abort()
+    if (passphrase) rmSync(stagingPath, { force: true })
+    throw error
   }
-
-  for (const { workspace } of targetWorkspaces) {
-    _addWorkspaceConfigV2(zip, workspace)
-  }
-
-  if (components.includes('channels')) _addChannels(zip, mode)
-  if (components.includes('chattools')) _addChatTools(zip, mode)
-  if (mode === 'personal') _addPersonalFiles(zip)
-
-  zip.writeZip(outputPath)
-  return buildExportResult(outputPath, warnings)
 }
 
 interface RuntimeArtifactCandidate extends RuntimeArtifactRef {
@@ -484,16 +615,16 @@ function _findClaudeSessionArtifact(sessionId: string): { filePath: string; proj
   return undefined
 }
 
-function _addRuntimeArtifacts(
-  zip: AdmZip,
+async function _addRuntimeArtifacts(
+  writer: ZipStreamWriter,
   candidates: RuntimeArtifactCandidate[],
   warnings: string[],
-): RuntimeArtifactsManifest {
+): Promise<RuntimeArtifactsManifest> {
   const refs: RuntimeArtifactsManifest = { claudeProjects: [], piSessions: [] }
   for (const candidate of candidates) {
     if (candidate.runtime === 'pi' || candidate.path.startsWith('runtime/pi/')) {
       try {
-        zip.addLocalFile(candidate.sourcePath, 'runtime/pi', `${candidate.sessionId}.jsonl`)
+        await writer.addFile(candidate.sourcePath, `runtime/pi/${candidate.sessionId}.jsonl`)
         refs.piSessions.push({ sessionId: candidate.sessionId, proferSessionId: candidate.proferSessionId, path: candidate.path, workspaceId: candidate.workspaceId, runtime: 'pi' })
       } catch (error) {
         addExportWarning(warnings, `已跳过 Pi 原生会话: ${candidate.sourcePath} (${formatErrorMessage(error)})`)
@@ -502,7 +633,7 @@ function _addRuntimeArtifacts(
     }
 
     try {
-      zip.addLocalFile(candidate.sourcePath, 'runtime/claude', `${candidate.sessionId}.jsonl`)
+      await writer.addFile(candidate.sourcePath, `runtime/claude/${candidate.sessionId}.jsonl`)
       refs.claudeProjects.push({
         sessionId: candidate.sessionId,
         proferSessionId: candidate.proferSessionId,
@@ -599,7 +730,13 @@ function _rewriteRuntimeCwd(filePath: string, cwd: string): void {
   }
 }
 
-function _addSessions(zip: AdmZip, workspace: AgentWorkspace, filterIds: string[] | undefined, warnings: string[]) {
+async function _addSessions(
+  writer: ZipStreamWriter,
+  workspace: AgentWorkspace,
+  filterIds: string[] | undefined,
+  warnings: string[],
+  blobRefs: Map<string, number>,
+) {
   const sessionsIndexPath = getAgentSessionsIndexPath()
   if (existsSync(sessionsIndexPath)) {
     const index = readJsonSafe<{ version: number; sessions: Array<{ id: string; workspaceId: string }> }>(sessionsIndexPath)
@@ -610,18 +747,17 @@ function _addSessions(zip: AdmZip, workspace: AgentWorkspace, filterIds: string[
     for (const session of targets) {
       const msgPath = getAgentSessionMessagesPath(session.id)
       if (existsSync(msgPath)) {
-        zip.addLocalFile(msgPath, 'sessions/agent')
-        exportedIds.add(session.id)
+        if (await _addSessionMessages(writer, msgPath, warnings, blobRefs)) exportedIds.add(session.id)
       }
       const workDir = join(getAgentWorkspacePath(workspace.slug), session.id)
       if (existsSync(workDir)) {
-        _addDirToZip(zip, workDir, `sessions/workspace-data/${session.id}`, warnings)
+        await _addDirToZip(writer, workDir, `sessions/workspace-data/${session.id}`, warnings)
       }
     }
 
     if (index) {
       const filtered = { ...index, sessions: index.sessions.filter((s) => exportedIds.has(s.id)) }
-      zip.addFile('sessions/agent-sessions-index.json', Buffer.from(JSON.stringify(filtered, null, 2), 'utf-8'))
+      await writer.addBuffer(JSON.stringify(filtered, null, 2), 'sessions/agent-sessions-index.json')
     }
   }
 
@@ -634,14 +770,27 @@ function _addSessions(zip: AdmZip, workspace: AgentWorkspace, filterIds: string[
     for (const conv of targets) {
       const msgPath = getConversationMessagesPath(conv.id)
       if (existsSync(msgPath)) {
-        zip.addLocalFile(msgPath, 'sessions/chat')
+        try {
+          await writer.addFile(msgPath, `sessions/chat/${basename(msgPath)}`)
+        } catch (error) {
+          addExportWarning(warnings, `已跳过 Chat 对话: ${msgPath} (${formatErrorMessage(error)})`)
+        }
       }
     }
-    zip.addFile('sessions/conversations-index.json', Buffer.from(JSON.stringify({ ...index, conversations: targets }, null, 2), 'utf-8'))
+    await writer.addBuffer(
+      JSON.stringify({ ...index, conversations: targets }, null, 2),
+      'sessions/conversations-index.json',
+    )
   }
 }
 
-function _addSessionsMultiWorkspace(zip: AdmZip, workspaces: AgentWorkspace[], filterIds: string[] | undefined, warnings: string[]) {
+async function _addSessionsMultiWorkspace(
+  writer: ZipStreamWriter,
+  workspaces: AgentWorkspace[],
+  filterIds: string[] | undefined,
+  warnings: string[],
+  blobRefs: Map<string, number>,
+) {
   const wsIds = new Set(workspaces.map((w) => w.id))
 
   const sessionsIndexPath = getAgentSessionsIndexPath()
@@ -654,21 +803,20 @@ function _addSessionsMultiWorkspace(zip: AdmZip, workspaces: AgentWorkspace[], f
     for (const session of targets) {
       const msgPath = getAgentSessionMessagesPath(session.id)
       if (existsSync(msgPath)) {
-        zip.addLocalFile(msgPath, 'sessions/agent')
-        exportedIds.add(session.id)
+        if (await _addSessionMessages(writer, msgPath, warnings, blobRefs)) exportedIds.add(session.id)
       }
       const ws = workspaces.find((w) => w.id === session.workspaceId)
       if (ws) {
         const workDir = join(getAgentWorkspacePath(ws.slug), session.id)
         if (existsSync(workDir)) {
-          _addDirToZip(zip, workDir, `sessions/workspace-data/${session.id}`, warnings)
+          await _addDirToZip(writer, workDir, `sessions/workspace-data/${session.id}`, warnings)
         }
       }
     }
 
     if (index) {
       const filtered = { ...index, sessions: index.sessions.filter((s) => exportedIds.has(s.id)) }
-      zip.addFile('sessions/agent-sessions-index.json', Buffer.from(JSON.stringify(filtered, null, 2), 'utf-8'))
+      await writer.addBuffer(JSON.stringify(filtered, null, 2), 'sessions/agent-sessions-index.json')
     }
   }
 
@@ -681,33 +829,80 @@ function _addSessionsMultiWorkspace(zip: AdmZip, workspaces: AgentWorkspace[], f
     for (const conv of targets) {
       const msgPath = getConversationMessagesPath(conv.id)
       if (existsSync(msgPath)) {
-        zip.addLocalFile(msgPath, 'sessions/chat')
+        try {
+          await writer.addFile(msgPath, `sessions/chat/${basename(msgPath)}`)
+        } catch (error) {
+          addExportWarning(warnings, `已跳过 Chat 对话: ${msgPath} (${formatErrorMessage(error)})`)
+        }
       }
     }
-    zip.addFile('sessions/conversations-index.json', Buffer.from(JSON.stringify({ ...index, conversations: targets }, null, 2), 'utf-8'))
+    await writer.addBuffer(
+      JSON.stringify({ ...index, conversations: targets }, null, 2),
+      'sessions/conversations-index.json',
+    )
   }
 }
 
-function _addSkills(zip: AdmZip, workspace: AgentWorkspace, warnings: string[]) {
-  const skillsDir = getWorkspaceSkillsDir(workspace.slug)
-  if (existsSync(skillsDir)) _addDirToZip(zip, skillsDir, 'skills/active', warnings)
-  const inactiveDir = getInactiveSkillsDir(workspace.slug)
-  if (existsSync(inactiveDir)) _addDirToZip(zip, inactiveDir, 'skills/inactive', warnings)
-  const overridesPath = getWorkspaceSkillOverridesPath(workspace.slug)
-  if (existsSync(overridesPath)) zip.addLocalFile(overridesPath, 'skills', 'skill-overrides.json')
+/** 写入会话 JSONL，并登记它引用的外置 blob（原文按内容寻址存放）。 */
+async function _addSessionMessages(
+  writer: ZipStreamWriter,
+  msgPath: string,
+  warnings: string[],
+  blobRefs: Map<string, number>,
+): Promise<boolean> {
+  try {
+    await writer.addFile(msgPath, `sessions/agent/${basename(msgPath)}`)
+  } catch (error) {
+    addExportWarning(warnings, `已跳过会话文件: ${msgPath} (${formatErrorMessage(error)})`)
+    return false
+  }
+  await _collectSessionBlobRefs(msgPath, blobRefs, warnings)
+  return true
 }
 
-function _addMcp(zip: AdmZip, workspace: AgentWorkspace, mode: MigrationMode) {
+/** 只解析带引用表的行，避免把整个会话文件读进内存。 */
+async function _collectSessionBlobRefs(filePath: string, target: Map<string, number>, warnings: string[]): Promise<void> {
+  try {
+    const reader = createInterface({
+      input: createReadStream(filePath, { encoding: 'utf-8' }),
+      crlfDelay: Infinity,
+    })
+    for await (const line of reader) {
+      if (!line.includes('_proferBlobs')) continue
+      try {
+        for (const ref of readSessionBlobRefs(JSON.parse(line))) {
+          const bytes = typeof ref.bytes === 'number' ? ref.bytes : 0
+          target.set(ref.hash, Math.max(target.get(ref.hash) ?? 0, bytes))
+        }
+      } catch {
+        // 损坏行不影响其他会话的原文收集；导出侧不因单行解析失败而中断。
+      }
+    }
+  } catch (error) {
+    addExportWarning(warnings, `无法读取会话引用表: ${filePath} (${formatErrorMessage(error)})`)
+  }
+}
+
+async function _addSkills(writer: ZipStreamWriter, workspace: AgentWorkspace, warnings: string[]) {
+  const skillsDir = getWorkspaceSkillsDir(workspace.slug)
+  if (existsSync(skillsDir)) await _addDirToZip(writer, skillsDir, 'skills/active', warnings)
+  const inactiveDir = getInactiveSkillsDir(workspace.slug)
+  if (existsSync(inactiveDir)) await _addDirToZip(writer, inactiveDir, 'skills/inactive', warnings)
+  const overridesPath = getWorkspaceSkillOverridesPath(workspace.slug)
+  if (existsSync(overridesPath)) await writer.addFile(overridesPath, 'skills/skill-overrides.json')
+}
+
+async function _addMcp(writer: ZipStreamWriter, workspace: AgentWorkspace, mode: MigrationMode) {
   const mcpPath = getWorkspaceMcpPath(workspace.slug)
   if (!existsSync(mcpPath)) return
 
   if (mode === 'share') {
     const config = readJsonSafe<Record<string, unknown>>(mcpPath)
     if (config) {
-      zip.addFile('config/mcp.json', Buffer.from(JSON.stringify(_scrubMcpCredentials(config), null, 2), 'utf-8'))
+      await writer.addBuffer(JSON.stringify(_scrubMcpCredentials(config), null, 2), 'config/mcp.json')
     }
   } else {
-    zip.addLocalFile(mcpPath, 'config')
+    await writer.addFile(mcpPath, 'config/mcp.json')
   }
 }
 
@@ -729,7 +924,7 @@ function _scrubMcpCredentials(config: Record<string, unknown>): Record<string, u
   return scrub(config) as Record<string, unknown>
 }
 
-function _addChannels(zip: AdmZip, mode: MigrationMode) {
+async function _addChannels(writer: ZipStreamWriter, mode: MigrationMode) {
   const channelsPath = getChannelsPath()
   if (!existsSync(channelsPath)) return
 
@@ -740,39 +935,44 @@ function _addChannels(zip: AdmZip, mode: MigrationMode) {
       catch { return { ...ch, apiKey: '' } }
     })
     const config = readJsonSafe<{ version: number }>(channelsPath) ?? { version: 1 }
-    zip.addFile('config/channels.json', Buffer.from(JSON.stringify({ ...config, channels: decrypted }, null, 2), 'utf-8'))
+    await writer.addBuffer(JSON.stringify({ ...config, channels: decrypted }, null, 2), 'config/channels.json')
   } else {
     const channels = listChannels().map((ch) => ({ ...ch, apiKey: '' }))
     const config = readJsonSafe<{ version: number }>(channelsPath) ?? { version: 1 }
-    zip.addFile('config/channels.json', Buffer.from(JSON.stringify({ ...config, channels }, null, 2), 'utf-8'))
+    await writer.addBuffer(JSON.stringify({ ...config, channels }, null, 2), 'config/channels.json')
   }
 }
 
-function _addChatTools(zip: AdmZip, mode: MigrationMode) {
+async function _addChatTools(writer: ZipStreamWriter, mode: MigrationMode) {
   const toolsPath = getChatToolsConfigPath()
   if (!existsSync(toolsPath)) return
 
   if (mode === 'share') {
     const config = readJsonSafe<{ toolStates?: unknown; toolCredentials?: unknown; customTools?: unknown }>(toolsPath)
     if (config) {
-      zip.addFile('config/chat-tools.json', Buffer.from(JSON.stringify({ ...config, toolCredentials: {} }, null, 2), 'utf-8'))
+      await writer.addBuffer(JSON.stringify({ ...config, toolCredentials: {} }, null, 2), 'config/chat-tools.json')
     }
   } else {
-    zip.addLocalFile(toolsPath, 'config')
+    await writer.addFile(toolsPath, 'config/chat-tools.json')
   }
 }
 
-function _addWorkspaceConfig(zip: AdmZip, workspace: AgentWorkspace) {
+async function _addWorkspaceConfig(writer: ZipStreamWriter, workspace: AgentWorkspace) {
   const configPath = join(getAgentWorkspacePath(workspace.slug), 'config.json')
   if (existsSync(configPath)) {
-    zip.addLocalFile(configPath, 'config', 'workspace-config.json')
+    await writer.addFile(configPath, 'config/workspace-config.json')
   }
-  zip.addFile('config/workspace-meta.json', Buffer.from(JSON.stringify(workspace, null, 2), 'utf-8'))
+  await writer.addBuffer(JSON.stringify(workspace, null, 2), 'config/workspace-meta.json')
 }
 
 // ─── v2 导出辅助函数 ─────────────────────────────────────────────────────────
 
-function _addSkillsV2(zip: AdmZip, workspace: AgentWorkspace, selectedSlugs: string[] | undefined, warnings: string[]) {
+async function _addSkillsV2(
+  writer: ZipStreamWriter,
+  workspace: AgentWorkspace,
+  selectedSlugs: string[] | undefined,
+  warnings: string[],
+) {
   const prefix = `workspaces/${workspace.slug}`
   const skillsDir = getWorkspaceSkillsDir(workspace.slug)
   if (existsSync(skillsDir)) {
@@ -780,7 +980,7 @@ function _addSkillsV2(zip: AdmZip, workspace: AgentWorkspace, selectedSlugs: str
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue
       assertSafeSkillSegment(entry.name, '导出 Skill slug')
       if (selectedSlugs && !selectedSlugs.includes(entry.name)) continue
-      _addDirToZip(zip, join(skillsDir, entry.name), `${prefix}/skills/active/${entry.name}`, warnings)
+      await _addDirToZip(writer, join(skillsDir, entry.name), `${prefix}/skills/active/${entry.name}`, warnings)
     }
   }
   const inactiveDir = getInactiveSkillsDir(workspace.slug)
@@ -789,14 +989,19 @@ function _addSkillsV2(zip: AdmZip, workspace: AgentWorkspace, selectedSlugs: str
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue
       assertSafeSkillSegment(entry.name, '导出 Skill slug')
       if (selectedSlugs && !selectedSlugs.includes(entry.name)) continue
-      _addDirToZip(zip, join(inactiveDir, entry.name), `${prefix}/skills/inactive/${entry.name}`, warnings)
+      await _addDirToZip(writer, join(inactiveDir, entry.name), `${prefix}/skills/inactive/${entry.name}`, warnings)
     }
   }
   const overridesPath = getWorkspaceSkillOverridesPath(workspace.slug)
-  if (existsSync(overridesPath)) zip.addLocalFile(overridesPath, `${prefix}/skills`, 'skill-overrides.json')
+  if (existsSync(overridesPath)) await writer.addFile(overridesPath, `${prefix}/skills/skill-overrides.json`)
 }
 
-function _addMcpV2(zip: AdmZip, workspace: AgentWorkspace, mode: MigrationMode, selectedNames?: string[]) {
+async function _addMcpV2(
+  writer: ZipStreamWriter,
+  workspace: AgentWorkspace,
+  mode: MigrationMode,
+  selectedNames?: string[],
+) {
   const prefix = `workspaces/${workspace.slug}`
   const mcpPath = getWorkspaceMcpPath(workspace.slug)
   if (!existsSync(mcpPath)) return
@@ -815,38 +1020,264 @@ function _addMcpV2(zip: AdmZip, workspace: AgentWorkspace, mode: MigrationMode, 
 
   const config = { servers }
   const output = mode === 'share' ? _scrubMcpCredentials(config as Record<string, unknown>) : config
-  zip.addFile(`${prefix}/config/mcp.json`, Buffer.from(JSON.stringify(output, null, 2), 'utf-8'))
+  await writer.addBuffer(JSON.stringify(output, null, 2), `${prefix}/config/mcp.json`)
 }
 
-function _addWorkspaceConfigV2(zip: AdmZip, workspace: AgentWorkspace) {
+async function _addWorkspaceConfigV2(writer: ZipStreamWriter, workspace: AgentWorkspace) {
   const prefix = `workspaces/${workspace.slug}`
   const configPath = join(getAgentWorkspacePath(workspace.slug), 'config.json')
   if (existsSync(configPath)) {
-    const content = readFileSync(configPath, 'utf-8')
-    zip.addFile(`${prefix}/config/workspace-config.json`, Buffer.from(content, 'utf-8'))
+    await writer.addFile(configPath, `${prefix}/config/workspace-config.json`)
   }
-  zip.addFile(`${prefix}/config/workspace-meta.json`, Buffer.from(JSON.stringify(workspace, null, 2), 'utf-8'))
+  await writer.addBuffer(JSON.stringify(workspace, null, 2), `${prefix}/config/workspace-meta.json`)
 }
 
-function _addPersonalFiles(zip: AdmZip) {
-  const files: Array<[string, string, string]> = [
-    [getSettingsPath(), 'auth', 'settings.json'],
-    [getUserProfilePath(), 'auth', 'user-profile.json'],
-    [join(getConfigDir(), 'cloud-auth.json'), 'auth', 'cloud-auth.json'],
+async function _addPersonalFiles(writer: ZipStreamWriter) {
+  const files: Array<[string, string]> = [
+    [getSettingsPath(), 'auth/settings.json'],
+    [getUserProfilePath(), 'auth/user-profile.json'],
+    [join(getConfigDir(), 'cloud-auth.json'), 'auth/cloud-auth.json'],
   ]
-  for (const [src, zipDir, zipName] of files) {
-    if (existsSync(src)) zip.addLocalFile(src, zipDir, zipName)
+  for (const [src, entryName] of files) {
+    if (existsSync(src)) await writer.addFile(src, entryName)
   }
+}
+
+// ─── personal 模式：会话原文与用户自建数据 ───────────────────────────────────
+
+/** 可重建、且体量巨大的目录不进备份，避免备份被依赖清单/版本库撑爆。 */
+const BACKUP_EXCLUDED_DIRS = new Set([
+  'node_modules', '.git', '__pycache__', '.venv', 'venv', '.cache',
+  '.runtime', '.migration-backup', '.pytest_cache', '.mypy_cache',
+])
+
+const BACKUP_EXCLUDED_FILES = new Set(['.DS_Store'])
+
+async function _addPersonalPayload(
+  writer: ZipStreamWriter,
+  workspaces: AgentWorkspace[],
+  blobRefs: Map<string, number>,
+  warnings: string[],
+): Promise<PersonalPayloadManifest> {
+  const sections: string[] = []
+
+  const blobs = await _addReferencedBlobs(writer, blobRefs, warnings)
+  if (blobs.blobCount > 0) sections.push('会话原文')
+
+  sections.push(...await _addPersonalConfigFiles(writer, warnings))
+  sections.push(...await _addPersonalDirectories(writer, warnings))
+
+  for (const workspace of workspaces) {
+    sections.push(...await _addWorkspacePayload(writer, workspace, warnings))
+  }
+
+  return { sections: [...new Set(sections)], ...blobs }
+}
+
+/** 只打包被导出会话引用到的 blob；未引用的属于孤儿，交给存储清理。 */
+async function _addReferencedBlobs(
+  writer: ZipStreamWriter,
+  blobRefs: Map<string, number>,
+  warnings: string[],
+): Promise<{ blobCount: number; blobBytes: number; missingBlobs: number }> {
+  let blobCount = 0
+  let blobBytes = 0
+  let missingBlobs = 0
+
+  for (const [hash, declaredBytes] of blobRefs) {
+    const hex = hash.startsWith('sha256:') ? hash.slice('sha256:'.length) : hash
+    if (!/^[0-9a-f]{64}$/iu.test(hex)) {
+      missingBlobs += 1
+      continue
+    }
+    const sourcePath = blobPathFor(hash)
+    if (!existsSync(sourcePath)) {
+      missingBlobs += 1
+      continue
+    }
+    try {
+      await writer.addFile(sourcePath, `personal/blobs/${hex.slice(0, 2)}/${hex.slice(2, 4)}/${hex}`)
+      blobCount += 1
+      blobBytes += Math.max(statSync(sourcePath).size, declaredBytes)
+    } catch (error) {
+      missingBlobs += 1
+      addExportWarning(warnings, `已跳过会话原文: ${hex} (${formatErrorMessage(error)})`)
+    }
+  }
+
+  if (missingBlobs > 0) {
+    addExportWarning(
+      warnings,
+      `有 ${missingBlobs} 段会话原文在本机已找不到，这部分内容在备份中无法恢复`,
+    )
+  }
+
+  return { blobCount, blobBytes, missingBlobs }
+}
+
+/** 本机单文件状态：规划库、自动化、预设、插件清单、IM 接入等。 */
+async function _addPersonalConfigFiles(writer: ZipStreamWriter, warnings: string[]): Promise<string[]> {
+  const sections = new Set<string>()
+  const planningDb = getPlanningDatabasePath()
+
+  const files: Array<{ path: string; entry: string; section: string }> = [
+    { path: planningDb, entry: 'personal/config/planning.db', section: '规划与日程' },
+    { path: `${planningDb}-wal`, entry: 'personal/config/planning.db-wal', section: '规划与日程' },
+    { path: `${planningDb}-shm`, entry: 'personal/config/planning.db-shm', section: '规划与日程' },
+    { path: getAutomationsPath(), entry: 'personal/config/automations.json', section: '定时任务' },
+    { path: getAgentPresetsPath(), entry: 'personal/config/agent-presets.json', section: '预设与提示词' },
+    { path: getSystemPromptsPath(), entry: 'personal/config/system-prompts.json', section: '预设与提示词' },
+    { path: getBrowserStartPagePath(), entry: 'personal/config/browser-start-page.json', section: '浏览器起始页' },
+    { path: getRecommendationsPath(), entry: 'personal/config/recommendations.json', section: '主动建议' },
+    { path: getPluginsIndexPath(), entry: 'personal/config/plugins.json', section: '插件' },
+    { path: join(getConfigDir(), 'plugin-permissions.json'), entry: 'personal/config/plugin-permissions.json', section: '插件' },
+    { path: getScratchPadPath(), entry: 'personal/config/scratch-pad.md', section: '随手记' },
+    { path: getWeChatConfigPath(), entry: 'personal/config/wechat.json', section: 'IM 接入' },
+    { path: getDingTalkConfigPath(), entry: 'personal/config/dingtalk.json', section: 'IM 接入' },
+    { path: getFeishuConfigPath(), entry: 'personal/config/feishu.json', section: 'IM 接入' },
+  ]
+
+  // 飞书 Bot 绑定/元数据按 botId 拆文件，按前缀收集。
+  try {
+    for (const name of readdirSync(getConfigDir())) {
+      if (!/^feishu-(?:bindings|metadata)-[\w-]+\.json$/u.test(name)) continue
+      files.push({ path: join(getConfigDir(), name), entry: `personal/config/${name}`, section: 'IM 接入' })
+    }
+  } catch {
+    // 配置目录读不到时其他分区照常备份
+  }
+
+  for (const file of files) {
+    if (!existsSync(file.path)) continue
+    try {
+      await writer.addFile(file.path, file.entry)
+      sections.add(file.section)
+    } catch (error) {
+      addExportWarning(warnings, `已跳过 ${file.entry}: ${formatErrorMessage(error)}`)
+    }
+  }
+
+  return [...sections]
+}
+
+/** 本机目录状态：插件、皮肤、全局 Skills、资料库、聊天附件。 */
+function _personalDirectorySources(): Array<{ name: string; path: string; section: string }> {
+  return [
+    { name: 'plugins', path: join(getConfigDir(), 'plugins'), section: '插件' },
+    { name: 'plugin-data', path: join(getConfigDir(), 'plugin-data'), section: '插件数据' },
+    { name: 'skins', path: join(getConfigDir(), 'skins'), section: '皮肤' },
+    { name: 'global-skills', path: join(getConfigDir(), 'global-skills'), section: '全局 Skills' },
+    { name: 'knowledge-base', path: join(getConfigDir(), 'knowledge-base'), section: '个人资料库' },
+    { name: 'attachments', path: join(getConfigDir(), 'attachments'), section: '聊天附件' },
+  ]
+}
+
+async function _addPersonalDirectories(writer: ZipStreamWriter, warnings: string[]): Promise<string[]> {
+  const sections: string[] = []
+
+  for (const dir of _personalDirectorySources()) {
+    if (!existsSync(dir.path)) continue
+    const before = writer.entryCount
+    await _addDirToZip(writer, dir.path, `personal/config/${dir.name}`, warnings)
+    if (writer.entryCount > before) sections.push(dir.section)
+  }
+
+  return sections
+}
+
+/** 工作区自己的资料：workspace-files、记忆、自定义预设。 */
+async function _addWorkspacePayload(
+  writer: ZipStreamWriter,
+  workspace: AgentWorkspace,
+  warnings: string[],
+): Promise<string[]> {
+  const sections: string[] = []
+  const prefix = `workspaces/${workspace.slug}`
+  const workspaceRoot = getAgentWorkspacePath(workspace.slug)
+
+  const filesDir = join(workspaceRoot, 'workspace-files')
+  if (existsSync(filesDir)) {
+    const before = writer.entryCount
+    await _addDirToZip(writer, filesDir, `${prefix}/workspace-files`, warnings)
+    if (writer.entryCount > before) sections.push('工作区文件')
+  }
+
+  const memoryDir = join(workspaceRoot, '.profer', 'memory')
+  if (existsSync(memoryDir)) {
+    const before = writer.entryCount
+    await _addDirToZip(writer, memoryDir, `${prefix}/memory`, warnings)
+    if (writer.entryCount > before) sections.push('工作区记忆')
+  }
+
+  const presetsPath = getWorkspaceAgentPresetsPath(workspace.slug)
+  if (existsSync(presetsPath)) {
+    try {
+      await writer.addFile(presetsPath, `${prefix}/config/agent-presets.json`)
+      sections.push('工作区预设')
+    } catch (error) {
+      addExportWarning(warnings, `已跳过工作区预设: ${formatErrorMessage(error)}`)
+    }
+  }
+
+  return sections
 }
 
 // ─── 导入（解析预览）────────────────────────────────────────────────────────
 
-export async function parseImportFile(filePath: string): Promise<ImportPreview | ImportPreviewV2> {
+export async function inspectImportFile(filePath: string): Promise<{ encrypted: boolean; bytes: number }> {
+  const encrypted = await isEncryptedBackup(filePath)
+  let bytes = 0
+  try {
+    bytes = statSync(filePath).size
+  } catch {
+    // 文件不可读时交给后续 parse 报错
+  }
+  return { encrypted, bytes }
+}
+
+/**
+ * 解析迁移文件（可带口令）。
+ *
+ * 加密备份先解密到临时文件再流式解包；解密文件在解包完成后立即删除，
+ * 不随 tempDir 一起留给后续导入步骤。
+ */
+export async function parseImportFile(
+  filePath: string,
+  passphrase?: string,
+): Promise<ImportPreview | ImportPreviewV2> {
   const tempDir = join(tmpdir(), `profer-import-${randomUUID()}`)
   mkdirSync(tempDir, { recursive: true })
 
-  const zip = new AdmZip(filePath)
-  _safeExtractAll(zip, tempDir)
+  let sourcePath = filePath
+  let decryptedPath: string | null = null
+  try {
+    if (await isEncryptedBackup(filePath)) {
+      if (!passphrase) throw new Error('该备份已加密，请输入口令')
+      decryptedPath = join(tmpdir(), `profer-decrypt-${randomUUID()}`)
+      await decryptBackupFile(filePath, decryptedPath, passphrase)
+      sourcePath = decryptedPath
+    }
+    return await _parseImportSource(sourcePath, tempDir)
+  } catch (error) {
+    // 解析失败时不把可能含用户数据的临时目录留在磁盘上。
+    rmSync(tempDir, { recursive: true, force: true })
+    throw error
+  } finally {
+    if (decryptedPath) rmSync(decryptedPath, { force: true })
+  }
+}
+
+async function _parseImportSource(sourcePath: string, tempDir: string): Promise<ImportPreview | ImportPreviewV2> {
+  // 流式解包：GB 级备份不能整包读进内存；条目名在解压前统一校验（Zip Slip / Windows 非法名）。
+  const entries = await readZipEntries(sourcePath)
+  assertSafeMigrationArchiveEntries(
+    entries.map((entry) => ({ entryName: entry.name, isDirectory: entry.isDirectory })),
+    tempDir,
+  )
+  const extraction = await extractZipEntries(sourcePath, entries, tempDir, {
+    onWarning: (message) => console.warn(`[数据迁移] ${message}`),
+  })
+  const extractionWarnings = extraction.warnings
 
   const manifestPath = join(tempDir, 'manifest.json')
   if (!existsSync(manifestPath)) {
@@ -933,6 +1364,7 @@ export async function parseImportFile(filePath: string): Promise<ImportPreview |
     })
 
     const pathCheckResults = _checkAttachedDirectoriesV2(tempDir, manifest)
+    const personal = await _readPersonalPreview(tempDir, manifest.personal, extractionWarnings)
 
     return {
       manifest,
@@ -942,6 +1374,7 @@ export async function parseImportFile(filePath: string): Promise<ImportPreview |
       crossPlatform,
       pathCheckResults,
       tempDir,
+      personal,
     } satisfies ImportPreviewV2
   }
 
@@ -955,6 +1388,7 @@ export async function parseImportFile(filePath: string): Promise<ImportPreview |
 
   const hasMcp = existsSync(join(tempDir, 'config/mcp.json'))
   const pathCheckResults = _checkAttachedDirectories(tempDir, manifest)
+  const personal = await _readPersonalPreview(tempDir, manifest.personal, extractionWarnings)
 
   return {
     manifest,
@@ -965,6 +1399,49 @@ export async function parseImportFile(filePath: string): Promise<ImportPreview |
     crossPlatform,
     pathCheckResults,
     tempDir,
+    personal,
+  }
+}
+
+/** 统计归档里的本机数据分区，供导入预览展示。 */
+async function _readPersonalPreview(
+  tempDir: string,
+  manifestPersonal: PersonalPayloadManifest | undefined,
+  warnings: string[],
+): Promise<PersonalImportPreview> {
+  const personalDir = join(tempDir, 'personal')
+  if (!existsSync(personalDir)) {
+    return { available: false, sections: [], blobCount: 0, blobBytes: 0, missingBlobs: 0, warnings }
+  }
+
+  let blobCount = 0
+  let blobBytes = 0
+  const blobsDir = join(personalDir, 'blobs')
+  if (existsSync(blobsDir)) {
+    for (const first of readdirSync(blobsDir, { withFileTypes: true })) {
+      if (!first.isDirectory()) continue
+      for (const second of readdirSync(join(blobsDir, first.name), { withFileTypes: true })) {
+        if (!second.isDirectory()) continue
+        for (const file of readdirSync(join(blobsDir, first.name, second.name), { withFileTypes: true })) {
+          if (!file.isFile()) continue
+          blobCount += 1
+          try {
+            blobBytes += statSync(join(blobsDir, first.name, second.name, file.name)).size
+          } catch {
+            // 单个 blob 读不到不影响预览
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    available: true,
+    sections: manifestPersonal?.sections ?? [],
+    blobCount,
+    blobBytes,
+    missingBlobs: manifestPersonal?.missingBlobs ?? 0,
+    warnings,
   }
 }
 
@@ -1024,7 +1501,17 @@ function _checkAttachedDirectoriesV2(tempDir: string, manifest: MigrationManifes
 
 // ─── 导入（确认执行）────────────────────────────────────────────────────────
 
-export async function confirmImport(options: ConfirmImportOptions | ConfirmImportOptionsV2): Promise<{ success: boolean }> {
+export interface ConfirmImportResult {
+  success: boolean
+  /** 未致命但需要用户知道的问题（缺 blob、校验和不符、部分文件未恢复等） */
+  warnings?: string[]
+  /** 实际恢复的本机数据分区 */
+  restored?: string[]
+}
+
+export async function confirmImport(
+  options: ConfirmImportOptions | ConfirmImportOptionsV2,
+): Promise<ConfirmImportResult> {
   const { tempDir, manifest, pathMappings } = options
 
   try {
@@ -1048,6 +1535,8 @@ export async function confirmImport(options: ConfirmImportOptions | ConfirmImpor
 
     if (!targetWorkspace) throw new Error('无法确定目标工作区')
 
+    const warnings: string[] = []
+
     if (manifest.components.includes('sessions')) {
       const v1Manifest = manifest as MigrationManifest
       const runtimeSessionFiles = await _importRuntimeArtifacts(
@@ -1070,11 +1559,22 @@ export async function confirmImport(options: ConfirmImportOptions | ConfirmImpor
       _importChatTools(tempDir)
     }
     _importWorkspaceConfig(tempDir, targetWorkspace, pathMappings)
+    let restored: string[] = []
     if (manifest.mode === 'personal') {
       _importPersonalFiles(tempDir)
+      restored = await _restorePersonalPayload(
+        tempDir,
+        [{ sourceSlug: (manifest as MigrationManifest).workspaceSlug, target: targetWorkspace }],
+        overwrite,
+        warnings,
+      )
     }
 
-    return { success: true }
+    return {
+      success: true,
+      ...(warnings.length > 0 ? { warnings: [...new Set(warnings)] } : {}),
+      ...(restored.length > 0 ? { restored } : {}),
+    }
   } finally {
     try {
       rmSync(tempDir, { recursive: true, force: true })
@@ -1084,10 +1584,11 @@ export async function confirmImport(options: ConfirmImportOptions | ConfirmImpor
   }
 }
 
-async function _confirmImportV2(options: ConfirmImportOptionsV2): Promise<{ success: boolean }> {
+async function _confirmImportV2(options: ConfirmImportOptionsV2): Promise<ConfirmImportResult> {
   const { tempDir, manifest, pathMappings, workspaceMappings, conflictResolution } = options
   const v2Manifest = manifest as MigrationManifestV2
   const overwrite = conflictResolution === 'overwrite'
+  const warnings: string[] = []
 
   const { createAgentWorkspace } = await import('./agent-workspace-manager')
 
@@ -1153,7 +1654,16 @@ async function _confirmImportV2(options: ConfirmImportOptionsV2): Promise<{ succ
     _importPersonalFiles(tempDir)
   }
 
-  return { success: true }
+  let restored: string[] = []
+  if (v2Manifest.mode === 'personal') {
+    restored = await _restorePersonalPayload(tempDir, resolvedMappings, overwrite, warnings)
+  }
+
+  return {
+    success: true,
+    ...(warnings.length > 0 ? { warnings: [...new Set(warnings)] } : {}),
+    ...(restored.length > 0 ? { restored } : {}),
+  }
 }
 
 async function _importSessions(
@@ -1431,6 +1941,228 @@ function _importPersonalFiles(tempDir: string) {
   }
 }
 
+// ─── personal 模式：恢复会话原文与用户自建数据 ───────────────────────────────
+
+interface WorkspacePayloadMapping {
+  sourceSlug: string
+  target: AgentWorkspace
+}
+
+/**
+ * 恢复 personal 归档里的本机数据分区。
+ *
+ * 语义分层：
+ * - 单文件状态（规划库、自动化、预设…）整体替换，旧文件先备份；
+ * - 目录（工作区文件、附件、插件…）只补缺不覆盖，避免导入旧备份反向删掉现有资料。
+ */
+async function _restorePersonalPayload(
+  tempDir: string,
+  mappings: WorkspacePayloadMapping[],
+  _overwrite: boolean,
+  warnings: string[],
+): Promise<string[]> {
+  const personalDir = join(tempDir, 'personal')
+  if (!existsSync(personalDir)) return []
+
+  const restored = new Set<string>()
+  const configDir = join(personalDir, 'config')
+
+  if (_restoreBlobs(join(personalDir, 'blobs'), warnings) > 0) restored.add('会话原文')
+  if (await _restorePlanningDatabase(configDir, warnings)) restored.add('规划与日程')
+
+  const configFiles: Array<{ name: string; dest: string; section: string }> = [
+    { name: 'automations.json', dest: getAutomationsPath(), section: '定时任务' },
+    { name: 'agent-presets.json', dest: getAgentPresetsPath(), section: '预设与提示词' },
+    { name: 'system-prompts.json', dest: getSystemPromptsPath(), section: '预设与提示词' },
+    { name: 'browser-start-page.json', dest: getBrowserStartPagePath(), section: '浏览器起始页' },
+    { name: 'recommendations.json', dest: getRecommendationsPath(), section: '主动建议' },
+    { name: 'plugins.json', dest: getPluginsIndexPath(), section: '插件' },
+    { name: 'plugin-permissions.json', dest: join(getConfigDir(), 'plugin-permissions.json'), section: '插件' },
+    { name: 'scratch-pad.md', dest: getScratchPadPath(), section: '随手记' },
+    { name: 'wechat.json', dest: getWeChatConfigPath(), section: 'IM 接入' },
+    { name: 'dingtalk.json', dest: getDingTalkConfigPath(), section: 'IM 接入' },
+    { name: 'feishu.json', dest: getFeishuConfigPath(), section: 'IM 接入' },
+  ]
+
+  if (existsSync(configDir)) {
+    for (const name of readdirSync(configDir)) {
+      if (!/^feishu-(?:bindings|metadata)-[\w-]+\.json$/u.test(name)) continue
+      configFiles.push({ name, dest: join(getConfigDir(), name), section: 'IM 接入' })
+    }
+  }
+
+  for (const file of configFiles) {
+    const src = join(configDir, file.name)
+    if (!existsSync(src)) continue
+    if (_restoreFileWithBackup(src, file.dest, warnings, file.name)) restored.add(file.section)
+  }
+
+  const dirs: Array<{ name: string; dest: string; section: string }> = [
+    { name: 'plugins', dest: join(getConfigDir(), 'plugins'), section: '插件' },
+    { name: 'plugin-data', dest: join(getConfigDir(), 'plugin-data'), section: '插件数据' },
+    { name: 'skins', dest: join(getConfigDir(), 'skins'), section: '皮肤' },
+    { name: 'global-skills', dest: join(getConfigDir(), 'global-skills'), section: '全局 Skills' },
+    { name: 'knowledge-base', dest: join(getConfigDir(), 'knowledge-base'), section: '个人资料库' },
+    { name: 'attachments', dest: join(getConfigDir(), 'attachments'), section: '聊天附件' },
+  ]
+
+  for (const dir of dirs) {
+    const src = join(configDir, dir.name)
+    if (!existsSync(src)) continue
+    if (_mergeDirectory(src, dir.dest, warnings) > 0) restored.add(dir.section)
+  }
+
+  for (const mapping of mappings) {
+    const workspaceRoot = join(tempDir, 'workspaces', mapping.sourceSlug)
+    if (!existsSync(workspaceRoot)) continue
+
+    const filesDir = join(workspaceRoot, 'workspace-files')
+    if (existsSync(filesDir) && _mergeDirectory(filesDir, getWorkspaceFilesDir(mapping.target.slug), warnings) > 0) {
+      restored.add('工作区文件')
+    }
+
+    const memoryDir = join(workspaceRoot, 'memory')
+    const memoryDest = join(getAgentWorkspacePath(mapping.target.slug), '.profer', 'memory')
+    if (existsSync(memoryDir) && _mergeDirectory(memoryDir, memoryDest, warnings) > 0) {
+      restored.add('工作区记忆')
+    }
+
+    const presetsSrc = join(workspaceRoot, 'config', 'agent-presets.json')
+    if (existsSync(presetsSrc) && _restoreFileWithBackup(presetsSrc, getWorkspaceAgentPresetsPath(mapping.target.slug), warnings, '工作区预设')) {
+      restored.add('工作区预设')
+    }
+  }
+
+  return [...restored]
+}
+
+/** 会话原文按内容哈希回填；已有的同名 blob 说明内容一致，直接跳过。 */
+function _restoreBlobs(blobsDir: string, warnings: string[]): number {
+  if (!existsSync(blobsDir)) return 0
+  let restored = 0
+
+  for (const first of readdirSync(blobsDir, { withFileTypes: true })) {
+    if (!first.isDirectory()) continue
+    for (const second of readdirSync(join(blobsDir, first.name), { withFileTypes: true })) {
+      if (!second.isDirectory()) continue
+      for (const file of readdirSync(join(blobsDir, first.name, second.name), { withFileTypes: true })) {
+        if (!file.isFile()) continue
+        if (!/^[0-9a-f]{64}$/iu.test(file.name)) {
+          warnings.push(`已跳过非法会话原文文件名: ${file.name}`)
+          continue
+        }
+        const source = join(blobsDir, first.name, second.name, file.name)
+        // 目标路径由哈希自身推导，不信任归档里的分片目录（防止借布局把文件写到别处）。
+        const destination = blobPathFor(`sha256:${file.name.toLowerCase()}`)
+        if (existsSync(destination)) continue
+        try {
+          mkdirSync(dirname(destination), { recursive: true })
+          cpSync(source, destination)
+          restored += 1
+        } catch (error) {
+          warnings.push(`未恢复会话原文 ${file.name}: ${formatErrorMessage(error)}`)
+        }
+      }
+    }
+  }
+
+  return restored
+}
+
+/**
+ * 替换规划数据库。
+ * WAL 模式下只换 .db 不换 -wal 会让 SQLite 用旧日志回放新库，因此三者必须同进同退。
+ */
+async function _restorePlanningDatabase(configDir: string, warnings: string[]): Promise<boolean> {
+  const sourceDb = join(configDir, 'planning.db')
+  if (!existsSync(sourceDb)) return false
+
+  const destinationDb = getPlanningDatabasePath()
+  try {
+    const { closePlanningDatabase, reloadPlanningDatabase } = await import('./planning-manager')
+    closePlanningDatabase()
+    try {
+      if (existsSync(destinationDb)) _backupExistingFile(destinationDb)
+      cpSync(sourceDb, destinationDb)
+
+      for (const suffix of ['-wal', '-shm']) {
+        const sourceSidecar = `${sourceDb}${suffix}`
+        const destinationSidecar = `${destinationDb}${suffix}`
+        if (existsSync(sourceSidecar)) {
+          cpSync(sourceSidecar, destinationSidecar)
+        } else {
+          rmSync(destinationSidecar, { force: true })
+        }
+      }
+    } finally {
+      try {
+        reloadPlanningDatabase()
+      } catch (error) {
+        // 重新打开失败不推翻已完成的数据替换；下次访问规划功能时会再次尝试。
+        warnings.push(`规划数据库重新打开失败: ${formatErrorMessage(error)}`)
+      }
+    }
+    return true
+  } catch (error) {
+    warnings.push(`未恢复规划与日程: ${formatErrorMessage(error)}`)
+    return false
+  }
+}
+
+function _restoreFileWithBackup(source: string, destination: string, warnings: string[], label: string): boolean {
+  try {
+    mkdirSync(dirname(destination), { recursive: true })
+    if (existsSync(destination)) _backupExistingFile(destination)
+    cpSync(source, destination)
+    return true
+  } catch (error) {
+    warnings.push(`未恢复 ${label}: ${formatErrorMessage(error)}`)
+    return false
+  }
+}
+
+function _backupExistingFile(destination: string): void {
+  const backupPath = `${destination}.backup-${Date.now()}-${randomUUID().slice(0, 6)}`
+  try {
+    cpSync(destination, backupPath)
+  } catch {
+    // 备份失败不阻断恢复：目标文件仍会被新内容替换，但至少不让整个导入失败。
+  }
+}
+
+/** 目录合并：只补缺，不覆盖已有文件；返回新增文件数。 */
+function _mergeDirectory(sourceDir: string, destinationDir: string, warnings: string[]): number {
+  let copied = 0
+  let entries: Dirent[]
+  try {
+    entries = readdirSync(sourceDir, { withFileTypes: true })
+  } catch (error) {
+    warnings.push(`无法读取待恢复目录 ${sourceDir}: ${formatErrorMessage(error)}`)
+    return 0
+  }
+
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const source = join(sourceDir, entry.name)
+    const destination = join(destinationDir, entry.name)
+    if (entry.isDirectory()) {
+      copied += _mergeDirectory(source, destination, warnings)
+      continue
+    }
+    if (!entry.isFile()) continue
+    if (existsSync(destination)) continue
+    try {
+      mkdirSync(dirname(destination), { recursive: true })
+      cpSync(source, destination)
+      copied += 1
+    } catch (error) {
+      warnings.push(`未恢复 ${destination}: ${formatErrorMessage(error)}`)
+    }
+  }
+
+  return copied
+}
+
 // ─── v2 导入辅助函数 ─────────────────────────────────────────────────────────
 
 function _importSkillsV2(tempDir: string, sourceSlug: string, targetWorkspace: AgentWorkspace, overwrite = false) {
@@ -1618,9 +2350,141 @@ function readJsonSafe<T>(filePath: string): T | null {
   }
 }
 
-function buildExportResult(filePath: string, warnings: string[]): ExportResult {
-  if (warnings.length === 0) return { success: true, filePath }
-  return { success: true, filePath, warnings }
+interface ExportReporter {
+  setPhase(phase: ExportProgress['phase']): void
+  setTotal(totalBytes: number): void
+  onBytes(bytesWritten: number): void
+  complete(): void
+}
+
+/** 进度上报：节流到 ~7 次/秒或每 1%，避免 GB 级导出把 IPC 淹没。 */
+function createExportReporter(onProgress?: (progress: ExportProgress) => void): ExportReporter {
+  let phase: ExportProgress['phase'] = 'preparing'
+  let totalBytes = 0
+  let bytesWritten = 0
+  let lastEmitAt = 0
+  let lastPercent = -1
+
+  const emit = (force: boolean): void => {
+    if (!onProgress) return
+    const percent = totalBytes > 0 ? Math.min(99, Math.floor((bytesWritten / totalBytes) * 100)) : 0
+    const now = Date.now()
+    if (!force && now - lastEmitAt < 150 && percent === lastPercent) return
+    lastEmitAt = now
+    lastPercent = percent
+    onProgress({ phase, percent, bytesWritten, totalBytes })
+  }
+
+  return {
+    setPhase(next) {
+      phase = next
+      emit(true)
+    },
+    setTotal(next) {
+      totalBytes = Math.max(0, next)
+      emit(true)
+    },
+    onBytes(next) {
+      bytesWritten = next
+      emit(false)
+    },
+    complete() {
+      phase = 'finalizing'
+      onProgress?.({ phase, percent: 100, bytesWritten, totalBytes })
+    },
+  }
+}
+
+function _resolvePassphrase(mode: MigrationMode, passphrase: string | undefined): string | undefined {
+  if (!passphrase) return undefined
+  if (mode !== 'personal') throw new Error('只有个人备份支持口令加密')
+  assertPassphrase(passphrase)
+  return passphrase
+}
+
+/**
+ * 导出总量估算：只走 stat，用于把「已写入字节」换成百分比。
+ * 异步实现，避免几十万个文件的同步 stat 把主进程冻住。
+ */
+export async function estimatePersonalExportBytes(
+  workspaces: AgentWorkspace[],
+  components: MigrationComponent[] = ['sessions', 'skills', 'mcp', 'channels', 'chattools'],
+): Promise<number> {
+  let total = 0
+  if (components.includes('sessions')) {
+    total += await _sumBytes(getAgentSessionsDir()) + await _sumBytes(blobRootDir())
+  }
+  for (const workspace of workspaces) {
+    total += await _sumBytes(getAgentWorkspacePath(workspace.slug))
+  }
+  for (const dir of _personalDirectorySources()) {
+    total += await _sumBytes(dir.path)
+  }
+  return total
+}
+
+async function _sumBytes(target: string): Promise<number> {
+  let isDirectory = false
+  try {
+    const stat = await fsp.stat(target)
+    if (stat.isFile()) return stat.size
+    isDirectory = stat.isDirectory()
+  } catch {
+    return 0
+  }
+  if (!isDirectory) return 0
+
+  let entries: Dirent[]
+  try {
+    entries = await fsp.readdir(target, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+
+  let total = 0
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    if (entry.isDirectory()) {
+      if (BACKUP_EXCLUDED_DIRS.has(entry.name)) continue
+      total += await _sumBytes(join(target, entry.name))
+      continue
+    }
+    if (!entry.isFile() || BACKUP_EXCLUDED_FILES.has(entry.name) || entry.name.endsWith('.tmp')) continue
+    try {
+      total += (await fsp.stat(join(target, entry.name))).size
+    } catch {
+      // 边导出边变化的文件不计入估算
+    }
+  }
+  return total
+}
+
+async function _finishExport(params: {
+  writer: ZipStreamWriter
+  stagingPath: string
+  outputPath: string
+  passphrase?: string
+  warnings: string[]
+  reporter: ExportReporter
+}): Promise<ExportResult> {
+  const { bytes, entries } = await params.writer.finalize()
+
+  if (params.passphrase) {
+    params.reporter.setPhase('encrypting')
+    await encryptBackupFile(params.stagingPath, params.outputPath, params.passphrase)
+    rmSync(params.stagingPath, { force: true })
+  }
+
+  params.reporter.complete()
+  const uniqueWarnings = [...new Set(params.warnings)]
+  return {
+    success: true,
+    filePath: params.outputPath,
+    bytes,
+    entries,
+    encrypted: params.passphrase !== undefined,
+    ...(uniqueWarnings.length > 0 ? { warnings: uniqueWarnings } : {}),
+  }
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -1632,8 +2496,13 @@ function addExportWarning(warnings: string[], message: string): void {
   console.warn(`[数据迁移] ${message}`)
 }
 
-/** 递归将本地目录的所有文件加入 zip 指定前缀路径 */
-function _addDirToZip(zip: AdmZip, srcDir: string, zipPrefix: string, warnings: string[]): void {
+/** 递归将本地目录的文件流式写入归档；跳过依赖/版本库等可重建目录。 */
+async function _addDirToZip(
+  writer: ZipStreamWriter,
+  srcDir: string,
+  zipPrefix: string,
+  warnings: string[],
+): Promise<void> {
   let entries: Dirent[]
   try {
     entries = readdirSync(srcDir, { withFileTypes: true })
@@ -1643,16 +2512,20 @@ function _addDirToZip(zip: AdmZip, srcDir: string, zipPrefix: string, warnings: 
   }
 
   for (const entry of entries) {
+    // 符号链接既不跟随也不打包：跟随可能形成环，也可能把备份带到工作区之外。
+    if (entry.isSymbolicLink()) continue
     const fullPath = join(srcDir, entry.name)
     const entryZipPath = `${zipPrefix}/${entry.name}`
     if (entry.isDirectory()) {
-      _addDirToZip(zip, fullPath, entryZipPath, warnings)
-    } else {
-      try {
-        zip.addLocalFile(fullPath, zipPrefix)
-      } catch (error) {
-        addExportWarning(warnings, `已跳过无法读取的备份项目: ${fullPath} (${formatErrorMessage(error)})`)
-      }
+      if (BACKUP_EXCLUDED_DIRS.has(entry.name)) continue
+      await _addDirToZip(writer, fullPath, entryZipPath, warnings)
+      continue
+    }
+    if (!entry.isFile() || BACKUP_EXCLUDED_FILES.has(entry.name) || entry.name.endsWith('.tmp')) continue
+    try {
+      await writer.addFile(fullPath, entryZipPath)
+    } catch (error) {
+      addExportWarning(warnings, `已跳过无法读取的备份项目: ${fullPath} (${formatErrorMessage(error)})`)
     }
   }
 }
@@ -1715,10 +2588,4 @@ export function assertSafeMigrationArchiveEntries(
     }
     destinations.set(destinationKey, entry.entryName)
   }
-}
-
-/** Zip Slip 安全解压：在委托 ZIP 库前逐条校验路径不会逃逸 targetDir。 */
-function _safeExtractAll(zip: AdmZip, targetDir: string): void {
-  assertSafeMigrationArchiveEntries(zip.getEntries(), targetDir)
-  zip.extractAllTo(targetDir, true)
 }

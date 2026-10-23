@@ -36,7 +36,7 @@ interface SqliteStatement {
   get(params?: Record<string, unknown>): unknown
   run(params?: Record<string, unknown>): unknown
 }
-interface SqliteDatabase { exec(sql: string): void; prepare(sql: string): SqliteStatement }
+interface SqliteDatabase { exec(sql: string): void; prepare(sql: string): SqliteStatement; close(): void }
 interface SqliteModule { DatabaseSync: new (path: string) => SqliteDatabase }
 
 type TodoRow = {
@@ -58,6 +58,28 @@ type ReminderRow = {
 type TodoSessionLinkRow = { todo_id: string; session_id: string; first_touched_at: number; last_touched_at: number }
 
 let database: SqliteDatabase | null = null
+
+/**
+ * 关闭并释放数据库句柄。
+ *
+ * 迁移导入会整体替换 planning.db；如果不先关句柄，旧连接会继续指向被替换的 inode，
+ * 之后写入会落在已删除的文件上。
+ */
+export function closePlanningDatabase(): void {
+  if (!database) return
+  try {
+    database.close()
+  } catch {
+    // 已经关闭或处于不可用状态时忽略
+  }
+  database = null
+}
+
+/** 替换数据库文件后重新打开（建表与 PRAGMA 会重新执行）。 */
+export function reloadPlanningDatabase(): void {
+  closePlanningDatabase()
+  getDatabase()
+}
 
 function withPlanningTransaction<T>(work: () => T): T {
   const db = getDatabase()

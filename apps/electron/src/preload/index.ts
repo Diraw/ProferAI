@@ -1524,10 +1524,14 @@ export interface ElectronAPI {
   migrationExport: (options: unknown) => Promise<MigrationExportResult>
   /** 执行 v2 多工作区导出 */
   migrationExportV2: (options: unknown) => Promise<MigrationExportResult>
-  /** 解析导入文件，返回预览信息 */
-  migrationParseImportFile: (filePath: string) => Promise<unknown>
+  /** 解析导入文件，返回预览信息（加密备份需传口令） */
+  migrationParseImportFile: (filePath: string, passphrase?: string) => Promise<unknown>
+  /** 检查导入文件是否加密及体积 */
+  migrationInspectImportFile: (filePath: string) => Promise<{ encrypted: boolean; bytes: number }>
+  /** 订阅导出进度 */
+  onMigrationProgress: (callback: (progress: { taskId?: string; phase: string; percent: number; bytesWritten: number; totalBytes: number }) => void) => () => void
   /** 确认导入 */
-  migrationConfirmImport: (options: unknown) => Promise<{ success: boolean }>
+  migrationConfirmImport: (options: unknown) => Promise<{ success: boolean; warnings?: string[]; restored?: string[] }>
   /** 打开文件选择对话框（选择 .profer-backup 或 .profer-share） */
   migrationOpenFileDialog: () => Promise<string | null>
   /** 打开文件保存对话框（选择导出路径） */
@@ -1654,6 +1658,9 @@ interface MigrationExportResult {
   success: boolean
   filePath: string
   warnings?: string[]
+  bytes?: number
+  entries?: number
+  encrypted?: boolean
 }
 
 /**
@@ -3557,8 +3564,18 @@ const electronAPI: ElectronAPI = {
     return ipcRenderer.invoke('migration:exportV2', options)
   },
 
-  migrationParseImportFile: (filePath: string) => {
-    return ipcRenderer.invoke('migration:parseImportFile', filePath)
+  migrationParseImportFile: (filePath: string, passphrase?: string) => {
+    return ipcRenderer.invoke('migration:parseImportFile', filePath, passphrase)
+  },
+
+  migrationInspectImportFile: (filePath: string) => {
+    return ipcRenderer.invoke('migration:inspectImportFile', filePath)
+  },
+
+  onMigrationProgress: (callback: (progress: { taskId?: string; phase: string; percent: number; bytesWritten: number; totalBytes: number }) => void) => {
+    const listener = (_: unknown, progress: Parameters<typeof callback>[0]): void => callback(progress)
+    ipcRenderer.on('migration:progress', listener)
+    return () => { ipcRenderer.removeListener('migration:progress', listener) }
   },
 
   migrationConfirmImport: (options: unknown) => {

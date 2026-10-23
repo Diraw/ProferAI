@@ -29,6 +29,14 @@ export interface ImportPreview {
   pathCheckResults: PathCheckResult[]
   tempDir: string
   workspaces?: WorkspaceImportPreviewItem[]
+  personal?: {
+    available: boolean
+    sections: string[]
+    blobCount: number
+    blobBytes: number
+    missingBlobs: number
+    warnings: string[]
+  }
 }
 
 export interface WorkspaceImportPreviewItem {
@@ -49,6 +57,13 @@ export interface WorkspaceImportMapping {
   newWorkspaceName?: string
 }
 
+export interface MigrationImportResult {
+  success: boolean
+  error?: string
+  warnings?: string[]
+  restored?: string[]
+}
+
 interface UseMigrationImportReturn {
   importing: boolean
   importPreview: ImportPreview | null
@@ -57,8 +72,15 @@ interface UseMigrationImportReturn {
   conflictResolution: 'overwrite' | 'skip'
   hasConflicts: boolean
   importConfirming: boolean
-  importResult: { success: boolean; error?: string } | null
+  importResult: MigrationImportResult | null
   isV2: boolean
+  /** 备份已加密，等待用户输入口令 */
+  requiresPassphrase: boolean
+  passphrase: string
+  passphraseError: string | null
+  setPassphrase: (value: string) => void
+  submitPassphrase: () => Promise<void>
+  cancelPassphrase: () => void
   handleSelectImportFile: () => Promise<void>
   handleConfirmImport: () => Promise<void>
   handlePathMapping: (originalPath: string, newValue: string | null) => void
@@ -74,9 +96,12 @@ export function useMigrationImport(initialFilePath?: string | null): UseMigratio
   const [workspaceMappings, setWorkspaceMappings] = useState<WorkspaceImportMapping[]>([])
   const [conflictResolution, setConflictResolution] = useState<'overwrite' | 'skip'>('overwrite')
   const [importConfirming, setImportConfirming] = useState(false)
-  const [importResult, setImportResult] = useState<{ success: boolean; error?: string } | null>(null)
+  const [importResult, setImportResult] = useState<MigrationImportResult | null>(null)
+  const [pendingFilePath, setPendingFilePath] = useState<string | null>(null)
+  const [passphrase, setPassphrase] = useState('')
+  const [passphraseError, setPassphraseError] = useState<string | null>(null)
 
-  const isV2 = importPreview?.manifest.version === '2.0' && !!importPreview.workspaces
+  const isV2 = !!importPreview?.workspaces
 
   const hasConflicts = importPreview?.workspaces?.some((ws) => {
     const mapping = workspaceMappings.find((m) => m.sourceSlug === ws.workspaceSlug)
@@ -91,7 +116,7 @@ export function useMigrationImport(initialFilePath?: string | null): UseMigratio
     }
     setPathMappings(initialPathMappings)
 
-    if (preview.manifest.version === '2.0' && preview.workspaces) {
+    if (preview.workspaces) {
       const mappings: WorkspaceImportMapping[] = preview.workspaces.map((ws) => ({
         sourceSlug: ws.workspaceSlug,
         action: ws.existsLocally ? 'merge' : 'create',
@@ -106,60 +131,102 @@ export function useMigrationImport(initialFilePath?: string | null): UseMigratio
     setImportPreview(preview)
   }, [])
 
-  const parseFile = useCallback(async (filePath: string) => {
+  const parseFile = useCallback(async (filePath: string, passphraseValue?: string) => {
     setImporting(true)
     setImportPreview(null)
     setImportResult(null)
+    setPassphraseError(null)
 
     try {
-      const preview = await window.electronAPI.migrationParseImportFile(filePath) as ImportPreview
+      const preview = await window.electronAPI.migrationParseImportFile(filePath, passphraseValue) as ImportPreview
       initFromPreview(preview)
+      setPendingFilePath(null)
+      setPassphrase('')
     } catch (err) {
-      setImportResult({ success: false, error: err instanceof Error ? err.message : '解析文件失败' })
+      const message = err instanceof Error ? err.message : '解析文件失败'
+      if (passphraseValue) {
+        // 口令类错误留在口令输入阶段，方便直接重试；其他错误按普通失败展示。
+        setPassphraseError(message)
+      } else {
+        setImportResult({ success: false, error: message })
+      }
     } finally {
       setImporting(false)
     }
   }, [initFromPreview])
 
+  const openFile = useCallback(async (filePath: string) => {
+    setImporting(true)
+    setImportPreview(null)
+    setImportResult(null)
+    setPassphraseError(null)
+
+    try {
+      const info = await window.electronAPI.migrationInspectImportFile(filePath)
+      if (info.encrypted) {
+        setPendingFilePath(filePath)
+        setPassphrase('')
+        return
+      }
+      await parseFile(filePath)
+    } catch (err) {
+      setImportResult({ success: false, error: err instanceof Error ? err.message : '解析文件失败' })
+    } finally {
+      setImporting(false)
+    }
+  }, [parseFile])
+
   useEffect(() => {
     if (initialFilePath) {
-      parseFile(initialFilePath)
+      void openFile(initialFilePath)
     }
-  }, [initialFilePath, parseFile])
+  }, [initialFilePath, openFile])
 
   const handleSelectImportFile = useCallback(async () => {
     setImporting(true)
     setImportPreview(null)
     setImportResult(null)
+    setPassphraseError(null)
 
+    let filePath: string | null
     try {
-      const filePath = await window.electronAPI.migrationOpenFileDialog()
-      if (!filePath) {
-        setImporting(false)
-        return
-      }
-      const preview = await window.electronAPI.migrationParseImportFile(filePath) as ImportPreview
-      initFromPreview(preview)
+      filePath = await window.electronAPI.migrationOpenFileDialog()
     } catch (err) {
-      setImportResult({ success: false, error: err instanceof Error ? err.message : '解析文件失败' })
-    } finally {
+      setImportResult({ success: false, error: err instanceof Error ? err.message : '选择文件失败' })
       setImporting(false)
+      return
     }
-  }, [initFromPreview])
+    if (!filePath) {
+      setImporting(false)
+      return
+    }
+    await openFile(filePath)
+  }, [openFile])
+
+  const submitPassphrase = useCallback(async () => {
+    if (!pendingFilePath) return
+    await parseFile(pendingFilePath, passphrase)
+  }, [pendingFilePath, passphrase, parseFile])
+
+  const cancelPassphrase = useCallback(() => {
+    setPendingFilePath(null)
+    setPassphrase('')
+    setPassphraseError(null)
+  }, [])
 
   const handleConfirmImport = useCallback(async () => {
     if (!importPreview) return
     setImportConfirming(true)
 
     try {
-      await window.electronAPI.migrationConfirmImport({
+      const result = await window.electronAPI.migrationConfirmImport({
         tempDir: importPreview.tempDir,
         manifest: importPreview.manifest,
         pathMappings,
         conflictResolution: hasConflicts ? conflictResolution : undefined,
         ...(isV2 ? { workspaceMappings } : {}),
-      })
-      setImportResult({ success: true })
+      }) as MigrationImportResult
+      setImportResult({ success: true, warnings: result.warnings, restored: result.restored })
       setImportPreview(null)
     } catch (err) {
       setImportResult({ success: false, error: err instanceof Error ? err.message : '导入失败' })
@@ -190,6 +257,9 @@ export function useMigrationImport(initialFilePath?: string | null): UseMigratio
     setConflictResolution('overwrite')
     setImportConfirming(false)
     setImportResult(null)
+    setPendingFilePath(null)
+    setPassphrase('')
+    setPassphraseError(null)
   }, [importPreview?.tempDir])
 
   return {
@@ -202,6 +272,12 @@ export function useMigrationImport(initialFilePath?: string | null): UseMigratio
     importConfirming,
     importResult,
     isV2,
+    requiresPassphrase: pendingFilePath !== null,
+    passphrase,
+    passphraseError,
+    setPassphrase,
+    submitPassphrase,
+    cancelPassphrase,
     handleSelectImportFile,
     handleConfirmImport,
     handlePathMapping,
