@@ -1260,6 +1260,8 @@ function TabBarInner({
         <div className="topbar-tabs-viewport absolute inset-0 overflow-hidden rounded-r-full">
           <div
             ref={scrollRef}
+            // 顶栏标签条把纵向滚轮换算成横向滚动，不参与全局平滑滚动
+            data-smooth-wheel="off"
             className="topbar-tabs-scroll flex min-w-0 items-center gap-1 overflow-x-auto pl-2 pr-1 scrollbar-none"
             style={{ height: TOPBAR_CONTENT_HEIGHT }}
           >

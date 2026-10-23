@@ -17,6 +17,7 @@ import React, { useEffect, useMemo, useRef } from 'react'
 import ReactDOM from 'react-dom/client'
 import { useSetAtom, useAtomValue, useStore } from 'jotai'
 import App from './App'
+import { SmoothWheelInitializer } from './hooks/useSmoothWheel'
 import {
   themeModeAtom,
   themeStyleAtom,
@@ -58,6 +59,7 @@ import {
   stickyUserMessageEnabledAtom,
   userMessagePositionAtom,
   showCreditsInSidebarAtom,
+  smoothScrollEnabledAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
   composerCompactModeAtom,
@@ -505,6 +507,7 @@ function UiPreferencesInitializer(): null {
   const setRichTextRenderingEnabled = useSetAtom(richTextRenderingEnabledAtom)
   const setComposerCompactMode = useSetAtom(composerCompactModeAtom)
   const setPreviewOpenMode = useSetAtom(previewOpenModeAtom)
+  const setSmoothScrollEnabled = useSetAtom(smoothScrollEnabledAtom)
 
   useEffect(() => {
     initializeUiPreferences(
@@ -514,9 +517,10 @@ function UiPreferencesInitializer(): null {
       setLongTextPasteAsAttachmentEnabled,
       setRichTextRenderingEnabled,
       setComposerCompactMode,
-      setPreviewOpenMode
+      setPreviewOpenMode,
+      setSmoothScrollEnabled
     )
-  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setUserMessagePosition, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode, setPreviewOpenMode])
+  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setUserMessagePosition, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode, setPreviewOpenMode, setSmoothScrollEnabled])
 
   return null
 }
@@ -1148,6 +1152,7 @@ if (isQuickTaskWindow) {
       <AgentUnreadSettingsInitializer />
       <DockBadgeInitializer />
       <UiPreferencesInitializer />
+      <SmoothWheelInitializer />
       <ComposerToolbarPreferencesInitializer />
       <MarkdownFontSizeInitializer />
       <UiScaleInitializer />

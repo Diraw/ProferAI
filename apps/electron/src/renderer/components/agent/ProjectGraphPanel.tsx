@@ -632,6 +632,8 @@ export function ProjectGraphPanel({ refreshVersion = 0 }: { refreshVersion?: num
           {/* 无界画布 */}
           <div
             ref={containerRef}
+            // 画布自己用滚轮缩放，不参与全局平滑滚动
+            data-smooth-wheel="off"
             className="flex-1 overflow-hidden relative"
             style={{
               cursor: dragging ? 'grabbing' : 'grab',

@@ -66,6 +66,8 @@ import {
   updateLongTextPasteAsAttachmentEnabled,
   richTextRenderingEnabledAtom,
   updateRichTextRenderingEnabled,
+  smoothScrollEnabledAtom,
+  updateSmoothScrollEnabled,
   previewOpenModeAtom,
   updatePreviewOpenMode,
   composerCompactModeAtom,
@@ -89,6 +91,7 @@ import {
   normalizeCompactViewportHeight,
 } from '@/lib/composer-compact-height'
 import { useWindowInnerHeight } from '@/hooks/use-window-inner-height'
+import { detectIsWindows } from '@profer/ui'
 import { agentProcessGroupsKeepExpandedAtom } from '@/atoms/agent-atoms'
 import { autoPreviewEnabledAtom } from '@/atoms/preview-atoms'
 import { manualReadConfirmEnabledAtom, updateManualReadConfirmEnabled } from '@/atoms/agent-unread-settings'
@@ -105,6 +108,8 @@ export function UsageSettings(): React.ReactElement {
   const [customSounds, setCustomSounds] = useAtom(customNotificationSoundsAtom)
   const [showCreditsInSidebar, setShowCreditsInSidebar] = useAtom(showCreditsInSidebarAtom)
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
+  const [smoothScrollEnabled, setSmoothScrollEnabled] = useAtom(smoothScrollEnabledAtom)
+  const isWindows = React.useMemo(() => detectIsWindows(), [])
   const [userMessagePosition, setUserMessagePosition] = useAtom(userMessagePositionAtom)
   const [longTextPasteAsAttachmentEnabled, setLongTextPasteAsAttachmentEnabled] = useAtom(longTextPasteAsAttachmentEnabledAtom)
   const [richTextRenderingEnabled, setRichTextRenderingEnabled] = useAtom(richTextRenderingEnabledAtom)
@@ -543,6 +548,17 @@ export function UsageSettings(): React.ReactElement {
               updateStickyUserMessageEnabled(checked)
             }}
           />
+          {isWindows && (
+            <SettingsToggle
+              label="平滑滚动"
+              description="接管鼠标滚轮的离散刻度，补上 macOS 那样的速度加速与惯性：连转更快、停手自然减速。触控板、高精度滚轮与 Ctrl+滚轮缩放不受影响。"
+              checked={smoothScrollEnabled}
+              onCheckedChange={(checked) => {
+                setSmoothScrollEnabled(checked)
+                void updateSmoothScrollEnabled(checked)
+              }}
+            />
+          )}
           <SettingsSegmentedControl
             label="用户消息位置"
             description="选择用户头像、用户名和消息气泡显示在对话的哪一侧"

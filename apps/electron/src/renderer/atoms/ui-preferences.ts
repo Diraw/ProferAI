@@ -32,6 +32,9 @@ export const longTextPasteAsAttachmentEnabledAtom = atom<boolean>(false)
 /** 输入框是否渲染 Markdown 富文本格式（默认关闭，纯文本模式；开启后渲染富文本，仍保留 Mention 引用） */
 export const richTextRenderingEnabledAtom = atom<boolean>(false)
 
+/** Windows 鼠标滚轮平滑滚动（默认开启，仅 Windows 生效） */
+export const smoothScrollEnabledAtom = atom<boolean>(true)
+
 /** 「矮窗口压缩输入框」配置 */
 export interface ComposerCompactModeSettings {
   /** 触发阈值（窗口内高，px）；0 = 关闭该行为 */
@@ -68,7 +71,8 @@ export async function initializeUiPreferences(
   setLongTextPasteAsAttachmentEnabled?: (enabled: boolean) => void,
   setRichTextRenderingEnabled?: (enabled: boolean) => void,
   setComposerCompactMode?: (value: ComposerCompactModeSettings) => void,
-  setPreviewOpenMode?: (mode: PreviewOpenMode) => void
+  setPreviewOpenMode?: (mode: PreviewOpenMode) => void,
+  setSmoothScrollEnabled?: (enabled: boolean) => void
 ): Promise<void> {
   try {
     const settings = await window.electronAPI.getSettings()
@@ -83,6 +87,7 @@ export async function initializeUiPreferences(
       maxHeight: normalizeCompactMaxHeight(settings.inputCompactMaxHeight),
     })
     setPreviewOpenMode?.(settings.previewModePreference === 'split' ? 'split' : DEFAULT_PREVIEW_OPEN_MODE)
+    setSmoothScrollEnabled?.(settings.smoothScrollEnabled ?? true)
   } catch (error) {
     console.error('[UI偏好] 初始化失败:', error)
   }
@@ -131,6 +136,17 @@ export async function updateRichTextRenderingEnabled(enabled: boolean): Promise<
     await window.electronAPI.updateSettings({ richTextRenderingEnabled: enabled })
   } catch (error) {
     console.error('[UI偏好] 更新输入框 Markdown 渲染设置失败:', error)
+  }
+}
+
+/**
+ * 更新 Windows 平滑滚动开关并持久化
+ */
+export async function updateSmoothScrollEnabled(enabled: boolean): Promise<void> {
+  try {
+    await window.electronAPI.updateSettings({ smoothScrollEnabled: enabled })
+  } catch (error) {
+    console.error('[UI偏好] 更新平滑滚动设置失败:', error)
   }
 }
 

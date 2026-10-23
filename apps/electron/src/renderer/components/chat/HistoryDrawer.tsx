@@ -872,6 +872,8 @@ function TreeCanvas({ layout, conversationId, onSwitch, collapsedIds, onToggleCo
       {/* 树形画布：滚轮缩放 + 左键拖拽平移 */}
       <div
         ref={canvasRef}
+        // 画布自己用滚轮缩放，不参与全局平滑滚动
+        data-smooth-wheel="off"
         className={cn('flex-1 overflow-hidden relative', isDragging ? 'cursor-grabbing' : 'cursor-grab')}
         onMouseDown={handleCanvasMouseDown}
       >
