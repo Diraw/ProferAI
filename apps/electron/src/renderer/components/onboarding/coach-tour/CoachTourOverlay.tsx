@@ -15,7 +15,7 @@
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { useAtom, useStore } from 'jotai'
-import { X } from 'lucide-react'
+import { Check, Clock3, Layers, Sparkles, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { coachTourOpenAtom } from '@/atoms/coach-tour-atoms'
 import { activeViewAtom, type ActiveView } from '@/atoms/active-view'
@@ -27,6 +27,13 @@ import { claimCoachTourOwnership } from './coach-tour-owner'
 
 /** 未测量前的气泡估算尺寸；首个 layout effect 会用真实值收敛，避免跳动 */
 const FALLBACK_CARD_SIZE: CardSize = { width: 320, height: 190 }
+
+/** 收尾卡片的三个「接下来」建议 */
+const FINALE_ACTIONS = [
+  { key: 'task', icon: Sparkles, title: '发一个真实任务', hint: '让它分析工作区里的一个文件并给出结论' },
+  { key: 'skill', icon: Layers, title: '把流程存成 Skill', hint: '一次写好，下次一句话调用' },
+  { key: 'automation', icon: Clock3, title: '设一个定时任务', hint: '每周一自动整理进展并提醒你' },
+] as const
 const MOVE_TRANSITION = 'left 0.32s cubic-bezier(0.22,1,0.36,1), top 0.32s cubic-bezier(0.22,1,0.36,1), width 0.32s cubic-bezier(0.22,1,0.36,1), height 0.32s cubic-bezier(0.22,1,0.36,1)'
 
 /** 收集某选择器下所有可见且非零尺寸的元素矩形 */
@@ -157,6 +164,7 @@ export function CoachTourOverlay(): React.ReactElement | null {
     }
     setStepIndex((current) => current + 1)
   }, [finish, isLast])
+  const restart = React.useCallback(() => setStepIndex(0), [])
 
   // 切步/退出时清掉未触发的交互前进定时器
   React.useEffect(() => {
@@ -259,6 +267,7 @@ export function CoachTourOverlay(): React.ReactElement | null {
   if (!open || !step) return null
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const isFinale = step.finale === true
   const cardLayout = computeCardLayout(rect, cardSize, step.placement, {
     width: window.innerWidth,
     height: window.innerHeight,
@@ -313,7 +322,7 @@ export function CoachTourOverlay(): React.ReactElement | null {
         />
       )}
 
-      {/* 引导气泡：关闭按钮与标题同一行中线，页脚与正文用分隔线断开 */}
+      {/* 引导气泡：普通步骤是标题 + 正文 + 页脚；最后一步换成完成卡片 */}
       <div
         ref={cardRef}
         role="dialog"
@@ -322,69 +331,138 @@ export function CoachTourOverlay(): React.ReactElement | null {
         tabIndex={-1}
         style={{ left: cardLayout.left, top: cardLayout.top, transition }}
         className={cn(
-          'titlebar-no-drag pointer-events-auto absolute w-[344px] rounded-2xl border border-border/80 bg-popover/95 p-4 text-popover-foreground shadow-[0_28px_80px_-24px_rgba(0,0,0,0.55)] outline-none backdrop-blur-xl',
+          'titlebar-no-drag pointer-events-auto absolute rounded-2xl border border-border/80 bg-popover/95 text-popover-foreground shadow-[0_28px_80px_-24px_rgba(0,0,0,0.55)] outline-none backdrop-blur-xl',
+          isFinale ? 'w-[380px] p-5' : 'w-[344px] p-4',
           !reduceMotion && 'animate-in fade-in-0 zoom-in-95 duration-200',
         )}
         onClick={(event) => event.stopPropagation()}
       >
-        {/* 内容区按步 key 重挂，切步时交叉淡入，避免文案瞬跳 */}
-        <div
-          key={step.key}
-          className={cn(!reduceMotion && 'animate-in fade-in-0 slide-in-from-bottom-1 duration-200')}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[9.5px] tracking-[0.1em] text-primary">
-                {String(stepIndex + 1).padStart(2, '0')} / {String(totalSteps).padStart(2, '0')}
-              </span>
-              <h3 className="truncate text-[13.5px] font-semibold">{step.title}</h3>
-            </div>
-            <button
-              type="button"
-              aria-label="退出引导"
-              onClick={close}
-              className="-mr-1 grid size-7 shrink-0 place-items-center rounded-lg text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        {isFinale ? (
+          <FinaleCard step={step} onFinish={finish} onRestart={restart} />
+        ) : (
+          <>
+            {/* 内容区按步 key 重挂，切步时交叉淡入，避免文案瞬跳 */}
+            <div
+              key={step.key}
+              className={cn(!reduceMotion && 'animate-in fade-in-0 slide-in-from-bottom-1 duration-200')}
             >
-              <X size={14} />
-            </button>
-          </div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 font-mono text-[9.5px] tracking-[0.1em] text-primary">
+                    {String(stepIndex + 1).padStart(2, '0')} / {String(totalSteps).padStart(2, '0')}
+                  </span>
+                  <h3 className="truncate text-[13.5px] font-semibold">{step.title}</h3>
+                </div>
+                <button
+                  type="button"
+                  aria-label="退出引导"
+                  onClick={close}
+                  className="-mr-1 grid size-7 shrink-0 place-items-center rounded-lg text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                >
+                  <X size={14} />
+                </button>
+              </div>
 
-          <p className="mt-2.5 text-[12.5px] leading-[1.7] text-muted-foreground">{step.body}</p>
+              <p className="mt-2.5 text-[12.5px] leading-[1.7] text-muted-foreground">{step.body}</p>
 
-          {interactive && (
-            <p className="mt-2.5 flex items-center gap-1.5 text-[11px] font-medium text-primary">
-              <span className="inline-block size-1.5 animate-pulse rounded-full bg-primary" aria-hidden="true" />
-              点击高亮区域继续
-            </p>
-          )}
-        </div>
+              {interactive && (
+                <p className="mt-2.5 flex items-center gap-1.5 text-[11px] font-medium text-primary">
+                  <span className="inline-block size-1.5 animate-pulse rounded-full bg-primary" aria-hidden="true" />
+                  点击高亮区域继续
+                </p>
+              )}
+            </div>
 
-        <div className="mt-4 flex items-center justify-between border-t border-border/60 pt-3">
-          {/* 步骤指示点 */}
-          <div className="flex items-center gap-1.5" aria-hidden="true">
-            {COACH_TOUR_STEPS.map((s, index) => (
-              <span
-                key={s.key}
-                className={cn(
-                  'h-1.5 rounded-full transition-all duration-200',
-                  index === stepIndex ? 'w-4 bg-primary' : 'w-1.5 bg-muted-foreground/25',
+            <div className="mt-4 flex items-center justify-between border-t border-border/60 pt-3">
+              {/* 步骤指示点 */}
+              <div className="flex items-center gap-1.5" aria-hidden="true">
+                {COACH_TOUR_STEPS.map((s, index) => (
+                  <span
+                    key={s.key}
+                    className={cn(
+                      'h-1.5 rounded-full transition-all duration-200',
+                      index === stepIndex ? 'w-4 bg-primary' : 'w-1.5 bg-muted-foreground/25',
+                    )}
+                  />
+                ))}
+              </div>
+
+              <div className="flex items-center gap-1">
+                {/* 交互步骤等用户亲自点击锚点；锚点缺失（降级）时恢复手动下一步 */}
+                {!interactive && (
+                  <Button type="button" size="sm" className="h-7 px-3 text-xs" onClick={next}>
+                    {isLast ? '完成' : '下一步'}
+                  </Button>
                 )}
-              />
-            ))}
-          </div>
-
-          <div className="flex items-center gap-1">
-            {/* 交互步骤等用户亲自点击锚点；锚点缺失（降级）时恢复手动下一步 */}
-            {!interactive && (
-              <Button type="button" size="sm" className="h-7 px-3 text-xs" onClick={next}>
-                {isLast ? '完成' : '下一步'}
-              </Button>
-            )}
-          </div>
-        </div>
+              </div>
+            </div>
+          </>
+        )}
       </div>
+
     </div>,
     document.body,
+  )
+}
+
+/** 收尾卡片：比普通气泡更宽、居中，给出三条下一步建议和两个出口 */
+function FinaleCard({
+  step,
+  onFinish,
+  onRestart,
+}: {
+  step: CoachTourStep
+  onFinish: () => void
+  onRestart: () => void
+}): React.ReactElement {
+  return (
+    <div className="relative">
+      <div
+        className="pointer-events-none absolute -inset-x-6 -top-24 h-40 bg-[radial-gradient(ellipse_at_center,hsl(var(--primary)/0.16),transparent_70%)]"
+        aria-hidden="true"
+      />
+
+      <div className="relative text-center">
+        <span className="mx-auto grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground shadow-[0_16px_40px_-14px_hsl(var(--primary)/0.55)]">
+          <Check className="size-5" aria-hidden="true" />
+        </span>
+        <h3 className="mt-4 text-[18px] font-semibold tracking-[-0.01em]">{step.title}</h3>
+        <p className="mx-auto mt-1.5 max-w-[300px] text-[12.5px] leading-relaxed text-muted-foreground">{step.body}</p>
+      </div>
+
+      <ul className="relative mt-5 space-y-1.5">
+        {FINALE_ACTIONS.map((action) => (
+          <li
+            key={action.key}
+            className="flex items-start gap-3 rounded-xl border border-border/60 bg-muted/30 px-3 py-2.5"
+          >
+            <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-lg bg-background text-muted-foreground">
+              <action.icon className="size-3.5" aria-hidden="true" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-[12px] font-medium text-foreground/90">{action.title}</span>
+              <span className="block text-[10.5px] leading-relaxed text-muted-foreground">{action.hint}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <div className="relative mt-5 flex items-center gap-2">
+        <Button type="button" size="sm" className="h-9 flex-1 text-xs" onClick={onFinish}>
+          开始使用
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-9 px-3 text-xs text-muted-foreground"
+          onClick={onRestart}
+        >
+          再看一遍
+        </Button>
+      </div>
+      <p className="relative mt-3 text-center text-[10px] text-muted-foreground/60">随时可从顶栏指南针重播</p>
+    </div>
   )
 }
 

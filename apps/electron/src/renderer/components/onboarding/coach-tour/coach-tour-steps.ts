@@ -35,6 +35,8 @@ export interface CoachTourStep {
   advanceOn?: 'click-anchor'
   /** 提供时取代 selectors：对所有命中元素取外接矩形作为锚点 */
   unionSelectors?: string[]
+  /** 收尾步：气泡改用「完成卡片」样式，给出下一步建议 */
+  finale?: boolean
 }
 
 export const COACH_TOUR_STEPS: CoachTourStep[] = [
@@ -104,10 +106,11 @@ export const COACH_TOUR_STEPS: CoachTourStep[] = [
   },
   {
     key: 'outro',
-    title: '开始你的第一个任务',
-    body: '建议的第一个任务：切到 Agent，让它分析工作区里的一个文件并给出结论。随时可从指南针重播。',
+    title: '好了，剩下的交给你',
+    body: '主要入口已经走了一遍。接下来最值得做的三件事：',
     selectors: [],
     placement: 'auto',
+    finale: true,
   },
 ]
 
