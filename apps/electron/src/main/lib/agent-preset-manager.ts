@@ -312,7 +312,7 @@ export function normalizePresetReference(reference: PresetReference, contextWork
     return { ...reference, presetId: reference.presetId.trim(), workspaceSlug }
   }
   if (reference.workspaceSlug !== undefined) {
-    throw new AgentPresetError('PRESET_SCOPE_MISMATCH', '全局预设引用不得携带 workspaceSlug')
+    throw new AgentPresetError('PRESET_SCOPE_MISMATCH', '全局预设引用不得携带 workspaceSlug，请删除该字段或改用 workspace 作用域')
   }
   return { ...reference, presetId: reference.presetId.trim() }
 }

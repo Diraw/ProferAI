@@ -75,6 +75,47 @@ describe('Pi 工具定义压缩', () => {
     })
   })
 
+  // 委派工具的 presetReference 描述不能在压缩后丢失：模型只看到「有这个可选字段」
+  // 就会习惯性把引用补成四字段对象，触发全局 scope 携带 workspaceSlug 的严格校验。
+  test('委派工具压缩后仍保留 presetReference / workspaceSlug 的说明', () => {
+    const presetReferenceSchema = {
+      type: 'object',
+      description: 'schema 层的长说明会被压缩掉',
+      properties: {
+        presetId: { type: 'string', description: 'id 说明' },
+        workspaceSlug: { type: 'string', description: 'slug 说明' },
+      },
+    }
+    const single = tool('mcp__collaboration__delegate_agent')
+    single.parameters = {
+      type: 'object',
+      properties: { presetReference: presetReferenceSchema },
+    } as never
+    const batch = tool('mcp__collaboration__delegate_agents')
+    batch.parameters = {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          items: { type: 'object', properties: { presetReference: presetReferenceSchema } },
+        },
+      },
+    } as never
+
+    const compactedSingle = compactPiToolDefinition(single, { allowBuiltinMcpNames: true })
+    const compactedBatch = compactPiToolDefinition(batch, { allowBuiltinMcpNames: true })
+
+    expect(compactedSingle.description).toContain('不要自行补字段')
+    expect(compactedBatch.description).toContain('不要自行补字段')
+
+    type ReferenceProperties = { properties: Record<string, { properties: Record<string, { description?: string }> }> }
+    const singleProps = (compactedSingle.parameters as unknown as ReferenceProperties).properties
+    expect(singleProps.presetReference!.properties.workspaceSlug!.description).toContain('presetScope=workspace')
+
+    const batchProps = (compactedBatch.parameters as unknown as { properties: { items: { items: ReferenceProperties } } }).properties
+    expect(batchProps.items.items.properties.presetReference!.properties.workspaceSlug!.description).toContain('presetScope=workspace')
+  })
+
   test('批量压缩不改变工具数量、名称或参数的非描述部分', () => {
     const original = [tool('read'), tool('BrowserNavigate'), tool('mcp__automation__create_automation'), tool('mcp__custom__third_party')]
     const compacted = compactPiToolDefinitions(original)

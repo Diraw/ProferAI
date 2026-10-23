@@ -56,11 +56,14 @@ const PRESERVED_PARAMETER_DESCRIPTIONS: Record<string, Record<string, string>> =
   mcp__collaboration__delegate_agent: {
     task: '发送给子 Agent 的完整任务说明，必须自包含必要上下文',
     modelId: '可选目标模型 ID；先从可用模型工具读取，不要猜测',
-    presetReference: '可选目标预设；不传则继承当前父会话预设',
+    presetReference: '可选目标预设；直接照抄 preset_list 返回的 presetReference，不要自行补字段；不传则继承父会话预设',
+    workspaceSlug: '仅 presetScope=workspace 时使用；内置/全局预设不要传',
   },
   mcp__collaboration__delegate_agents: {
     items: '要创建的子会话列表，最多 50 个',
     sharedContext: '批量子任务共用背景，会自动拼接到每个子任务前',
+    presetReference: '可选目标预设；直接照抄 preset_list 返回的 presetReference，不要自行补字段',
+    workspaceSlug: '仅 presetScope=workspace 时使用；内置/全局预设不要传',
   },
   mcp__collaboration__wait_for_delegations: {
     minCompleted: 'mode=any 时至少等待完成的数量；mode=all 忽略，默认 1',
@@ -117,7 +120,7 @@ function compactMcpDescription(name: string): string | undefined {
     return '查看 Profer 持久化定时任务及运行记录。'
   }
   if (name.startsWith('mcp__collaboration__')) {
-    if (name.endsWith('delegate_agent') || name.endsWith('delegate_agents')) return '只为长耗时、可独立且需追踪的任务创建 Profer 协作会话；任务须自包含，简单搜索直接完成。presetReference 按工具 schema 提供。'
+    if (name.endsWith('delegate_agent') || name.endsWith('delegate_agents')) return '只为长耗时、可独立且需追踪的任务创建 Profer 协作会话；任务须自包含，简单搜索直接完成。presetReference 直接照抄 preset_list 返回的引用，不要自行补字段。'
     if (name.endsWith('wait_for_delegations')) return '等待协作会话并返回结构化状态。'
     if (name.endsWith('answer_delegation_question')) return '代答子会话的问答或权限阻塞。'
     if (name.endsWith('continue_delegation')) return '向已结束的子会话追加后续指令。'

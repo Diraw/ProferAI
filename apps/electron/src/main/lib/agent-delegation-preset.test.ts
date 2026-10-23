@@ -124,15 +124,36 @@ describe('resolveDelegationPreset', () => {
     })).toThrow('当前工作区')
   })
 
-  test('拒绝给全局引用附加 workspaceSlug', () => {
-    expect(() => resolveDelegationPreset({
+  test('全局引用多余携带的 workspaceSlug 在委派边界被静默丢弃', () => {
+    const result = resolveDelegationPreset({
       target: {
         presetId: 'code',
         presetScope: 'builtin-meta',
         workspaceSlug: 'workspace-a',
+        presetVersion: '1.1.0',
       },
       workspaceSlug: 'workspace-a',
-    })).toThrow('全局预设引用不得携带 workspaceSlug')
+    })
+
+    expect(result?.reference).toEqual({
+      presetId: 'code',
+      presetScope: 'builtin-meta',
+      presetVersion: '1.1.0',
+    })
+    expect(result?.reference.workspaceSlug).toBeUndefined()
+    expect(result?.preset.id).toBe('code')
+  })
+
+  test('父会话全局引用携带 workspaceSlug 时同样归一化而非报错', () => {
+    const result = resolveDelegationPreset({
+      parent: parent({
+        presetId: 'standard',
+        presetReference: { presetId: 'standard', presetScope: 'builtin-meta', workspaceSlug: 'workspace-a' },
+      }),
+      workspaceSlug: 'workspace-a',
+    })
+
+    expect(result?.reference).toEqual({ presetId: 'standard', presetScope: 'builtin-meta' })
   })
 
   test('没有父预设和显式目标时保留既有默认行为', () => {

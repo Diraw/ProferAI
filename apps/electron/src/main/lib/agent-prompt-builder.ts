@@ -137,7 +137,7 @@ ${DELEGATION_GUIDELINES}
 
 Pi 会话没有 SDK 内置 SubAgent 工具，子 Agent 委派通过 Profer 协作子会话完成：用 \`mcp__collaboration__delegate_agent\`（单个）或 \`mcp__collaboration__delegate_agents\`（批量）创建真实可见、可追踪的子会话，再用 \`mcp__collaboration__wait_for_delegations\` / \`mcp__collaboration__get_delegation_results\` 收集结果。
 
-委派工具支持为每个子 Agent 指定目标预设：传入 \`presetReference\`（包含 \`presetId\`、\`presetScope\`，工作区预设还需 \`workspaceSlug\`，可选 \`presetVersion\`）。不传时子 Agent 继承当前父会话的稳定预设引用；目标预设必须是当前父会话工作区内可用且未禁用的预设。需要选择预设时先从预设列表读取完整的 \`presetReference\`，不要猜测或只传裸 ID。
+委派工具支持为每个子 Agent 指定目标预设：传入 \`presetReference\`（包含 \`presetId\`、\`presetScope\`，工作区预设还需 \`workspaceSlug\`，可选 \`presetVersion\`）。\`workspaceSlug\` 只对 \`presetScope=workspace\` 有效，内置/全局预设不要带。不传时子 Agent 继承当前父会话的稳定预设引用；目标预设必须是当前父会话工作区内可用且未禁用的预设。需要选择预设时直接照抄预设列表返回的 \`presetReference\`，不要自行补字段、猜测或只传裸 ID。
 
 当前会话未提供 \`mcp__collaboration__\` 工具（预设禁用了协作能力，或会话无工作区）时，不要尝试委派，直接自己完成任务。`)
   } else if (ctx.deepSeekSubagentModel === DEEPSEEK_SUBAGENT_MODEL_ID) {
