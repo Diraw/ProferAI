@@ -1790,6 +1790,57 @@
   background: transparent;
 }
 
+/* ===== 对话区滚动条：滚动时才出现 =====
+ * 不滚动时完全透明，用户滚动时露出，停手约 0.7s 后隐藏（macOS 习惯）。
+ * JS 侧见 components/ai-elements/scrollbar-reveal.ts：只给滚动容器打 data-scrolling，
+ * 程序性滚动（流式跟随、内容变高）不触发。
+ *
+ * 必须把 scrollbar-width/color 交回 auto 才能自己控制显隐：
+ * 全局 `*` 规则里的 scrollbar-width/color 会让 Chromium 走系统 overlay 滚动条，
+ * 那种滚动条由 macOS 自己决定何时出现，JS 改不动；只有 ::-webkit-scrollbar
+ * 伪元素样式才是应用可控的。代价是滚动条占 6px（对话区本来就用
+ * scrollbarGutter: stable both-edges 保留槽位，所以内容不会左右跳动）。
+ */
+.profer-scroll-region {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.profer-scroll-region:hover {
+  /* 覆盖全局 `*:hover` 的加深规则：悬停本身不显示滚动条。 */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.profer-scroll-region::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.profer-scroll-region::-webkit-scrollbar-track {
+  background: transparent;
+}
+.profer-scroll-region::-webkit-scrollbar-thumb,
+.profer-scroll-region:hover::-webkit-scrollbar-thumb,
+.profer-scroll-region::-webkit-scrollbar-thumb:hover {
+  background-color: transparent;
+  opacity: 0;
+}
+.profer-scroll-region[data-scrolling='true']::-webkit-scrollbar-thumb,
+.profer-scroll-region[data-scrolling='true']:hover::-webkit-scrollbar-thumb,
+.profer-scroll-region[data-scrolling='true']::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--muted-foreground) / 0.45);
+  opacity: 1;
+}
+
+/* 有右侧进度条的对话区：隐藏原生滚动条，避免两条叠在一起。
+ * 进度条本身就承担位置指示 + 拖拽，滚动时出现；没有进度条的对话视图
+ * （未达 minimap 阈值、并行视图等）仍按上面的规则使用原生滚动条。 */
+[role='log']:has(.scroll-progress-track) .profer-scroll-region {
+  scrollbar-width: none;
+}
+[role='log']:has(.scroll-progress-track) .profer-scroll-region::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 /* 左侧会话/项目列表：默认不露出滚动条，鼠标进入列表后才显示，仍支持滚轮和触控板滚动。 */
 .sidebar-session-scroll {
   scrollbar-width: none;
@@ -2014,6 +2065,20 @@
 }
 
 /* ===== 滚动进度条 — 适配所有主题（无轨道背景，仅滑块） ===== */
+
+/* 按需显隐：不滚动时完全隐藏，用户滚动时露出，停手约 0.7s 后隐藏。
+ * 标记由 components/ai-elements/scrollbar-reveal.ts 打在轨道元素上；
+ * 用 opacity 而不是背景色，避免和皮肤/主题的 --scroll-thumb-bg 配色打架。 */
+.scroll-progress-track {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.scroll-progress-track[data-scrolling='true'],
+.scroll-progress-track[data-dragging='true'] {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 /* 默认亮色主题 */
 .scroll-progress-thumb {

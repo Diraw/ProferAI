@@ -20,6 +20,7 @@ function harness() {
     clientHeight = 400
     isContentEditable = false
     tagName = 'DIV'
+    dataset: Record<string, string> = {}
     listeners = new Map<string, Function>()
     addEventListener(name: string, cb: Function) { this.listeners.set(name, cb) }
     removeEventListener(name: string) { this.listeners.delete(name) }

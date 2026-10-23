@@ -1,5 +1,6 @@
 import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type MutableRefObject } from 'react'
 import { ConversationScrollController, type ReadingPosition } from './conversation-scroll-controller'
+import { attachScrollbarReveal } from './scrollbar-reveal'
 
 export interface ConversationScrollActions {
   following: boolean
@@ -51,7 +52,12 @@ export function ConversationScrollProvider({ children, smoothResize }: {
       if (!saved.following && saved.position) instance.restore(saved.position)
       else instance.follow(false)
     }
-    const onScroll = (): void => instance.scrolled()
+    // 滚动条按需显示：仅用户主动滚动时露出，停手后自动隐藏（样式见 globals.css）。
+    const scrollbar = attachScrollbarReveal(el)
+    const onScroll = (): void => {
+      instance.scrolled()
+      if (scrollbar.isVisible()) scrollbar.reveal()
+    }
     const nestedScroller = (target: EventTarget | null): boolean => {
       let node = target instanceof HTMLElement ? target : null
       while (node && node !== el) {
@@ -63,21 +69,30 @@ export function ConversationScrollProvider({ children, smoothResize }: {
     }
     const onWheel = (event: WheelEvent): void => {
       if (nestedScroller(event.target)) return
+      scrollbar.reveal()
       instance.userInput()
       if (event.deltaY < 0 && el.scrollHeight > el.clientHeight) instance.pause()
     }
-    const onPointer = (): void => instance.userInput()
+    // 点击内容不应闪出滚动条；只有直接操作滚动条（target 为容器本身）才露出。
+    const onPointer = (event: PointerEvent): void => {
+      if (event.target === el) scrollbar.reveal()
+      instance.userInput()
+    }
     const onKey = (event: KeyboardEvent): void => {
       if (nestedScroller(event.target)) return
       if (event.target instanceof HTMLElement && (event.target.isContentEditable
         || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName))) return
-      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) instance.userInput()
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
+        scrollbar.reveal()
+        instance.userInput()
+      }
       if (['ArrowUp', 'PageUp', 'Home'].includes(event.key)) instance.pause()
     }
     let touchY: number | null = null
     const onTouchStart = (event: TouchEvent): void => { touchY = event.touches[0]?.clientY ?? null }
     const onTouchMove = (event: TouchEvent): void => {
       if (nestedScroller(event.target)) return
+      scrollbar.reveal()
       instance.userInput()
       const y = event.touches[0]?.clientY
       if (y !== undefined && touchY !== null && y > touchY) instance.pause()
@@ -102,6 +117,7 @@ export function ConversationScrollProvider({ children, smoothResize }: {
     return () => {
       disposedSnapshot.current = { following: instance.following, position: instance.snapshot() }
       instance.dispose()
+      scrollbar.dispose()
       controller.current = null
       observer.disconnect()
       el.removeEventListener('pointerdown', onPointer)

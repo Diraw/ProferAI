@@ -12,6 +12,7 @@ import { useAtomValue } from 'jotai'
 import { MarkdownPreview, MARKDOWN_PREVIEW_LIGHT_COMPONENTS } from '@profer/ui'
 import { AlertTriangle, Search } from 'lucide-react'
 import { useConversationScroll } from './conversation-scroll'
+import { attachScrollbarReveal } from './scrollbar-reveal'
 import { Input } from '@profer/ui/primitives/input'
 import { UserAvatar } from '@/components/chat/UserAvatar'
 import { getModelLogo, resolveModelProvider } from '@/lib/model-logo'
@@ -207,6 +208,15 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
   const searchInputRef = React.useRef<HTMLInputElement>(null)
   const trackRef = React.useRef<HTMLDivElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
+
+  /** 滚动进度条按需显隐：只有用户滚动时才露出，停手约 0.7s 后隐藏。 */
+  React.useEffect(() => {
+    if (!canScroll) return
+    const track = trackRef.current
+    if (!track) return
+    const reveal = attachScrollbarReveal(track, { watchElement: scrollRef.current })
+    return () => reveal.dispose()
+  }, [scrollRef, canScroll])
 
   /**
    * 一轮 = 一条用户消息 + 它的回复（见 lib/navigation-turns）。
@@ -706,7 +716,8 @@ export function ScrollMinimap({ items, onRequestEarlier }: ScrollMinimapProps): 
       <div className="absolute right-1 top-0 bottom-0 z-30 py-4 pointer-events-none">
         <div
           ref={trackRef}
-          className="relative h-full rounded-full cursor-pointer pointer-events-auto"
+          data-dragging={isDragging || undefined}
+          className="scroll-progress-track relative h-full rounded-full cursor-pointer"
           style={{ width: 7 }}
           onMouseDown={handleTrackMouseDown}
         >
