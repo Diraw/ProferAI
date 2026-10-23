@@ -328,11 +328,14 @@ export function MainArea(): React.ReactElement {
     }
   }, [tabs, activeTabId, setActiveTabId])
 
+  // 对话区表面必须显式上色（bg-content-area）：皮肤把 --content-area 定义为「比侧栏浅」
+  // 的内容区色，缺这层底色时面板会透出外层 .shell-bg 缝隙渐变（比侧栏更深），
+  // 云朵舞者等浅色皮肤就会呈现「侧栏与对话区颜色颠倒」。
   return (
     <div className="relative flex h-full min-w-0">
       <Panel
         variant="grow"
-        className="main-content-panel relative rounded-2xl shadow-xl dark:shadow-sm"
+        className="main-content-panel relative rounded-2xl bg-content-area shadow-xl dark:shadow-sm"
       >
         {/* 通用兜底宿主：凡是 TabBar 不持有窗口按钮的分支（定时任务表单、无 Tab
             空态、以及所有全屏视图）都必须能提供按钮；页面自己声明的宿主
