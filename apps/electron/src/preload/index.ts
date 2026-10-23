@@ -174,6 +174,9 @@ export interface ElectronAPI {
   /** 获取宿主操作系统和 CPU 架构，供安装包选择使用 */
   getPlatformInfo: () => { platform: NodeJS.Platform; arch: string }
 
+  /** 手写笔墨迹识别：传入 PNG dataURL，返回识别文本（macOS Vision，离线） */
+  recognizeHandwriting: (pngBase64: string) => Promise<{ text: string; error?: 'unsupported-platform' | 'helper-missing' | 'recognize-failed' }>
+
   /** 输入区工具栏按业务域收敛的宿主能力；底层仍复用现有 IPC channel。 */
   composer: {
     chat: {
@@ -1680,6 +1683,8 @@ const electronAPI: ElectronAPI = {
   exportVisualization: (input) => ipcRenderer.invoke(VISUALIZATION_IPC.EXPORT, input),
 
   getPlatformInfo: () => ({ platform: process.platform, arch: process.arch }),
+
+  recognizeHandwriting: (pngBase64: string) => ipcRenderer.invoke('pen:recognize', pngBase64),
 
   // 运行时
   getRuntimeStatus: () => {

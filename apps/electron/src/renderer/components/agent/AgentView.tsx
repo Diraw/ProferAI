@@ -41,6 +41,7 @@ import { ExitPlanModeBanner } from './ExitPlanModeBanner'
 import { PlanModeDashedBorder } from './PlanModeDashedBorder'
 import { ModelSelector } from '@/components/chat/ModelSelector'
 import { AttachmentPreviewItem } from '@/components/chat/AttachmentPreviewItem'
+import { PEN_INK_ENABLED, PenInkLayerSafe } from '@/components/chat/PenInkLayer'
 import { QuotedSelectionChip } from '@/components/diff/QuotedSelectionChip'
 import { RichTextInput, type RichTextInputHandle } from '@/components/ai-elements/rich-text-input'
 import { SpeechButton, useLoadVoiceDictationSettings } from '@/components/ai-elements/speech-button'
@@ -1600,6 +1601,14 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const handlePasteFiles = React.useCallback((files: File[]): void => {
     addFilesAsAttachments(files)
   }, [addFilesAsAttachments])
+
+  /** 手写笔落墨：与 ChatInput 同一套自动墨迹，识别成文字后插到光标处 */
+  const composerCardRef = React.useRef<HTMLDivElement | null>(null)
+
+  const handleInkText = React.useCallback((text: string): void => {
+    if (richTextInputRef.current?.insertText(text)) return
+    setInputContent(inputContent.trim().length > 0 ? `${inputContent} ${text}` : text)
+  }, [inputContent, setInputContent])
 
   /** 粘贴超长文本时转为待发送附件，避免把大段内容直接塞进输入框 */
   const handlePasteLongText = React.useCallback((text: string): void => {
@@ -3426,6 +3435,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
             <BackgroundTaskControls sessionId={sessionId} />
             <RuntimeProcessPanel sessionId={sessionId} />
             <div
+              ref={composerCardRef}
               className={cn(
                 'agent-input-surface relative z-10 rounded-[17px] border-[0.5px] border-border bg-background/70 backdrop-blur-sm transition-[background-color,border-color,box-shadow] duration-200 [.composer-stack:has(.service-rail)_&]:-mt-5',
                 (isPlanMode || isPermissionPlanMode) && !isDragOver && 'plan-mode-border',
@@ -3435,6 +3445,14 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
             >
+              {/* 手写板：卡片内部的一块区域，笔一点输入框就展开 */}
+              {PEN_INK_ENABLED ? (
+                <PenInkLayerSafe
+                  containerRef={composerCardRef}
+                  onText={handleInkText}
+                />
+              ) : null}
+
             {(isPlanMode || isPermissionPlanMode) && !isDragOver && <PlanModeDashedBorder />}
             {/* 无 Agent 渠道或无可用模型提示 */}
             {(!agentChannelId || !hasAvailableModel) && (

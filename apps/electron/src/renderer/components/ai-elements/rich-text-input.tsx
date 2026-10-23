@@ -203,6 +203,8 @@ export interface RichTextInputHandle {
   getMarkdown: () => string
   insertFileMentions: (items: FilePanelDragItem[]) => void
   insertSessionMention: (item: SessionReferenceDragItem) => boolean
+  /** 在光标处插入纯文本（手写识别结果回填用） */
+  insertText: (text: string) => boolean
 }
 
 /**
@@ -876,6 +878,13 @@ export const RichTextInput = forwardRef<RichTextInputHandle, RichTextInputProps>
     insertSessionMention: (item) => {
       if (!editor || !editor.isEditable) return false
       editor.chain().focus().insertContent({ type: 'mention', attrs: { id: item.sessionId, label: item.title, mentionSuggestionChar: '&' } }).insertContent(' ').run()
+      return true
+    },
+    insertText: (text) => {
+      if (!editor || editor.isDestroyed || !editor.isEditable) return false
+      const trimmed = text.trim()
+      if (trimmed.length === 0) return false
+      editor.chain().focus().insertContent(trimmed).run()
       return true
     },
   }), [editor])

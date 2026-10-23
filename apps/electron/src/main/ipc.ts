@@ -250,6 +250,7 @@ import { registerHeatmapMigrationIpc } from './lib/heatmap-migration-ipc'
 import type { MainWindowGetter } from './lib/ipc-sender-guard'
 import { getMainWindow } from './lib/main-window-state'
 import { registerAppIconIpc } from './lib/app-icon-ipc'
+import { registerPenOcrIpc } from './lib/pen-ocr-ipc'
 import { registerDockBadgeIpc } from './lib/dock-badge-ipc'
 import { registerEnvironmentIpc } from './lib/environment-ipc'
 import { registerNotificationSoundIpc } from './lib/notification-sound-ipc'
@@ -4705,6 +4706,9 @@ export function registerIpcHandlers(): void {
 
   // ===== 定时任务（Automation）=====
   registerAutomationIpc()
+
+  // ===== 手写笔墨迹识别（macOS Vision）=====
+  registerPenOcrIpc()
 
   // ===== 身份认证 =====
   registerAccountIpc()

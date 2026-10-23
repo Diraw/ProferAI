@@ -119,6 +119,9 @@ mac:
   extraResources:
     - from: resources/bin/profer
       to: bin/profer
+    # 手写笔 OCR 小工具（macOS Vision）；非 macOS 平台不携带，渲染进程回退到图片附件。
+    - from: resources/bin/pen-ocr
+      to: bin/pen-ocr
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist
@@ -126,6 +129,7 @@ mac:
   # Profer CLI 由当前 macOS runner 构建，并在将来启用签名时纳入签名范围。
   binaries:
     - resources/bin/profer
+    - resources/bin/pen-ocr
   extendInfo:
     NSMicrophoneUsageDescription: "Profer 需要访问麦克风，用于将你的语音实时转写为文本。"
     NSAppleEventsUsageDescription: "Profer 需要通过系统事件将你确认的文本粘贴到当前应用的光标位置。"
@@ -166,6 +170,9 @@ win:
   extraResources:
     - from: resources/bin/profer.exe
       to: bin/profer.exe
+    # 手写 OCR 脚本（Windows.Media.Ocr，系统自带能力，无额外依赖）
+    - from: resources/pen-ocr/PenOcr.ps1
+      to: pen-ocr/PenOcr.ps1
   fileAssociations:
     - ext: profer-backup
       name: Profer Personal Backup

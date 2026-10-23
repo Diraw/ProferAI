@@ -21,6 +21,8 @@ import { openKnowledgePreview } from '@/components/knowledge-base/KnowledgePrevi
 import { createChatComposerToolbarItems } from './chat-composer-toolbar-config'
 import { composerToolbarPreferencesAtom } from '@/atoms/composer-toolbar-preferences'
 import { AttachmentPreviewItem } from './AttachmentPreviewItem'
+import { PEN_INK_ENABLED, PenInkLayerSafe } from './PenInkLayer'
+import type { RichTextInputHandle } from '@/components/ai-elements/rich-text-input'
 import { RichTextInput } from '@/components/ai-elements/rich-text-input'
 import { useLoadVoiceDictationSettings } from '@/components/ai-elements/speech-button'
 import { voiceDictationEnabledAtom } from '@/atoms/voice-dictation-atoms'
@@ -280,6 +282,21 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
     addFilesAsAttachments(files)
   }, [addFilesAsAttachments])
 
+  /**
+   * 手写笔落墨：composer 卡片即起笔点。
+   *
+   * 没有开关、没有设备扫描——笔一落笔 PenInkLayer 自己判定笔设备，
+   * 抬手空闲后调系统 OCR 识别成文字插到光标处；认不出来只提示，不塞图片附件。
+   */
+  const composerCardRef = React.useRef<HTMLDivElement | null>(null)
+  const richTextInputRef = React.useRef<RichTextInputHandle | null>(null)
+
+  const handleInkText = React.useCallback((text: string): void => {
+    if (richTextInputRef.current?.insertText(text)) return
+    // 编辑器还没就绪（极少见）：退化成追加到草稿末尾，至少不丢字
+    setContent(content.trim().length > 0 ? `${content} ${text}` : text)
+  }, [content, setContent])
+
   // 拖放处理
   const handleDragOver = React.useCallback((e: React.DragEvent): void => {
     e.preventDefault()
@@ -363,8 +380,9 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
     <div className="px-2.5 pb-2.5 md:px-[18px] md:pb-[18px]" data-input-mode="chat">
         {/* 卡片式输入容器 — 对标 Cherry Studio: border-radius 17px, 0.5px border */}
         <div
+          ref={composerCardRef}
           className={cn(
-            'agent-input-surface rounded-[17px] border-[0.5px] border-surface-border bg-input/70 backdrop-blur-sm transition-all duration-200',
+            'agent-input-surface relative rounded-[17px] border-[0.5px] border-surface-border bg-input/70 backdrop-blur-sm transition-all duration-200',
             'focus-within:border-focus/40 focus-within:ring-2 focus-within:ring-focus/10',
             isDragOver && 'border-[2px] border-dashed border-[#2ecc71] bg-[#2ecc71]/[0.03]'
           )}
@@ -372,6 +390,14 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
+          {/* 手写板：卡片内部的一块区域，笔一点输入框就展开 */}
+          {PEN_INK_ENABLED ? (
+            <PenInkLayerSafe
+              containerRef={composerCardRef}
+              onText={handleInkText}
+            />
+          ) : null}
+
           {/* 附件预览区域 — Cherry Studio: padding 5px 15px, flex-wrap, gap 4px */}
           {(pendingAttachments.length > 0 || pendingKnowledgeReferences.length > 0) && (
             <div className="flex flex-wrap gap-1 px-[15px] pt-[10px] pb-[15px]">
@@ -390,6 +416,7 @@ export function ChatInput({ conversationId, streaming, pendingAttachments, onSet
 
           {/* TipTap 富文本编辑器 */}
           <RichTextInput
+            ref={richTextInputRef}
             value={content}
             onChange={setContent}
             onSubmit={handleSend}
