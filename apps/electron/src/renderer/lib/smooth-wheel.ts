@@ -56,9 +56,30 @@ export interface SpringState {
   velocity: number
 }
 
+/** 一次滚轮事件的诊断采样（设置页「滚动诊断」与排障使用）。 */
+export interface WheelSample {
+  at: number
+  deltaY: number
+  deltaMode: number
+  /** 与上一个滚轮事件的间隔（ms） */
+  gapMs: number
+  /** 本手势的最终判定 */
+  gesture: WheelGesture
+  /** 是否真正接管（调用了 preventDefault 并驱动弹簧） */
+  handled: boolean
+  /** 命中的滚动容器摘要；未命中为 null */
+  scroller: string | null
+  /** 上一段动画的平均帧间隔（ms）；未跑过动画为 null */
+  frameMs: number | null
+  /** 上一段动画里超过 24ms 的帧数 */
+  slowFrames: number
+}
+
 export interface SmoothWheelOptions {
   /** 运行时开关；返回 false 时滚轮事件完全不介入。 */
   enabled?: () => boolean
+  /** 每次滚轮事件后的诊断采样回调。 */
+  onSample?: (sample: WheelSample) => void
   /** 减少动效时直通原生。 */
   reducedMotion?: () => boolean
   now?: () => number
@@ -127,6 +148,7 @@ function defaultReducedMotion(): boolean {
  */
 export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void {
   const enabled = options.enabled ?? (() => true)
+  const onSample = options.onSample
   const reducedMotion = options.reducedMotion ?? defaultReducedMotion
   const now = options.now ?? (() => performance.now())
   const request = options.requestFrame ?? ((callback) => requestAnimationFrame(callback))
@@ -140,6 +162,12 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
   let lastWritten = 0
   let lastMagnitude = 0
   let gesture: WheelGesture | null = null
+  // 上一段动画的帧率统计，用于判断「接管了但主线程跟不上」
+  let frameCount = 0
+  let frameTotal = 0
+  let slowFrames = 0
+  let lastFrameMs: number | null = null
+  let lastSlowFrames = 0
 
   function measure(element: HTMLElement, at: number): Geometry {
     const cached = geometry.get(element)
@@ -147,6 +175,13 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     const entry = { at, max: Math.max(0, element.scrollHeight - element.clientHeight) }
     geometry.set(element, entry)
     return entry
+  }
+
+  function describe(element: HTMLElement): string {
+    const tag = element.tagName.toLowerCase()
+    const id = element.id ? `#${element.id}` : ''
+    const classes = Array.from(element.classList).slice(0, 2).map((name) => `.${name}`).join('')
+    return `${tag}${id}${classes}`
   }
 
   function write(element: HTMLElement, top: number): void {
@@ -190,6 +225,13 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     if (frame !== null) cancel(frame)
     frame = null
     active = null
+    if (frameCount > 0) {
+      lastFrameMs = frameTotal / frameCount
+      lastSlowFrames = slowFrames
+    }
+    frameCount = 0
+    frameTotal = 0
+    slowFrames = 0
   }
 
   /** 结束接管：flush 时把待走的距离一次补齐（换手势时避免丢一格），否则就地停下。 */
@@ -208,8 +250,12 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
       stop()
       return
     }
-    const dt = clamp(timestamp - lastTick, 1, MAX_FRAME_MS)
+    const rawDt = timestamp - lastTick
+    const dt = clamp(rawDt, 1, MAX_FRAME_MS)
     lastTick = timestamp
+    frameCount += 1
+    frameTotal += rawDt
+    if (rawDt > 24) slowFrames += 1
     // 内容可能在动画中途变短（流式输出结束、列表过滤），目标必须跟着夹紧，
     // 否则 target 永远追不到 position，rAF 会空转不停。
     current.target = clamp(current.target, 0, current.max)
@@ -242,14 +288,30 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
   }
 
   function onWheel(event: WheelEvent): void {
+    const at = now()
+    const gap = at - lastEventAt
+    const sample: WheelSample = {
+      at,
+      deltaY: event.deltaY,
+      deltaMode: event.deltaMode,
+      gapMs: gap,
+      gesture: 'pixel',
+      handled: false,
+      scroller: null,
+      frameMs: lastFrameMs,
+      slowFrames: lastSlowFrames,
+    }
+    applyWheel(event, at, gap, sample)
+    onSample?.(sample)
+  }
+
+  function applyWheel(event: WheelEvent, at: number, gap: number, sample: WheelSample): void {
     if (!enabled() || reducedMotion()) return
     if (event.defaultPrevented) return
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
     const rawDelta = event.deltaY
     if (rawDelta === 0 || Math.abs(event.deltaX) > Math.abs(rawDelta)) return
 
-    const at = now()
-    const gap = at - lastEventAt
     if (gap > GESTURE_IDLE_MS) {
       gesture = null
       lastMagnitude = 0
@@ -268,6 +330,7 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     }
     lastEventAt = at
     lastMagnitude = magnitude
+    sample.gesture = gesture
     if (gesture === 'pixel') return
 
     const delta = normalizeWheelDelta(event.deltaMode, rawDelta, window.innerHeight)
@@ -277,6 +340,8 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     if (!element) return
 
     event.preventDefault()
+    sample.handled = true
+    sample.scroller = describe(element)
 
     const geo = measure(element, at)
     if (!active || active.element !== element) {

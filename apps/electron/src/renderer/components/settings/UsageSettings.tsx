@@ -72,6 +72,7 @@ import {
   updatePreviewOpenMode,
   composerCompactModeAtom,
 } from '@/atoms/ui-preferences'
+import { showCurrentSessionSectionAtom } from '@/atoms/sidebar-atoms'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -91,6 +92,11 @@ import {
   normalizeCompactViewportHeight,
 } from '@/lib/composer-compact-height'
 import { useWindowInnerHeight } from '@/hooks/use-window-inner-height'
+import {
+  readSmoothWheelSamples,
+  readSmoothWheelVersion,
+  subscribeSmoothWheelSamples,
+} from '@/lib/smooth-wheel-telemetry'
 import { detectIsWindows } from '@profer/ui'
 import { agentProcessGroupsKeepExpandedAtom } from '@/atoms/agent-atoms'
 import { autoPreviewEnabledAtom } from '@/atoms/preview-atoms'
@@ -107,6 +113,7 @@ export function UsageSettings(): React.ReactElement {
   const [notificationSounds, setNotificationSounds] = useAtom(notificationSoundsAtom)
   const [customSounds, setCustomSounds] = useAtom(customNotificationSoundsAtom)
   const [showCreditsInSidebar, setShowCreditsInSidebar] = useAtom(showCreditsInSidebarAtom)
+  const [showCurrentSessionSection, setShowCurrentSessionSection] = useAtom(showCurrentSessionSectionAtom)
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
   const [smoothScrollEnabled, setSmoothScrollEnabled] = useAtom(smoothScrollEnabledAtom)
   const isWindows = React.useMemo(() => detectIsWindows(), [])
@@ -531,6 +538,12 @@ export function UsageSettings(): React.ReactElement {
             </Select>
           </SettingsRow>
           <SettingsToggle
+            label="显示「当前会话」区域"
+            description="在左侧栏顶部列出已打开的会话入口；关闭后会话仍保留在对话 / 项目列表中"
+            checked={showCurrentSessionSection}
+            onCheckedChange={setShowCurrentSessionSection}
+          />
+          <SettingsToggle
             label="侧栏显示我的积分"
             description="关闭后隐藏左侧栏底部的积分余额条，不影响积分与用量页面"
             checked={showCreditsInSidebar}
@@ -558,6 +571,12 @@ export function UsageSettings(): React.ReactElement {
                 void updateSmoothScrollEnabled(checked)
               }}
             />
+          )}
+          {isWindows && smoothScrollEnabled && (
+            <details className="px-4 py-3">
+              <summary className="cursor-pointer select-none text-[13px] text-muted-foreground">滚动诊断</summary>
+              <SmoothScrollDiagnostics />
+            </details>
           )}
           <SettingsSegmentedControl
             label="用户消息位置"
@@ -920,5 +939,51 @@ function AddSoundDialog({
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * 平滑滚动诊断读数
+ *
+ * 滚轮没反应时先看这里：判定成「像素」说明设备是触控板/高精度滚轮（直通原生）；
+ * 「未接管」但判定是「刻度」说明没找到可滚动容器；帧间隔明显高于 16.7ms 说明
+ * 接管了但主线程跟不上，观感会不如原生。
+ */
+function SmoothScrollDiagnostics(): React.ReactElement {
+  React.useSyncExternalStore(subscribeSmoothWheelSamples, readSmoothWheelVersion)
+  const samples = readSmoothWheelSamples()
+  const reducedMotion = React.useMemo(
+    () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
+    [],
+  )
+  const latest = samples[samples.length - 1]
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-border/60 bg-muted/20 p-3 text-[12px]">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+        <span>减少动效：{reducedMotion ? '开（不接管）' : '关'}</span>
+        {latest?.frameMs != null && (
+          <span>
+            上段动画帧间隔 {latest.frameMs.toFixed(1)}ms
+            {latest.slowFrames > 0 ? ` · 掉帧 ${latest.slowFrames}` : ''}
+          </span>
+        )}
+      </div>
+      {samples.length === 0 ? (
+        <p className="text-muted-foreground">把鼠标移到消息区滚一下，这里会显示最近 6 次滚轮事件。</p>
+      ) : (
+        <ul className="space-y-0.5 font-mono text-[11px] leading-5">
+          {[...samples].reverse().map((sample, index) => (
+            <li key={`${sample.at}-${index}`} className="truncate">
+              Δy {Math.round(sample.deltaY)} · mode {sample.deltaMode} · {sample.gesture === 'tick' ? '刻度' : '像素'} · {sample.handled ? `已接管 ${sample.scroller ?? ''}` : '未接管'}
+              {sample.gapMs < 1000 ? ` · 间隔 ${Math.round(sample.gapMs)}ms` : ''}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-muted-foreground">
+        一直显示「像素 · 未接管」= 当前设备是触控板或高精度滚轮，这类输入本身连续，会直通原生。
+      </p>
+    </div>
   )
 }

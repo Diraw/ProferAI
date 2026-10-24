@@ -10,6 +10,7 @@ import { useAtomValue } from 'jotai'
 import { detectIsWindows } from '@profer/ui'
 import { smoothScrollEnabledAtom } from '@/atoms/ui-preferences'
 import { installSmoothWheel } from '@/lib/smooth-wheel'
+import { reportSmoothWheelSample } from '@/lib/smooth-wheel-telemetry'
 
 export function SmoothWheelInitializer(): null {
   const enabled = useAtomValue(smoothScrollEnabledAtom)
@@ -17,7 +18,7 @@ export function SmoothWheelInitializer(): null {
 
   React.useEffect(() => {
     if (!isWindows || !enabled) return
-    return installSmoothWheel()
+    return installSmoothWheel({ onSample: reportSmoothWheelSample })
   }, [isWindows, enabled])
 
   return null
