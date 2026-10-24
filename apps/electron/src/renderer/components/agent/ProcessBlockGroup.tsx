@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { ChevronRight } from 'lucide-react'
+import { Spinner } from '@profer/ui/primitives/spinner'
 import { shouldRestartProcessCollapse } from './process-fold-state'
 import { cn } from '@/lib/utils'
 import { getToolDisplayName, getToolIcon } from './tool-utils'
@@ -268,6 +269,8 @@ export function ProcessBlockGroup({ blocks, isStreaming, scrollAnchorId, keepExp
           )}
         />
         <span className="min-w-0 truncate text-[14px] text-muted-foreground">{summary}</span>
+        {/* 折叠状态下的活动提示：过程收起时也必须能看出这一轮仍在运行。 */}
+        {isStreaming && <Spinner size="sm" aria-hidden="true" className="shrink-0 text-primary/60" />}
         {collapseCountdown !== null && (
           <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground/50">
             （{collapseCountdown}）

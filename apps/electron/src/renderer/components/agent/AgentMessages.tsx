@@ -42,7 +42,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/t
 import { groupIntoTurns, MessageGroupRenderer, getGroupId, getGroupNavKey, getGroupPreview, parseAttachedFiles as sdkParseAttachedFiles, isImageFile as sdkIsImageFile, CompactingIndicator, buildHistoricalTaskSubjects, type MessageGroup, type EditResendRequest } from './SDKMessageRenderer'
 import { extractUserText } from '@profer/session-core'
 import { shouldRegenerateFromRetry } from '@/lib/agent-regenerate-anchor'
-import { buildLiveGroupSet } from './live-group-set'
+import { buildLiveGroupSet, findStreamingTurnGroup, hasAssistantTurnInCurrentTurn } from './live-group-set'
 import { mergeMessagesByUuid } from '@/lib/agent-message-merge'
 import { applyResolvedBlobMessages } from '@/lib/resolved-blob-messages'
 import { deriveAgentRuntimeDisplay } from '@/domains/agent-runtime/agent-runtime-display-policy'
@@ -790,12 +790,26 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
   }, [visibleGroups])
 
   // 实时消息中是否已有可渲染的助手内容
-  // 流式中：通过 liveGroupSet 精确判断（只有 streaming 时 liveGroupSet 才非空）
+  // 流式中：以「当前这轮是否处于 live 态」判断（对象身份失配时用本轮起点兜底）
   // 流式结束后：直接检查 liveMessages 中是否有助手消息，
   // 防止 streaming→false 到 liveMessages 被清除之间的过渡帧中 fallback 气泡重复渲染
+  const streamingTurnGroup = React.useMemo(() => findStreamingTurnGroup({
+    allGroups,
+    liveGroupSet,
+    streaming,
+    runStartedAt: startedAt,
+  }), [allGroups, liveGroupSet, streaming, startedAt])
   const hasLiveAssistantContent = streaming
-    ? allGroups.some((g) => g.type === 'assistant-turn' && liveGroupSet.has(g))
+    ? (streamingTurnGroup != null || allGroups.some((g) => g.type === 'assistant-turn' && liveGroupSet.has(g)))
     : (liveMessages != null && liveMessages.some((m) => (m as { type: string }).type === 'assistant'))
+
+  // 本轮是否已经有渲染出来的助手内容。尾部流式气泡靠它决定要不要再画一次头像：
+  // 落盘水位和实时缓冲不同步时（上一段已落盘、下一段 live 消息还没到），只按
+  // liveMessages 判断会多画一个带头像的气泡，同一条用户消息看起来就是两个模型回复。
+  const currentTurnHasAssistantContent = React.useMemo(
+    () => hasAssistantTurnInCurrentTurn(allGroups),
+    [allGroups],
+  )
 
   const runtimeDisplay = deriveAgentRuntimeDisplay({
     running: streaming,
@@ -873,7 +887,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
             {visibleTimeline.map((item) => {
               if (item.kind === 'image') return <AgentImageGenerationCardView key={`generation:${item.id}`} card={item.card} />
               const group = item.group
-              const isLive = liveGroupSet.has(group)
+              const isLive = liveGroupSet.has(group) || group === streamingTurnGroup
               const shouldDisableActions = isLive
               // 会话活跃态（streaming 或 backgroundWaiting）时禁用压缩/重试操作，
               // 防止用户误操作触发与正在运行的 agent session 冲突
@@ -938,13 +952,17 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
 
             {/* 无实时助手内容时：显示完整气泡（含头像/名称/时间） */}
             {/* 注意：工具活动已通过 SDK 渲染路径（liveGroups）展示 */}
+            {/* 本轮已有内容时只续接正文，不再画第二份头像/模型名：同一轮内的流式正文 */}
+            {/* 属于上面那条消息，另起一个 header 会让人以为模型回了两条。 */}
             {!hasLiveAssistantContent && !suppressAgentRunning && (showAgentRunningIndicator || visibleContent || retrying) && (
               <Message from="assistant">
-                <MessageHeader
-                  model={agentStreamingModel}
-                  time={formatMessageTime(Date.now())}
-                  logo={<AssistantLogo model={streamingModelId} />}
-                />
+                {!currentTurnHasAssistantContent && (
+                  <MessageHeader
+                    model={agentStreamingModel}
+                    time={formatMessageTime(startedAt ?? Date.now())}
+                    logo={<AssistantLogo model={streamingModelId} />}
+                  />
+                )}
                 <MessageContent>
                   {retrying && <RetryingNotice retrying={retrying} />}
                   {visibleContent ? (
