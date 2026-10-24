@@ -60,6 +60,7 @@ import {
   userMessagePositionAtom,
   showCreditsInSidebarAtom,
   smoothScrollEnabledAtom,
+  smoothScrollForceAtom,
   longTextPasteAsAttachmentEnabledAtom,
   richTextRenderingEnabledAtom,
   composerCompactModeAtom,
@@ -508,6 +509,7 @@ function UiPreferencesInitializer(): null {
   const setComposerCompactMode = useSetAtom(composerCompactModeAtom)
   const setPreviewOpenMode = useSetAtom(previewOpenModeAtom)
   const setSmoothScrollEnabled = useSetAtom(smoothScrollEnabledAtom)
+  const setSmoothScrollForce = useSetAtom(smoothScrollForceAtom)
 
   useEffect(() => {
     initializeUiPreferences(
@@ -518,9 +520,10 @@ function UiPreferencesInitializer(): null {
       setRichTextRenderingEnabled,
       setComposerCompactMode,
       setPreviewOpenMode,
-      setSmoothScrollEnabled
+      setSmoothScrollEnabled,
+      setSmoothScrollForce
     )
-  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setUserMessagePosition, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode, setPreviewOpenMode, setSmoothScrollEnabled])
+  }, [setShowCreditsInSidebar, setStickyUserMessageEnabled, setUserMessagePosition, setLongTextPasteAsAttachmentEnabled, setRichTextRenderingEnabled, setComposerCompactMode, setPreviewOpenMode, setSmoothScrollEnabled, setSmoothScrollForce])
 
   return null
 }

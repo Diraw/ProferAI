@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  PIXEL_STIFFNESS,
   SPRING_STIFFNESS,
   classifyWheel,
   normalizeWheelDelta,
@@ -107,5 +108,31 @@ describe('stepSpring', () => {
     expect(Number.isFinite(state.position)).toBe(true)
     expect(state.position).toBeGreaterThan(2900)
     expect(state.position).toBeLessThan(3100)
+  })
+})
+
+describe('强制接管的刚度', () => {
+  function settleMs(stiffness: number): number {
+    const state = { position: 0, velocity: 0 }
+    for (let frame = 1; frame <= 60; frame += 1) {
+      for (let s = 0; s < 4; s += 1) stepSpring(state, 100, 16 / 4 / 1000, stiffness)
+      if (Math.abs(100 - state.position) < 0.8 && Math.abs(state.velocity) < 40) return frame * 16
+    }
+    return Number.POSITIVE_INFINITY
+  }
+
+  test('像素级刚度比刻度刚度更硬、尾速更短', () => {
+    expect(PIXEL_STIFFNESS).toBeGreaterThan(SPRING_STIFFNESS)
+    expect(settleMs(PIXEL_STIFFNESS)).toBeLessThan(settleMs(SPRING_STIFFNESS) - 80)
+  })
+
+  test('更硬的刚度依然不过冲', () => {
+    const state = { position: 0, velocity: 0 }
+    let peak = 0
+    for (let i = 0; i < 200; i += 1) {
+      stepSpring(state, 100, 0.004, PIXEL_STIFFNESS)
+      peak = Math.max(peak, state.position)
+    }
+    expect(peak).toBeLessThanOrEqual(100.5)
   })
 })

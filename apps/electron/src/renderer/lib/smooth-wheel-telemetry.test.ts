@@ -15,6 +15,7 @@ function sample(deltaY: number, handled: boolean): WheelSample {
     gapMs: 40,
     gesture: 'tick',
     handled,
+    forced: false,
     scroller: handled ? 'div.profer-scroll-region' : null,
     frameMs: 16.7,
     slowFrames: 0,

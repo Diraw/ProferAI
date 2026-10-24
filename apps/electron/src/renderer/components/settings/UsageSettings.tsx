@@ -68,6 +68,8 @@ import {
   updateRichTextRenderingEnabled,
   smoothScrollEnabledAtom,
   updateSmoothScrollEnabled,
+  smoothScrollForceAtom,
+  updateSmoothScrollForce,
   previewOpenModeAtom,
   updatePreviewOpenMode,
   composerCompactModeAtom,
@@ -116,6 +118,7 @@ export function UsageSettings(): React.ReactElement {
   const [showCurrentSessionSection, setShowCurrentSessionSection] = useAtom(showCurrentSessionSectionAtom)
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
   const [smoothScrollEnabled, setSmoothScrollEnabled] = useAtom(smoothScrollEnabledAtom)
+  const [smoothScrollForce, setSmoothScrollForce] = useAtom(smoothScrollForceAtom)
   const isWindows = React.useMemo(() => detectIsWindows(), [])
   const [userMessagePosition, setUserMessagePosition] = useAtom(userMessagePositionAtom)
   const [longTextPasteAsAttachmentEnabled, setLongTextPasteAsAttachmentEnabled] = useAtom(longTextPasteAsAttachmentEnabledAtom)
@@ -573,9 +576,20 @@ export function UsageSettings(): React.ReactElement {
             />
           )}
           {isWindows && smoothScrollEnabled && (
+            <SettingsToggle
+              label="强制接管触控板与高精度滚轮"
+              description="默认只接管鼠标滚轮的离散刻度；自带平滑滚动的驱动（Logitech 等）与触控板会被判定为像素级输入、原样交还浏览器。打开后这类输入也走弹簧曲线（更硬的刚度、不做加速），触控板本身已连续，可能反而更黏。"
+              checked={smoothScrollForce}
+              onCheckedChange={(checked) => {
+                setSmoothScrollForce(checked)
+                void updateSmoothScrollForce(checked)
+              }}
+            />
+          )}
+          {isWindows && (
             <details className="px-4 py-3">
               <summary className="cursor-pointer select-none text-[13px] text-muted-foreground">滚动诊断</summary>
-              <SmoothScrollDiagnostics />
+              <SmoothScrollDiagnostics enabled={smoothScrollEnabled} force={smoothScrollForce} />
             </details>
           )}
           <SettingsSegmentedControl
@@ -949,7 +963,7 @@ function AddSoundDialog({
  * 「未接管」但判定是「刻度」说明没找到可滚动容器；帧间隔明显高于 16.7ms 说明
  * 接管了但主线程跟不上，观感会不如原生。
  */
-function SmoothScrollDiagnostics(): React.ReactElement {
+function SmoothScrollDiagnostics({ enabled, force }: { enabled: boolean; force: boolean }): React.ReactElement {
   React.useSyncExternalStore(subscribeSmoothWheelSamples, readSmoothWheelVersion)
   const samples = readSmoothWheelSamples()
   const reducedMotion = React.useMemo(
@@ -961,6 +975,7 @@ function SmoothScrollDiagnostics(): React.ReactElement {
   return (
     <div className="mt-2 space-y-2 rounded-lg border border-border/60 bg-muted/20 p-3 text-[12px]">
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+        <span>监听：{enabled ? `已启用（强制接管${force ? '开' : '关'}）` : '已关闭'}</span>
         <span>减少动效：{reducedMotion ? '开（不接管）' : '关'}</span>
         {latest?.frameMs != null && (
           <span>
@@ -975,7 +990,7 @@ function SmoothScrollDiagnostics(): React.ReactElement {
         <ul className="space-y-0.5 font-mono text-[11px] leading-5">
           {[...samples].reverse().map((sample, index) => (
             <li key={`${sample.at}-${index}`} className="truncate">
-              Δy {Math.round(sample.deltaY)} · mode {sample.deltaMode} · {sample.gesture === 'tick' ? '刻度' : '像素'} · {sample.handled ? `已接管 ${sample.scroller ?? ''}` : '未接管'}
+              Δy {Math.round(sample.deltaY)} · mode {sample.deltaMode} · {sample.gesture === 'tick' ? '刻度' : sample.forced ? '像素·强制' : '像素'} · {sample.handled ? `已接管 ${sample.scroller ?? ''}` : '未接管'}
               {sample.gapMs < 1000 ? ` · 间隔 ${Math.round(sample.gapMs)}ms` : ''}
             </li>
           ))}

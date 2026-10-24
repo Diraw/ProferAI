@@ -8,18 +8,19 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import { detectIsWindows } from '@profer/ui'
-import { smoothScrollEnabledAtom } from '@/atoms/ui-preferences'
+import { smoothScrollEnabledAtom, smoothScrollForceAtom } from '@/atoms/ui-preferences'
 import { installSmoothWheel } from '@/lib/smooth-wheel'
 import { reportSmoothWheelSample } from '@/lib/smooth-wheel-telemetry'
 
 export function SmoothWheelInitializer(): null {
   const enabled = useAtomValue(smoothScrollEnabledAtom)
+  const force = useAtomValue(smoothScrollForceAtom)
   const isWindows = React.useMemo(() => detectIsWindows(), [])
 
   React.useEffect(() => {
     if (!isWindows || !enabled) return
-    return installSmoothWheel({ onSample: reportSmoothWheelSample })
-  }, [isWindows, enabled])
+    return installSmoothWheel({ onSample: reportSmoothWheelSample, force: () => force })
+  }, [isWindows, enabled, force])
 
   return null
 }

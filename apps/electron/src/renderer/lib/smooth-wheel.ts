@@ -32,6 +32,8 @@ const BOOST_MAX = 1.9
 /** 临界阻尼弹簧刚度（rad²/s²）：620 → 60fps 下单格约 300ms 落定（更硬会显得顿，更软会发飘）。 */
 export const SPRING_STIFFNESS = 620
 export const SPRING_DAMPING = 2 * Math.sqrt(SPRING_STIFFNESS)
+/** 强制接管像素级输入时用的刚度：更硬、尾速更短，只做轻微抹平而不是拖出长尾。 */
+export const PIXEL_STIFFNESS = 1800
 /** 每帧物理子步数：60Hz 下每步约 4ms，弹簧积分稳定。 */
 const SUBSTEPS = 4
 /** 小于该高度的容器不接管：弹出菜单、代码块这类小区域原生滚动已足够，接管只会增加风险。 */
@@ -67,6 +69,8 @@ export interface WheelSample {
   gesture: WheelGesture
   /** 是否真正接管（调用了 preventDefault 并驱动弹簧） */
   handled: boolean
+  /** 像素级输入是否被「强制接管」开关放行 */
+  forced: boolean
   /** 命中的滚动容器摘要；未命中为 null */
   scroller: string | null
   /** 上一段动画的平均帧间隔（ms）；未跑过动画为 null */
@@ -78,6 +82,8 @@ export interface WheelSample {
 export interface SmoothWheelOptions {
   /** 运行时开关；返回 false 时滚轮事件完全不介入。 */
   enabled?: () => boolean
+  /** 强制接管像素级输入（触控板 / 高精度滚轮），默认关闭。 */
+  force?: () => boolean
   /** 每次滚轮事件后的诊断采样回调。 */
   onSample?: (sample: WheelSample) => void
   /** 减少动效时直通原生。 */
@@ -105,9 +111,15 @@ export function wheelBoost(gapMs: number): number {
   return 1 + ((BOOST_SLOW_MS - clamped) / (BOOST_SLOW_MS - BOOST_FAST_MS)) * (BOOST_MAX - 1)
 }
 
-/** 一步临界阻尼弹簧积分（dt 单位：秒）。 */
-export function stepSpring(state: SpringState, target: number, dtSeconds: number): void {
-  const acceleration = SPRING_STIFFNESS * (target - state.position) - SPRING_DAMPING * state.velocity
+/** 一步临界阻尼弹簧积分（dt 单位：秒）。刚度默认按离散刻度调好的 620。 */
+export function stepSpring(
+  state: SpringState,
+  target: number,
+  dtSeconds: number,
+  stiffness: number = SPRING_STIFFNESS,
+): void {
+  const damping = stiffness === SPRING_STIFFNESS ? SPRING_DAMPING : 2 * Math.sqrt(stiffness)
+  const acceleration = stiffness * (target - state.position) - damping * state.velocity
   state.velocity += acceleration * dtSeconds
   state.position += state.velocity * dtSeconds
 }
@@ -134,6 +146,7 @@ interface ActiveScroll {
   velocity: number
   target: number
   max: number
+  stiffness: number
 }
 
 function defaultReducedMotion(): boolean {
@@ -148,6 +161,7 @@ function defaultReducedMotion(): boolean {
  */
 export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void {
   const enabled = options.enabled ?? (() => true)
+  const forceEnabled = options.force ?? (() => false)
   const onSample = options.onSample
   const reducedMotion = options.reducedMotion ?? defaultReducedMotion
   const now = options.now ?? (() => performance.now())
@@ -260,7 +274,7 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     // 否则 target 永远追不到 position，rAF 会空转不停。
     current.target = clamp(current.target, 0, current.max)
     const slice = dt / SUBSTEPS / 1000
-    for (let i = 0; i < SUBSTEPS; i += 1) stepSpring(current, current.target, slice)
+    for (let i = 0; i < SUBSTEPS; i += 1) stepSpring(current, current.target, slice, current.stiffness)
 
     if (current.position < 0) {
       current.position = 0
@@ -297,6 +311,7 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
       gapMs: gap,
       gesture: 'pixel',
       handled: false,
+      forced: false,
       scroller: null,
       frameMs: lastFrameMs,
       slowFrames: lastSlowFrames,
@@ -331,7 +346,10 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     lastEventAt = at
     lastMagnitude = magnitude
     sample.gesture = gesture
-    if (gesture === 'pixel') return
+    // 强制接管时像素级输入也走弹簧，但用更硬的刚度、不做速度加速（增量本身已经连续）。
+    const forced = gesture === 'pixel' && forceEnabled()
+    sample.forced = forced
+    if (gesture === 'pixel' && !forced) return
 
     const delta = normalizeWheelDelta(event.deltaMode, rawDelta, window.innerHeight)
     if (!Number.isFinite(delta) || delta === 0) return
@@ -344,11 +362,13 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
     sample.scroller = describe(element)
 
     const geo = measure(element, at)
+    const stiffness = gesture === 'tick' ? SPRING_STIFFNESS : PIXEL_STIFFNESS
     if (!active || active.element !== element) {
-      active = { element, position: element.scrollTop, velocity: 0, target: element.scrollTop, max: geo.max }
+      active = { element, position: element.scrollTop, velocity: 0, target: element.scrollTop, max: geo.max, stiffness }
     }
     const current = active
     current.max = geo.max
+    current.stiffness = stiffness
     // 动画空闲时用户可能用滚动条 / 键盘挪过位置，以实际位置为准，避免落点漂移。
     if (frame === null && Math.abs(element.scrollTop - current.position) > 1) {
       current.position = element.scrollTop
@@ -356,7 +376,8 @@ export function installSmoothWheel(options: SmoothWheelOptions = {}): () => void
       current.target = element.scrollTop
     }
 
-    const increment = clamp(delta * wheelBoost(gap), -MAX_STEP_PX, MAX_STEP_PX)
+    const scaled = gesture === 'tick' ? delta * wheelBoost(gap) : delta
+    const increment = clamp(scaled, -MAX_STEP_PX, MAX_STEP_PX)
     current.target = clamp(current.target + increment, 0, geo.max)
     start()
   }

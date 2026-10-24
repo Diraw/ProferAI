@@ -330,6 +330,13 @@ export interface AppSettings {
    * 触控板 / 高精度滚轮的像素级输入始终直通原生。
    */
   smoothScrollEnabled?: boolean
+  /**
+   * 平滑滚动是否强制接管像素级输入（触控板 / 高精度滚轮），默认 false。
+   *
+   * 默认只接管鼠标滚轮的离散刻度；自带平滑滚动的驱动（Logitech 等）与触控板
+   * 会被判定为像素级输入而直通原生，打开此项后它们也走弹簧曲线。
+   */
+  smoothScrollForceEnabled?: boolean
   /** 窗口内高低于该值（px）时输入框进入紧凑档（默认 700；0 = 关闭，输入框高度恒定） */
   inputCompactViewportHeight?: number
   /** 紧凑档下输入框最小高度（px，默认 60；决定空内容时变矮多少，常规为 81） */

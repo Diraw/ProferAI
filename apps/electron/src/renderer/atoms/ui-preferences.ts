@@ -35,6 +35,9 @@ export const richTextRenderingEnabledAtom = atom<boolean>(false)
 /** Windows 鼠标滚轮平滑滚动（默认开启，仅 Windows 生效） */
 export const smoothScrollEnabledAtom = atom<boolean>(true)
 
+/** 是否强制接管像素级输入（触控板 / 高精度滚轮），默认关闭 */
+export const smoothScrollForceAtom = atom<boolean>(false)
+
 /** 「矮窗口压缩输入框」配置 */
 export interface ComposerCompactModeSettings {
   /** 触发阈值（窗口内高，px）；0 = 关闭该行为 */
@@ -72,7 +75,8 @@ export async function initializeUiPreferences(
   setRichTextRenderingEnabled?: (enabled: boolean) => void,
   setComposerCompactMode?: (value: ComposerCompactModeSettings) => void,
   setPreviewOpenMode?: (mode: PreviewOpenMode) => void,
-  setSmoothScrollEnabled?: (enabled: boolean) => void
+  setSmoothScrollEnabled?: (enabled: boolean) => void,
+  setSmoothScrollForce?: (enabled: boolean) => void
 ): Promise<void> {
   try {
     const settings = await window.electronAPI.getSettings()
@@ -88,6 +92,7 @@ export async function initializeUiPreferences(
     })
     setPreviewOpenMode?.(settings.previewModePreference === 'split' ? 'split' : DEFAULT_PREVIEW_OPEN_MODE)
     setSmoothScrollEnabled?.(settings.smoothScrollEnabled ?? true)
+    setSmoothScrollForce?.(settings.smoothScrollForceEnabled ?? false)
   } catch (error) {
     console.error('[UI偏好] 初始化失败:', error)
   }
@@ -147,6 +152,17 @@ export async function updateSmoothScrollEnabled(enabled: boolean): Promise<void>
     await window.electronAPI.updateSettings({ smoothScrollEnabled: enabled })
   } catch (error) {
     console.error('[UI偏好] 更新平滑滚动设置失败:', error)
+  }
+}
+
+/**
+ * 更新「强制接管像素级输入」开关并持久化
+ */
+export async function updateSmoothScrollForce(enabled: boolean): Promise<void> {
+  try {
+    await window.electronAPI.updateSettings({ smoothScrollForceEnabled: enabled })
+  } catch (error) {
+    console.error('[UI偏好] 更新平滑滚动强制接管设置失败:', error)
   }
 }
 
