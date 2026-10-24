@@ -22,10 +22,10 @@ import { toast } from 'sonner'
 import { useSessionSettingMutation } from '@/lib/use-session-setting-mutation'
 
 const EFFORT_OPTIONS: { value: AgentEffort; label: string }[] = [
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'max', label: '最大' },
+  { value: 'low', label: '轻度' },
+  { value: 'medium', label: '中度' },
+  { value: 'high', label: '深度' },
+  { value: 'max', label: '极限' },
 ]
 
 export function AgentSettings(): React.ReactElement {

@@ -17,7 +17,7 @@ import * as React from 'react'
 import { unstable_batchedUpdates } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
-import { CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Brain, Sparkles, GitBranch } from 'lucide-react'
+import { CornerDownLeft, Square, Settings, Paperclip, FolderPlus, X, Copy, Check, Sparkles, GitBranch } from 'lucide-react'
 import { AgentMessages } from './AgentMessages'
 import { AgentRuntimeSelector } from './AgentRuntimeSelector'
 import { AgentHeader } from './AgentHeader'
@@ -39,7 +39,6 @@ import { agentPresetCacheKey, agentPresetsAtom, agentPresetsLoadedAtom } from '@
 import { AskUserBanner } from './AskUserBanner'
 import { ExitPlanModeBanner } from './ExitPlanModeBanner'
 import { PlanModeDashedBorder } from './PlanModeDashedBorder'
-import { ModelSelector } from '@/components/chat/ModelSelector'
 import { AttachmentPreviewItem } from '@/components/chat/AttachmentPreviewItem'
 import { PEN_INK_ENABLED, PenInkLayerSafe } from '@/components/chat/PenInkLayer'
 import { QuotedSelectionChip } from '@/components/diff/QuotedSelectionChip'
@@ -52,7 +51,6 @@ import {
   AgentComposerToolPopover,
   AgentComposerToolTrigger,
 } from '@/components/ai-elements/composer/ComposerTool'
-import { Switch } from '@profer/ui/primitives/switch'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -69,7 +67,7 @@ import { cn } from '@/lib/utils'
 import { evaluateAutoSendTurn } from '@/lib/agent-autosend-turn'
 import { rollbackRejectedAgentRunState } from '@/lib/agent-stream-state-cleanup'
 import { countRunningDelegations } from '@/domains/agent-runtime/agent-runtime-display-policy'
-import { updateComposerEffort, updateComposerOpenAIThinkingLevel, updateComposerRuntime, updateComposerSettings, openComposerFileDialog, openComposerFolderDialog, updateAgentComposerModel, listComposerPresets, rebindComposerPreset, getComposerReasoningCapability, attachComposerDirectory } from '@/domains/composer/composer-api'
+import { updateComposerRuntime, updateComposerSettings, openComposerFileDialog, openComposerFolderDialog, updateAgentComposerModel, listComposerPresets, rebindComposerPreset, getComposerReasoningCapability, attachComposerDirectory } from '@/domains/composer/composer-api'
 import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import { registerShortcut } from '@/lib/shortcut-registry'
 import { autoPreviewEnabledAtom, previewFileMapAtom, quotedSelectionMapAtom, agentInterruptionMapAtom } from '@/atoms/preview-atoms'
@@ -135,9 +133,13 @@ import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { AgentSessionProvider } from '@/contexts/session-context'
 import { ExplorationBranchBar } from './ExplorationBranchBar'
+import { DelegationRuntimeBar } from './DelegationRuntimeBar'
+import { resolveDelegationRuntimeDisplay } from '@/domains/agent-runtime/delegation-runtime-display'
+import { AgentModelReasoningPicker } from './AgentModelReasoningPicker'
 import { sendWithCmdEnterAtom } from '@/atoms/shortcut-atoms'
 import { useOpenPreview } from '@/components/diff/preview-opener'
-import type { AgentRunInitiator, AgentRuntime, AgentSendInput, AgentPendingFile, FileDialogLargeFile, ModelOption, SDKMessage } from '@profer/shared'
+import type { AgentRunInitiator, AgentRuntime, AgentSendInput, AgentPendingFile, FileDialogLargeFile, ModelOption, SDKMessage, SDKUserMessage, AgentSessionMeta } from '@profer/shared'
+import { isUserInputMessage } from '@profer/session-core'
 
 /** 桌面端 Agent 会话懒加载单页消息数（与 main/agent-session-manager 的 DESKTOP_AGENT_PAGE_SIZE 同步） */
 const DESKTOP_AGENT_PAGE_SIZE = 60
@@ -203,191 +205,6 @@ function createUserSDKMessage(text: string, uuid?: string, createdAt = Date.now(
 function buildAgentInterruptionText(state: AgentInterruptionState): string {
   const time = new Date(state.at).toLocaleString('zh-CN', { hour12: false, second: undefined })
   return `上次任务被中断（${state.label}，${time}），可能未完成。\n请先查看对话历史中你上一条收到的用户消息，继续完成该任务。`
-}
-
-// ===== 思考模式 Hover Popover =====
-
-interface OpenAIThinkingConfig {
-  sessionId: string
-  currentLevel: string | null
-  disabled: boolean
-  /** 该模型可用的推理档位列表（缺省则展示完整七档）。 */
-  levels?: readonly import('@profer/shared').AgentThinkingLevel[]
-}
-
-interface AgentThinkingPopoverProps {
-  agentThinking: import('@profer/shared').ThinkingConfig | undefined
-  sessionId: string
-  onToggle: () => void
-  /** Pi + Codex 推理模型时，统一用同一个脑图标控制会话级 reasoning.effort。 */
-  openAIConfig?: OpenAIThinkingConfig
-  /** 将已持久化的会话档位即时同步回 renderer，避免菜单停留在旧状态。 */
-  onOpenAIThinkingUpdated: (session: import('@profer/shared').AgentSessionMeta) => void
-  /** 当前会话已持久化的推理强度覆盖（null/undefined=未设置，跟随预设/全局）。 */
-  sessionAgentEffort?: import('@profer/shared').AgentEffort | null
-  /** 当前会话绑定预设声明的推理强度；未设置时为空，作为无会话覆盖时的默认档。 */
-  presetEffort?: import('@profer/shared').AgentEffort
-  /** 会话级思考强度覆盖持久化成功后回写会话列表。 */
-  onAgentEffortUpdated?: (session: import('@profer/shared').AgentSessionMeta) => void
-}
-
-const EFFORT_LABELS: Record<import('@profer/shared').AgentEffort, string> = {
-  low: '低',
-  medium: '中',
-  high: '高',
-  max: '最大',
-}
-
-const OPENAI_THINKING_LABELS: Record<string, string> = {
-  off: '关闭推理',
-  minimal: '最小',
-  low: '低',
-  medium: '中',
-  high: '高',
-  xhigh: '最高',
-  max: '最大',
-}
-
-/** 完整推理档位顺序（缺省 capability 时菜单回退用）。 */
-const ALL_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-
-function AgentThinkingPopover({ agentThinking, onToggle, openAIConfig, sessionId, sessionAgentEffort, presetEffort, onAgentEffortUpdated, onOpenAIThinkingUpdated }: AgentThinkingPopoverProps): React.ReactElement {
-  const [thinkingExpanded, setThinkingExpanded] = useAtom(thinkingExpandedAtom)
-  const effort = useAtomValue(agentEffortAtom)
-  const [open, setOpen] = React.useState(false)
-
-  const isOpenAIReasoning = Boolean(openAIConfig)
-  const isEnabled = isOpenAIReasoning
-    ? openAIConfig?.currentLevel !== 'off'
-    : agentThinking?.type === 'adaptive'
-
-  // 生效档位级联：会话级手动覆盖 > 预设默认 > 全局设置 > high（与主进程 query 一致）。
-  const hasSessionEffortOverride = sessionAgentEffort !== undefined && sessionAgentEffort !== null
-  const defaultEffort = presetEffort ?? effort ?? 'high'
-  const activeEffort = sessionAgentEffort ?? defaultEffort
-  const openAIDefaultLabel = presetEffort ? `预设默认（${EFFORT_LABELS[presetEffort]}）` : '全局默认'
-
-  /** 手动切换思考强度：只写本会话覆盖，不动预设/全局；运行中由主进程拒绝，下一轮生效。 */
-  const handleEffortChange = React.useCallback(async (v: string) => {
-    const value = v as import('@profer/shared').AgentEffort
-    try {
-      const updated = await updateComposerEffort(sessionId, value)
-      onAgentEffortUpdated?.(updated)
-      toast.success(`思考强度已设为「${EFFORT_LABELS[value]}」，下一轮生效`)
-    } catch (error) {
-      console.error('[Agent] 切换思考强度失败:', error)
-      toast.error(error instanceof Error ? error.message : '切换思考强度失败')
-    }
-  }, [sessionId, onAgentEffortUpdated])
-
-  /** 清除会话级覆盖，回落预设默认 / 全局设置。 */
-  const handleResetEffort = React.useCallback(async () => {
-    if (!hasSessionEffortOverride) return
-    try {
-      const updated = await updateComposerEffort(sessionId, null)
-      onAgentEffortUpdated?.(updated)
-      toast.success('思考强度已恢复预设/全局默认')
-    } catch (error) {
-      console.error('[Agent] 恢复思考强度默认失败:', error)
-      toast.error(error instanceof Error ? error.message : '恢复思考强度默认失败')
-    }
-  }, [sessionId, onAgentEffortUpdated, hasSessionEffortOverride])
-
-  const handleOpenAILevelChange = (level: string | null): void => {
-    if (!openAIConfig) return
-    setOpen(false)
-    updateComposerOpenAIThinkingLevel(
-      openAIConfig.sessionId,
-      level as import('@profer/shared').AgentThinkingLevel | null,
-    )
-      .then((updatedSession) => {
-        // IPC 已将档位持久化；同步回 renderer 的会话列表，避免菜单仍显示旧的
-        // 「全局默认」状态、让用户误以为点击没有生效。
-        onOpenAIThinkingUpdated(updatedSession)
-        toast.success(level === null ? '已恢复全局默认推理档位' : `推理档位已设为「${OPENAI_THINKING_LABELS[level] ?? level}」`)
-      })
-      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : '切换推理档位失败'))
-  }
-
-  return (
-    <AgentComposerToolPopover
-      open={open}
-      onOpenChange={setOpen}
-      tooltip={isOpenAIReasoning ? `推理档位：${openAIConfig?.currentLevel ? OPENAI_THINKING_LABELS[openAIConfig.currentLevel] : openAIDefaultLabel}` : '思考设置'}
-      className={cn('p-2 px-2.5', isOpenAIReasoning ? 'w-36' : 'w-auto min-w-[180px]')}
-      trigger={
-        <AgentComposerToolTrigger
-          label={isOpenAIReasoning ? `推理档位：${openAIConfig?.currentLevel ? OPENAI_THINKING_LABELS[openAIConfig.currentLevel] : openAIDefaultLabel}` : '思考设置'}
-          state={isEnabled ? 'active' : 'default'}
-          disabled={openAIConfig?.disabled}
-          aria-expanded={open}
-        >
-          <Brain className="size-5" />
-        </AgentComposerToolTrigger>
-      }
-    >
-      {isOpenAIReasoning ? (
-        <div className="flex flex-col">
-          <div className="px-2 py-1 text-xs text-muted-foreground">推理档位</div>
-          {[
-            { level: null, label: openAIDefaultLabel },
-            ...(openAIConfig?.levels ?? ALL_THINKING_LEVELS).map((level) => ({
-              level,
-              label: OPENAI_THINKING_LABELS[level] ?? level,
-            })),
-          ].map(({ level, label }) => (
-            <AgentComposerToolMenuItem
-              key={level ?? '__default__'}
-              onClick={() => handleOpenAILevelChange(level)}
-              selected={(openAIConfig?.currentLevel ?? null) === level}
-            >
-              <span className="w-4 text-center">{(openAIConfig?.currentLevel ?? null) === level ? '✓' : ''}</span>
-              <span>{label}</span>
-            </AgentComposerToolMenuItem>
-          ))}
-          <div className="my-1 h-px bg-border" />
-          <div className="flex items-center justify-between gap-4 px-2 py-1">
-            <span className="text-xs text-foreground/70">展开思考</span>
-            <Switch
-              checked={thinkingExpanded}
-              onCheckedChange={setThinkingExpanded}
-              className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3"
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-xs text-foreground/70">思考模式</span>
-            <Switch checked={isEnabled} onCheckedChange={onToggle} className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3" />
-          </div>
-          <div className="h-px bg-border" />
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-xs text-foreground/70">展开思考</span>
-            <Switch checked={thinkingExpanded} onCheckedChange={setThinkingExpanded} className="h-4 w-7 [&>span]:size-3 [&>span]:data-[state=checked]:translate-x-3" />
-          </div>
-          <div className="h-px bg-border" />
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-xs text-foreground/70">思考强度</span>
-              {hasSessionEffortOverride && (
-                <button type="button" onClick={() => handleResetEffort()} title="恢复预设/全局默认" className="text-[10px] text-foreground/40 hover:text-foreground/70">
-                  默认
-                </button>
-              )}
-            </div>
-            <div className="flex gap-0.5">
-              {(['low', 'medium', 'high', 'max'] as const).map((v) => (
-                <button key={v} type="button" onClick={() => handleEffortChange(v)} className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors', activeEffort === v ? 'bg-primary text-primary-foreground' : 'text-foreground/50 hover:bg-muted hover:text-foreground/70')}>
-                  {EFFORT_LABELS[v]}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-    </AgentComposerToolPopover>
-  )
 }
 
 // ===== 工具栏附件按钮（添加文件 / 附加文件夹 二级菜单） =====
@@ -586,6 +403,8 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const agentChannelIds = useAtomValue(agentChannelIdsAtom)
   const setAgentChannelIds = useSetAtom(agentChannelIdsAtom)
   const [agentThinking, setAgentThinking] = useAtom(agentThinkingAtom)
+  const [thinkingExpanded, setThinkingExpanded] = useAtom(thinkingExpandedAtom)
+  const globalEffort = useAtomValue(agentEffortAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const setActiveView = useSetAtom(activeViewAtom)
   const globalWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
@@ -594,6 +413,34 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     () => countRunningDelegations(sessions, sessionId),
     [sessions, sessionId],
   )
+  // 委派子会话自身的运行态：实时流优先，持久化委派状态兜底。
+  // 子会话页常在运行中途才打开，过程区又默认折叠，只靠流式计时行很容易看不出在跑。
+  // 缺实时起点时用最近一条人类输入（委派 prompt / 续跑指令）作为本轮起点。
+  const delegationFallbackStartedAt = React.useMemo(() => {
+    const messages = [...persistedSDKMessages, ...(liveMessages ?? [])]
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (!message || message.type !== 'user') continue
+      if (!isUserInputMessage(message as SDKUserMessage)) continue
+      const createdAt = (message as { _createdAt?: unknown })._createdAt
+      if (typeof createdAt === 'number') return createdAt
+    }
+    return undefined
+  }, [persistedSDKMessages, liveMessages])
+  const delegationRuntimeDisplay = React.useMemo(() => {
+    const meta = sessions.find((session) => session.id === sessionId)
+    if (!meta) return null
+    return resolveDelegationRuntimeDisplay({
+      parentSessionId: meta.parentSessionId,
+      sourceDelegationId: meta.sourceDelegationId,
+      delegationStatus: meta.delegationStatus,
+      liveRunning: streamState?.running === true,
+      liveStartedAt: streamState?.startedAt,
+      fallbackStartedAt: delegationFallbackStartedAt,
+      sessionUpdatedAt: meta.updatedAt,
+      now: Date.now(),
+    })
+  }, [sessions, sessionId, streamState?.running, streamState?.startedAt, delegationFallbackStartedAt])
   const setAgentSessions = useSetAtom(agentSessionsAtom)
   const setDraftSessionIds = useSetAtom(draftSessionIdsAtom)
   const agentPresetsMap = useAtomValue(agentPresetsAtom)
@@ -680,22 +527,28 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
   const sessionAgentRuntime: AgentRuntime = sessionMeta
     ? sessionMeta.agentRuntime ?? 'claude'
     : agentRuntime
-  // 当前 Pi 模型的推理档位能力（异步桥接，供思考档位菜单动态展示）。
+  // 当前 Pi 模型的推理档位能力（异步桥接，供推理强度控件动态展示）。
   const [piReasoningCapability, setPiReasoningCapability] = React.useState<import('@profer/shared').ReasoningCapability | undefined>(undefined)
+  // 能力查询期间不能先回退到「无 capability」分支，否则会闪一下 Claude 的强度档。
+  const [reasoningCapabilityLoading, setReasoningCapabilityLoading] = React.useState(false)
   React.useEffect(() => {
     if (sessionAgentRuntime !== 'pi' || !agentModelId) {
       setPiReasoningCapability(undefined)
+      setReasoningCapabilityLoading(false)
       return
     }
     const channel = globalChannels.find((c) => c.id === agentChannelId)
     if (!channel) {
       setPiReasoningCapability(undefined)
+      setReasoningCapabilityLoading(false)
       return
     }
     let cancelled = false
+    setReasoningCapabilityLoading(true)
     getComposerReasoningCapability(channel.provider, agentModelId, channel.baseUrl)
       .then((capability) => { if (!cancelled) setPiReasoningCapability(capability) })
       .catch(() => { if (!cancelled) setPiReasoningCapability(undefined) })
+      .finally(() => { if (!cancelled) setReasoningCapabilityLoading(false) })
     return () => { cancelled = true }
   }, [sessionAgentRuntime, agentModelId, agentChannelId, globalChannels])
   React.useEffect(() => {
@@ -3181,18 +3034,45 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     && !isAgentPresetToolGroupDisabled(sessionBoundPreset.disabledToolGroups, 'task-graph'),
   )
 
+  /** 合并控件：思考模式开关走全局设置，与原有 popover 保持同一条写入路径。 */
+  const handleToggleAgentThinking = React.useCallback((): void => {
+    const next = agentThinking?.type === 'adaptive'
+      ? { type: 'disabled' as const }
+      : { type: 'adaptive' as const }
+    setAgentThinking(next)
+    updateComposerSettings({ agentThinking: next })
+  }, [agentThinking, setAgentThinking])
+
+  /** 档位 / 强度写入后回写会话列表，避免弹层仍显示旧值。 */
+  const handleReasoningSessionUpdated = React.useCallback((updated: AgentSessionMeta): void => {
+    setAgentSessions((sessions) => sessions.map((session) => (
+      session.id === updated.id ? updated : session
+    )))
+  }, [setAgentSessions])
+
   const inputToolbarItems = React.useMemo<ComposerToolbarItem[]>(() => {
     const items: ComposerToolbarItem[] = [
     {
       key: 'model',
       node: (
-        <ModelSelector
+        <AgentModelReasoningPicker
+          sessionId={sessionId}
+          sessionMeta={sessionMeta}
+          capability={sessionAgentRuntime === 'pi' ? piReasoningCapability : undefined}
+          capabilityLoading={sessionAgentRuntime === 'pi' && reasoningCapabilityLoading}
+          presetEffort={sessionBoundPreset?.effort}
+          globalEffort={globalEffort}
+          agentThinking={agentThinking}
+          onToggleThinking={handleToggleAgentThinking}
+          running={streaming || backgroundWaiting}
+          onSessionUpdated={handleReasoningSessionUpdated}
+          thinkingExpanded={thinkingExpanded}
+          onThinkingExpandedChange={setThinkingExpanded}
+          externalSelectedModel={externalSelectedModel}
+          onModelSelect={handleModelSelect}
           filterChannelIds={sessionAgentRuntime === 'pi' ? undefined : agentChannelIds}
           preferredProtocol={sessionAgentRuntime === 'pi' ? 'openai' : 'anthropic'}
           strictProtocolFilter
-          externalSelectedModel={externalSelectedModel}
-          onModelSelect={handleModelSelect}
-          composerTool
         />
       ),
     },
@@ -3209,42 +3089,6 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     },
     { key: 'permission-mode', node: <PermissionModeSelector sessionId={sessionId} presetPermissionMode={sessionBoundPreset?.permissionMode} persistedRevision={sessionMeta?.revision} composerTool /> },
     { key: 'preset', node: <PresetSelector sessionId={sessionId} persistedPresetId={sessionMeta?.presetId} persistedPresetReference={sessionMeta?.presetReference} persistedRevision={sessionMeta?.revision} workspaceSlug={workspaceSlug ?? undefined} open={presetMenuOpen} onOpenChange={setPresetMenuOpen} onManagePresets={openWorkspacePresets} /> },
-    {
-      key: 'thinking',
-      node: (
-        <AgentThinkingPopover
-          agentThinking={agentThinking}
-          sessionId={sessionId}
-          sessionAgentEffort={sessionMeta?.agentEffort ?? null}
-          presetEffort={sessionBoundPreset?.effort}
-          onToggle={() => {
-            const next = agentThinking?.type === 'adaptive'
-              ? { type: 'disabled' as const }
-              : { type: 'adaptive' as const }
-            setAgentThinking(next)
-            updateComposerSettings({ agentThinking: next })
-          }}
-          onAgentEffortUpdated={(updatedSession) => {
-            setAgentSessions((sessions) => sessions.map((session) => (
-              session.id === updatedSession.id ? updatedSession : session
-            )))
-          }}
-          onOpenAIThinkingUpdated={(updatedSession) => {
-            setAgentSessions((sessions) => sessions.map((session) => (
-              session.id === updatedSession.id ? updatedSession : session
-            )))
-          }}
-          openAIConfig={sessionMeta && sessionAgentRuntime === 'pi' && piReasoningCapability
-            ? {
-                sessionId,
-                currentLevel: sessionMeta.openAIThinkingLevel ?? null,
-                disabled: streaming || backgroundWaiting,
-                levels: piReasoningCapability.levels,
-              }
-            : undefined}
-        />
-      ),
-    },
     ...(voiceDictationEnabled ? [{ key: 'speech', node: <SpeechButton composerTool /> }] : []),
     {
       key: 'attach',
@@ -3292,6 +3136,13 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
     piReasoningCapability,
     sessionMeta,
     setAgentThinking,
+    agentModelId,
+    handleToggleAgentThinking,
+    handleReasoningSessionUpdated,
+    reasoningCapabilityLoading,
+    globalEffort,
+    thinkingExpanded,
+    setThinkingExpanded,
     handleOpenFileDialog,
     handleAttachFolder,
     contextStatus.inputTokens,
@@ -3350,6 +3201,7 @@ export function AgentView({ sessionId }: AgentViewProps): React.ReactElement {
         <div className="shrink-0">
           <AgentHeader sessionId={sessionId} />
         </div>
+        {delegationRuntimeDisplay && <div className="shrink-0"><DelegationRuntimeBar display={delegationRuntimeDisplay} /></div>}
         {/* 探索分支：来源标注 + 带回主线（原侧面板分支条，随分支 Tab 化迁入） */}
         {isExplorationBranch && <ExplorationBranchBar branchSessionId={sessionId} />}
         <div className="shrink-0">

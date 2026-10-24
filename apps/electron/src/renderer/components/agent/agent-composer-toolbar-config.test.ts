@@ -8,7 +8,6 @@ describe('Agent composer toolbar descriptor', () => {
       runtime: 'runtime',
       permissionMode: 'permission',
       preset: 'preset',
-      thinking: 'thinking',
       attach: 'attach',
       contextUsage: 'usage',
     })
@@ -18,7 +17,6 @@ describe('Agent composer toolbar descriptor', () => {
       'runtime',
       'permission-mode',
       'preset',
-      'thinking',
       'context-usage',
     ])
     expect(items[0]?.canOverflow).toBe(false)

@@ -360,6 +360,9 @@ export async function resolvePiReasoningCapability(
   const catalogModel = await findPiCatalogModel(provider, modelId)
   return resolveReasoningCapability({
     profile,
+    // profile 已按 transport 过滤过，这里取到的就是实际会用的编码；
+    // 界面据此展示「档位 → 实际请求值」。
+    encoding: profile?.encodings[transport],
     catalog: catalogModel
       ? {
           reasoning: catalogModel.reasoning,

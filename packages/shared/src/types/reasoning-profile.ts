@@ -72,16 +72,22 @@ export interface PiCatalogReasoningMetadata {
 /**
  * 可跨主进程和渲染进程传输的 reasoning capability。
  *
- * 不携带 protocol encoding；Pi catalog 继续负责把所选 level 编码为实际请求字段。
+ * 除档位集合外还带 `effortMap`：同一个产品档位在不同模型上会编码成不同的
+ * provider 值（DeepSeek V4 Pro 的 low 实际发 high），界面需要它才能如实展示
+ * 「所选档位」与「实际请求强度」的差异。
  */
 export interface ReasoningCapability {
   source: 'profile' | 'pi-catalog'
   levels: readonly AgentThinkingLevel[]
   defaultLevel: AgentThinkingLevel
+  /** 档位 → 实际请求值；缺省表示未知，null 表示该档不产生显式参数。 */
+  effortMap?: ReasoningEffortMap
 }
 
 export interface ResolveReasoningCapabilityInput {
   profile?: ReasoningProfile
+  /** profile 命中时当前 transport 选中的编码，决定 capability 暴露的 effortMap。 */
+  encoding?: ReasoningEncoding
   catalog?: PiCatalogReasoningMetadata
 }
 
@@ -397,14 +403,54 @@ function getPiCatalogThinkingLevels(catalog: PiCatalogReasoningMetadata): AgentT
 }
 
 /**
- * 解析最终会话 capability。显式 profile 优先于 Pi catalog，保留经过验证的模型专属编码。
+ * catalog 明确拒绝的档位。
+ *
+ * 只认 `thinkingLevelMap[level] === null` 这种显式声明，不把「缺省映射」当成不支持：
+ * findPiCatalogModel 会跨 provider 兜底查同名模型，缺省映射可能只是这份目录没写全，
+ * 用它否决经过验证的 profile 会把可用档位误删。`reasoning: false` 才是整体拒绝。
+ */
+function getCatalogDeniedLevels(catalog: PiCatalogReasoningMetadata | undefined): ReadonlySet<AgentThinkingLevel> {
+  if (!catalog) return new Set()
+  if (catalog.reasoning === false) return new Set(PI_EXTENDED_THINKING_LEVELS)
+  const map = catalog.thinkingLevelMap
+  if (!map) return new Set()
+  return new Set(PI_EXTENDED_THINKING_LEVELS.filter((level) => map[level] === null))
+}
+
+/** capability 只描述真正可选的档位，effortMap 跟着档位一起收窄。 */
+function narrowEffortMap(
+  map: ReasoningEffortMap | undefined,
+  levels: readonly AgentThinkingLevel[],
+): ReasoningEffortMap | undefined {
+  if (!map) return undefined
+  const narrowed: ReasoningEffortMap = {}
+  for (const level of levels) {
+    if (level in map) narrowed[level] = map[level]
+  }
+  return Object.keys(narrowed).length > 0 ? narrowed : undefined
+}
+
+/**
+ * 解析最终会话 capability。
+ *
+ * profile 决定「产品档位」（含经过验证的编码），catalog 只负责否决它显式标记为
+ * 不支持的档位：两者取交集，避免同名模型换后端后界面仍给出会被服务端拒绝的档位。
  */
 export function resolveReasoningCapability(input: ResolveReasoningCapabilityInput): ReasoningCapability | undefined {
+  const denied = getCatalogDeniedLevels(input.catalog)
+
   if (input.profile) {
+    const levels = input.profile.levels.filter((level) => !denied.has(level))
+    if (levels.length === 0) return undefined
+    const defaultLevel = normalizeReasoningCapabilityLevel(
+      { source: 'profile', levels, defaultLevel: input.profile.defaultLevel },
+      input.profile.defaultLevel,
+    ) ?? levels[0]!
     return {
       source: 'profile',
-      levels: input.profile.levels,
-      defaultLevel: input.profile.defaultLevel,
+      levels,
+      defaultLevel,
+      effortMap: narrowEffortMap(input.encoding?.effortMap, levels),
     }
   }
 
@@ -415,10 +461,19 @@ export function resolveReasoningCapability(input: ResolveReasoningCapabilityInpu
     { source: 'pi-catalog', levels, defaultLevel: 'high' },
     'high',
   ) ?? levels[0]!
+
+  // catalog 的 thinkingLevelMap 就是 Pi 的实际编码表，直接透出给界面。
+  const effortMap: ReasoningEffortMap = {}
+  for (const level of levels) {
+    const mapped = input.catalog.thinkingLevelMap?.[level]
+    if (typeof mapped === 'string') effortMap[level] = mapped
+  }
+
   return {
     source: 'pi-catalog',
     levels,
     defaultLevel,
+    ...(Object.keys(effortMap).length > 0 ? { effortMap } : {}),
   }
 }
 

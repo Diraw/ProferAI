@@ -30,7 +30,6 @@ export const COMPOSER_TOOLBAR_DEFINITIONS: Record<ComposerToolbarSurface, readon
     { key: 'runtime', label: '运行时', description: '切换 Agent 运行时。' },
     { key: 'permission-mode', label: '权限模式', description: '调整当前会话的权限策略。' },
     { key: 'preset', label: '预设', description: '切换当前会话使用的 Agent 预设。' },
-    { key: 'thinking', label: '思考设置', description: '调整 Agent 的思考和推理设置。' },
     { key: 'speech', label: '语音输入', description: '从语音输入浮窗插入文字。' },
     { key: 'context-usage', label: '上下文用量', description: '查看并管理当前会话的上下文用量。' },
     { key: 'graph', label: '任务图', description: '查看当前任务的图结构。' },

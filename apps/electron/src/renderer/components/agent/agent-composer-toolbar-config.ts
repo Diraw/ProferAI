@@ -8,7 +8,6 @@ export interface AgentComposerToolbarNodes {
   runtime: ReactNode
   permissionMode: ReactNode
   preset: ReactNode
-  thinking: ReactNode
   speech?: ReactNode
   attach: ReactNode
   contextUsage: ReactNode
@@ -29,7 +28,6 @@ export function createAgentComposerToolbarItems(input: AgentComposerToolbarNodes
     { key: 'runtime', node: input.runtime },
     { key: 'permission-mode', node: input.permissionMode },
     { key: 'preset', node: input.preset },
-    { key: 'thinking', node: input.thinking },
     ...(input.speech ? [{ key: 'speech', node: input.speech }] : []),
     { key: 'attach', node: input.attach },
     { key: 'context-usage', node: input.contextUsage },

@@ -5,9 +5,10 @@
  * Logo 通过静态 import 打包，确保 Vite 正确处理资源。
  *
  * 匹配规则：
- * - logoMap 的 key 作为正则表达式（忽略大小写）
+ * - 先按 MODEL_LOGO_MAP 的 key（正则，忽略大小写）精确匹配具体型号/子品牌
+ * - 再按 FAMILY_PREFIX_RULES 匹配厂商系列前缀（不写死版本号，gpt-6.1-sol 这类新版本自动归类）
  * - 按顺序匹配，越具体的规则排在越前面
- * - 未匹配到时返回默认图标
+ * - 未匹配到时回退供应商图标，最终回退默认图标
  */
 
 // ===== 模型图标导入 =====
@@ -124,9 +125,8 @@ const MODEL_LOGO_MAP: Record<string, string> = {
   'gpt-image': OpenAILogo,
   'gpt-3': OpenAILogo,
   'gpt-4': OpenAILogo,
-  o1: OpenAILogo,
-  o3: OpenAILogo,
-  o4: OpenAILogo,
+  // o 系列（o1 / o3-mini / o4-pro）；锚定开头，避免任意含 "o1" 的 ID 误判
+  '^o[1-9](?:$|[-_.])': OpenAILogo,
   'gpt-6-astra': OpenAILogo,
   'gpt-5-mini': OpenAILogo,
   'gpt-5-nano': OpenAILogo,
@@ -164,6 +164,7 @@ const MODEL_LOGO_MAP: Record<string, string> = {
 
   // === Kimi ===
   kimi: KimiLogo,
+  moonshot: KimiLogo,
 
   // === Doubao / 豆包 ===
   doubao: DoubaoLogo,
@@ -180,6 +181,7 @@ const MODEL_LOGO_MAP: Record<string, string> = {
 
   // === Mistral ===
   codestral: CodestralLogo,
+  devstral: MistralLogo,
   mixtral: MistralLogo,
   mistral: MistralLogo,
   ministral: MistralLogo,
@@ -218,6 +220,38 @@ const MODEL_LOGO_MAP: Record<string, string> = {
 }
 
 /**
+ * 厂商系列前缀规则（锚定开头，作为 MODEL_LOGO_MAP 的兜底）
+ *
+ * 这里只写“系列”，不写版本号：同系列新版本（gpt-7、gemini-4-pro、claude-5）
+ * 无需新增枚举也能命中正确品牌。具体子品牌/衍生模型仍由 MODEL_LOGO_MAP 优先处理。
+ */
+const FAMILY_PREFIX_RULES: Array<[string, string]> = [
+  // OpenAI：gpt-6.1-sol / gpt-7 / gpt-5.6-luna 统归于 OpenAI
+  ['^gpt[-_.]?\\d', OpenAILogo],
+  ['^chatgpt', OpenAILogo],
+  ['^claude', ClaudeLogo],
+  ['^anthropic-', ClaudeLogo],
+  ['^gemini', GeminiLogo],
+  ['^gemma', GemmaLogo],
+  ['^deepseek', DeepSeekLogo],
+  ['^(qwen|qwq|qvq)', QwenLogo],
+  ['^(kimi|moonshot)', KimiLogo],
+  ['^(glm|zhipu)', ZhipuLogo],
+  ['^grok', GrokLogo],
+  ['^llama', LlamaLogo],
+  ['^(devstral|mistral|mixtral|codestral|magistral|ministral)', MistralLogo],
+  ['^(doubao|seed)', DoubaoLogo],
+  ['^hunyuan', HunyuanLogo],
+  ['^(ernie|tao-)', WenxinLogo],
+  ['^(sparkdesk|generalv|spark-)', SparkDeskLogo],
+  ['^step', StepLogo],
+  ['^mimo', XiaomiLogo],
+  ['^minimax', MiniMaxLogo],
+  ['^(cohere|command)', CohereLogo],
+  ['^(text-embedding|embedding)', EmbeddingLogo],
+]
+
+/**
  * 供应商 Logo 映射
  *
  * 当模型 ID 无法匹配时，按供应商类型回退。
@@ -254,18 +288,28 @@ const PROVIDER_LOGO_MAP: Record<ProviderType, string> = {
 const COMPILED_LOGO_MAP: Array<[RegExp, string]> = Object.entries(MODEL_LOGO_MAP)
   .map(([key, logo]) => [new RegExp(key, 'i'), logo])
 
+/** 预编译的系列前缀列表（兜底层） */
+const COMPILED_FAMILY_RULES: Array<[RegExp, string]> = FAMILY_PREFIX_RULES
+  .map(([key, logo]) => [new RegExp(key, 'i'), logo])
+
 /**
  * 根据模型 ID 获取对应的 Logo
  *
- * 使用正则匹配，按优先级顺序遍历编译后的正则列表。
+ * 先查具体型号/子品牌规则，再用厂商系列前缀兜底（支持同系列未来版本）。
  * 未匹配到返回 undefined。
  *
- * @param modelId 模型 ID（如 "gpt-4-turbo"、"claude-3-opus-20240229"）
+ * @param modelId 模型 ID（如 "gpt-4-turbo"、"claude-3-opus-20240229"、"gpt-6.1-sol"）
  */
 export function getModelLogoById(modelId: string): string | undefined {
   if (!modelId) return undefined
 
   for (const [regex, logo] of COMPILED_LOGO_MAP) {
+    if (regex.test(modelId)) {
+      return logo
+    }
+  }
+
+  for (const [regex, logo] of COMPILED_FAMILY_RULES) {
     if (regex.test(modelId)) {
       return logo
     }

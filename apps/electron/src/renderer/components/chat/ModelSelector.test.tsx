@@ -39,7 +39,7 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 const mounts: (() => void)[] = []
-function mount(channels = [fixture], conversation = meta) {
+function mount(channels = [fixture], conversation = meta, props: Parameters<typeof ModelSelector>[0] = {}) {
   errors.length = 0
   store.set(channelsAtom, channels); store.set(channelsLoadedAtom, true)
   store.set(authStatusAtom, { isLoggedIn: true, teamAccountId: 'a' })
@@ -94,7 +94,7 @@ function mount(channels = [fixture], conversation = meta) {
       changed = false; index = 0
       const previous = internals.ReactCurrentDispatcher.current
       internals.ReactCurrentDispatcher.current = dispatcher
-      try { tree = ModelSelector() } finally { internals.ReactCurrentDispatcher.current = previous }
+      try { tree = ModelSelector(props) } finally { internals.ReactCurrentDispatcher.current = previous }
       const queued = effects; effects = []
       queued.forEach((effect) => effect())
     } while (changed)
@@ -157,5 +157,56 @@ describe('ModelSelector 真实交互（fixture IPC）', () => {
     expect(scope.trigger().props.title).toBe('Model')
     store.set(channelsAtom, [channels[0]!]); scope.render()
     expect(scope.elements().some((element) => element.props.children === '暂无可用模型')).toBe(true)
+  })
+})
+
+describe('ModelSelector 合并控件的宿主插槽', () => {
+  test('footer 与 triggerExtra 由宿主注入，选中后保持弹层打开', () => {
+    const selected: string[] = []
+    const scope = mount([fixture, { ...fixture, id: 'second' }], { ...meta, channelId: 'second' }, {
+      keepOpenOnSelect: true,
+      onModelSelect: (option) => selected.push(option.modelId),
+      triggerExtra: React.createElement('span', { id: 'fixture-level' }, '高'),
+      footer: React.createElement('div', { id: 'fixture-footer' }, '推理强度'),
+    })
+
+    const ids = scope.elements().map((element) => element.props.id)
+    expect(ids).toContain('fixture-level')
+    expect(ids).toContain('fixture-footer')
+
+    ;(scope.option().props.onClick as () => void)()
+    expect(selected).toEqual(['model'])
+  })
+
+  test('运行中 disabled 时模型行不可选，footer 仍挂载', () => {
+    const selected: string[] = []
+    const scope = mount(undefined, undefined, {
+      disabled: true,
+      onModelSelect: (option) => selected.push(option.modelId),
+      footer: React.createElement('div', { id: 'fixture-footer' }, '推理强度'),
+    })
+
+    expect(scope.option().props.disabled).toBe(true)
+    ;(scope.option().props.onClick as () => void)()
+    expect(selected).toEqual([])
+    expect(scope.elements().map((element) => element.props.id)).toContain('fixture-footer')
+  })
+})
+
+describe('ModelSelector 事件通知', () => {
+  test('打开弹层会通知宿主', () => {
+    const events: boolean[] = []
+    const scope = mount(undefined, undefined, { onOpenChange: (open) => events.push(open) })
+
+    ;(scope.trigger().props.onClick as () => void)()
+    expect(events).toEqual([true])
+  })
+})
+
+describe('ModelSelector 只渲染 Dialog 的宿主模式', () => {
+  test('hideTrigger 时不渲染触发按钮，Dialog 仍按宿主状态受控渲染', () => {
+    const scope = mount(undefined, undefined, { hideTrigger: true, open: true, onOpenChange: () => {} })
+    expect(scope.elements().some((element) => element.props.title === 'Model')).toBe(false)
+    expect(scope.elements().some((element) => element.props.open === true)).toBe(true)
   })
 })

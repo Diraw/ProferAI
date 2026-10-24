@@ -140,6 +140,20 @@ interface ModelSelectorProps {
   strictProtocolFilter?: boolean
   /** Agent 输入区使用统一的 Composer hover/focus/Tooltip 外壳，Chat 默认不变。 */
   composerTool?: boolean
+  /** 弹层底部固定区域（如推理强度），不随模型列表滚动。 */
+  footer?: React.ReactNode
+  /** 触发按钮上模型名右侧的附加内容（如当前推理档位）。compact 下不渲染。 */
+  triggerExtra?: React.ReactNode
+  /** 选中后保持弹层打开，让用户在同一面板里接着调档位。 */
+  keepOpenOnSelect?: boolean
+  /** 锁定模型切换（Agent 运行中）：行置灰且点击不生效，footer 仍可交互。 */
+  disabled?: boolean
+  /** 外部直接受控开关 Dialog。 */
+  open?: boolean
+  /** 弹层开合通知；宿主据此复位二级视图。 */
+  onOpenChange?: (open: boolean) => void
+  /** 只渲染 Dialog，不渲染触发按钮（宿主已自带触发器时用）。 */
+  hideTrigger?: boolean
 }
 
 export function ModelSelector({
@@ -152,6 +166,13 @@ export function ModelSelector({
   preferredProtocol = 'openai',
   strictProtocolFilter = false,
   composerTool = false,
+  footer,
+  triggerExtra,
+  keepOpenOnSelect = false,
+  disabled = false,
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger = false,
 }: ModelSelectorProps = {}): React.ReactElement {
   const compactCtx = React.useContext(CompactModelSelectorCtx)
   const compact = compactProp ?? compactCtx
@@ -159,11 +180,18 @@ export function ModelSelector({
   const conversationId = useConversationIdOptional()
   const setConversations = useSetAtom(conversationsAtom)
   const setGlobalModel = useSetAtom(selectedModelAtom)
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const open = controlledOpen !== undefined ? controlledOpen : uncontrolledOpen
+  const handleOpenChange = React.useCallback((next: boolean): void => {
+    if (controlledOpen === undefined) {
+      setUncontrolledOpen(next)
+    }
+    onOpenChange?.(next)
+  }, [controlledOpen, onOpenChange])
   const channels = useAtomValue(channelsAtom)
   const authStatus = useAtomValue(authStatusAtom)
   const channelsLoaded = useAtomValue(channelsLoadedAtom)
   const modelSelectorRequest = useAtomValue(modelSelectorRequestAtom)
-  const [open, setOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
   const [saving, setSaving] = React.useState(false)
   const selectionInFlightRef = React.useRef(false)
@@ -183,9 +211,9 @@ export function ModelSelector({
   React.useEffect(() => {
     if (modelSelectorRequest.seq > lastConsumedModelSelectorSeqRef.current) {
       lastConsumedModelSelectorSeqRef.current = modelSelectorRequest.seq
-      setOpen(true)
+      handleOpenChange(true)
     }
-  }, [modelSelectorRequest])
+  }, [modelSelectorRequest, handleOpenChange])
 
   // 外部模型优先 → per-conversation 模型
   const selectedModel = externalSelectedModel !== undefined ? externalSelectedModel : conversationModel
@@ -275,7 +303,7 @@ export function ModelSelector({
 
   /** 选择模型并持久化到当前对话 */
   const handleSelect = (option: ModelOption): void => {
-    if (selectionInFlightRef.current || !store.get(channelsLoadedAtom)) return
+    if (disabled || selectionInFlightRef.current || !store.get(channelsLoadedAtom)) return
     const currentChannels = store.get(channelsAtom).filter((channel) => store.get(authStatusAtom).isLoggedIn || !isOfficialChannel(channel))
     const currentOption = buildModelOptions(currentChannels, option.channelId, filterChannelIds, preferredProtocol, strictProtocolFilter)
       .find((item) => item.modelId === option.modelId)
@@ -285,14 +313,14 @@ export function ModelSelector({
     }
     if (onModelSelect) {
       onModelSelect(currentOption)
-      setOpen(false)
+      if (!keepOpenOnSelect) handleOpenChange(false)
       return
     }
 
     const commit = (): void => {
       setConversationModel?.({ channelId: option.channelId, modelId: option.modelId })
       setGlobalModel({ channelId: option.channelId, modelId: option.modelId })
-      setOpen(false)
+      if (!keepOpenOnSelect) handleOpenChange(false)
     }
     if (!conversationId) { commit(); return }
 
@@ -335,7 +363,7 @@ export function ModelSelector({
     if (!open) return
     return navigationController.register((action) => {
       if (action === 'back') {
-        setOpen(false)
+        handleOpenChange(false)
         return true
       }
       if (action === 'previous' || action === 'next') {
@@ -356,6 +384,7 @@ export function ModelSelector({
   }, [open, flatOptions, highlightIndex, handleSelect])
 
   if (channelsLoaded && modelOptions.length === 0) {
+    if (hideTrigger) return <></>
     return (
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground px-2 py-1">
         <Cpu className="size-3.5" />
@@ -367,13 +396,13 @@ export function ModelSelector({
   return (
     <>
       {/* 触发按钮 */}
-      {composerTool && (
+      {!hideTrigger && composerTool && (
         <AgentComposerToolTooltip label={displayModelInfo
           ? `模型 · ${showChannelInTrigger ? `${displayChannelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName}`
           : '选择模型'}>
           <button
             type="button"
-            onClick={() => setOpen(true)}
+            onClick={() => handleOpenChange(true)}
             aria-label={displayModelInfo
               ? (showChannelInTrigger ? `${displayChannelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName)
               : '选择模型'}
@@ -387,13 +416,13 @@ export function ModelSelector({
             {displayModelInfo ? (
               <img src={getModelLogo(displayModelInfo.modelId, displayModelInfo.provider)} alt={displayModelInfo.modelName} className="size-5 rounded object-cover" />
             ) : <Cpu className="size-5" />}
-            {!compact && <><span className="max-w-[200px] truncate">{displayModelInfo ? (showChannelInTrigger ? `${displayChannelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName) : '选择模型'}</span><ChevronDown className="size-3" /></>}
+            {!compact && <><span className="max-w-[200px] truncate">{displayModelInfo ? (showChannelInTrigger ? `${displayChannelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName) : '选择模型'}</span>{triggerExtra}<ChevronDown className="size-3" /></>}
           </button>
         </AgentComposerToolTooltip>
       )}
-      {!composerTool && <button
+      {!hideTrigger && !composerTool && <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => handleOpenChange(true)}
         className={cn(
           'model-selector-trigger flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors',
           compact && 'justify-center rounded-full size-7 px-0',
@@ -418,13 +447,14 @@ export function ModelSelector({
                 ? (showChannelInTrigger ? `${displayChannelName} · ${displayModelInfo.modelName}` : displayModelInfo.modelName)
                 : '选择模型'}
             </span>
+            {triggerExtra}
             <ChevronDown className="size-3" />
           </>
         )}
       </button>}
 
       {/* 模型选择 Dialog */}
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="p-0 gap-0 max-w-lg" aria-describedby={undefined}>
           <DialogHeader className="sr-only">
             <DialogTitle>选择模型</DialogTitle>
@@ -498,7 +528,7 @@ export function ModelSelector({
                             else itemRefs.current.delete(currentFlatIndex)
                           }}
                           type="button"
-                          disabled={saving}
+                          disabled={saving || disabled}
                           onClick={() => handleSelect(option)}
                           onMouseEnter={() => setHighlightIndex(currentFlatIndex)}
                           className={cn(
@@ -544,6 +574,7 @@ export function ModelSelector({
               })()
             )}
           </div>
+          {footer ? <div className="border-t border-border/60">{footer}</div> : null}
         </DialogContent>
       </Dialog>
     </>
