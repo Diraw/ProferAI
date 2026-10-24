@@ -83,8 +83,30 @@
   --chart-7: 18 72% 64%;
   --chart-8: 100 48% 58%;
 
-  /* 外壳缝隙背景；AppShell 的 .shell-bg 会使用它。 */
+  /* 外壳缝隙背景；AppShell 的 .shell-bg 会使用它。
+   * 不定义时 skin-base 的 `background: var(--shell-bg-gradient)` 会让外壳变透明。 */
   --shell-bg-gradient: linear-gradient(145deg, hsl(222 32% 7%), hsl(222 24% 12%));
+
+  /* 可选但强烈建议：skin-base 直连 token。
+   * 这一组必须写完整 CSS 值（hsl()/rgb()/渐变/阴影），不能写 `H S% L%` 三元组；
+   * 不写时对应组件不是“回落默认”，而是直接变透明（选中底、滑块、滚动条、选区）。 */
+  --item-selected-bg: hsl(212 30% 24%);          /* 会话/工作区/Tab 选中底 */
+  --item-selected-fg: hsl(210 30% 96%);          /* 选中行文字；会强制所有子元素继承 */
+  --selection-bg: hsl(var(--primary) / 0.30);
+  --selection-color: hsl(var(--foreground));
+  --mode-slider-bg: hsl(212 28% 30%);            /* 模式切换器滑块 */
+  --mode-slider-shadow: 0 2px 4px rgb(0 0 0 / 0.35);
+  --mode-btn-selected-color: hsl(210 30% 98%);
+  --workspace-badge-color: hsl(212 70% 78%);
+  --dialog-glow-shadow: 0 0 40px 8px rgb(255 255 255 / 0.06), 0 25px 50px -12px rgb(0 0 0 / 0.5);
+  --code-block-header-bg: hsl(222 24% 12%);
+  --minimap-indicator-bg: hsl(212 60% 65%);
+  --scroll-thumb-bg: hsl(212 40% 60% / 0.20);
+  --scroll-thumb-hover: hsl(212 40% 60% / 0.32);
+  --scroll-thumb-active: hsl(212 40% 60% / 0.42);
+  --plan-mode-stroke-color: hsl(var(--primary) / 0.55);
+  --tabbar-shadow-color: hsl(220 18% 25% / 0.6);
+  --tiptap-pre-bg: 222 30% 8%;                   /* 这一项是三元组：消费写法是 hsl(var(--tiptap-pre-bg, ...)) */
 }
 
 /* 可选：消息样式。

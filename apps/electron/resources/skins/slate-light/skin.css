@@ -14,7 +14,7 @@
   --content-area: 40 8% 94%;            /* #f0efec 内容区域 */
   --sidebar-surface: 40 6% 88%;
   --tabbar-surface: 40 6% 88%;
-  --input-surface: 60 14.3% 98.6%;
+  --input-surface: 40 4% 96%;           /* 输入框近白中性色，去掉暖粉感 */
   --tab-surface: 40 8% 94%;
   --muted: 40 6% 85%;                   /* #dbd8d2 次要背景 */
   --muted-foreground: 40 5% 45%;        /* #787568 次要文字 */
@@ -28,7 +28,7 @@
   --ring: 18 20% 43%;                   /* 聚焦环（与主色一致） */
   --card: 40 8% 96%;                    /* #f6f5f2 卡片背景 */
   --card-foreground: 40 8% 18%;         /* #312f2a 卡片前景 */
-  --input: 40 6% 90%;                   /* #e8e6e2 输入框背景 */
+  --input: 40 4% 94%;                   /* 输入框背景（调浅、降饱和去粉） */
   --popover: 40 8% 96%;                 /* #f6f5f2 弹出层 */
   --popover-foreground: 40 8% 18%;      /* #312f2a 弹出前景 */
   --dialog: 40 8% 94%;                  /* #f0efec 弹窗背景（主题色） */
@@ -87,7 +87,7 @@ html.skin-slate-light .heatmap-empty-cell {
   --sunken-surface: var(--muted);
   --surface-border: var(--border);
   --surface-border-strong: var(--border);
-  --input-hover: var(--muted);
+  --input-hover: 40 5% 92%;
   --control-surface: var(--secondary);
   --control-hover: var(--accent);
   --selected-surface: var(--accent);
@@ -120,4 +120,14 @@ html.skin-slate-light .heatmap-empty-cell {
   --chart-6: 185 34% 42%;
   --chart-7: 18 42% 46%;
   --chart-8: 245 34% 54%;
+}
+
+/* ===== 输入框 =====
+ * 主输入框默认用 bg-background/70 叠在内容区上，暖灰偏深，亮背景下会读成“发粉”。
+ * 改用更浅、更低饱和的 input-surface，既变浅又去掉粉调，边框仍按原层次。
+ */
+html.skin-slate-light .agent-input-surface,
+html.skin-slate-light.ui-classic .agent-input-surface {
+  background-color: hsl(var(--input-surface)) !important;
+  border-color: hsl(var(--border)) !important;
 }

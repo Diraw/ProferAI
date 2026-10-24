@@ -505,7 +505,7 @@
     --content-area: 40 8% 94%;            /* #f0efec 内容区域（RGB 240,239,236 主题色） */
     --sidebar-surface: 40 6% 88%;
     --tabbar-surface: 40 6% 88%;
-    --input-surface: 60 14.3% 98.6%;
+    --input-surface: 40 4% 96%;           /* 输入框近白中性色，去掉暖粉感 */
     --tab-surface: 40 8% 94%;
     /* 次要色 */
     --muted: 40 6% 85%;                   /* #dbd8d2 次要背景 */
@@ -522,7 +522,7 @@
     /* 组件色 */
     --card: 40 8% 96%;                    /* #f6f5f2 卡片背景 */
     --card-foreground: 40 8% 18%;         /* #312f2a 卡片前景 */
-    --input: 40 6% 90%;                   /* #e8e6e2 输入框背景 */
+    --input: 40 4% 94%;                   /* 输入框背景（调浅、降饱和去粉） */
     --popover: 40 8% 96%;                 /* #f6f5f2 弹出层 */
     --popover-foreground: 40 8% 18%;      /* #312f2a 弹出前景 */
     --dialog: 40 8% 94%;                  /* #f0efec 弹窗背景（主题色） */
@@ -672,6 +672,15 @@
   z-index: 1;
   -webkit-app-region: drag;
   app-region: drag;
+}
+
+/* 侧栏 rail：图标统一加深加粗。
+ *
+ * lucide 默认 stroke-width 2，在 17px 尺寸 + 58% 前景色下偏细偏淡；
+ * 这里用 CSS 统一覆盖，避免每个调用点都要手写 strokeWidth，
+ * 以后 rail 新增入口自动继承。 */
+[data-profer-rail] svg {
+  stroke-width: 2.2;
 }
 
 /* Windows 自定义窗口控制按钮
@@ -1577,6 +1586,11 @@
 
 .ui-classic .agent-input-surface {
   background-color: hsl(var(--background) / 0.7) !important;
+}
+
+/* 云朵舞者：经典界面下输入框改用更浅的专用输入表面，避免暖灰叠色后发粉。 */
+.ui-classic.theme-slate-light .agent-input-surface {
+  background-color: hsl(var(--input-surface)) !important;
 }
 
 .ui-classic .mode-switcher-track {

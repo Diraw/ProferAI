@@ -5,8 +5,12 @@
  * 通过 html[class*="skin-"] 作用域只在皮肤激活时生效，默认主题零影响。
  *
  * 皮肤作者只需在 skin.css 的 :root 中填写 token 值，无需了解内部类名。
- * 原则：var() 一律不写 fallback —— token 未定义即声明失效 = 不覆写，
- * 组件回落默认（Tailwind 基础）样式，保证默认主题观感与现行为完全一致。
+ * 原则：var() 尽量不写 fallback，未定义的 token 由皮肤自己负责补上。
+ * 注意：token 未定义时该声明在计算值阶段变成 guaranteed-invalid（按 unset 处理，
+ * 多数情况 = 透明），**不会**把组件级联里更早的样式捡回来；所以直连组要么全给值，
+ * 要么在皮肤里覆盖掉整条声明。只有 --minimap-indicator-bg、--tiptap-pre-bg、
+ * --plan-mode-stroke-color 三处写了 fallback。
+ * 默认主题（html 无 skin-* 类）不受影响，观感与现行为完全一致。
  */
 
 /* ===== 文字选区 =====
