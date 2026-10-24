@@ -10,8 +10,7 @@
  */
 
 import { DELEGATION_GUIDELINES, buildTaskGraphGuideline, buildPlanningTodoGuideline, buildPresetToolList, buildToolUsageGuidelines, buildWebSearchGuideline, buildBrowserGuideline } from './agent-prompt-tools'
-import { buildCoreAgentPrompt, type AgentEpistemicMode } from './agent-prompt-core'
-export type { AgentEpistemicMode } from './agent-prompt-core'
+import { buildCoreAgentPrompt } from './agent-prompt-core'
 import { AGENT_IMAGE_OUTPUT_TEXT_RULE } from './agent-image-output-contract'
 import { AGENT_PRESET_CAPABILITY_GROUPS, isAgentPresetToolGroupDisabled } from '@profer/shared'
 import type { AgentPresetToolGroup, ProferPermissionMode } from '@profer/shared'
@@ -32,8 +31,6 @@ export interface SystemPromptContext {
   permissionMode: ProferPermissionMode
   /** 当前会话绑定的预设名称（缺省视为「标准」） */
   presetName?: string
-  /** Agent 对不确定性、多解与创作表达的姿态；默认 grounded。 */
-  epistemicMode?: AgentEpistemicMode
   /** 当前用户消息经主进程意图 gate 允许的低风险预设操作。 */
   allowedPresetOperations?: readonly AgentPresetMutationOperation[]
   /** 预设声明的隐藏内置段落 key（'subagents' | 'memory' | 'task-graph'），消除预设与内置规则的矛盾指令 */
@@ -106,9 +103,7 @@ export function buildSystemPrompt(ctx: SystemPromptContext): string {
     : undefined
 
   const sections: string[] = []
-  const epistemicMode = ctx.epistemicMode ?? 'grounded'
-
-  sections.push(buildCoreAgentPrompt(epistemicMode))
+  sections.push(buildCoreAgentPrompt())
 
   // Agent 预设（岗位）体系：Agent 需要第一时间知道预设机制、当前岗位与自由切换能力
   sections.push(`## Agent 预设（岗位）体系
@@ -242,7 +237,8 @@ Pi 没有 Claude Agent SDK 的自动记忆后台机制，但 Profer 已为 Pi �
 
 - 非关键细节合理默认；仅用户能回答且影响关键取舍或授权时提问。明确产出请求不强制问卷。
 - AskUserQuestion：一题一维度，相关问题合并一次问；有候选必须放 options（label 简短、细节放 description），纯开放问题才留空；给推荐和依据。
-- ${epistemicMode === 'open' ? '影响执行结果、安全或现实事实判断的前提才需要纠正，其余分歧不展开。' : '指出影响结果的错误前提，说明依据与影响；不确定不填补。'}`)
+- 指出影响结果的错误前提，说明依据与影响；不确定时明确说明，不编造。`)
+
 
   // 计划模式指令（始终注入计划文件路径规则）。WebSearch 是 Claude 原生工具，
   // 因此必须和 web 能力组同步，不能在禁用后仍出现在 Prompt 中。

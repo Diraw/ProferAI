@@ -44,10 +44,9 @@ export function registerSettingsIpc(): void {
         syncFeishuSyncSleepBlocker(result)
       }
 
-      if (updates.developerModeEnabled !== undefined || updates.openEpistemicModeEnabled !== undefined || updates.pluginSystemEnabled !== undefined) {
+      if (updates.developerModeEnabled !== undefined || updates.pluginSystemEnabled !== undefined) {
         const payload = {
           developerModeEnabled: result.developerModeEnabled === true,
-          openEpistemicModeEnabled: result.openEpistemicModeEnabled === true,
         }
         BrowserWindow.getAllWindows().forEach((win) => {
           win.webContents.send(SETTINGS_IPC_CHANNELS.ON_DEVELOPER_SETTINGS_CHANGED, payload)
@@ -144,10 +143,9 @@ export function registerSettingsIpc(): void {
         if (updates.feishuSessionMirror !== undefined) {
           syncFeishuSyncSleepBlocker(result)
         }
-        if (updates.developerModeEnabled !== undefined || updates.openEpistemicModeEnabled !== undefined || updates.pluginSystemEnabled !== undefined) {
+        if (updates.developerModeEnabled !== undefined || updates.pluginSystemEnabled !== undefined) {
           const payload = {
             developerModeEnabled: result.developerModeEnabled === true,
-            openEpistemicModeEnabled: result.openEpistemicModeEnabled === true,
           }
           BrowserWindow.getAllWindows().forEach((win) => {
             win.webContents.send(SETTINGS_IPC_CHANNELS.ON_DEVELOPER_SETTINGS_CHANGED, payload)

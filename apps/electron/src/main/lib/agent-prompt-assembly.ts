@@ -21,7 +21,7 @@ export interface AgentPromptAssemblyInput {
 
 export function assembleAgentSystemPrompt(input: AgentPromptAssemblyInput) {
   const core = input.mode === 'light'
-    ? buildLightSystemPrompt({ presetName: input.context.presetName, epistemicMode: input.policy.epistemicMode })
+    ? buildLightSystemPrompt({ presetName: input.context.presetName })
     : buildSystemPrompt(input.context)
   const base = input.mode === 'standard' && input.runtime === 'pi'
     ? buildPiTaskPrompt({

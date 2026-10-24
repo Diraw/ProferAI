@@ -100,7 +100,7 @@ describe('设置服务命名收敛兼容（Tablet* → Pocket*）', () => {
     expect(settings.pocketModeEnabled).toBeUndefined()
     expect(settings.pocketModePort).toBeUndefined()
     expect(settings.developerModeEnabled).toBe(false)
-    expect(settings.openEpistemicModeEnabled).toBe(false)
+    expect('openEpistemicModeEnabled' in settings).toBe(false)
     // 兜底默认值仍生效
     expect(settings.notificationsEnabled).toBe(true)
   })
@@ -111,7 +111,7 @@ describe('设置服务命名收敛兼容（Tablet* → Pocket*）', () => {
 
     const settings = getSettings()
     expect(settings.developerModeEnabled).toBe(true)
-    expect(settings.openEpistemicModeEnabled).toBe(false)
+    expect('openEpistemicModeEnabled' in settings).toBe(false)
     expect('pluginSystemEnabled' in settings).toBe(false)
 
     updateSettings({ notificationsEnabled: false })
@@ -143,32 +143,26 @@ describe('设置服务命名收敛兼容（Tablet* → Pocket*）', () => {
     expect('pluginSystemEnabled' in persisted).toBe(false)
   })
 
-  test('Given 开发者模式关闭 When 开放认识论被设置为 true Then 强制归一为关闭', () => {
+  test('Given 旧配置含认识论字段 When 读取并保存 Then 丢弃废弃字段且保留其他设置', () => {
     const configDir = process.env.PROFER_CONFIG_DIR!
-    writeSettingsFile(configDir, {
-      developerModeEnabled: false,
-      openEpistemicModeEnabled: true,
-    })
-
-    expect(getSettings().openEpistemicModeEnabled).toBe(false)
-    updateSettings({ openEpistemicModeEnabled: true })
-    expect(getSettings().openEpistemicModeEnabled).toBe(false)
-    expect(readSettingsFile(configDir).openEpistemicModeEnabled).toBe(false)
+    for (const developerModeEnabled of [true, false]) {
+      clearSettingsCache()
+      writeSettingsFile(configDir, { developerModeEnabled, openEpistemicModeEnabled: true })
+      expect('openEpistemicModeEnabled' in getSettings()).toBe(false)
+      updateSettings({ notificationsEnabled: false })
+      expect('openEpistemicModeEnabled' in readSettingsFile(configDir)).toBe(false)
+      expect(getSettings().developerModeEnabled).toBe(developerModeEnabled)
+      expect(getSettings().notificationsEnabled).toBe(false)
+    }
   })
 
-  test('Given 开放认识论已开启 When 关闭开发者模式 Then 两个设置一并关闭', () => {
+  test('Given 旧客户端仍发送废弃字段 When 更新 Then 不重新持久化', () => {
     const configDir = process.env.PROFER_CONFIG_DIR!
-    writeSettingsFile(configDir, {
-      developerModeEnabled: true,
-      openEpistemicModeEnabled: true,
-    })
-
-    getSettings()
-    updateSettings({ developerModeEnabled: false })
-
-    expect(getSettings().developerModeEnabled).toBe(false)
-    expect(getSettings().openEpistemicModeEnabled).toBe(false)
-    expect(readSettingsFile(configDir).openEpistemicModeEnabled).toBe(false)
+    const legacyPatch = { developerModeEnabled: true, openEpistemicModeEnabled: true }
+    updateSettings(legacyPatch)
+    expect('openEpistemicModeEnabled' in getSettings()).toBe(false)
+    expect('openEpistemicModeEnabled' in readSettingsFile(configDir)).toBe(false)
+    expect(getSettings().developerModeEnabled).toBe(true)
   })
 
   test('Given 未显式配置端口 When 更新为 0 Then 写入 0 表示回落默认端口', () => {

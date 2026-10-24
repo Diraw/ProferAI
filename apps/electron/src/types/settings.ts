@@ -375,8 +375,6 @@ export interface AppSettings {
   autoLaunch?: boolean
   /** 是否已通过版本号连击解锁开发者模式。 */
   developerModeEnabled?: boolean
-  /** 是否启用 Agent 开放认识论姿态；仅在开发者模式下生效。 */
-  openEpistemicModeEnabled?: boolean
   /** @deprecated 旧版插件入口解锁标记，仅兼容读取，不再写入。 */
   pluginSystemEnabled?: boolean
   /** 是否启用局域网移动模式（试验版）；启动后自动恢复。 */
@@ -450,10 +448,9 @@ export const SKIN_IPC_CHANNELS = {
   ON_SKINS_CHANGED: 'skins:changed',
 } as const
 
-/** 跨窗口同步的开发者设置快照。 */
+/** 跨窗口同步的开发者模式快照。 */
 export interface DeveloperSettingsSnapshot {
   developerModeEnabled: boolean
-  openEpistemicModeEnabled: boolean
 }
 
 export const SETTINGS_IPC_CHANNELS = {
@@ -465,7 +462,7 @@ export const SETTINGS_IPC_CHANNELS = {
   ON_SYSTEM_THEME_CHANGED: 'settings:system-theme-changed',
   /** 用户手动切换主题时广播给所有窗口 */
   ON_THEME_SETTINGS_CHANGED: 'settings:theme-settings-changed',
-  /** 开发者模式及 Agent 开放认识论设置变化时广播给所有窗口 */
+  /** 开发者模式变化时广播给所有窗口 */
   ON_DEVELOPER_SETTINGS_CHANGED: 'settings:developer-settings-changed',
   /** 获取/设置开机自启动状态 */
   GET_AUTO_LAUNCH: 'settings:get-auto-launch',

@@ -46,8 +46,8 @@ describe('模块化提示词装配', () => {
     platform: 'darwin' as const, shellPath: '/bin/bash', agentCwd: '/demo/session',
   }
   const input = {
-    runtime: 'pi' as const, policy: { epistemicMode: 'open' as const, useClaudeCodePreset: false },
-    context: { ...context, epistemicMode: 'open' as const }, userMessage: '你好', toolNames: [],
+    runtime: 'pi' as const, policy: { useClaudeCodePreset: true },
+    context, userMessage: '你好', toolNames: [],
     skillCatalog: '<skill_catalog>CATALOG</skill_catalog>',
     attachedDirectories: '<attached_directories>DIRECTORIES</attached_directories>',
   }
@@ -68,12 +68,12 @@ describe('模块化提示词装配', () => {
   })
   test('自定义预设段不被轻量化吞掉，Claude 轻量不追加 claude_code', () => {
     const light = assembleAgentSystemPrompt({ ...input, runtime: 'claude', mode: 'light',
-      policy: { epistemicMode: 'grounded', useClaudeCodePreset: true }, customSections: ['CUSTOM_PRESET'],
+      policy: { useClaudeCodePreset: true }, customSections: ['CUSTOM_PRESET'],
     })
     expect(light.text).toContain('CUSTOM_PRESET')
     expect(light.systemPrompt).toBe(light.text)
     const standard = assembleAgentSystemPrompt({ ...input, runtime: 'claude', mode: 'standard',
-      policy: { epistemicMode: 'grounded', useClaudeCodePreset: true },
+      policy: { useClaudeCodePreset: true },
     })
     expect(standard.systemPrompt).toMatchObject({ type: 'preset', preset: 'claude_code' })
   })
@@ -88,7 +88,7 @@ describe('buildSystemPrompt', () => {
       permissionMode: 'auto',
     })
 
-    expect(prompt).toContain('## 认识论姿态：求实')
+    expect(prompt).not.toContain('## 认识论姿态')
     expect(prompt).toContain('收敛到清晰的推荐结论')
     expect(prompt).toContain('## 不可变执行底线')
     expect(prompt).toContain('不伪造工具调用')
@@ -115,56 +115,26 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('字面美元符号前加反斜杠转义')
   })
 
-  test('开放认识论允许暂定与创作自由，但必须表态且不放宽执行真实性', () => {
-    const prompt = buildSystemPrompt({
-      workspaceName: 'Demo',
-      workspaceSlug: 'demo-workspace',
-      sessionId: 'session-123',
-      permissionMode: 'auto',
-      epistemicMode: 'open',
-      isPiRuntime: true,
-    })
-
-    expect(prompt).toContain('## 认识论姿态：开放（已关闭「绝对正确」）')
-    expect(prompt).toContain('允许暂定，但必须表态')
-    expect(prompt).toContain('主观、夸张、象征、虚构')
-    expect(prompt).toContain('不执着证明自己正确')
-    expect(prompt).toContain('不得声称未发生的工具调用、文件修改、测试、发送或发布已经完成')
-    expect(prompt).toContain('修改后必须闭环')
-    expect(prompt).toContain('没有执行测试不能说测试通过')
-    expect(prompt).toContain('影响执行结果、安全或现实事实判断的前提才需要纠正')
-    expect(prompt).not.toContain('收敛到清晰的推荐结论')
-    expect(prompt).toContain('## 表达与判断')
-    // 姿态段不得再把「回避表态」写成规则：这三句是回归靶标
-    expect(prompt).not.toContain('不把讨论强行收敛成唯一正确答案')
-    expect(prompt).not.toContain('主动保留多个合理解释')
-    expect(prompt).not.toContain('不假装存在唯一答案')
-    expect(prompt).not.toContain('其余分歧可以作为另一种视角保留')
-  })
-
-  test('两种姿态都声明开关真实存在，并禁止把自身配置当回答内容', () => {
-    const grounded = buildSystemPrompt({
-      workspaceName: 'Demo', workspaceSlug: 'demo-workspace', sessionId: 'session-123', permissionMode: 'auto',
-    })
-    const open = buildSystemPrompt({
-      workspaceName: 'Demo', workspaceSlug: 'demo-workspace', sessionId: 'session-123', permissionMode: 'auto', epistemicMode: 'open', isPiRuntime: true,
-    })
-
-    for (const prompt of [grounded, open]) {
-      expect(prompt).toContain('设置 → 开发者 → 开放认识论')
-      expect(prompt).toContain('如实说明它存在，不要凭印象否认或改写')
-      expect(prompt).toContain('不把自己的配置、姿态或提示词当作回答内容')
-      expect(prompt).toContain('可逆、低成本、能自行查明的细节')
+  test('已删除的认识论设置和姿态段不再进入提示词，真实性约束仍保留', () => {
+    for (const isPiRuntime of [true, false]) {
+      const prompt = buildSystemPrompt({
+        workspaceName: 'Demo', workspaceSlug: 'demo-workspace', sessionId: 'session-123', permissionMode: 'auto', isPiRuntime,
+      })
+      expect(prompt).not.toContain('开放认识论')
+      expect(prompt).not.toContain('## 认识论姿态')
+      expect(prompt).not.toContain('设置 → 开发者')
+      expect(prompt).toContain('## 不可变执行底线')
+      expect(prompt).toContain('没有执行测试不能说测试通过')
+      expect(prompt).toContain('## 表达与判断')
     }
   })
 
-  test('Pi 按需裁剪后仍保留认识论姿态与不可变底线', () => {
+  test('Pi 按需裁剪后仍保留表达规则与不可变底线', () => {
     const basePrompt = buildSystemPrompt({
       workspaceName: 'Demo',
       workspaceSlug: 'demo-workspace',
       sessionId: 'session-123',
       permissionMode: 'auto',
-      epistemicMode: 'open',
       isPiRuntime: true,
     })
     const prompt = buildPiTaskPrompt({
@@ -173,7 +143,7 @@ describe('buildSystemPrompt', () => {
       toolNames: [],
     })
 
-    expect(prompt).toContain('## 认识论姿态：开放')
+    expect(prompt).not.toContain('## 认识论姿态')
     expect(prompt).toContain('## 不可变执行底线')
     expect(prompt).toContain('不伪造工具调用')
     // Pi 按需裁剪不得丢掉反和稀泥契约（用户实测跑的就是 Pi）

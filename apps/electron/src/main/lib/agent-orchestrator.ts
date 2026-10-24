@@ -1993,7 +1993,6 @@ export class AgentOrchestrator {
           sessionId,
           permissionMode: initialPermissionMode,
           presetName: presetPolicy.preset.name,
-          epistemicMode: promptPolicy.epistemicMode,
           allowedPresetOperations,
           // 方案 3：工具组禁用同步隐藏提示词段落，自动映射来自 shared 唯一事实表
           // （task-graph→task-graph、memory→memory、collaboration→subagents、automation→automation）
@@ -2103,8 +2102,7 @@ export class AgentOrchestrator {
         canUseTool,
         ...sdkAllowedTools,
         ...(disabledClaudeTools.length > 0 && { disallowedTools: disabledClaudeTools }),
-        // 默认继续使用 claude_code preset；开发者开启开放认识论后改用 Profer 完整自管 prompt，
-        // 避免上游本地 preset 稀释该姿态。模型服务端更高优先级规则不受此设置影响。
+        // Claude 默认沿用 claude_code preset；Profer 只追加本轮按能力与策略组装的 prompt。
         systemPrompt: promptAssembly.systemPrompt,
         resumeSessionId: existingSdkSessionId,
         onRuntimeMessage: input.onRuntimeMessage,

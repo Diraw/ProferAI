@@ -141,7 +141,7 @@ const DEVELOPER_MODE_ITEM: SettingsTabItem = {
   id: "developer",
   label: "开发者",
   icon: <FlaskConical size={16} />,
-  searchTerms: ["开发者模式", "开放认识论", "实验性能力", "运行时边界"],
+  searchTerms: ["开发者模式", "实验性能力", "运行时边界"],
 };
 
 const PLUGIN_SYSTEM_ITEM: SettingsTabItem = {
@@ -299,7 +299,7 @@ export function SettingsPanel({
       : SYSTEM_GROUP_ITEMS
 
     const allGroups: SettingsTabGroup[] = [
-      { items: [{ id: "general", label: "通用", icon: <Settings size={16} />, searchTerms: ["语言", "启动", "开机启动", "Shell", "终端", "新标签页", "URL"] }, { id: "usage", label: "使用偏好", icon: <SlidersHorizontal size={16} />, searchTerms: ["通知", "声音", "归档", "会话", "对话", "用户消息", "头像", "左右", "输入框", "粘贴", "Markdown", "预览", "紧凑模式"] }] },
+      { items: [{ id: "general", label: "通用", icon: <Settings size={16} />, searchTerms: ["语言", "启动", "开机启动", "Shell", "终端", "新标签页", "URL"] }, { id: "usage", label: "使用偏好", icon: <SlidersHorizontal size={16} />, searchTerms: ["通知", "声音", "归档", "会话", "对话", "用户消息", "头像", "左右", "输入框", "粘贴", "Markdown", "预览", "紧凑模式", "侧栏", "侧边栏", "当前会话", "显示", "隐藏"] }] },
       { title: "账户", items: ACCOUNT_GROUP_ITEMS },
       { title: "模型与能力", items: modelItems },
       { title: "体验", items: EXPERIENCE_GROUP_ITEMS },

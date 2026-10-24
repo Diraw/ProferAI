@@ -591,7 +591,7 @@ export interface ElectronAPI {
   /** 同步更新应用设置（用于 beforeunload 场景） */
   updateSettingsSync: (updates: Partial<AppSettings>) => boolean
 
-  /** 订阅开发者模式与开放认识论设置变化（返回清理函数） */
+  /** 订阅开发者模式设置变化（返回清理函数） */
   onDeveloperSettingsChanged: (callback: (settings: DeveloperSettingsSnapshot) => void) => () => void
 
   /** 获取移动模式（试验版）状态与连接信息 */

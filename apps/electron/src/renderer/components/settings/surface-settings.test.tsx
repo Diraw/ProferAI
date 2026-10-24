@@ -34,7 +34,7 @@ const { PluginSettings } = await import('./PluginSettings')
 const { themeModeAtom, themeStyleAtom, skinsAtom } = await import('../../atoms/theme')
 const { markdownFontSizeAtom } = await import('../../atoms/markdown-font-size')
 const { shortcutOverridesAtom } = await import('../../atoms/shortcut-atoms')
-const { developerModeEnabledAtom, openEpistemicModeEnabledAtom } = await import('../../atoms/developer-mode')
+const { developerModeEnabledAtom } = await import('../../atoms/developer-mode')
 const { updateStatusAtom, updaterAvailableAtom } = await import('../../atoms/updater')
 const { settingsTabAtom } = await import('../../atoms/settings-tab')
 const { updateShortcutOverrides, initShortcutRegistry, registerShortcut, getActiveAccelerator } = await import('../../lib/shortcut-registry')
@@ -250,14 +250,18 @@ describe('开发者与插件门禁和危险确认', () => {
     expect(developer.elements().some((item) => item.props.onCheckedChange)).toBe(false)
     await tick(); expect(calls).toBe(0)
   })
-  test('实验保存失败保留 atom；退出需确认，失败不隐藏，重试关闭成功', async () => {
-    store.set(developerModeEnabledAtom, true); store.set(openEpistemicModeEnabledAtom, true); store.set(settingsTabAtom, 'developer')
+  test('废弃实验开关不再渲染；退出需确认，失败不隐藏，重试关闭成功', async () => {
+    store.set(developerModeEnabledAtom, true); store.set(settingsTabAtom, 'developer')
     let writes = 0
-    api({ updateSettings: async (patch: Props) => { if (++writes < 3) throw new Error('fixture-write'); return patch } })
+    api({ updateSettings: async (patch: Props) => {
+      expect(patch).toEqual({ developerModeEnabled: false })
+      if (++writes === 1) throw new Error('fixture-write')
+      return patch
+    } })
     const host = mount(DeveloperSettings)
-    ;(host.field('开放认识论（关闭「绝对正确」姿态）').onCheckedChange as (value: boolean) => void)(false); await tick(); host.render()
-    expect(store.get(openEpistemicModeEnabledAtom)).toBe(true)
-    click(host.button('退出开发者模式')); host.render(); expect(writes).toBe(1)
+    expect(host.elements().some((item) => item.props.onCheckedChange)).toBe(false)
+    expect(text(host.elements())).not.toContain('开放认识论')
+    click(host.button('退出开发者模式')); host.render(); expect(writes).toBe(0)
     click(host.button('确认退出')); await tick(); host.render(); expect(store.get(developerModeEnabledAtom)).toBe(true)
     click(host.button('确认退出')); await tick(); host.render(); expect(store.get(developerModeEnabledAtom)).toBe(false); expect(store.get(settingsTabAtom)).toBe('general')
   })

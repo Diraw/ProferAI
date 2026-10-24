@@ -19,6 +19,7 @@ interface LegacyTabletModeSettings {
   tabletModeEnabled?: boolean
   tabletModePort?: number
   pluginSystemEnabled?: boolean
+  openEpistemicModeEnabled?: boolean
 }
 
 function getDefaultSettings(): AppSettings {
@@ -36,7 +37,6 @@ function getDefaultSettings(): AppSettings {
     feishuSessionMirror: { mode: 'off' },
     agentRuntime: DEFAULT_AGENT_RUNTIME,
     developerModeEnabled: false,
-    openEpistemicModeEnabled: false,
   }
 }
 
@@ -61,7 +61,7 @@ export function getSettings(): AppSettings {
     const parsed = JSON.parse(raw) as Partial<AppSettings> & LegacyTabletModeSettings
     // 2026-09 命名收敛（Tablet* → Pocket*）：旧版写入的 tabletMode* 键归一为 pocketMode*，
     // 归一后旧键不再写回文件，老用户的「移动模式」开关与自定义端口保持不变。
-    const { tabletModeEnabled, tabletModePort, pluginSystemEnabled, ...data } = parsed
+    const { tabletModeEnabled, tabletModePort, pluginSystemEnabled, openEpistemicModeEnabled: _openEpistemicModeEnabled, ...data } = parsed
     const developerModeEnabled = data.developerModeEnabled ?? pluginSystemEnabled ?? false
     _settingsCache = {
       ...data,
@@ -81,7 +81,6 @@ export function getSettings(): AppSettings {
       feishuSessionMirror: data.feishuSessionMirror ?? { mode: 'off' },
       agentRuntime: normalizeAgentRuntime(data.agentRuntime),
       developerModeEnabled,
-      openEpistemicModeEnabled: developerModeEnabled && data.openEpistemicModeEnabled === true,
     }
     return _settingsCache
   } catch (error) {
@@ -100,8 +99,10 @@ export function updateSettings(updates: Partial<AppSettings>): AppSettings {
   // 确保缓存已初始化
   if (!_settingsCache) getSettings()
 
+  const supportedUpdates = { ...updates }
+  delete (supportedUpdates as Partial<AppSettings> & { openEpistemicModeEnabled?: boolean }).openEpistemicModeEnabled
   const normalizedUpdates: Partial<AppSettings> = {
-    ...updates,
+    ...supportedUpdates,
     ...(updates.agentRuntime !== undefined
       ? { agentRuntime: normalizeAgentRuntime(updates.agentRuntime) }
       : {}),
@@ -116,12 +117,6 @@ export function updateSettings(updates: Partial<AppSettings>): AppSettings {
     normalizedUpdates.previewModePreference = updates.previewModePreference === 'split' ? 'split' : DEFAULT_PREVIEW_OPEN_MODE
   }
   delete normalizedUpdates.pluginSystemEnabled
-  const developerModeEnabled = normalizedUpdates.developerModeEnabled
-    ?? _settingsCache!.developerModeEnabled
-    ?? false
-  if (!developerModeEnabled && (updates.openEpistemicModeEnabled !== undefined || _settingsCache!.openEpistemicModeEnabled === true)) {
-    normalizedUpdates.openEpistemicModeEnabled = false
-  }
   const updated: AppSettings = {
     ..._settingsCache!,
     ...normalizedUpdates,

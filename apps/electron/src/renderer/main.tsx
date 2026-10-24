@@ -77,7 +77,7 @@ import {
 } from './atoms/ui-scale'
 import { installedPluginsAtom } from './atoms/plugin-system'
 import { composerToolbarPreferencesAtom, initializeComposerToolbarPreferences } from './atoms/composer-toolbar-preferences'
-import { developerModeEnabledAtom, openEpistemicModeEnabledAtom } from './atoms/developer-mode'
+import { developerModeEnabledAtom } from './atoms/developer-mode'
 import { useGlobalAgentListeners } from './hooks/useGlobalAgentListeners'
 import { useBrowserLocalFileSelectionQuote } from './hooks/useBrowserLocalFileSelectionQuote'
 import { useBrowserPreviewThemeSync } from './hooks/useBrowserPreviewThemeSync'
@@ -596,18 +596,16 @@ function PluginSystemInitializer(): null {
     return () => { revision += 1; unsubscribe() }
   }, [store])
   const setDeveloperModeEnabled = useSetAtom(developerModeEnabledAtom)
-  const setOpenEpistemicModeEnabled = useSetAtom(openEpistemicModeEnabledAtom)
 
   useEffect(() => {
-    const apply = (settings: { developerModeEnabled?: boolean; openEpistemicModeEnabled?: boolean }): void => {
+    const apply = (settings: { developerModeEnabled?: boolean }): void => {
       setDeveloperModeEnabled(settings.developerModeEnabled === true)
-      setOpenEpistemicModeEnabled(settings.developerModeEnabled === true && settings.openEpistemicModeEnabled === true)
     }
     void window.electronAPI.getSettings()
       .then(apply)
       .catch((error: unknown) => console.error('[开发者模式] 初始化状态失败:', error))
     return window.electronAPI.onDeveloperSettingsChanged(apply)
-  }, [setDeveloperModeEnabled, setOpenEpistemicModeEnabled])
+  }, [setDeveloperModeEnabled])
 
   return null
 }

@@ -2,4 +2,3 @@
 import { atom } from 'jotai'
 
 export const developerModeEnabledAtom = atom(false)
-export const openEpistemicModeEnabledAtom = atom(false)

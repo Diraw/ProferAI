@@ -38,7 +38,7 @@ import { Badge } from '@profer/ui/primitives/badge'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { VersionHistory } from './VersionHistory'
-import { developerModeEnabledAtom, openEpistemicModeEnabledAtom } from '@/atoms/developer-mode'
+import { developerModeEnabledAtom } from '@/atoms/developer-mode'
 import {
   INITIAL_DEVELOPER_MODE_UNLOCK_CLICK_STATE,
   advanceDeveloperModeUnlockClick,
@@ -555,7 +555,6 @@ function ShellEnvironmentCard(): React.ReactElement | null {
 export function AboutSettings(): React.ReactElement {
   const developerModeEnabled = useAtomValue(developerModeEnabledAtom)
   const setDeveloperModeEnabled = useSetAtom(developerModeEnabledAtom)
-  const setOpenEpistemicModeEnabled = useSetAtom(openEpistemicModeEnabledAtom)
   const unlockClickStateRef = React.useRef(INITIAL_DEVELOPER_MODE_UNLOCK_CLICK_STATE)
   const unlockPendingRef = React.useRef(false)
 
@@ -571,7 +570,6 @@ export function AboutSettings(): React.ReactElement {
       .then((settings) => {
         if (settings.developerModeEnabled !== true) throw new Error('应用未确认启用开发者模式')
         setDeveloperModeEnabled(settings.developerModeEnabled === true)
-        setOpenEpistemicModeEnabled(settings.openEpistemicModeEnabled === true)
         toast.success('开发者模式已启用')
       })
       .catch((error: unknown) => {
@@ -581,7 +579,7 @@ export function AboutSettings(): React.ReactElement {
       .finally(() => {
         unlockPendingRef.current = false
       })
-  }, [developerModeEnabled, setDeveloperModeEnabled, setOpenEpistemicModeEnabled])
+  }, [developerModeEnabled, setDeveloperModeEnabled])
 
   return (
     <div className="space-y-8">

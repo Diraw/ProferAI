@@ -51,7 +51,7 @@ describe('Agent 提示词模式', () => {
     const sdk = await import('@earendil-works/pi-coding-agent')
     const { getBuiltinModel } = await import('@earendil-works/pi-ai/providers/all')
     const root = mkdtempSync(join(tmpdir(), 'profer-light-prompt-'))
-    const text = buildLightSystemPrompt({ epistemicMode: 'open' })
+    const text = buildLightSystemPrompt({})
     try {
       const settingsManager = sdk.SettingsManager.inMemory()
       const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null,
@@ -84,15 +84,13 @@ describe('Agent 提示词模式', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  test('轻量身份/真实性/权限/姿态仍有效，省掉文件工作规范', () => {
-    for (const epistemicMode of ['open', 'grounded'] as const) {
-      const prompt = buildLightSystemPrompt({ epistemicMode, presetName: '代码' })
-      expect(prompt).toContain('不伪造')
-      expect(prompt).toContain('权限模式和能力门禁')
-      expect(prompt).toContain('当前预设：代码')
-      expect(prompt).toContain('没有时说无法确认')
-      expect(prompt.length).toBeLessThan(700)
-      for (const term of ['workspace-profile.md', '任务图', 'MEMORY.md', 'SKILL.md', '当前平台', 'BrowserObserve']) expect(prompt).not.toContain(term)
-    }
+  test('轻量身份、真实性和权限仍有效，省掉实验姿态与文件工作规范', () => {
+    const prompt = buildLightSystemPrompt({ presetName: '代码' })
+    expect(prompt).toContain('不伪造')
+    expect(prompt).toContain('权限模式和能力门禁')
+    expect(prompt).toContain('当前预设：代码')
+    expect(prompt).toContain('没有时说无法确认')
+    expect(prompt.length).toBeLessThan(700)
+    for (const term of ['开放认识论', '认识论姿态', 'workspace-profile.md', '任务图', 'MEMORY.md', 'SKILL.md', '当前平台', 'BrowserObserve']) expect(prompt).not.toContain(term)
   })
 })
