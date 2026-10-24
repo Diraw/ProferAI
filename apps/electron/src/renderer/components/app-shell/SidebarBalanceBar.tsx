@@ -82,10 +82,7 @@ export function SidebarBalanceBar({ collapsed = false }: SidebarBalanceBarProps)
         onClick={openCredits}
         aria-label={`我的积分 ${formatPoints(points)}`}
         title={`我的积分 ${formatPoints(points)}\n${cycleTooltip}\n${bucketTooltip}${isOverdraft ? '\n已透支！' : isExhausted ? '（已耗尽）' : isLow ? '（偏低）' : ''}`}
-        className={cn(
-          'w-full flex items-center justify-center py-2 rounded-[10px] border transition-colors titlebar-no-drag',
-          tone.ring,
-        )}
+        className="flex size-[34px] flex-none items-center justify-center rounded-[9px] transition-colors titlebar-no-drag hover:bg-foreground/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <Coins className={cn('size-4', tone.text)} />
       </button>

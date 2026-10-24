@@ -153,7 +153,7 @@ export function ModeSwitcher(): React.ReactElement {
     <div data-profer-navigation-region="mode-switcher" className="pt-2 titlebar-drag-region select-none">
       <div
         className={cn(
-          'relative flex rounded-xl p-1 titlebar-drag-region mode-switcher-track',
+          'relative flex min-w-0 overflow-hidden rounded-xl p-1 titlebar-drag-region mode-switcher-track',
           isClassic ? 'bg-muted' : 'bg-primary/5'
         )}
       >
@@ -179,7 +179,8 @@ export function ModeSwitcher(): React.ReactElement {
                 setPreviewMode(value)
               }}
               className={cn(
-                'mode-btn titlebar-no-drag relative z-[1] h-8 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-3 py-0 text-[15px] leading-5 font-medium transition-colors duration-200 select-none',
+                // min-w-0 + 文字 truncate：列表被拖窄时按钮收缩而不是把整条轨道撑出去
+                'mode-btn titlebar-no-drag relative z-[1] flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-1.5 py-0 text-[15px] leading-5 font-medium transition-colors duration-200 select-none',
                 isActive
                   ? 'mode-btn-selected text-foreground'
                   : isPreview
@@ -187,8 +188,8 @@ export function ModeSwitcher(): React.ReactElement {
                     : 'text-muted-foreground hover:text-foreground'
               )}
             >
-              {icon}
-              {label}
+              <span className="flex-none">{icon}</span>
+              <span className="truncate">{label}</span>
             </button>
           )
         })}

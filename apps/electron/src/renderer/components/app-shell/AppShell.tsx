@@ -29,8 +29,10 @@ import { cn } from '@/lib/utils'
 const MIN_RIGHT_PANEL_WIDTH = 300
 const MAX_RIGHT_PANEL_WIDTH = 560
 
-const MIN_LEFT_SIDEBAR_WIDTH = 300
-const MAX_LEFT_SIDEBAR_WIDTH = 420
+// 左侧栏拖拽范围按「列表宽」计算（外壳总宽 = 54 常驻 rail + 列表宽）。
+// 下限 230 保证 ModeSwitcher 的「Agent / Chat」不被截断，上限 360 避免把主区挤成单栏。
+const MIN_LEFT_SIDEBAR_WIDTH = 230
+const MAX_LEFT_SIDEBAR_WIDTH = 360
 
 function clampLeftSidebarWidth(width: number): number {
   return Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(MAX_LEFT_SIDEBAR_WIDTH, width))

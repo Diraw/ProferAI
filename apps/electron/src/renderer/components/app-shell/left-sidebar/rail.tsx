@@ -1,25 +1,42 @@
 /**
- * rail.tsx — 折叠态（mini rail）
+ * rail.tsx — 常驻图标列（54px）
  *
- * 从 LeftSidebar 抽离的折叠态图标视图。通过 SidebarModel 读取状态与 handler。
+ * 侧栏改成「rail 常驻 + 列表可收起」后，rail 是唯一的全局导航层：
+ *   panel toggle
+ *   ── Agent / Chat
+ *   ── Todo / 日程 / 定时任务 / Agent 技能 / 插件
+ *   （弹性留白）
+ *   余额 / 头像（设置）
+ *
+ * 规划中心拆成三个并列入口：它们共享 activeView='planning'，
+ * 由 planningTab 决定显示哪个分区，选中态也按分区分别判断。
+ *
+ * 展开与收起只影响右侧列表是否渲染，rail 本身不换视图，
+ * 因此图标列在两种状态下位置完全一致（顶部留白同为 50 / 32）。
  */
 
 import * as React from 'react'
 import { PluginSidebarEntries } from '@/components/plugins/PluginEntries'
-import { PanelLeftOpen, Bot, MessageSquare, Plus, Search, CalendarDays, Blocks } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen, Bot, MessageSquare, Plus, Search, CalendarDays, Clock, ListTodo, Blocks } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@profer/ui/primitives/tooltip'
 import { CollapsedWorkspacePopover } from '@/components/agent/CollapsedWorkspacePopover'
 import { SidebarBalanceBar } from '@/components/app-shell/SidebarBalanceBar'
 import { UserAvatar } from '@/components/chat/UserAvatar'
-import { SidebarWindowDragStrip, SIDEBAR_DRAG_STRIP_HEIGHT } from './navigation-items'
-import { RailRecentButton } from './session-items'
-import { formatAutomationCount } from './sidebar-utils'
+import {
+  PLANNING_NAV_ITEM,
+  RAIL_BUTTON_ACTIVE_CLASS,
+  RAIL_BUTTON_CLASS,
+  RAIL_BUTTON_IDLE_CLASS,
+  RailSeparator,
+  SidebarRailEntry,
+} from './navigation-items'
+import { getActiveAccelerator, getAcceleratorDisplay } from '@/lib/shortcut-registry'
 import type { SidebarModel } from './use-left-sidebar'
 
-export function SidebarRail({ s }: { s: SidebarModel }): React.ReactElement {
+export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: number }): React.ReactElement {
   const {
-    isMac,
+    sidebarCollapsed,
     setSidebarCollapsed,
     handleRailModeSwitch,
     mode,
@@ -27,227 +44,173 @@ export function SidebarRail({ s }: { s: SidebarModel }): React.ReactElement {
     handleNewConversation,
     setSearchDialogOpen,
     automationCount,
-    handleOpenAutomations,
+    todoOpenCount,
+    todayCalendarCount,
+    planningTab,
+    handleOpenPlanning,
     activeView,
     handleOpenSkills,
     capabilities,
-    railRecentItems,
-    handleSelectAgentSession,
-    handleSelectConversation,
     setSettingsOpen,
     userProfile,
     hasUpdate,
     hasEnvironmentIssues,
   } = s
 
-  return (
-    <div className="relative h-full flex flex-col items-center px-2">
-        <SidebarWindowDragStrip
-          height={isMac ? SIDEBAR_DRAG_STRIP_HEIGHT.collapsedMac : SIDEBAR_DRAG_STRIP_HEIGHT.collapsed}
+  const collapseShortcut = navigator.platform.includes('Mac') ? '⌘B' : 'Ctrl+B'
+  const newShortcut = getAcceleratorDisplay(getActiveAccelerator('new-session'))
+  const skillsUpdateCount = capabilities?.skills.filter((skill) => skill.hasUpdate).length ?? 0
+
+  const agentModeButton = (
+    <button
+      type="button"
+      aria-label="切换到 Agent 模式"
+      aria-current={mode === 'agent' ? 'page' : undefined}
+      onClick={() => handleRailModeSwitch('agent')}
+      className={cn(RAIL_BUTTON_CLASS, mode === 'agent' ? RAIL_BUTTON_ACTIVE_CLASS : RAIL_BUTTON_IDLE_CLASS)}
+    >
+      {mode === 'agent' && (
+        <span
+          aria-hidden="true"
+          className="absolute -left-[7px] top-[10px] h-[14px] w-[2px] rounded-[2px] bg-primary"
         />
+      )}
+      <Bot size={17} />
+    </button>
+  )
 
-        {/* macOS 需要避开左上角红绿灯；边栏覆盖全局标题栏拖拽层，因此留白自身也要可拖拽。 */}
-        <div className={cn('w-full flex-shrink-0 titlebar-drag-region', isMac ? 'h-[50px]' : 'h-2')} />
+  return (
+    <div
+      data-profer-rail=""
+      className="relative flex h-full w-full flex-col items-center gap-[3px] overflow-y-auto scrollbar-none pb-2.5"
+      style={{ paddingTop: topOffset }}
+    >
+      {/* 列表开关：展开时收起、收起时展开 */}
+      <SidebarRailEntry
+        icon={sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+        label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+        tooltip={`${sidebarCollapsed ? '展开' : '收起'}侧边栏 (${collapseShortcut})`}
+        onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+      />
 
-        {/* 展开按钮：mini rail 的唯一布局控制入口 */}
-        <div className="pt-2">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label="展开侧边栏"
-                onClick={() => setSidebarCollapsed(false)}
-                className="size-10 flex items-center justify-center rounded-[12px] text-foreground/60 bg-muted hover:bg-foreground/[0.08] hover:text-foreground transition-colors titlebar-no-drag"
-              >
-                <PanelLeftOpen size={17} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">展开侧边栏 ({navigator.platform.includes('Mac') ? '⌘B' : 'Ctrl+B'})</TooltipContent>
-          </Tooltip>
-        </div>
+      {/* 收起态没有列表，新建与搜索必须留在 rail 上，否则收起后无法开始新会话 */}
+      {sidebarCollapsed && (
+        <>
+          <SidebarRailEntry
+            icon={<Plus size={17} />}
+            label={mode === 'agent' ? '新建 Agent 会话' : '新建 Chat 对话'}
+            tooltip={
+              <>
+                {mode === 'agent' ? '新会话' : '新对话'}
+                {newShortcut ? ` (${newShortcut})` : ''}
+              </>
+            }
+            onClick={mode === 'agent' ? handleNewAgentSession : handleNewConversation}
+            navigationItem="new-session"
+          />
+          <SidebarRailEntry
+            icon={<Search size={17} />}
+            label="搜索"
+            tooltip="搜索会话"
+            onClick={() => setSearchDialogOpen(true)}
+          />
+        </>
+      )}
 
-        <div className="my-3 h-px w-8 bg-border/70" />
-
-        {/* 模式切换 */}
-        <div className="flex flex-col items-center gap-1.5" data-tour="mode-switch">
-          <CollapsedWorkspacePopover>
-            <button
-              type="button"
-              aria-label="切换到 Agent 模式（悬停查看项目）"
-              onClick={() => handleRailModeSwitch('agent')}
-              className={cn(
-                'relative size-10 flex items-center justify-center rounded-[12px] transition-colors titlebar-no-drag',
-                mode === 'agent'
-                  ? 'bg-primary/10 text-foreground shadow-[0_1px_2px_0_rgba(0,0,0,0.05)]'
-                  : 'text-foreground/45 hover:bg-foreground/[0.06] hover:text-foreground/75'
-              )}
-            >
-              <Bot size={18} />
-            </button>
-          </CollapsedWorkspacePopover>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label="切换到 Chat 模式"
-                onClick={() => handleRailModeSwitch('chat')}
-                className={cn(
-                  'relative size-10 flex items-center justify-center rounded-[12px] transition-colors titlebar-no-drag',
-                  mode === 'chat'
-                    ? 'bg-primary/10 text-foreground shadow-[0_1px_2px_0_rgba(0,0,0,0.05)]'
-                    : 'text-foreground/45 hover:bg-foreground/[0.06] hover:text-foreground/75'
-                )}
-              >
-                <MessageSquare size={17} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">Chat 模式</TooltipContent>
-          </Tooltip>
-        </div>
-
-        <div className="my-3 h-px w-8 bg-border/70" />
-
-        <PluginSidebarEntries collapsed />
-        {/* 高频操作 */}
-        <div className="flex flex-col items-center gap-1.5">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label={mode === 'agent' ? '新建 Agent 会话' : '新建 Chat 对话'}
-                data-profer-navigation-item="new-session"
-                onClick={mode === 'agent' ? handleNewAgentSession : handleNewConversation}
-                className="size-10 flex items-center justify-center rounded-[12px] text-foreground/70 bg-primary/5 hover:bg-primary/10 hover:text-foreground transition-[background-color,border-color,color] duration-150 titlebar-no-drag border border-border/60 hover:border-border"
-              >
-                <Plus size={16} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {mode === 'agent' ? '新会话' : '新对话'}
-            </TooltipContent>
-          </Tooltip>
-
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label="搜索"
-                onClick={() => setSearchDialogOpen(true)}
-                className="size-10 flex items-center justify-center rounded-[12px] text-foreground/45 bg-primary/5 hover:bg-primary/10 hover:text-foreground/70 transition-[background-color,border-color,color] duration-150 titlebar-no-drag border border-border/60 hover:border-border"
-              >
-                <Search size={16} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">搜索</TooltipContent>
-          </Tooltip>
-
-          {/* 规划中心入口 */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label={`规划中心，${automationCount} 个定时任务`}
-                data-profer-navigation-item="planning"
-                onClick={handleOpenAutomations}
-                className={cn(
-                  'relative size-10 flex items-center justify-center rounded-[12px] transition-colors titlebar-no-drag border',
-                  activeView === 'planning'
-                    ? 'border-primary/80 bg-primary text-primary-foreground shadow-sm'
-                    : 'border-border/45 bg-foreground/[0.025] text-foreground/45 hover:border-border/70 hover:bg-foreground/[0.045] hover:text-primary',
-                )}
-              >
-                <CalendarDays size={16} />
-                {automationCount > 0 && (
-                  <span
-                    className={cn(
-                      'absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-medium tabular-nums',
-                      activeView === 'planning'
-                        ? 'bg-primary-foreground text-primary'
-                        : 'bg-primary text-primary-foreground',
-                    )}
-                  >
-                    {formatAutomationCount(automationCount)}
-                  </span>
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              规划中心（{automationCount} 个定时任务）
-            </TooltipContent>
-          </Tooltip>
-
-          {/* Agent 技能入口 */}
-          {mode === 'agent' && (
+      {/* 展开态：Agent/Chat 切换由列表顶部的 ModeSwitcher 承担，rail 只留一条分隔线。
+          收起态：没有列表，模式切换必须留在 rail 上（Agent 按钮悬停可预览工作区）。 */}
+      {sidebarCollapsed ? (
+        <>
+          <RailSeparator className="mt-[2px]" />
+          <div className="flex flex-col items-center gap-[3px]" data-tour="mode-switch">
+            <CollapsedWorkspacePopover>{agentModeButton}</CollapsedWorkspacePopover>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Agent 技能"
-                  data-profer-navigation-item="agent-skills"
-                  onClick={handleOpenSkills}
-                  className={cn(
-                    'relative size-10 flex items-center justify-center rounded-[12px] transition-colors titlebar-no-drag border',
-                    activeView === 'agent-skills'
-                      ? 'border-primary/80 bg-primary text-primary-foreground shadow-sm'
-                      : 'border-border/45 bg-foreground/[0.025] text-foreground/45 hover:border-border/70 hover:bg-foreground/[0.045] hover:text-primary',
-                  )}
+                  aria-label="切换到 Chat 模式"
+                  aria-current={mode === 'chat' ? 'page' : undefined}
+                  onClick={() => handleRailModeSwitch('chat')}
+                  className={cn(RAIL_BUTTON_CLASS, mode === 'chat' ? RAIL_BUTTON_ACTIVE_CLASS : RAIL_BUTTON_IDLE_CLASS)}
                 >
-                  <Blocks size={16} />
-                  {(capabilities?.skills.filter((s) => s.hasUpdate).length ?? 0) > 0 && (
-                    <span className="absolute -top-1 -right-1 size-2.5 rounded-full bg-blue-500" />
+                  {mode === 'chat' && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute -left-[7px] top-[10px] h-[14px] w-[2px] rounded-[2px] bg-primary"
+                    />
                   )}
+                  <MessageSquare size={17} />
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="right">Agent 技能</TooltipContent>
+              <TooltipContent side="right">Chat 模式</TooltipContent>
             </Tooltip>
-          )}
-        </div>
-
-        <div className="my-3 h-px w-8 bg-border/70" />
-
-        {/* 最近/关键会话入口 */}
-        <div className="flex-1 min-h-0 w-full overflow-y-auto scrollbar-thin">
-          <div className="flex flex-col items-center gap-1.5 pb-2">
-            {railRecentItems.map((item) => (
-              <RailRecentButton
-                key={`${item.type}-${item.id}`}
-                item={item}
-                onSelect={(selected) => {
-                  if (selected.type === 'agent') {
-                    handleSelectAgentSession(selected.id, selected.title)
-                  } else {
-                    handleSelectConversation(selected.id, selected.title)
-                  }
-                }}
-              />
-            ))}
           </div>
-        </div>
+          <RailSeparator />
+        </>
+      ) : (
+        <RailSeparator className="mt-[2px]" />
+      )}
 
-        {/* 用户头像（点击打开设置） */}
-        <div className="pt-3 pb-3">
-          {/* 余额图标（仅代管模式显示） */}
-          <div className="px-1 pb-2">
-            <SidebarBalanceBar collapsed />
-          </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label="打开设置"
-                onClick={() => setSettingsOpen(true)}
-                className="relative size-10 flex items-center justify-center rounded-[12px] transition-colors titlebar-no-drag hover:bg-foreground/5"
-              >
-                <UserAvatar avatar={userProfile.avatar} size={28} />
-                {(hasUpdate || hasEnvironmentIssues) && (
-                  <span className="absolute top-0 right-0 w-2 h-2 rounded-full bg-red-500" />
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">设置</TooltipContent>
-          </Tooltip>
-        </div>
-      </div>
+      {/* 功能入口：Todo / 日程 / 定时任务 / Agent 技能 / 插件页面。
+          规划中心原先是一个入口 + 内部三个 tab；拆分后 rail 直接给出三个并列入口，
+          主窗口内的 tab 条随之下线（独立规划窗口仍保留 tab）。 */}
+      <SidebarRailEntry
+        icon={<ListTodo size={17} />}
+        label={`Todo，${todoOpenCount} 项待完成`}
+        tooltip={`Todo（${todoOpenCount} 项待完成）`}
+        active={activeView === 'planning' && planningTab === 'todos'}
+        onClick={() => handleOpenPlanning('todos')}
+        navigationItem={PLANNING_NAV_ITEM.todos}
+      />
+      <SidebarRailEntry
+        icon={<CalendarDays size={17} />}
+        label={`日程，今天 ${todayCalendarCount} 个安排`}
+        tooltip={`日程（今天 ${todayCalendarCount} 个安排）`}
+        active={activeView === 'planning' && planningTab === 'calendar'}
+        onClick={() => handleOpenPlanning('calendar')}
+        navigationItem={PLANNING_NAV_ITEM.calendar}
+      />
+      <SidebarRailEntry
+        icon={<Clock size={17} />}
+        label={`定时任务，${automationCount} 个任务`}
+        tooltip={`定时任务（${automationCount} 个）`}
+        active={activeView === 'planning' && planningTab === 'automations'}
+        onClick={() => handleOpenPlanning('automations')}
+        navigationItem={PLANNING_NAV_ITEM.automations}
+      />
+      {mode === 'agent' && (
+        <SidebarRailEntry
+          icon={<Blocks size={17} />}
+          label={`Agent 技能，${capabilities?.skills.length ?? 0} 个能力${skillsUpdateCount > 0 ? `，${skillsUpdateCount} 个可更新` : ''}`}
+          tooltip={skillsUpdateCount > 0 ? `Agent 技能（${skillsUpdateCount} 个可更新）` : 'Agent 技能'}
+          active={activeView === 'agent-skills'}
+          dot={skillsUpdateCount > 0}
+          onClick={handleOpenSkills}
+          navigationItem="agent-skills"
+        />
+      )}
+      <PluginSidebarEntries collapsed />
+
+      <div className="min-h-0 flex-1" />
+
+      {/* 身份区：余额 + 头像（点击进设置） */}
+      <SidebarBalanceBar collapsed />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="打开设置"
+            onClick={() => setSettingsOpen(true)}
+            className={cn(RAIL_BUTTON_CLASS, RAIL_BUTTON_IDLE_CLASS)}
+          >
+            <UserAvatar avatar={userProfile.avatar} size={26} />
+            {(hasUpdate || hasEnvironmentIssues) && (
+              <span className="absolute right-[6px] top-[6px] size-[5px] rounded-full bg-red-500" />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="right">设置</TooltipContent>
+      </Tooltip>
+    </div>
   )
 }

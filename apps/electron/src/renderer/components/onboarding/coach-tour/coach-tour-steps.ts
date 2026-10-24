@@ -75,16 +75,16 @@ export const COACH_TOUR_STEPS: CoachTourStep[] = [
   },
   {
     key: 'planning-enter',
-    title: '规划中心',
-    body: '重复的活儿交给定时任务：每周一整理进展、每天早上汇总安排。点进去看看。',
-    selectors: ['[data-profer-navigation-item="planning"]'],
+    title: 'Todo、日程与定时任务',
+    body: '三块各自一个入口：Todo 记要做的、日程排时间、定时任务到点自动跑。点 Todo 进去看看。',
+    selectors: ['[data-profer-navigation-item="planning-todos"]'],
     placement: 'right',
     advanceOn: 'click-anchor',
   },
   {
     key: 'planning-view',
-    title: '任务、日程、定时任务',
-    body: 'Todo、日程和定时任务都在这里。任务跑完会把结果写回会话并推送提醒。',
+    title: '三块互不打扰',
+    body: '左边三个入口随时直达；任务跑完会把结果写回会话并推送提醒。',
     selectors: ['[data-tour="planning-panel"]', '[data-profer-navigation-region="planning"]'],
     placement: 'auto',
   },
@@ -115,4 +115,4 @@ export const COACH_TOUR_STEPS: CoachTourStep[] = [
 ]
 
 /** 引导内容版本：增删步骤/大改文案时 +1，老用户升级后自动重播一次新指引 */
-export const CURRENT_COACH_TOUR_VERSION = 6
+export const CURRENT_COACH_TOUR_VERSION = 7

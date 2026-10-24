@@ -1252,6 +1252,7 @@ function TabBarInner({
           Tab viewport 与右侧控件独立，避免两者共享直角接缝。 */}
       <div
         ref={topbarContentRef}
+        data-profer-tabbar-content=""
         className="topbar-content absolute inset-x-0 z-10"
         style={{ top: TOPBAR_CONTENT_OFFSET, height: TOPBAR_CONTENT_HEIGHT }}
       >

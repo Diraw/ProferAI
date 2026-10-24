@@ -6,13 +6,12 @@
  * - 对话行 ConversationItem
  * - Agent 会话行 AgentSessionItem / RelatedChildSessionItem
  * - 项目分组 AgentProjectGroupItem
- * - 折叠态 rail 的最近会话按钮 RailRecentButton
  */
 
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pin, PinOff, Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X, XCircle, XSquare,
+  Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, Star, X, XCircle, XSquare,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useShortcut } from '@/hooks/useShortcut'
@@ -38,12 +37,11 @@ import { Popover, PopoverContent, PopoverTrigger } from '@profer/ui/primitives/p
 import {
   SessionMiniMapPopover,
   useSessionMiniMapHover,
-  type SessionMiniMapType,
 } from '@/components/session-preview/SessionMiniMapPopover'
 import { browserStateMapAtom } from '@/atoms/browser-atoms'
 import { currentAgentSessionIdAtom, unviewedCompletedSessionIdsAtom, type SessionIndicatorStatus } from '@/atoms/agent-atoms'
 import type { ConversationMeta, AgentSessionMeta, AgentWorkspace } from '@profer/shared'
-import { formatRelativeUpdatedAt, getRailInitial } from './sidebar-utils'
+import { formatRelativeUpdatedAt, sidebarRowClass } from './sidebar-utils'
 import type { ShortcutRegistrationOptions } from '@/lib/shortcut-registry'
 import {
   ACTIVE_SESSION_STATUSES,
@@ -78,91 +76,27 @@ const PINNED_SESSION_VISIBLE_LIMIT = 6
 const PINNED_SESSION_ROW_HEIGHT_PX = 32
 export const PINNED_SESSION_MAX_HEIGHT = PINNED_SESSION_VISIBLE_LIMIT * PINNED_SESSION_ROW_HEIGHT_PX
 
-const RAIL_STATUS_CLASS: Record<SessionIndicatorStatus, string> = {
-  idle: 'hidden',
-  running: 'border-info animate-pulse',
-  blocked: 'border-warning',
-  completed: 'border-success',
-}
-
 export interface AgentProjectGroup {
   workspace: AgentWorkspace
   sessions: AgentSessionMeta[]
 }
 
-export interface RailRecentItem {
-  id: string
-  title: string
-  type: SessionMiniMapType
-  initial: string
-  active: boolean
-  status: SessionIndicatorStatus
-  pinned: boolean
-  workspaceName?: string
-  isAutomation?: boolean
-}
-
-export function RailRecentButton({
-  item,
-  onSelect,
-}: {
-  item: RailRecentItem
-  onSelect: (item: RailRecentItem) => void
-}): React.ReactElement {
-  const preview = useSessionMiniMapHover()
-
+/**
+ * 置顶标记：实心星号。
+ *
+ * 缩进行（depth=1）把星号放进左侧 26px 缩进留白里，绝对定位、不占标题宽度，
+ * 这样置顶行与普通行的标题仍然左对齐；非缩进行没有留白可用，退回标题前内联显示。
+ */
+function PinnedStar({ gutter }: { gutter: boolean }): React.ReactElement {
   return (
-    <>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            ref={preview.setAnchorRef}
-            type="button"
-            aria-label={`打开${item.type === 'agent' ? 'Agent 会话' : 'Chat 对话'}：${item.title}`}
-            onClick={() => { if (preview.shouldSuppressClick()) return; onSelect(item) }}
-            onMouseEnter={preview.handleMouseEnter}
-            onMouseLeave={preview.handleMouseLeave}
-            onTouchStart={preview.handleTouchStart}
-            onTouchMove={preview.handleTouchMove}
-            onTouchEnd={preview.handleTouchEnd}
-            onTouchCancel={preview.handleTouchCancel}
-            className={cn(
-              'relative size-10 flex items-center justify-center overflow-hidden rounded-[12px] transition-colors titlebar-no-drag',
-              item.active
-                ? 'bg-primary/10 text-foreground shadow-[0_1px_2px_0_rgba(0,0,0,0.05)]'
-                : 'text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground/80'
-            )}
-          >
-            <span
-              className={cn(
-                'absolute inset-y-0 left-0 w-0 border-l-[3px] rounded-l-[12px] pointer-events-none',
-                RAIL_STATUS_CLASS[item.status]
-              )}
-            />
-            {item.isAutomation
-              ? <Clock size={14} className="text-foreground/40" />
-              : <span className="text-[14px] font-semibold leading-none">{item.initial}</span>
-            }
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">
-          {item.type === 'agent' ? 'Agent' : 'Chat'} · {item.title}
-        </TooltipContent>
-      </Tooltip>
-      <SessionMiniMapPopover
-        target={{
-          type: item.type,
-          sessionId: item.id,
-          title: item.title,
-          workspaceName: item.workspaceName,
-        }}
-        anchorRef={preview.anchorRef}
-        open={preview.isOpen}
-        isLeaving={preview.isLeaving}
-        onMouseEnter={preview.handlePanelMouseEnter}
-        onMouseLeave={preview.handlePanelMouseLeave}
-      />
-    </>
+    <Star
+      size={11}
+      aria-label="已置顶"
+      className={cn(
+        'fill-current text-primary/60',
+        gutter ? 'pointer-events-none absolute left-[7px] top-1/2 -translate-y-1/2' : 'flex-shrink-0',
+      )}
+    />
   )
 }
 
@@ -173,6 +107,8 @@ export interface SessionItemActionsProps {
   relativeTimeNow: number
   pinned: boolean
   archived: boolean
+  /** 当前项：时间常显；非当前项只在 hover 时出按钮 */
+  active?: boolean
   onTogglePin: () => void
   onToggleArchive: () => void
   onCloseTab?: () => void
@@ -258,7 +194,8 @@ function SafeTooltip({ children, content, side = 'top' }: SafeTooltipProps): Rea
 }
 
 /**
- * 列表项右侧操作区：默认显示相对更新时间，hover 时切换为「置顶 / 归档 / 三点菜单」按钮组。
+ * 列表项右侧操作区：当前项常显相对更新时间，hover / 聚焦时切换为「置顶 / 归档 / 三点菜单」按钮组。
+ * 非当前项默认两侧都不显示（行内只留标题），hover 时才换成按钮，避免同时叠时间与按钮。
  * 归档需要二次确认；进入确认态后强制保持按钮可见，避免鼠标移开后用户失去反馈。
  */
 export function SessionItemActions({
@@ -266,6 +203,7 @@ export function SessionItemActions({
   relativeTimeNow,
   pinned,
   archived,
+  active = false,
   onTogglePin,
   onToggleArchive,
   onCloseTab,
@@ -351,8 +289,8 @@ export function SessionItemActions({
       <span
         title={`最后更新：${new Date(updatedAt).toLocaleString('zh-CN')}`}
         className={cn(
-          'absolute inset-y-0 right-0 block w-full text-right text-[12px] leading-[18px] tabular-nums text-foreground/35 transition-opacity duration-100',
-          forceVisible ? 'opacity-0' : 'opacity-100 group-hover:opacity-0',
+          'pointer-events-none absolute inset-y-0 right-0 block w-full text-right text-[11px] leading-[18px] tabular-nums text-foreground/[0.26] transition-opacity duration-100',
+          forceVisible ? 'opacity-0' : active ? 'opacity-100 group-hover:opacity-0' : 'opacity-0',
         )}
       >
         {formatRelativeUpdatedAt(updatedAt, relativeTimeNow)}
@@ -375,7 +313,7 @@ export function SessionItemActions({
             )}
             onClick={onTogglePin}
           >
-            {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+            {pinned ? <Star size={14} className="fill-current" /> : <Star size={14} />}
           </button>
         </SafeTooltip>
         <SafeTooltip
@@ -457,7 +395,9 @@ interface ConversationItemProps {
   conversation: ConversationMeta
   active: boolean
   streaming: boolean
-  /** 是否在标题旁显示 Pin 图标 */
+  /** 1 = 项目/分组内的会话行（左侧留出层级缩进） */
+  depth?: 0 | 1
+  /** 是否在标题旁显示置顶星标 */
   showPinIcon: boolean
   /** 输入框是否有未发送内容（草稿标记） */
   hasDraft?: boolean
@@ -483,6 +423,7 @@ export const ConversationItem = React.memo(function ConversationItem({
   conversation,
   active,
   streaming,
+  depth = 0,
   showPinIcon,
   hasDraft,
   relativeTimeNow,
@@ -557,7 +498,7 @@ export const ConversationItem = React.memo(function ConversationItem({
     <>
       {renderCloseMenuGroup(MenuItem, MenuSeparator, { onCloseTab, onCloseOtherTabs, onCloseAllTabs })}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onTogglePin(conversation.id)}>
-        {isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+        {isPinned ? <Star size={14} className="fill-current" /> : <Star size={14} />}
         {isPinned ? '取消置顶' : '置顶对话'}
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => startEdit()}>
@@ -616,12 +557,10 @@ export const ConversationItem = React.memo(function ConversationItem({
             startEdit()
           }}
           className={cn(
-            'group relative w-full flex items-center gap-1.5 rounded-md py-[5px] pl-2.5 pr-1.5 transition-colors duration-100 titlebar-no-drag text-left',
+            sidebarRowClass({ active, depth }),
+            'titlebar-no-drag text-left',
             active && 'session-item-selected',
-            streaming
-              ? 'text-foreground font-medium hover:bg-foreground/[0.03]'
-              : 'hover:bg-foreground/[0.03]',
-            active && 'bg-foreground/[0.08]',
+            streaming && 'font-medium',
           )}
         >
           {(streaming || (isClassic && active)) && (
@@ -647,13 +586,11 @@ export const ConversationItem = React.memo(function ConversationItem({
               />
             ) : (
               <div className={cn(
-                'truncate text-[14px] leading-[19px] flex items-center gap-1.5',
-                active ? 'text-foreground' : 'text-foreground/80'
+                'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
+                active ? 'text-foreground' : 'text-foreground/[0.62]'
               )}>
-                {/* 置顶标记 */}
-                {showPinIcon && (
-                  <Pin size={11} className="flex-shrink-0 text-primary/60" />
-                )}
+                {/* 置顶标记：星号落在左侧缩进留白里，不挤动标题 */}
+                {showPinIcon && <PinnedStar gutter={depth === 1} />}
                 {regeneratingTitle ? (
                   <>
                     <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
@@ -674,6 +611,7 @@ export const ConversationItem = React.memo(function ConversationItem({
             <SessionItemActions
               updatedAt={conversation.updatedAt}
               relativeTimeNow={relativeTimeNow}
+              active={active}
               pinned={isPinned}
               archived={!!conversation.archived}
               onTogglePin={() => onTogglePin(conversation.id)}
@@ -738,6 +676,8 @@ interface AgentSessionItemProps {
   session: AgentSessionMeta
   active: boolean
   indicatorStatus: SessionIndicatorStatus
+  /** 1 = 项目/分组内的会话行（左侧留出层级缩进） */
+  depth?: 0 | 1
   showPinIcon?: boolean
   hasDraft?: boolean
   leftAccent?: SessionLeftAccent
@@ -775,6 +715,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
   session,
   active,
   indicatorStatus,
+  depth = 0,
   showPinIcon,
   hasDraft,
   delegationSummary,
@@ -868,7 +809,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
     <>
       {renderCloseMenuGroup(MenuItem, MenuSeparator, { onCloseTab, onCloseOtherTabs, onCloseAllTabs })}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onTogglePin(session.id)}>
-        {session.pinned ? <PinOff size={14} /> : <Pin size={14} />}
+        {session.pinned ? <Star size={14} className="fill-current" /> : <Star size={14} />}
         {session.pinned ? '取消置顶' : '置顶会话'}
       </MenuItem>
       {canMove && (
@@ -950,14 +891,10 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
             startEdit()
           }}
           className={cn(
-            'group relative w-full flex items-center gap-1.5 rounded-md py-[5px] pl-2.5 pr-1.5 transition-colors duration-100 titlebar-no-drag text-left',
+            sidebarRowClass({ active, depth }),
+            'titlebar-no-drag text-left',
             active && 'agent-session-item-active',
-            leftAccent
-              ? SESSION_ACCENT_ROW_CLASS[leftAccent]
-              : 'hover:bg-foreground/[0.03]',
-            // 选中态背景：浅色叠加深色变深、深色叠加浅色变浅，自动适配主题。
-            // orange accent 自带橙色底色，不再叠加，避免视觉过重。
-            active && leftAccent !== 'orange' && 'bg-foreground/[0.08]',
+            leftAccent && SESSION_ACCENT_ROW_CLASS[leftAccent],
           )}
         >
           {(leftAccent || (isClassic && active)) && (
@@ -982,12 +919,10 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
               />
             ) : (
               <div className={cn(
-                'truncate text-[14px] leading-[19px] flex items-center gap-1.5',
-                active ? 'text-foreground' : 'text-foreground/80'
+                'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
+                active ? 'text-foreground' : 'text-foreground/[0.62]'
               )}>
-                {showPinIcon && (
-                  <Pin size={11} className="flex-shrink-0 text-primary/60" />
-                )}
+                {showPinIcon && <PinnedStar gutter={depth === 1} />}
                 {session.sourceAutomationId && !session.sourceDelegationId && (
                   <Clock size={11} className="flex-shrink-0 text-foreground/40" />
                 )}
@@ -1046,6 +981,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
             <SessionItemActions
               updatedAt={session.updatedAt}
               relativeTimeNow={relativeTimeNow}
+              active={active}
               pinned={!!session.pinned}
               archived={!!session.archived}
               onTogglePin={() => onTogglePin(session.id)}
@@ -1274,7 +1210,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
   const recentCutoff = relativeTimeNow - PROJECT_SESSION_RECENT_WINDOW_MS
   // 折叠时：所有"活跃"会话（运行中 / 阻塞 / 未查看的已完成）必须展示，
   // 不受 PROJECT_SESSION_PREVIEW_LIMIT 与 3 天窗口限制；活跃部分内部按
-  // blocked > running > completed 优先级排序（与 railRecentItems 对齐），
+  // blocked > running > completed 优先级排序（与 rail 的状态优先级一致），
   // 同优先级保留 group.sessions 的 updatedAt 倒序。
   // 非活跃部分仍保留原"最近 3 天 + 至多 5 条"预览策略，作为额外补充展示。
   // 用户点击"显示更多"会在折叠基线之上每次再额外展开 PROJECT_SESSION_EXPAND_STEP 条。
@@ -1325,10 +1261,10 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
       className={cn('relative py-0.5 rounded-md transition-opacity', dragging && 'opacity-45')}
     >
       {dropPosition === 'before' && (
-        <div className="absolute -top-0.5 left-3 right-3 h-0.5 translate-x-[2px] rounded-full bg-primary z-10" />
+        <div className="absolute -top-0.5 left-2 right-2 h-0.5 rounded-full bg-primary z-10" />
       )}
 
-      <div className="group/project relative flex translate-x-[2px] items-center">
+      <div className="group/project relative flex items-center">
         <span
           draggable
           onDragStart={(e) => onDragStart(e, group.workspace.id)}
@@ -1342,10 +1278,9 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
         {renamingWorkspace ? (
           <div
             className={cn(
-              'relative flex-1 min-w-0 flex items-center gap-1 pl-[9px] pr-1 py-1 rounded-md text-left titlebar-no-drag group-hover/project:pl-4 group-hover/project:pr-11',
-              isCurrent
-                ? 'agent-project-item-current text-foreground'
-                : 'text-foreground/65',
+              sidebarRowClass({ active: isCurrent, tall: true }),
+              'min-w-0 flex-1 gap-1 text-left group-hover/project:pl-4 group-hover/project:pr-11',
+              isCurrent && 'agent-project-item-current',
             )}
           >
             {renderWorkspaceIcon(13, 'flex-shrink-0 text-foreground/40')}
@@ -1355,7 +1290,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               onChange={(e) => setWorkspaceEditName(e.target.value)}
               onKeyDown={handleWorkspaceRenameKeyDown}
               onBlur={() => void handleWorkspaceRenameCommit()}
-              className="flex-1 min-w-0 bg-transparent text-[14px] font-medium text-foreground border-b border-primary/50 outline-none px-0.5 leading-[19px]"
+              className="flex-1 min-w-0 bg-transparent text-[13px] font-medium text-foreground border-b border-primary/50 outline-none px-0.5 leading-[18px]"
               maxLength={50}
             />
           </div>
@@ -1387,15 +1322,14 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
               onToggleProjectCollapse(group.workspace.id)
             }}
             className={cn(
-              'relative flex-1 min-w-0 flex items-center gap-1 pl-[9px] pr-1 py-1 rounded-md text-left transition-[padding,color,background-color] titlebar-no-drag group-hover/project:pl-4 group-hover/project:pr-11 hover:bg-foreground/[0.025]',
-              isCurrent
-                ? 'agent-project-item-current text-foreground'
-                : 'text-foreground/65 hover:text-foreground/88',
-              justSwitchedTo && 'animate-workspace-highlight bg-primary/15 rounded-md',
+              sidebarRowClass({ active: isCurrent, tall: true }),
+              'min-w-0 flex-1 gap-1 text-left transition-[padding] group-hover/project:pl-4 group-hover/project:pr-11',
+              isCurrent && 'agent-project-item-current',
+              justSwitchedTo && 'animate-workspace-highlight bg-primary/15',
             )}
           >
             {renderWorkspaceIcon(13, 'flex-shrink-0 text-foreground/40')}
-            <span className="flex-1 min-w-0 truncate text-[14px] font-medium leading-[19px]">
+            <span className="flex-1 min-w-0 truncate text-[13px] font-medium leading-[18px]">
               {group.workspace.name}
             </span>
             <span
@@ -1471,7 +1405,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
         </DropdownMenu>
       </div>
 
-      <div id={`project-sessions-${group.workspace.id}`} className="ml-4 mt-px">
+      <div id={`project-sessions-${group.workspace.id}`} className="mt-px">
         {!collapsed ? (
           treeItems.length > 0 ? (
             <div className="flex flex-col gap-0.5">
@@ -1488,6 +1422,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                       session={item.session}
                       active={treeActive}
                       indicatorStatus={rowStatus}
+                      depth={1}
                       showPinIcon={!!item.session.pinned}
                       hasDraft={agentDraftIds.has(item.session.id)}
                       delegationSummary={childCount > 0
@@ -1539,7 +1474,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                 <button
                   type="button"
                   onClick={() => onShowMore(group.workspace.id)}
-                  className="w-full text-left px-1.5 py-1 rounded-md text-[13px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                  className="flex h-[26px] w-full items-center rounded-[7px] pl-[26px] pr-2 text-left text-[12px] text-foreground/[0.32] transition-colors hover:bg-foreground/[0.04] hover:text-foreground/[0.62] titlebar-no-drag"
                 >
                   显示更多
                 </button>
@@ -1549,7 +1484,7 @@ export const AgentProjectGroupItem = React.memo(function AgentProjectGroupItem({
                 <button
                   type="button"
                   onClick={() => onCollapseExtra(group.workspace.id)}
-                  className="w-full text-left px-1.5 py-1 rounded-md text-[13px] text-foreground/35 hover:bg-foreground/[0.03] hover:text-foreground/60 transition-colors titlebar-no-drag"
+                  className="flex h-[26px] w-full items-center rounded-[7px] pl-[26px] pr-2 text-left text-[12px] text-foreground/[0.32] transition-colors hover:bg-foreground/[0.04] hover:text-foreground/[0.62] titlebar-no-drag"
                 >
                   收起
                 </button>

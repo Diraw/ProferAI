@@ -25,7 +25,7 @@ mock.module('jotai', () => ({
   useStore: () => store,
 }))
 const errors: string[] = []
-mock.module('sonner', () => ({ toast: { error: (message: string) => errors.push(message), success() {}, warning() {} } }))
+mock.module('sonner', () => ({ Toaster: () => null, toast: { error: (message: string) => errors.push(message), success() {}, warning() {} } }))
 const promptAutosaveFixture = Object.assign(() => {}, {
   flush: async () => {},
   remove: async (id: string) => {
@@ -56,6 +56,7 @@ const { userProfileAtom } = await import('../../atoms/user-profile')
 const { authStatusAtom } = await import('../../atoms/identity-atoms')
 const { promptConfigAtom, selectedPromptIdAtom } = await import('../../atoms/system-prompt-atoms')
 const { composerCompactModeAtom, previewOpenModeAtom } = await import('../../atoms/ui-preferences')
+const { showCurrentSessionSectionAtom } = await import('../../atoms/sidebar-atoms')
 const { customNotificationSoundsAtom, notificationSoundsAtom } = await import('../../atoms/notifications')
 const { chatToolsAtom } = await import('../../atoms/chat-tool-atoms')
 
@@ -167,6 +168,7 @@ const click = (props: Props) => (props.onClick as (event: { preventDefault: () =
 afterEach(() => {
   hosts.splice(0).forEach((host) => host.dispose())
   errors.length = 0
+  store.set(showCurrentSessionSectionAtom, true)
 })
 
 describe('AccountSettings 真实事件（mock IPC）', () => {
@@ -454,6 +456,15 @@ describe('UsageSettings 低风险持久化与删除', () => {
     expect(errors.at(-1)).toContain('删除失败')
     click(host.button('删除音效')); await tick(); host.render()
     expect(store.get(customNotificationSoundsAtom)).toHaveLength(0)
+  })
+  test('侧边栏「当前会话」区域开关默认开启，关闭后写入本地偏好', async () => {
+    api()
+    store.set(showCurrentSessionSectionAtom, true)
+    const host = mount(UsageSettings); await tick(); host.render()
+    expect(host.field('显示「当前会话」区域').checked).toBe(true)
+    ;(host.field('显示「当前会话」区域').onCheckedChange as (value: boolean) => void)(false); await tick(); host.render()
+    expect(store.get(showCurrentSessionSectionAtom)).toBe(false)
+    expect(host.field('显示「当前会话」区域').checked).toBe(false)
   })
 })
 

@@ -5,6 +5,7 @@
  * 相对时间、rail 首字母、Set 不可变操作、列表渐进切片等。不依赖任何 React/atom。
  */
 
+import { cn } from '@/lib/utils'
 import type { WorkspaceSortMode } from '@/atoms/sidebar-atoms'
 import type { AppMode } from '@/atoms/app-mode'
 import type { TabItem } from '@/atoms/tab-atoms'
@@ -116,10 +117,6 @@ export function groupByDate<T extends { updatedAt: number }>(items: T[]): Array<
   return groups
 }
 
-export function getRailInitial(title: string): string {
-  return title.trim().slice(0, 1).toUpperCase() || '·'
-}
-
 /** 不可变地切换 Set 中某个成员的存在状态（存在则删除，不存在则添加），返回新 Set */
 export function toggleSetEntry<T>(prev: Set<T>, value: T): Set<T> {
   const next = new Set(prev)
@@ -138,6 +135,44 @@ export function deleteSetEntry<T>(prev: Set<T>, value: T): Set<T> {
   next.delete(value)
   return next
 }
+
+/**
+ * 侧栏行统一外观（会话 / 项目 / 入口共用）。
+ *
+ * 只统一 className，不抽组件：ConversationItem 内含编辑态、右键菜单、中键关闭、
+ * 迷你地图预览与 F2 快捷键，抽组件会强制重排这些逻辑，风险大于收益。
+ *
+ * 约定：行高 30（项目 32），圆角 7，左右内边距 8，子会话缩进 26；
+ * 除 focus ring 外不使用描边与阴影，层级只靠背景灰度与文字灰度区分。
+ */
+export function sidebarRowClass(options: {
+  active?: boolean
+  /** 1 = 项目内的会话行（左侧留出层级缩进） */
+  depth?: 0 | 1
+  /** 已归档等次要行 */
+  muted?: boolean
+  /** 项目行等 32px 行 */
+  tall?: boolean
+} = {}): string {
+  const { active, depth = 0, muted, tall } = options
+  return cn(
+    // shrink-0：行必须保持固定高度。列表容器有 max-height 时（当前会话区 144px），
+    // flex 子项默认会被压扁去「塞进」容器，导致行高从 30px 塌成 20px 左右且不再滚动。
+    'group relative flex w-full shrink-0 items-center gap-2 rounded-[7px] px-2 text-[13px] transition-colors duration-100',
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+    tall ? 'h-8' : 'h-[30px]',
+    depth === 1 && 'pl-[26px]',
+    active
+      ? 'bg-foreground/[0.07] text-foreground'
+      : muted
+        ? 'text-foreground/[0.38] hover:bg-foreground/[0.04] hover:text-foreground/[0.62]'
+        : 'text-foreground/[0.62] hover:bg-foreground/[0.04] hover:text-foreground',
+  )
+}
+
+/** 侧栏分区标题（当前会话 / 置顶 / 项目 / 今天…）统一外观 */
+export const SIDEBAR_SECTION_TITLE_CLASS =
+  'text-[11px] font-medium text-foreground/[0.38] select-none'
 
 /**
  * 列表渐进渲染辅助：按累计条数切分组列表（先渲染可见数量，空闲时补全）。

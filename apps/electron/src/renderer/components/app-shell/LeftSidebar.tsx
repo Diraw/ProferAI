@@ -3,14 +3,17 @@
  *
  * 组件已按职责拆分到 left-sidebar/ 目录：
  * - use-left-sidebar.ts  状态 + handler + 派生数据（hook）
- * - rail.tsx             折叠态图标视图
- * - expanded-sidebar.tsx 展开态完整视图
+ * - rail.tsx             常驻图标列（54px，导航 + 身份）
+ * - expanded-sidebar.tsx 列表视图（新建/搜索 + 项目树 / 会话）
  * - sidebar-dialogs.tsx  删除/迁移/加入工作区弹窗
  * - session-items.tsx    列表项子组件
  * - navigation-items.tsx 导航条目小件
  * - sidebar-utils.ts / session-tree.ts 纯函数工具
  *
- * 本文件仅负责 props 透传与折叠/展开外壳装配。
+ * 本文件负责外壳装配：宽度语义、rail + 列表两栏、拖拽留白、红绿灯与弹窗。
+ *
+ * 宽度语义：外壳宽 = 54（常驻 rail）+ 列表宽；收起时只留 58 的 rail。
+ * 54 + 246 = 300，与 lib/panel-layout.ts 的 SIDEBAR_WIDTH 预算保持一致。
  */
 
 import * as React from "react";
@@ -20,10 +23,20 @@ import { useLeftSidebar } from "./left-sidebar/use-left-sidebar";
 import { SidebarRail } from "./left-sidebar/rail";
 import { ExpandedSidebar } from "./left-sidebar/expanded-sidebar";
 import { SidebarDialogs } from "./left-sidebar/sidebar-dialogs";
+import { SIDEBAR_HEADER_INSET, SIDEBAR_PANEL_TOP, SidebarWindowDragStrip } from "./left-sidebar/navigation-items";
+import { useTabBarBottomOffset } from "./left-sidebar/use-tabbar-offset";
 import { MacTrafficLights } from "./MacTrafficLights";
 
 export type { LeftSidebarProps } from "./left-sidebar/types";
 import type { LeftSidebarProps } from "./left-sidebar/types";
+
+/** 常驻 rail 宽度 */
+const RAIL_WIDTH = 54;
+/** 收起态外壳宽：rail 居中，左右各留 2px */
+const COLLAPSED_WIDTH = 58;
+/** 列表宽度默认值与下限（与 atoms/sidebar-atoms、AppShell 的 clamp 对齐） */
+const DEFAULT_LIST_WIDTH = 246;
+const MIN_LIST_WIDTH = 230;
 
 export function LeftSidebar({
   width,
@@ -33,22 +46,48 @@ export function LeftSidebar({
   const s = useLeftSidebar();
   const isClassic = s.isClassic;
   const sidebarCollapsed = s.sidebarCollapsed;
+  const listWidth = width ?? DEFAULT_LIST_WIDTH;
+  // 面板顶边与 Tab 标签本体下沿对齐：运行时量真实 DOM，量不到才用常量兜底。
+  const panelTop = useTabBarBottomOffset(SIDEBAR_PANEL_TOP);
 
   return (
     <div
+      data-profer-sidebar=""
       className={cn(
         "relative h-full overflow-hidden sidebar-collapse-ease",
         !noTransition &&
           "transition-[width] duration-300 will-change-[width] contain-layout",
+        // 着色层铺满整个外壳（含顶部留白与红绿灯区）：::before 画在外壳底色之上、
+        // 子元素之下，列表容器再用 bg-sidebar 盖回浅色，形成「着色底 + 浅色内容卡」。
         "bg-sidebar rounded-2xl shadow-xl dark:shadow-md",
+        // isolate + -z-10：着色层压在 stacking context 底部，位于外壳底色之上、所有内容之下。
+        "isolate before:absolute before:inset-0 before:-z-10 before:bg-foreground/[0.035] before:content-['']",
       )}
       style={{
-        width: sidebarCollapsed ? 60 : (width ?? 300),
-        minWidth: sidebarCollapsed ? 60 : 200,
+        width: sidebarCollapsed ? COLLAPSED_WIDTH : RAIL_WIDTH + listWidth,
+        minWidth: sidebarCollapsed ? COLLAPSED_WIDTH : RAIL_WIDTH + MIN_LIST_WIDTH,
         flexShrink: sidebarCollapsed ? 0 : 1,
       }}
     >
-      {sidebarCollapsed ? <SidebarRail s={s} /> : <ExpandedSidebar s={s} />}
+      {/* 顶部拖拽留白整条覆盖 rail + 列表，高度取 Tab 标签本体的下沿（运行时实测）；
+          rail 图标与列表内容都从这条线开始，红绿灯（18–38）落在它上方。 */}
+      <SidebarWindowDragStrip height={panelTop} />
+
+      <div className="flex h-full min-h-0">
+        {/* rail 透明，直接露出外壳的着色层；收起态占满 58px。 */}
+        <div className={cn('flex-none', sidebarCollapsed ? 'w-full' : 'w-[54px]')}>
+          <SidebarRail s={s} topOffset={panelTop + SIDEBAR_HEADER_INSET} />
+        </div>
+        {!sidebarCollapsed && (
+          <div className="min-w-0 flex-1" style={{ paddingTop: panelTop }}>
+            {/* 内容卡：bg-sidebar 把着色盖回浅色，只有左上角圆角让底下的着色露出来，
+                这条弧线就是 rail 与列表的分界收口。 */}
+            <div className="h-full overflow-hidden rounded-tl-[10px] bg-sidebar">
+              <ExpandedSidebar s={s} />
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* 红绿灯必须最后渲染，确保位于左上拖拽层之上；只有这块区域退出窗口拖拽。 */}
       {s.isMac && (

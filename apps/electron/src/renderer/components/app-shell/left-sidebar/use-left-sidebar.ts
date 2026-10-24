@@ -90,6 +90,7 @@ import { hasUpdateAtom } from '@/atoms/updater'
 import { draftSessionIdsAtom } from '@/atoms/draft-session-atoms'
 import { hasEnvironmentIssuesAtom } from '@/atoms/environment'
 import { promptConfigAtom, selectedPromptIdAtom, conversationPromptIdAtom } from '@/atoms/system-prompt-atoms'
+import { calendarEventsAtom, planningTabAtom, todosAtom, type PlanningTab } from '@/atoms/planning-atoms'
 import { useOpenSession } from '@/hooks/useOpenSession'
 import { openExplorationBranchTab } from '@/lib/exploration-tab'
 import { useSyncActiveTabSideEffects } from '@/hooks/useSyncActiveTabSideEffects'
@@ -109,7 +110,6 @@ import { noteExplicitUnreadRead } from '@/lib/agent-unread-transition'
 
 import {
   groupByDate,
-  getRailInitial,
   toggleSetEntry,
   deleteSetEntry,
   sliceGroupsByCount,
@@ -122,7 +122,7 @@ import {
   PROJECT_SESSION_EXPAND_STEP,
   sortProjectSessions,
 } from './session-tree'
-import { focusEnterableViewItem } from './navigation-items'
+import { focusEnterableViewItem, planningSectionOf } from './navigation-items'
 import type { AgentProjectGroup } from './session-items'
 
 
@@ -137,6 +137,30 @@ export function useLeftSidebar() {
   const automations = useAtomValue(automationsAtom)
   const setAutomations = useSetAtom(automationsAtom)
   const automationCount = automations.length
+  // 规划中心拆成 rail 三个入口后，每个入口的计数与选中态都读同一份数据：
+  // 选中态由 activeView + planningTab 共同决定，计数只做提示，不参与导航逻辑。
+  const [planningTab, setPlanningTab] = useAtom(planningTabAtom)
+  const planningTabRef = React.useRef(planningTab)
+  planningTabRef.current = planningTab
+  const todos = useAtomValue(todosAtom)
+  const calendarEvents = useAtomValue(calendarEventsAtom)
+  const todoOpenCount = React.useMemo(
+    () => todos.filter((todo) => todo.status === 'open').length,
+    [todos],
+  )
+  const todayCalendarCount = React.useMemo(() => {
+    const start = new Date()
+    start.setHours(0, 0, 0, 0)
+    const end = new Date(start)
+    end.setDate(end.getDate() + 1)
+    const from = start.getTime()
+    const to = end.getTime()
+    // 日程页同时展示事件与到期 Todo，入口计数也跟着算在一起，
+    // 避免 rail 说「今天 0 个安排」但点进去日历上排着待办。
+    const eventCount = calendarEvents.filter((event) => event.startAt >= from && event.startAt < to).length
+    const todoCount = todos.filter((todo) => todo.dueAt !== undefined && todo.dueAt >= from && todo.dueAt < to).length
+    return eventCount + todoCount
+  }, [calendarEvents, todos])
   const setSettingsTab = useSetAtom(settingsTabAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const [conversations, setConversations] = useAtom(conversationsAtom)
@@ -208,18 +232,21 @@ export function useLeftSidebar() {
         current.click()
         return true
       }
-      // 全屏可进入视图（规划中心 / Agent 技能）的“进入/返回”：
+      // 全屏可进入视图（规划中心三入口 / Agent 技能）的“进入/返回”：
       // - right（→/手柄右拨）：进入对应视图并移交焦点进内容区；已激活则只移交焦点，
       //   绝不靠再次 right 切回对话区（否则会“按一下右又跳回对话”）。
       // - left（←）：仅当已在对应视图时返回对话区（复用 onClick toggle 语义）。
-      if ((current.dataset.proferNavigationItem === 'planning'
-        || current.dataset.proferNavigationItem === 'agent-skills')
-        && (action === 'left' || action === 'right')) {
-        const item = current.dataset.proferNavigationItem
-        const isActive = activeViewRef.current === item
+      const navItem = current.dataset.proferNavigationItem
+      const planningSection = planningSectionOf(navItem)
+      if ((planningSection || navItem === 'agent-skills') && (action === 'left' || action === 'right')) {
+        // 规划中心三个入口共享 activeView='planning'，选中态还要看当前分区，
+        // 否则在 Todo 页按 → 到「日程」只会移交焦点而不切分区。
+        const isActive = planningSection
+          ? activeViewRef.current === 'planning' && planningTabRef.current === planningSection
+          : activeViewRef.current === navItem
         if (action === 'right') {
           if (!isActive) current.click() // 未激活才进入（避免 toggle 回对话）
-          focusEnterableViewItem(item) // 已激活/刚进入都移交焦点进内容区
+          focusEnterableViewItem(navItem!) // 已激活/刚进入都移交焦点进内容区
         } else if (isActive) {
           current.click() // left + 已在对应视图：切回对话区
         }
@@ -622,10 +649,13 @@ export function useLeftSidebar() {
     window.electronAPI.listAgentWorkspaces().then(setWorkspacesStable).catch(console.error)
   }, [authStatus.isLoggedIn, setWorkspacesStable])
 
-  /** 打开规划中心（Todo · 日程 · 定时任务） */
-  const handleOpenAutomations = React.useCallback((): void => {
-    // 已激活时再次点击切回对话列表（编辑页则先关表单回列表）（#972）
-    if (activeView === 'planning') {
+  /** 打开规划中心的某个分区（Todo · 日程 · 定时任务）。
+   *  三个入口共享 activeView='planning'，分区由 planningTab 决定；再次点击当前分区
+   *  才回到对话列表（与原先单一入口的 toggle 语义一致），切到其它分区不收起视图。 */
+  const handleOpenPlanning = React.useCallback((target: PlanningTab): void => {
+    const isSameSection = activeView === 'planning' && planningTab === target
+    if (isSameSection) {
+      // 定时任务设置页是叠在列表之上的表单，先退回到列表，再点一次才回对话。
       if (store.get(automationFormAtom).open) {
         setAutomationForm({ open: false, draft: null })
         return
@@ -633,9 +663,13 @@ export function useLeftSidebar() {
       setActiveView('conversations')
       return
     }
-    setAutomationForm({ open: false, draft: null })
+    // 切分区时关闭定时任务表单，避免从「新建定时任务」直接落到 Todo 页时表单还在。
+    if (store.get(automationFormAtom).open) {
+      setAutomationForm({ open: false, draft: null })
+    }
+    setPlanningTab(target)
     setActiveView('planning')
-  }, [activeView, setAutomationForm, setActiveView, store])
+  }, [activeView, planningTab, setAutomationForm, setActiveView, setPlanningTab, store])
 
   /** 打开 Agent 技能视图 */
   const handleOpenSkills = React.useCallback((): void => {
@@ -1686,80 +1720,6 @@ export function useLeftSidebar() {
     setViewMode,
   ])
 
-  const railRecentItems = React.useMemo(() => {
-    if (mode === 'chat') {
-      return conversations
-        .filter((c) => !c.archived && !draftSessionIds.has(c.id))
-        .sort((a, b) => {
-          const activeDelta = Number(b.id === activeSessionId) - Number(a.id === activeSessionId)
-          if (activeDelta !== 0) return activeDelta
-          const streamingDelta = Number(streamingIds.has(b.id)) - Number(streamingIds.has(a.id))
-          if (streamingDelta !== 0) return streamingDelta
-          const pinnedDelta = Number(!!b.pinned) - Number(!!a.pinned)
-          if (pinnedDelta !== 0) return pinnedDelta
-          return b.updatedAt - a.updatedAt
-        })
-        .slice(0, 5)
-        .map((conversation) => ({
-          id: conversation.id,
-          title: conversation.title,
-          type: 'chat' as const,
-          initial: getRailInitial(conversation.title),
-          active: conversation.id === activeSessionId,
-          status: streamingIds.has(conversation.id) ? 'running' as const : 'idle' as const,
-          pinned: !!conversation.pinned,
-          workspaceName: undefined,
-        }))
-    }
-
-    return agentSessions
-      .filter((session) =>
-        !session.archived
-        && !session.draft
-        && !draftSessionIds.has(session.id)
-        && (!currentWorkspaceId || session.workspaceId === currentWorkspaceId)
-      )
-      .sort((a, b) => {
-        const statusA = agentIndicatorMap.get(a.id) ?? (unviewedCompletedSessionIds.has(a.id) ? 'completed' : 'idle')
-        const statusB = agentIndicatorMap.get(b.id) ?? (unviewedCompletedSessionIds.has(b.id) ? 'completed' : 'idle')
-        const priority = (session: AgentSessionMeta, status: SessionIndicatorStatus): number => {
-          if (session.id === activeSessionId) return 0
-          if (status === 'blocked') return 1
-          if (status === 'running') return 2
-          if (session.pinned) return 3
-          if (status === 'completed') return 4
-          return 5
-        }
-        const priorityDelta = priority(a, statusA) - priority(b, statusB)
-        if (priorityDelta !== 0) return priorityDelta
-        return b.updatedAt - a.updatedAt
-      })
-      .slice(0, 5)
-      .map((session) => ({
-        id: session.id,
-        title: session.title,
-        type: 'agent' as const,
-        initial: getRailInitial(session.title),
-        active: session.id === activeSessionId,
-        status: agentIndicatorMap.get(session.id) ?? (unviewedCompletedSessionIds.has(session.id) ? 'completed' as const : 'idle' as const),
-        pinned: !!session.pinned,
-        workspaceName: session.workspaceId ? workspaceNameMap.get(session.workspaceId) : undefined,
-        isAutomation: !!session.sourceAutomationId,
-      }))
-  }, [
-    mode,
-    conversations,
-    agentSessions,
-    draftSessionIds,
-    currentWorkspaceId,
-    activeSessionId,
-    streamingIds,
-    agentIndicatorMap,
-    unviewedCompletedSessionIds,
-    workspaceNameMap,
-  ])
-
-
   return {
     // 视图/模式
     activeView,
@@ -1774,10 +1734,13 @@ export function useLeftSidebar() {
     setSidebarCollapsed,
     activeSessionId,
 
-    // automations / skills
+    // automations / skills / planning
     automationCount,
+    todoOpenCount,
+    todayCalendarCount,
+    planningTab,
     capabilities,
-    handleOpenAutomations,
+    handleOpenPlanning,
     handleOpenSkills,
 
     // tab 状态
@@ -1884,8 +1847,7 @@ export function useLeftSidebar() {
     setMoveTargetId,
     handleSessionMoved,
 
-    // 折叠 rail
-    railRecentItems,
+    // rail 模式切换
     handleRailModeSwitch,
 
     // 通用

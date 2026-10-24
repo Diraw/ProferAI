@@ -76,7 +76,7 @@ const FEATURE_TOUR_SLIDES: TourSlide[] = [
     key: 'planning',
     kicker: 'AUTOMATION',
     title: '重复的事，\n自己发生。',
-    summary: 'Todo、日程和定时任务放在一处。到点自动执行，结果写回会话，不用你盯着。',
+    summary: 'Todo 记要做的、日程排时间、定时任务到点自动执行。三块各有入口，结果写回会话。',
     example: '每周一早上 9 点整理上周进展并提醒我',
     tags: ['Todo', '日程', '定时任务'],
     Mock: PlanningMock,

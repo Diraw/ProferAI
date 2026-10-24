@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentSessionMeta, ConversationMeta } from '@profer/shared'
 import type { TabItem } from '@/atoms/tab-atoms'
-import { getOpenSessionEntries } from './sidebar-utils'
+import { getOpenSessionEntries, sidebarRowClass } from './sidebar-utils'
 
 const NOW = 1_752_000_000_000
 const session = (id: string, overrides: Partial<AgentSessionMeta> = {}): AgentSessionMeta => ({
@@ -67,5 +67,29 @@ describe('getOpenSessionEntries — 当前会话列表与计数共用数据', ()
     expect(getOpenSessionEntries('scratch', [tab('a')], [], [session('a')])).toEqual([])
     expect(getOpenSessionEntries('agent', [tab('missing')], [], [])).toEqual([])
     expect(getOpenSessionEntries('chat', [], [], [])).toEqual([])
+  })
+})
+
+describe('sidebarRowClass — 侧栏行视觉契约', () => {
+  test('Given 默认行 When 生成 Then 30px 高、7px 圆角、左右 8px 内边距', () => {
+    const cls = sidebarRowClass()
+    expect(cls).toContain('h-[30px]')
+    expect(cls).toContain('rounded-[7px]')
+    expect(cls).toContain('px-2')
+    expect(cls).toContain('text-[13px]')
+    // 侧栏内不使用描边与阴影，层级只靠灰度
+    expect(cls).not.toContain('border')
+    expect(cls).not.toContain('shadow')
+  })
+
+  test('Given 项目内会话 When 生成 Then 增加 26px 缩进且不影响默认行', () => {
+    expect(sidebarRowClass({ depth: 1 })).toContain('pl-[26px]')
+    expect(sidebarRowClass({ depth: 0 })).not.toContain('pl-[26px]')
+  })
+
+  test('Given 当前项与项目行 When 生成 Then 选中底色与 32px 行高互不干扰', () => {
+    expect(sidebarRowClass({ active: true })).toContain('bg-foreground/[0.07]')
+    expect(sidebarRowClass({ tall: true })).toContain('h-8')
+    expect(sidebarRowClass({ muted: true })).toContain('text-foreground/[0.38]')
   })
 })
