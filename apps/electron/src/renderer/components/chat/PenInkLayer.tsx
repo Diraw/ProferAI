@@ -14,7 +14,7 @@
  */
 
 import * as React from 'react'
-import { Pencil, X } from 'lucide-react'
+import { Pencil } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   buildStrokePath,
@@ -70,6 +70,8 @@ export function PenInkLayer({
   const commitTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const idleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const recognizingRef = React.useRef(false)
+  /** 开发态诊断：记录一次落笔收到多少个 move，用于定位「一笔写不完」 */
+  const moveCountRef = React.useRef(0)
   const dprRef = React.useRef(1)
   const colorRef = React.useRef('#111827')
   const [padVisible, setPadVisible] = React.useState(false)
@@ -147,13 +149,28 @@ export function PenInkLayer({
     }
   }, [])
 
+  const schedulePadIdleRef = React.useRef<() => void>(() => {})
+
+  /**
+   * 空置收起：没有残留墨迹时 8s 收；有残留（识别失败）再多等一轮后强制收起，
+   * 避免手写板永远挂在输入框上方。
+   */
   const schedulePadIdle = React.useCallback(() => {
     clearIdleTimer()
+    const wait = strokesRef.current.length === 0 ? PAD_IDLE_CLOSE_MS : PAD_IDLE_CLOSE_MS * 2
     idleTimerRef.current = setTimeout(() => {
       idleTimerRef.current = null
-      if (!currentRef.current && strokesRef.current.length === 0) setActive(false)
-    }, PAD_IDLE_CLOSE_MS)
-  }, [clearIdleTimer, setActive])
+      if (currentRef.current || recognizingRef.current) {
+        schedulePadIdleRef.current()
+        return
+      }
+      strokesRef.current = []
+      redraw()
+      setActive(false)
+    }, wait)
+  }, [clearIdleTimer, redraw, setActive])
+
+  schedulePadIdleRef.current = schedulePadIdle
 
   const commit = React.useCallback(() => {
     clearCommitTimer()
@@ -208,17 +225,6 @@ export function PenInkLayer({
       })
   }, [clearCommitTimer, redraw, schedulePadIdle])
 
-  /** 手动收起：丢弃当前墨迹（认不出时重来用） */
-  const closePad = React.useCallback(() => {
-    clearCommitTimer()
-    clearIdleTimer()
-    strokesRef.current = []
-    currentRef.current = null
-    pendingRef.current = null
-    redraw()
-    setActive(false)
-  }, [clearCommitTimer, clearIdleTimer, redraw, setActive])
-
   const scheduleCommit = React.useCallback(() => {
     clearCommitTimer()
     commitTimerRef.current = setTimeout(() => {
@@ -249,6 +255,10 @@ export function PenInkLayer({
       event.clientY <= rect.bottom
 
     const handlePointerDown = (event: PointerEvent): void => {
+      moveCountRef.current = 0
+      if (import.meta.env.DEV) {
+        console.debug('[pen] down', event.pointerType, 'p=', Number(event.pressure?.toFixed(2)))
+      }
       if (!event.isPrimary) return
       if (!isPenLike(event)) return
 
@@ -276,10 +286,12 @@ export function PenInkLayer({
     const startStroke = (event: PointerEvent): void => {
       const pending = pendingRef.current
       if (!pending) return
+      // 捕获到实际落笔元素（canvas）上：对非目标元素捕获在 Windows 上容易触发隐式释放
+      const captureTarget = event.target instanceof Element ? event.target : canvas
       try {
-        container.setPointerCapture(pending.pointerId)
+        captureTarget.setPointerCapture(pending.pointerId)
       } catch {
-        // 捕获失败不影响绘制
+        // 捕获失败不影响绘制，window 上的监听仍然收得到后续事件
       }
       currentRef.current = {
         points: [pending.point, pointFromEvent(event)],
@@ -303,6 +315,7 @@ export function PenInkLayer({
       event.preventDefault()
       event.stopPropagation()
 
+      moveCountRef.current += 1
       const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
       for (const sample of samples.length > 0 ? samples : [event]) {
         const point = pointFromEvent(sample)
@@ -329,7 +342,7 @@ export function PenInkLayer({
       strokesRef.current.push(current)
       currentRef.current = null
       try {
-        if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId)
+        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
       } catch {
         // 忽略
       }
@@ -338,6 +351,9 @@ export function PenInkLayer({
     }
 
     const handlePointerUp = (event: PointerEvent): void => {
+      if (import.meta.env.DEV) {
+        console.debug('[pen]', event.type, event.pointerType, 'moves=', moveCountRef.current, 'pending=', !!pendingRef.current, 'drawing=', !!currentRef.current)
+      }
       if (!pendingRef.current && !currentRef.current) return
       finishStroke(event)
     }
@@ -383,7 +399,14 @@ export function PenInkLayer({
         <div
           ref={padRef}
           className="relative rounded-t-[17px] border-b-[0.5px] border-surface-border bg-input/40"
-          style={{ height: PAD_HEIGHT }}
+          style={{
+            height: PAD_HEIGHT,
+            // Windows 上不声明 touch-action，笔拖动会被当成滚动/手势，浏览器直接发 pointercancel，
+            // 表现就是「一笔写不完」。user-select 顺带避免拖出选区。
+            touchAction: 'none',
+            userSelect: 'none',
+            WebkitUserSelect: 'none',
+          }}
         >
           {/* 手写纸感底纹 */}
           <div
@@ -398,19 +421,11 @@ export function PenInkLayer({
             <Pencil className="size-3" />
             <span>{recognizing ? '识别中…' : '手写板 · 写完自动转文字'}</span>
           </div>
-          <button
-            type="button"
-            onClick={closePad}
-            aria-label="收起手写板"
-            tabIndex={padVisible ? 0 : -1}
-            className="absolute right-2.5 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <X className="size-3.5" />
-          </button>
           <canvas
             ref={canvasRef}
             aria-hidden="true"
             className="absolute left-0 top-0 cursor-crosshair text-foreground"
+            style={{ touchAction: 'none' }}
           />
         </div>
       </div>
