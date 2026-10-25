@@ -2,11 +2,12 @@
  * PenInkLayer — 输入框内嵌的手写板
  *
  * 设计要点：
- * - 手写板不是浮窗，而是 composer 卡片内部的一块区域：同一个圆角、同一个边框、
- *   同一条底线分隔，卡片自然长高，工具栏留在底部——读起来是一个整体，不是两个窗口
+ * - 手写板是 composer 卡片内部的一块区域：同一个圆角、同一条边框、一条分隔线，
+ *   卡片自然长高，工具栏留在底部——读起来是一个整体，不是两个窗口
+ * - 事件只挂在「卡片」和「手写板」两个元素上，**不碰 window**：
+ *   任何全局 pointer 监听 + preventDefault 都可能吞掉应用其它区域的点击
  * - 笔点输入框只负责把板子叫出来，这一下不计入书写（编辑器照常获得焦点）
- * - 真正落笔必须在板子里；抬手空闲后调 macOS Vision 识别成文字，插到光标处
- * - 认不出来就明说，绝不往输入框塞图片附件
+ * - 抬手空闲后识别成文字插到光标处；认不出只提示，绝不往输入框塞图片附件
  * - 零轮询：笔的存在完全由 Pointer Events 表达
  *
  * 关于 pointerType：Wacom 在 macOS 上常把笔报成 'mouse'，但压力不是鼠标恒定的 0.5，
@@ -48,7 +49,7 @@ function isPenLike(event: PointerEvent): boolean {
 }
 
 export interface PenInkLayerProps {
-  /** composer 卡片：用于量宽度、判定「笔点在输入框上」 */
+  /** composer 卡片：量宽度 + 判定「笔点在输入框上」 */
   containerRef: React.RefObject<HTMLElement | null>
   /** 识别成功：把文本插回输入框 */
   onText: (text: string) => void
@@ -70,8 +71,6 @@ export function PenInkLayer({
   const commitTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const idleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const recognizingRef = React.useRef(false)
-  /** 开发态诊断：记录一次落笔收到多少个 move，用于定位「一笔写不完」 */
-  const moveCountRef = React.useRef(0)
   const dprRef = React.useRef(1)
   const colorRef = React.useRef('#111827')
   const [padVisible, setPadVisible] = React.useState(false)
@@ -204,7 +203,7 @@ export function PenInkLayer({
           schedulePadIdle()
           return
         }
-        // 只回文字，不回图片；认不出就保留墨迹，让用户接着写或重写
+        // 只回文字，不回图片；认不出就保留墨迹，让用户接着写
         if (result?.error === 'unsupported-platform') {
           toast.warning('当前系统暂不支持手写识别')
           return
@@ -213,7 +212,7 @@ export function PenInkLayer({
           toast.error('手写识别组件缺失，请重新安装应用')
           return
         }
-        toast.warning('没认出文字，可以接着写或点 × 重来')
+        toast.warning('没认出文字，可以接着写')
       })
       .catch((error: unknown) => {
         console.error('[PenInkLayer] 手写识别失败:', error)
@@ -233,159 +232,110 @@ export function PenInkLayer({
     }, commitDelayMs)
   }, [clearCommitTimer, commit, commitDelayMs])
 
+  // 画布尺寸跟着卡片宽度走
   React.useEffect(() => {
-    const canvas = canvasRef.current
     const container = containerRef.current
-    if (!canvas || !container) return
-
+    if (!container) return
     resizeCanvas()
     const observer = new ResizeObserver(() => resizeCanvas())
     observer.observe(container)
+    return () => observer.disconnect()
+  }, [containerRef, resizeCanvas])
 
-    const pointFromEvent = (event: PointerEvent | MouseEvent): InkPoint => {
-      const rect = canvas.getBoundingClientRect()
-      const pressure = 'pressure' in event ? event.pressure : 0
-      return { x: event.clientX - rect.left, y: event.clientY - rect.top, pressure: pressure ?? 0 }
-    }
+  /**
+   * 打开手写板：只监听 composer 卡片本身（元素级）。
+   * 不用 window 监听、不 preventDefault —— 编辑器照常拿到点击和光标。
+   */
+  React.useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
 
-    const within = (rect: DOMRect, event: PointerEvent): boolean =>
-      event.clientX >= rect.left &&
-      event.clientX <= rect.right &&
-      event.clientY >= rect.top &&
-      event.clientY <= rect.bottom
-
-    const handlePointerDown = (event: PointerEvent): void => {
-      moveCountRef.current = 0
-      if (import.meta.env.DEV) {
-        console.debug('[pen] down', event.pointerType, 'p=', Number(event.pressure?.toFixed(2)))
-      }
-      if (!event.isPrimary) return
-      if (!isPenLike(event)) return
-
+    const handleOpen = (event: PointerEvent): void => {
+      if (!event.isPrimary || !isPenLike(event)) return
       const target = event.target
       if (target instanceof Element && target.closest(INTERACTIVE_SELECTOR)) return
-
-      // 板子开着：笔落在板子里才开始记账
-      const pad = padRef.current
-      if (activeRef.current && pad && within(pad.getBoundingClientRect(), event)) {
-        event.preventDefault()
-        event.stopPropagation()
-        clearCommitTimer()
-        clearIdleTimer()
-        pendingRef.current = { point: pointFromEvent(event), pointerId: event.pointerId }
-        return
-      }
-
-      // 笔落在输入框：只把板子叫出来，这一下不计入书写，点击行为照常
-      if (within(container.getBoundingClientRect(), event)) {
-        setActive(true)
-        schedulePadIdle()
-      }
+      if (activeRef.current) return
+      setActive(true)
+      schedulePadIdle()
     }
 
-    const startStroke = (event: PointerEvent): void => {
-      const pending = pendingRef.current
-      if (!pending) return
-      // 捕获到实际落笔元素（canvas）上：对非目标元素捕获在 Windows 上容易触发隐式释放
-      const captureTarget = event.target instanceof Element ? event.target : canvas
-      try {
-        captureTarget.setPointerCapture(pending.pointerId)
-      } catch {
-        // 捕获失败不影响绘制，window 上的监听仍然收得到后续事件
-      }
-      currentRef.current = {
-        points: [pending.point, pointFromEvent(event)],
-        size: INK_BASE_SIZE,
-      }
+    container.addEventListener('pointerdown', handleOpen)
+    return () => container.removeEventListener('pointerdown', handleOpen)
+  }, [containerRef, schedulePadIdle, setActive])
+
+  const pointFromEvent = React.useCallback((event: PointerEvent): InkPoint => {
+    const canvas = canvasRef.current
+    if (!canvas) return { x: 0, y: 0, pressure: 0 }
+    const rect = canvas.getBoundingClientRect()
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top, pressure: event.pressure ?? 0 }
+  }, [])
+
+  const handlePadPointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
+    const native = event.nativeEvent
+    if (!native.isPrimary || !isPenLike(native)) return
+    // 只吃掉手写板内部的默认行为，不影响应用其它区域
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      event.currentTarget.setPointerCapture(native.pointerId)
+    } catch {
+      // 捕获失败不影响绘制
+    }
+    clearCommitTimer()
+    clearIdleTimer()
+    pendingRef.current = { point: pointFromEvent(native), pointerId: native.pointerId }
+  }, [clearCommitTimer, clearIdleTimer, pointFromEvent])
+
+  const handlePadPointerMove = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
+    const native = event.nativeEvent
+    const pending = pendingRef.current
+    if (pending && !currentRef.current) {
+      const point = pointFromEvent(native)
+      if (Math.hypot(point.x - pending.point.x, point.y - pending.point.y) < TAP_SLOP) return
+      currentRef.current = { points: [pending.point, point], size: INK_BASE_SIZE }
       pendingRef.current = null
       redraw()
+      return
     }
 
-    const handlePointerMove = (event: PointerEvent): void => {
-      const pending = pendingRef.current
-      if (pending && !currentRef.current) {
-        const point = pointFromEvent(event)
-        if (Math.hypot(point.x - pending.point.x, point.y - pending.point.y) < TAP_SLOP) return
-        startStroke(event)
-        return
-      }
+    const current = currentRef.current
+    if (!current) return
+    event.preventDefault()
 
-      const current = currentRef.current
-      if (!current) return
-      event.preventDefault()
-      event.stopPropagation()
+    const samples = typeof native.getCoalescedEvents === 'function' ? native.getCoalescedEvents() : [native]
+    for (const sample of samples.length > 0 ? samples : [native]) {
+      const point = pointFromEvent(sample)
+      const last = current.points[current.points.length - 1]
+      if (!last) break
+      if (Math.hypot(point.x - last.x, point.y - last.y) < MIN_SEGMENT) continue
+      current.points.push(point)
+    }
+    redraw()
+  }, [pointFromEvent, redraw])
 
-      moveCountRef.current += 1
-      const samples = typeof event.getCoalescedEvents === 'function' ? event.getCoalescedEvents() : [event]
-      for (const sample of samples.length > 0 ? samples : [event]) {
-        const point = pointFromEvent(sample)
-        const last = current.points[current.points.length - 1]
-        if (!last) break
-        if (Math.hypot(point.x - last.x, point.y - last.y) < MIN_SEGMENT) continue
-        current.points.push(point)
+  const finishStroke = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
+    const native = event.nativeEvent
+    try {
+      if (event.currentTarget.hasPointerCapture(native.pointerId)) {
+        event.currentTarget.releasePointerCapture(native.pointerId)
       }
-      redraw()
+    } catch {
+      // 忽略
     }
 
-    const finishStroke = (event: PointerEvent): void => {
-      if (pendingRef.current) {
-        // 板子上的纯点击：不留墨
-        pendingRef.current = null
-        return
-      }
-
-      const current = currentRef.current
-      if (!current) return
-      event.preventDefault()
-      event.stopPropagation()
-
-      strokesRef.current.push(current)
-      currentRef.current = null
-      try {
-        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
-      } catch {
-        // 忽略
-      }
-      redraw()
-      scheduleCommit()
-    }
-
-    const handlePointerUp = (event: PointerEvent): void => {
-      if (import.meta.env.DEV) {
-        console.debug('[pen]', event.type, event.pointerType, 'moves=', moveCountRef.current, 'pending=', !!pendingRef.current, 'drawing=', !!currentRef.current)
-      }
-      if (!pendingRef.current && !currentRef.current) return
-      finishStroke(event)
-    }
-
-    const handleWindowBlur = (): void => {
+    if (pendingRef.current) {
+      // 手写板上的纯点击：不留墨
       pendingRef.current = null
-      if (currentRef.current) {
-        const current = currentRef.current
-        if (current.points.length > 1) strokesRef.current.push(current)
-        currentRef.current = null
-        redraw()
-      }
-      if (strokesRef.current.length > 0) commit()
+      return
     }
 
-    window.addEventListener('pointerdown', handlePointerDown, true)
-    window.addEventListener('pointermove', handlePointerMove, true)
-    window.addEventListener('pointerup', handlePointerUp, true)
-    window.addEventListener('pointercancel', handlePointerUp, true)
-    window.addEventListener('blur', handleWindowBlur)
-
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown, true)
-      window.removeEventListener('pointermove', handlePointerMove, true)
-      window.removeEventListener('pointerup', handlePointerUp, true)
-      window.removeEventListener('pointercancel', handlePointerUp, true)
-      window.removeEventListener('blur', handleWindowBlur)
-      observer.disconnect()
-      clearCommitTimer()
-      clearIdleTimer()
-    }
-  }, [clearCommitTimer, clearIdleTimer, commit, containerRef, redraw, resizeCanvas, scheduleCommit, schedulePadIdle, setActive])
+    const current = currentRef.current
+    if (!current) return
+    currentRef.current = null
+    strokesRef.current.push(current)
+    redraw()
+    scheduleCommit()
+  }, [redraw, scheduleCommit])
 
   return (
     <div
@@ -398,11 +348,14 @@ export function PenInkLayer({
       <div className="min-h-0 overflow-hidden">
         <div
           ref={padRef}
-          className="relative rounded-t-[17px] border-b-[0.5px] border-surface-border bg-input/40"
+          onPointerDown={handlePadPointerDown}
+          onPointerMove={handlePadPointerMove}
+          onPointerUp={finishStroke}
+          onPointerCancel={finishStroke}
+          className="relative cursor-crosshair rounded-t-[17px] border-b-[0.5px] border-surface-border bg-input/40"
           style={{
             height: PAD_HEIGHT,
-            // Windows 上不声明 touch-action，笔拖动会被当成滚动/手势，浏览器直接发 pointercancel，
-            // 表现就是「一笔写不完」。user-select 顺带避免拖出选区。
+            // Windows 上不声明 touch-action，笔拖动会被当成滚动/手势，浏览器直接发 pointercancel
             touchAction: 'none',
             userSelect: 'none',
             WebkitUserSelect: 'none',
@@ -424,7 +377,7 @@ export function PenInkLayer({
           <canvas
             ref={canvasRef}
             aria-hidden="true"
-            className="absolute left-0 top-0 cursor-crosshair text-foreground"
+            className="pointer-events-none absolute left-0 top-0 text-foreground"
             style={{ touchAction: 'none' }}
           />
         </div>
