@@ -35,6 +35,8 @@ const TAP_SLOP = 4
 const MIN_SEGMENT = 0.7
 /** 抬手后多久自动识别 */
 const DEFAULT_COMMIT_DELAY_MS = 1400
+/** 橡皮擦半径（CSS px） */
+const ERASER_RADIUS = 14
 /** 笔点这些元素时当点击处理，不落墨 */
 const INTERACTIVE_SELECTOR = 'button, a, input, textarea, select, [role="button"], [contenteditable="false"]'
 
@@ -71,6 +73,9 @@ export function PenInkLayer({
   const commitTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const idleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const recognizingRef = React.useRef(false)
+  /** 笔杆键（橡皮擦）按住中 */
+  const erasingRef = React.useRef(false)
+  const lastErasePointRef = React.useRef<InkPoint | null>(null)
   const dprRef = React.useRef(1)
   const colorRef = React.useRef('#111827')
   const [padVisible, setPadVisible] = React.useState(false)
@@ -160,6 +165,8 @@ export function PenInkLayer({
   }, [clearCommitTimer, clearIdleTimer, redraw, setActive])
 
   const schedulePadIdleRef = React.useRef<() => void>(() => {})
+  const scheduleCommitRef = React.useRef<() => void>(() => {})
+  const commitRef = React.useRef<() => void>(() => {})
 
   /**
    * 空置收起：没有残留墨迹时 8s 收；有残留（识别失败）再多等一轮后强制收起，
@@ -182,10 +189,24 @@ export function PenInkLayer({
 
   schedulePadIdleRef.current = schedulePadIdle
 
+  const scheduleCommit = React.useCallback(() => {
+    clearCommitTimer()
+    commitTimerRef.current = setTimeout(() => {
+      commitTimerRef.current = null
+      commitRef.current()
+    }, commitDelayMs)
+  }, [clearCommitTimer, commitDelayMs])
+
+  scheduleCommitRef.current = scheduleCommit
+
   const commit = React.useCallback(() => {
     clearCommitTimer()
-    currentRef.current = null
-    pendingRef.current = null
+
+    // 还在写、刚落笔、或正在擦：等这一轮结束再提交，别把正在处理的墨迹清掉
+    if (currentRef.current || pendingRef.current || erasingRef.current) {
+      scheduleCommitRef.current()
+      return
+    }
 
     // 识别期间又落笔：等这一批结束再提交，避免把新笔画一起清掉
     if (recognizingRef.current) return
@@ -235,13 +256,7 @@ export function PenInkLayer({
       })
   }, [clearCommitTimer, redraw, schedulePadIdle])
 
-  const scheduleCommit = React.useCallback(() => {
-    clearCommitTimer()
-    commitTimerRef.current = setTimeout(() => {
-      commitTimerRef.current = null
-      commit()
-    }, commitDelayMs)
-  }, [clearCommitTimer, commit, commitDelayMs])
+  commitRef.current = commit
 
   // 画布尺寸跟着卡片宽度走
   React.useEffect(() => {
@@ -281,12 +296,42 @@ export function PenInkLayer({
     return { x: event.clientX - rect.left, y: event.clientY - rect.top, pressure: event.pressure ?? 0 }
   }, [])
 
+  /** 擦掉落在半径内的笔画 */
+  const eraseAt = React.useCallback((point: InkPoint): void => {
+    const before = strokesRef.current.length
+    strokesRef.current = strokesRef.current.filter(
+      (stroke) => !stroke.points.some((p) => Math.hypot(p.x - point.x, p.y - point.y) <= ERASER_RADIUS),
+    )
+    if (strokesRef.current.length !== before) redraw()
+  }, [redraw])
+
   const handlePadPointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     const native = event.nativeEvent
     // 关闭按钮等交互元素：放行，不拦事件（笔点上去就是一次普通点击）
     const target = native.target
     if (target instanceof Element && target.closest('button')) return
-    if (!native.isPrimary || !isPenLike(native)) return
+    if (!native.isPrimary) return
+
+    // 笔杆键 = 橡皮擦（Wacom 默认映射为右键；带橡皮擦笔尖的上报 button 5）
+    const isEraser = native.button === 5 || native.button === 2 || (native.buttons & 32) !== 0
+    if (isEraser) {
+      event.preventDefault()
+      event.stopPropagation()
+      erasingRef.current = true
+      const point = pointFromEvent(native)
+      lastErasePointRef.current = point
+      eraseAt(point)
+      try {
+        event.currentTarget.setPointerCapture(native.pointerId)
+      } catch {
+        // 忽略
+      }
+      clearCommitTimer()
+      clearIdleTimer()
+      return
+    }
+
+    if (!isPenLike(native)) return
     // 只吃掉手写板内部的默认行为，不影响应用其它区域
     event.preventDefault()
     event.stopPropagation()
@@ -302,6 +347,23 @@ export function PenInkLayer({
 
   const handlePadPointerMove = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     const native = event.nativeEvent
+
+    if (erasingRef.current) {
+      event.preventDefault()
+      const point = pointFromEvent(native)
+      const last = lastErasePointRef.current
+      // 快速划动时补采样，避免漏擦
+      if (last) {
+        const distance = Math.hypot(point.x - last.x, point.y - last.y)
+        const steps = Math.max(1, Math.floor(distance / (ERASER_RADIUS / 2)))
+        for (let i = 1; i <= steps; i++) {
+          eraseAt({ x: last.x + ((point.x - last.x) * i) / steps, y: last.y + ((point.y - last.y) * i) / steps, pressure: 0 })
+        }
+      }
+      eraseAt(point)
+      lastErasePointRef.current = point
+      return
+    }
     const pending = pendingRef.current
     if (pending && !currentRef.current) {
       const point = pointFromEvent(native)
@@ -329,6 +391,22 @@ export function PenInkLayer({
 
   const finishStroke = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     const native = event.nativeEvent
+
+    if (erasingRef.current) {
+      erasingRef.current = false
+      lastErasePointRef.current = null
+      try {
+        if (event.currentTarget.hasPointerCapture(native.pointerId)) {
+          event.currentTarget.releasePointerCapture(native.pointerId)
+        }
+      } catch {
+        // 忽略
+      }
+      // 擦完把剩下的墨迹送去识别
+      if (strokesRef.current.length > 0) scheduleCommit()
+      else schedulePadIdle()
+      return
+    }
     try {
       if (event.currentTarget.hasPointerCapture(native.pointerId)) {
         event.currentTarget.releasePointerCapture(native.pointerId)
@@ -366,6 +444,7 @@ export function PenInkLayer({
           onPointerMove={handlePadPointerMove}
           onPointerUp={finishStroke}
           onPointerCancel={finishStroke}
+          onContextMenu={(event) => event.preventDefault()}
           className="relative cursor-crosshair rounded-t-[17px] border-b-[0.5px] border-surface-border bg-input/40"
           style={{
             height: PAD_HEIGHT,
