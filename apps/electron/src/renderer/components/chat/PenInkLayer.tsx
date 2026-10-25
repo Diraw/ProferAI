@@ -14,7 +14,7 @@
  */
 
 import * as React from 'react'
-import { Pencil } from 'lucide-react'
+import { Pencil, X } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   buildStrokePath,
@@ -27,13 +27,13 @@ import {
 /** 手写板高度 */
 const PAD_HEIGHT = 190
 /** 空置多久自动收起 */
-const PAD_IDLE_CLOSE_MS = 6000
+const PAD_IDLE_CLOSE_MS = 8000
 /** 小于这个位移视为点击，不落墨 */
 const TAP_SLOP = 4
 /** 低于这个位移不采样 */
 const MIN_SEGMENT = 0.7
 /** 抬手后多久自动识别 */
-const DEFAULT_COMMIT_DELAY_MS = 900
+const DEFAULT_COMMIT_DELAY_MS = 1400
 /** 笔点这些元素时当点击处理，不落墨 */
 const INTERACTIVE_SELECTOR = 'button, a, input, textarea, select, [role="button"], [contenteditable="false"]'
 
@@ -69,6 +69,7 @@ export function PenInkLayer({
   const activeRef = React.useRef(false)
   const commitTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const idleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recognizingRef = React.useRef(false)
   const dprRef = React.useRef(1)
   const colorRef = React.useRef('#111827')
   const [padVisible, setPadVisible] = React.useState(false)
@@ -146,36 +147,47 @@ export function PenInkLayer({
     }
   }, [])
 
+  const schedulePadIdle = React.useCallback(() => {
+    clearIdleTimer()
+    idleTimerRef.current = setTimeout(() => {
+      idleTimerRef.current = null
+      if (!currentRef.current && strokesRef.current.length === 0) setActive(false)
+    }, PAD_IDLE_CLOSE_MS)
+  }, [clearIdleTimer, setActive])
+
   const commit = React.useCallback(() => {
     clearCommitTimer()
-    const strokes = strokesRef.current
     currentRef.current = null
     pendingRef.current = null
-    strokesRef.current = []
-    redraw()
 
-    if (strokes.length === 0) {
-      setActive(false)
-      return
-    }
+    // 识别期间又落笔：等这一批结束再提交，避免把新笔画一起清掉
+    if (recognizingRef.current) return
 
-    const dataUrl = strokesToPngDataUrl(strokes)
+    const batch = strokesRef.current.slice()
+    if (batch.length === 0) return
+
+    // 识别图放大、加白边、笔画加粗：OCR 对细笔画和紧贴边缘的图都不敏感
+    const dataUrl = strokesToPngDataUrl(batch, { scale: 3, padding: 24, weight: 1.6 })
     const recognize = window.electronAPI?.recognizeHandwriting
     if (!dataUrl || typeof recognize !== 'function') {
-      setActive(false)
       toast.warning('手写识别不可用')
       return
     }
 
+    recognizingRef.current = true
     setRecognizing(true)
     void recognize(dataUrl)
       .then((result) => {
         const text = result?.text?.trim() ?? ''
         if (text.length > 0) {
+          // 只摘掉这一批，识别期间新写的笔画保留
+          strokesRef.current = strokesRef.current.filter((stroke) => !batch.includes(stroke))
+          redraw()
           onTextRef.current(text)
+          schedulePadIdle()
           return
         }
-        // 只回文字，不回图片
+        // 只回文字，不回图片；认不出就保留墨迹，让用户接着写或重写
         if (result?.error === 'unsupported-platform') {
           toast.warning('当前系统暂不支持手写识别')
           return
@@ -184,17 +196,28 @@ export function PenInkLayer({
           toast.error('手写识别组件缺失，请重新安装应用')
           return
         }
-        toast.warning('没认出文字，再写一次试试')
+        toast.warning('没认出文字，可以接着写或点 × 重来')
       })
       .catch((error: unknown) => {
         console.error('[PenInkLayer] 手写识别失败:', error)
         toast.error('手写识别失败')
       })
       .finally(() => {
+        recognizingRef.current = false
         setRecognizing(false)
-        setActive(false)
       })
-  }, [clearCommitTimer, redraw, setActive])
+  }, [clearCommitTimer, redraw, schedulePadIdle])
+
+  /** 手动收起：丢弃当前墨迹（认不出时重来用） */
+  const closePad = React.useCallback(() => {
+    clearCommitTimer()
+    clearIdleTimer()
+    strokesRef.current = []
+    currentRef.current = null
+    pendingRef.current = null
+    redraw()
+    setActive(false)
+  }, [clearCommitTimer, clearIdleTimer, redraw, setActive])
 
   const scheduleCommit = React.useCallback(() => {
     clearCommitTimer()
@@ -203,14 +226,6 @@ export function PenInkLayer({
       commit()
     }, commitDelayMs)
   }, [clearCommitTimer, commit, commitDelayMs])
-
-  const schedulePadIdle = React.useCallback(() => {
-    clearIdleTimer()
-    idleTimerRef.current = setTimeout(() => {
-      idleTimerRef.current = null
-      if (!currentRef.current && strokesRef.current.length === 0) setActive(false)
-    }, PAD_IDLE_CLOSE_MS)
-  }, [clearIdleTimer, setActive])
 
   React.useEffect(() => {
     const canvas = canvasRef.current
@@ -383,6 +398,15 @@ export function PenInkLayer({
             <Pencil className="size-3" />
             <span>{recognizing ? '识别中…' : '手写板 · 写完自动转文字'}</span>
           </div>
+          <button
+            type="button"
+            onClick={closePad}
+            aria-label="收起手写板"
+            tabIndex={padVisible ? 0 : -1}
+            className="absolute right-2.5 top-2 flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <X className="size-3.5" />
+          </button>
           <canvas
             ref={canvasRef}
             aria-hidden="true"
