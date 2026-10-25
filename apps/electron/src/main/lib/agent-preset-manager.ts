@@ -197,31 +197,65 @@ function readConfig(workspaceSlug: string | undefined): AgentPresetConfig {
         preset.migrationReason = `非法派生基座: ${String(preset.basePresetId)}`
       }
     }
-    // 规范化：允许空默认值；非空值必须仍指向当前可用预设，否则清空而不是回退 standard。
-    const rawDefault = typeof data.defaultPresetId === 'string' ? data.defaultPresetId : (data.defaultPresetExplicitlyCleared ? '' : DEFAULT_PRESET_ID)
-    const globalScopes = rawDefault ? readGlobalConfig().workspaceScopes?.[rawDefault] : undefined
-    const globalDefaultAvailable = readGlobalConfig().presets.some((p) => p.id === rawDefault) && (globalScopes === undefined || Boolean(workspaceSlug && globalScopes.includes(workspaceSlug)))
-    const defaultPresetId = rawDefault && (
-      BUILTIN_AGENT_PRESETS.some((b) => b.id === rawDefault) ||
-      globalDefaultAvailable ||
-      presets.some((p) => p.id === rawDefault)
-    ) ? rawDefault : ''
-    const defaultPresetReference = defaultPresetId
-      ? (data.defaultPresetReference ?? {
-          presetId: defaultPresetId,
-          presetScope: BUILTIN_AGENT_PRESETS.some((preset) => preset.id === defaultPresetId)
-            ? 'builtin-meta'
-            : readGlobalConfig().presets.some((preset) => preset.id === defaultPresetId) ? 'user-global' : 'workspace',
-          ...(BUILTIN_AGENT_PRESETS.some((preset) => preset.id === defaultPresetId) || readGlobalConfig().presets.some((preset) => preset.id === defaultPresetId) ? {} : { workspaceSlug }),
-        })
-      : undefined
-
+    // 规范化：允许空默认值；优先使用仍在当前工作区生效的稳定引用。
+    // 旧版本可能留下 defaultPresetId=standard，但 defaultPresetReference 已指向用户全局预设；
+    // 以 ID 优先会把已解除范围的 standard 再次带入 runtime，最终触发作用域错误。
+    const globalConfig = readGlobalConfig()
     const disabledGlobalPresetIds = Array.isArray(data.disabledGlobalPresetIds)
       ? data.disabledGlobalPresetIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
       : []
     const disabledWorkspacePresetIds = Array.isArray(data.disabledWorkspacePresetIds)
       ? data.disabledWorkspacePresetIds.filter((id): id is string => typeof id === 'string' && presets.some((preset) => preset.id === id))
       : []
+    const isGlobalPresetEnabled = (presetId: string): boolean => {
+      if (disabledGlobalPresetIds.includes(presetId)) return false
+      const scopes = globalConfig.workspaceScopes?.[presetId]
+      return scopes === undefined || Boolean(workspaceSlug && scopes.includes(workspaceSlug))
+    }
+    const resolveDefaultReference = (reference: unknown): PresetReference | undefined => {
+      if (!reference || typeof reference !== 'object') return undefined
+      const candidate = reference as Partial<PresetReference>
+      if (typeof candidate.presetId !== 'string' || !candidate.presetId.trim()) return undefined
+      if (!['builtin-meta', 'user-global', 'workspace'].includes(String(candidate.presetScope))) return undefined
+      const presetId = candidate.presetId.trim()
+      if (candidate.presetScope === 'builtin-meta') {
+        if (!BUILTIN_AGENT_PRESETS.some((preset) => preset.id === presetId) || !isGlobalPresetEnabled(presetId)) return undefined
+        return { presetId, presetScope: 'builtin-meta' }
+      }
+      if (candidate.presetScope === 'user-global') {
+        const preset = globalConfig.presets.find((item) => item.id === presetId)
+        if (!preset || !isGlobalPresetEnabled(presetId)) return undefined
+        return { presetId, presetScope: 'user-global', ...(candidate.presetVersion ? { presetVersion: candidate.presetVersion } : {}) }
+      }
+      if (!workspaceSlug || candidate.workspaceSlug !== undefined && candidate.workspaceSlug !== workspaceSlug) return undefined
+      if (!presets.some((preset) => preset.id === presetId) || disabledWorkspacePresetIds.includes(presetId)) return undefined
+      return { presetId, presetScope: 'workspace', workspaceSlug, ...(candidate.presetVersion ? { presetVersion: candidate.presetVersion } : {}) }
+    }
+    const referenceFromId = (presetId: string): PresetReference | undefined => {
+      if (BUILTIN_AGENT_PRESETS.some((preset) => preset.id === presetId) && isGlobalPresetEnabled(presetId)) {
+        return { presetId, presetScope: 'builtin-meta' }
+      }
+      if (globalConfig.presets.some((preset) => preset.id === presetId) && isGlobalPresetEnabled(presetId)) {
+        return { presetId, presetScope: 'user-global' }
+      }
+      if (presets.some((preset) => preset.id === presetId) && !disabledWorkspacePresetIds.includes(presetId)) {
+        return { presetId, presetScope: 'workspace', workspaceSlug }
+      }
+      return undefined
+    }
+    const configuredReference = resolveDefaultReference(data.defaultPresetReference)
+    const rawDefault = typeof data.defaultPresetId === 'string' ? data.defaultPresetId.trim() : (data.defaultPresetExplicitlyCleared ? '' : DEFAULT_PRESET_ID)
+    const rawDefaultReference = rawDefault ? referenceFromId(rawDefault) : undefined
+    const fallbackReference = data.defaultPresetExplicitlyCleared
+      ? undefined
+      : configuredReference ?? rawDefaultReference ?? [
+          ...BUILTIN_AGENT_PRESETS.map((preset) => preset.id),
+          ...globalConfig.presets.map((preset) => preset.id),
+          ...presets.map((preset) => preset.id),
+        ].map((presetId) => referenceFromId(presetId)).find((reference): reference is PresetReference => reference !== undefined)
+    const defaultPresetReference = fallbackReference
+    const defaultPresetId = defaultPresetReference?.presetId ?? ''
+
     return { presets, defaultPresetId, ...(defaultPresetReference ? { defaultPresetReference } : {}), ...(data.defaultPresetExplicitlyCleared ? { defaultPresetExplicitlyCleared: true } : {}), disabledGlobalPresetIds, disabledWorkspacePresetIds }
   } catch (error) {
     console.error('[Agent 预设] 读取配置失败:', error)
