@@ -15,7 +15,7 @@
  */
 
 import * as React from 'react'
-import { Pencil } from 'lucide-react'
+import { Pencil, X } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   buildStrokePath,
@@ -148,6 +148,17 @@ export function PenInkLayer({
     }
   }, [])
 
+  /** 手动收起：丢弃当前墨迹（卡住时用笔直接点 × 退出） */
+  const closePad = React.useCallback(() => {
+    clearCommitTimer()
+    clearIdleTimer()
+    strokesRef.current = []
+    currentRef.current = null
+    pendingRef.current = null
+    redraw()
+    setActive(false)
+  }, [clearCommitTimer, clearIdleTimer, redraw, setActive])
+
   const schedulePadIdleRef = React.useRef<() => void>(() => {})
 
   /**
@@ -272,6 +283,9 @@ export function PenInkLayer({
 
   const handlePadPointerDown = React.useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     const native = event.nativeEvent
+    // 关闭按钮等交互元素：放行，不拦事件（笔点上去就是一次普通点击）
+    const target = native.target
+    if (target instanceof Element && target.closest('button')) return
     if (!native.isPrimary || !isPenLike(native)) return
     // 只吃掉手写板内部的默认行为，不影响应用其它区域
     event.preventDefault()
@@ -380,6 +394,16 @@ export function PenInkLayer({
             className="pointer-events-none absolute left-0 top-0 text-foreground"
             style={{ touchAction: 'none' }}
           />
+          {/* 收起按钮压在画布之上：板子卡住时用笔直接点它 */}
+          <button
+            type="button"
+            onClick={closePad}
+            aria-label="收起手写板"
+            tabIndex={padVisible ? 0 : -1}
+            className="absolute right-2.5 top-2 z-10 flex size-6 items-center justify-center rounded-md bg-background/60 text-muted-foreground backdrop-blur-sm transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <X className="size-3.5" />
+          </button>
         </div>
       </div>
     </div>
