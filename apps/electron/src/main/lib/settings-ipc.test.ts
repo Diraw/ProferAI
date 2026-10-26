@@ -16,9 +16,11 @@ describe('应用设置 IPC 注册（结构检查）', () => {
     expect(source).toContain('export function registerSettingsIpc(): void')
   })
 
-  test('包含原段落的 10 个 ipcMain 注册', () => {
+  test('包含原段落的 ipcMain 注册（允许后续新增）', () => {
+    // 只验证「搬过来的那一段还在」，不锁死精确条数：新增一个 handler 就会让
+    // toBe(10) 这种断言变红，而它并不代表搬迁回归（v0.16.14 的远程公网地址就新增了一个）。
     const count = (source.match(/ipcMain\.(handle|on)\(/g) ?? []).length
-    expect(count).toBe(10)
+    expect(count).toBeGreaterThanOrEqual(10)
   })
 
   test('动态 import 路径已改为相对 lib/，且目标文件存在', () => {
