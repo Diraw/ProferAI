@@ -52,6 +52,11 @@ export function PocketModeSettings(): React.ReactElement {
   const [savingPort, setSavingPort] = React.useState(false)
   /** 用户手动编辑过端口输入后，不再被状态刷新覆盖 */
   const portDirtyRef = React.useRef(false)
+  /** 公网连接地址草稿（自建 FRP/端口映射） */
+  const [publicHost, setPublicHost] = React.useState('')
+  const [publicPort, setPublicPort] = React.useState('')
+  const [savingPublic, setSavingPublic] = React.useState(false)
+  const publicDirtyRef = React.useRef(false)
   /** 安卓版 APK 扫码下载信息（含二维码 dataURL），服务运行且找到 APK 时存在 */
   const [apkQr, setApkQr] = React.useState<ApkQrInfo | null>(null)
   const [apkLoading, setApkLoading] = React.useState(false)
@@ -79,6 +84,13 @@ export function PocketModeSettings(): React.ReactElement {
   React.useEffect(() => {
     if (status && !portDirtyRef.current) setPortInput(String(status.port))
   }, [status?.port])
+
+  // 同步已保存的公网地址（用户正在编辑时以草稿为准）
+  React.useEffect(() => {
+    if (publicDirtyRef.current) return
+    setPublicHost(status?.publicEndpoint?.host ?? '')
+    setPublicPort(status?.publicEndpoint ? String(status.publicEndpoint.port) : '')
+  }, [status?.publicEndpoint?.host, status?.publicEndpoint?.port])
 
   // 服务监听是异步的；启用后短暂轮询，直到主进程回传局域网地址与 Token。
   React.useEffect(() => {
@@ -200,6 +212,82 @@ export function PocketModeSettings(): React.ReactElement {
     }
   }
 
+  // ===== 公网连接地址（自建 FRP / 端口映射）=====
+  const parsedPublicPort = Number(publicPort)
+  const publicPortValid = publicPort.trim() !== '' && Number.isInteger(parsedPublicPort) && (parsedPublicPort === 443 || (parsedPublicPort >= 1024 && parsedPublicPort <= 65535))
+  const publicHostValid = publicHost.trim().length > 0
+  const publicEndpoint = status?.publicEndpoint ?? null
+  const publicChanged = publicEndpoint
+    ? publicEndpoint.host !== publicHost.trim() || publicEndpoint.port !== parsedPublicPort
+    : publicHostValid && publicPortValid
+
+  const savePublic = async (): Promise<void> => {
+    if (operationPending.current) return
+    if (!publicHostValid) { toast.error('请填写公网 IP 或域名'); return }
+    if (!publicPortValid) { toast.error('公网端口必须是 443 或 1024-65535 之间的整数'); return }
+    setSavingPublic(true)
+    operationPending.current = true
+    setActionError('')
+    try {
+      const next = await window.electronAPI.setPocketPublicEndpoint({ host: publicHost.trim(), port: parsedPublicPort })
+      setStatus(next)
+      publicDirtyRef.current = false
+      if (next.publicEndpoint) {
+        setPublicHost(next.publicEndpoint.host)
+        setPublicPort(String(next.publicEndpoint.port))
+      }
+      toast.success('公网地址已保存，刷新二维码即带上该地址')
+    } catch (error) {
+      console.error('[移动模式] 保存公网地址失败:', error)
+      toast.error(error instanceof Error ? error.message : '保存公网地址失败')
+      setActionError('保存公网地址失败，草稿已保留。请重试保存。')
+      await refresh()
+    } finally {
+      setSavingPublic(false)
+      operationPending.current = false
+    }
+  }
+
+  const clearPublic = async (): Promise<void> => {
+    if (operationPending.current) return
+    setSavingPublic(true)
+    operationPending.current = true
+    setActionError('')
+    try {
+      const next = await window.electronAPI.setPocketPublicEndpoint(null)
+      setStatus(next)
+      publicDirtyRef.current = false
+      setPublicHost('')
+      setPublicPort('')
+      toast.success('已清除公网地址，二维码只带局域网地址')
+    } catch (error) {
+      console.error('[移动模式] 清除公网地址失败:', error)
+      toast.error(error instanceof Error ? error.message : '清除公网地址失败')
+      setActionError('清除公网地址失败。请重试。')
+      await refresh()
+    } finally {
+      setSavingPublic(false)
+      operationPending.current = false
+    }
+  }
+
+  const copyManualInfo = async (): Promise<void> => {
+    if (!publicEndpoint) return
+    const lines = [
+      'Profer 手动连接信息',
+      `地址：${publicEndpoint.host}`,
+      `端口：${publicEndpoint.port}`,
+      ...(status?.token ? [`Token：${status.token}`] : []),
+      ...(publicEndpoint.pin ? [`证书指纹：${publicEndpoint.pin}`] : []),
+    ]
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      toast.success('连接信息已复制，可在手机「手动连接」里逐项填写')
+    } catch {
+      toast.error('复制失败，请手动复制')
+    }
+  }
+
   if (!status) {
     return <IntegrationSettingsFeedback loading={!loadError} message={loadError || '正在加载移动模式…'} onRetry={loadError ? () => void refresh() : undefined} />
   }
@@ -306,8 +394,11 @@ export function PocketModeSettings(): React.ReactElement {
             {status.running ? (
               <>
                 {status.lanUrl && <ConnectionValue label="移动端访问地址" value={status.lanUrl} />}
-                <RemotePairingSettings />
-                {status.token && <ConnectionValue label="手动兼容凭据（仅可信局域网）" value={status.token} secret />}
+                <RemotePairingSettings
+                  refreshKey={publicEndpoint ? `${publicEndpoint.host}:${publicEndpoint.port}` : 'lan'}
+                  large={Boolean(publicEndpoint)}
+                />
+                {status.token && <ConnectionValue label="手动连接凭据（Token）" value={status.token} secret />}
               </>
             ) : status.error || listenTimedOut ? (
               <IntegrationSettingsFeedback loading={saving} message={status.error || '启动等待已超时，请重试启动或更换端口。'} onRetry={() => void toggle(true)} />
@@ -317,10 +408,112 @@ export function PocketModeSettings(): React.ReactElement {
           </SettingsCard>
           <div className="mt-3 flex gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
             <Wifi className="mt-0.5 size-4 shrink-0 text-amber-600" />
-            <span>当前版本只支持同一局域网内连接；手机与电脑需要连在同一个 Wi-Fi / 路由器下。公网穿透暂未开放。</span>
+            <span>局域网内直接扫码连接；配了公网地址时，外网也能扫码直连（需你自己的 FRP / 端口映射已就绪）。Token 等同连接凭据，请勿分享给不受信任的人。</span>
           </div>
         </SettingsSection>
       )}
+
+      {/* 公网连接地址：用户自建 FRP / 端口映射后，二维码带上公网端点，手机扫码即可在外网直连。 */}
+      <SettingsSection
+        title="公网连接地址（可选）"
+        description="自己配置了 FRP 内网穿透时填写。二维码会一并带上公网地址，手机扫码即可在外网连接；不填则只带局域网地址。"
+      >
+        <SettingsCard divided={false}>
+          <div className="flex flex-col gap-2.5 px-4 py-3.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                aria-label="公网 IP 或域名"
+                placeholder="1.2.3.4 或 remote.example.com"
+                autoComplete="off"
+                spellCheck={false}
+                value={publicHost}
+                onChange={(e) => { publicDirtyRef.current = true; setPublicHost(e.target.value) }}
+                disabled={saving || savingPort || savingPublic}
+                className="w-56"
+              />
+              <Input
+                aria-label="公网端口"
+                inputMode="numeric"
+                placeholder="17788"
+                autoComplete="off"
+                maxLength={5}
+                value={publicPort}
+                onChange={(e) => { publicDirtyRef.current = true; setPublicPort(e.target.value.replace(/\D/g, '')) }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && publicChanged && !savingPublic) void savePublic() }}
+                disabled={saving || savingPort || savingPublic}
+                aria-invalid={publicPort.trim() !== '' && !publicPortValid}
+                className="w-24 tabular-nums"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!publicChanged || savingPublic || saving || savingPort}
+                onClick={() => void savePublic()}
+              >
+                {savingPublic ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+                保存
+              </Button>
+              {publicEndpoint && (
+                <Button variant="ghost" size="sm" disabled={savingPublic || saving} onClick={() => void clearPublic()}>
+                  清除
+                </Button>
+              )}
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              填 IP 时桌面自己提供自签 TLS，二维码带证书指纹；填域名时假定由你自己的反向代理终止 TLS（系统可信证书）。
+              两种情况下你的 FRP 都只需把公网端口映射到本机 {status.port} 端口。
+            </p>
+            {publicEndpoint ? (
+              <div className="space-y-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2.5 text-xs leading-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="shrink-0 text-muted-foreground">公网地址</span>
+                  <code className="min-w-0 break-all">{publicEndpoint.url}</code>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-6 shrink-0"
+                    aria-label="复制公网地址"
+                    onClick={async () => {
+                      try { await navigator.clipboard.writeText(publicEndpoint.url); toast.success('公网地址已复制') } catch { toast.error('复制失败，请手动复制') }
+                    }}
+                  >
+                    <Copy className="size-3.5" />
+                  </Button>
+                </div>
+                {publicEndpoint.pin && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="shrink-0 text-muted-foreground">证书指纹</span>
+                    <code className="min-w-0 break-all">{publicEndpoint.pin}</code>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-6 shrink-0"
+                      aria-label="复制证书指纹"
+                      onClick={async () => {
+                        try { await navigator.clipboard.writeText(publicEndpoint.pin ?? ''); toast.success('证书指纹已复制') } catch { toast.error('复制失败，请手动复制') }
+                      }}
+                    >
+                      <Copy className="size-3.5" />
+                    </Button>
+                  </div>
+                )}
+                {publicEndpoint.trustMode === 'pinned' && !publicEndpoint.pin && (
+                  <p className="text-destructive">自签证书尚未生成，刷新二维码后会重试。</p>
+                )}
+                <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                  <Button variant="outline" size="sm" disabled={!status.token} onClick={() => void copyManualInfo()}>
+                    <Copy className="size-3.5" />
+                    复制手动连接信息
+                  </Button>
+                  {!status.token && <span className="text-muted-foreground">开启移动模式后可复制 Token</span>}
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs leading-5 text-muted-foreground">未配置公网地址：二维码只包含局域网地址。</p>
+            )}
+          </div>
+        </SettingsCard>
+      </SettingsSection>
 
       {/* 安卓版 App 扫码下载：指向官网 profer.cn 域名直链，任何场景都可用，不依赖移动模式是否开启。 */}
       <SettingsSection
@@ -385,7 +578,7 @@ export function PocketModeSettings(): React.ReactElement {
 
       <div className="flex items-start gap-2 rounded-lg bg-muted/50 px-3 py-2.5 text-xs leading-5 text-muted-foreground">
         <Smartphone className="mt-0.5 size-4 shrink-0" />
-        <span>这是试验版功能。手机/平板与电脑需连接同一个 Wi‑Fi 或局域网。</span>
+        <span>这是试验版功能。手机与电脑在同一局域网时可直接扫码；在外网时需先配好公网地址与自己的穿透映射。</span>
       </div>
     </div>
   )
