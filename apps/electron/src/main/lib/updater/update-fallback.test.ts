@@ -48,4 +48,20 @@ describe('更新源回退', () => {
       async (source) => { throw new Error(`${source.id} unavailable`) },
     )).rejects.toThrow('国内更新服务器: domestic unavailable；备用国内更新源: domestic-fallback unavailable；GitHub Releases: github unavailable')
   })
+
+  test('整轮被判死后不再对剩余源发请求', async () => {
+    const attempted: string[] = []
+    const result = await runWithUpdateSourceFallback(
+      getUpdateSources(undefined),
+      async (source) => {
+        attempted.push(source.id)
+        return false
+      },
+      undefined,
+      () => attempted.length >= 1,
+    )
+
+    expect(attempted).toEqual(['domestic'])
+    expect(result).toBe(false)
+  })
 })

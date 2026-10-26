@@ -44,7 +44,12 @@ export async function orderSourcesByReachability(
 
   const reachable = outcomes
     .filter((outcome) => outcome.reachable)
-    .sort((left, right) => left.latencyMs - right.latencyMs)
+    // 延迟相同时按声明顺序兜底：探活计时精度只有毫秒，纯按延迟排序会让同延迟的源
+    // 顺序抖动（尤其是机器负载高的时候），用户每次检查看到的首选源都可能不同。
+    .sort((left, right) => (
+      left.latencyMs - right.latencyMs
+      || sources.indexOf(left.source) - sources.indexOf(right.source)
+    ))
 
   if (reachable.length === 0) return [...sources]
 

@@ -50,6 +50,14 @@ const APP_VERSION = __APP_VERSION__
 
 const GITHUB_RELEASES_URL = 'https://github.com/Yuan-lai-ru-ci/ProferAI/releases'
 
+/**
+ * 界面侧检查兜底。
+ *
+ * 主进程已经有硬超时（UPDATE_CHECK_TOTAL_DEADLINE_MS），这里留一点余量作为最后保险：
+ * 即使 IPC 因为意外原因永不返回，按钮也必须恢复可点，不能永久停在「正在检查」。
+ */
+const CHECK_UI_DEADLINE_MS = 30_000
+
 /** 更新状态卡片 */
 function UpdateCard(): React.ReactElement | null {
   const available = useAtomValue(updaterAvailableAtom)
@@ -68,11 +76,20 @@ function UpdateCard(): React.ReactElement | null {
     checkingRef.current = true
     setChecking(true)
     setCheckError(null)
+    // 主进程已有硬超时，这里是最后一道保险：渲染层不能出现「永远转圈」的终态。
+    // 用 globalThis 而不是 window：部分测试宿主只桩了 window 的少量字段。
+    const watchdog = globalThis.setTimeout(() => {
+      if (!checkingRef.current) return
+      checkingRef.current = false
+      setChecking(false)
+      setCheckError('检查更新超时，请检查网络或代理后重试')
+    }, CHECK_UI_DEADLINE_MS)
     try {
       await checkForUpdates()
     } catch (cause) {
       setCheckError(cause instanceof Error ? cause.message : String(cause))
     } finally {
+      globalThis.clearTimeout(watchdog)
       checkingRef.current = false
       setChecking(false)
     }
@@ -115,7 +132,10 @@ function UpdateCard(): React.ReactElement | null {
 
   if (!available) return <SettingsCard><SettingsRow label="软件更新" description="当前构建未提供应用内更新，可打开官方发布页查看安装包。"><Button size="sm" variant="outline" onClick={() => void window.electronAPI.openExternal(GITHUB_RELEASES_URL).catch(() => toast.error('无法打开发布页'))}><ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />官方发布页</Button></SettingsRow></SettingsCard>
 
-  const isChecking = checking || status.status === 'checking' || status.status === 'downloading'
+  // 检查阶段和下载阶段分开：下载有自己的进度文案，不能把「检查中」的转圈沿用下去，
+  // 否则一次 250MB 的下载会让按钮看起来一直在「检查」。
+  const isBusy = checking || status.status === 'checking' || status.status === 'downloading'
+  const isChecking = checking || status.status === 'checking'
   const hasReleaseNotes = status.releaseNotes || latestNotes
 
   return (
@@ -145,7 +165,7 @@ function UpdateCard(): React.ReactElement | null {
           ) : (
             <button
               onClick={handleCheck}
-              disabled={isChecking}
+              disabled={isBusy}
               className="inline-flex items-center gap-1.5 rounded-md bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80 transition-colors disabled:opacity-50"
             >
               {isChecking ? (

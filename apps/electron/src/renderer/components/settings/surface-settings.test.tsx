@@ -385,6 +385,27 @@ describe('在途与冲突边界（只使用 fixture）', () => {
     pending.reject(new Error('fixture-update')); await tick(); host.render(); expect(host.elements().some((item) => item.props.role === 'alert')).toBe(true)
     click(host.button('重试')); await tick(); host.render(); expect(checks).toBe(2)
   })
+  test('检查更新一直不返回时，界面兜底超时恢复可点，不永久转圈', async () => {
+    fixtureUpdaterAvailable = true; store.set(updateStatusAtom, { status: 'idle' })
+    const pending = deferred<void>()
+    api({ updater: { checkForUpdates: () => pending.promise } })
+    const realSetTimeout = globalThis.setTimeout
+    const timers: Array<() => void> = []
+    globalThis.setTimeout = ((handler: () => void) => { timers.push(handler); return 0 }) as unknown as typeof globalThis.setTimeout
+    try {
+      const host = mount(child(AboutSettings, 'UpdateCard'))
+      click(host.button('检查更新')); host.render()
+      // 主进程挂死时按钮先进入检查中，且必须已经挂上界面兜底定时器。
+      expect(host.button('检查更新').disabled).toBe(true)
+      expect(timers.length).toBe(1)
+      timers.forEach((handler) => handler()); host.render()
+      expect(host.button('检查更新').disabled).toBe(false)
+      expect(host.elements().some((item) => item.props.role === 'alert' && text(item).includes('检查更新超时'))).toBe(true)
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+      pending.resolve()
+    }
+  })
   test('运行时摘要失败可重读，Bun快照为只读，不重新初始化运行时', async () => {
     let reads = 0; let reinit = 0
     const runtime = { available: true, path: 'fixture/runtime', version: 'fixture-version', error: null }

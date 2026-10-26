@@ -4,7 +4,6 @@ import {
   DOMESTIC_UPDATE_FEED_URL,
   getUpdateSources,
   isSecureUpdateFeedUrl,
-  UPDATE_REQUEST_TIMEOUT_MS,
   updateMetadataFileName,
 } from './update-sources'
 
@@ -15,7 +14,6 @@ describe('更新源优先级', () => {
     expect(getUpdateSources(undefined)[0]?.configuration).toEqual({
       provider: 'generic',
       url: DOMESTIC_UPDATE_FEED_URL,
-      timeout: UPDATE_REQUEST_TIMEOUT_MS,
     })
     // 2026-10-08：香港机失联，主源不能再是 updates.profer.cn
     expect(DOMESTIC_UPDATE_FEED_URL).toBe('https://profer.cn/profer-updates/')

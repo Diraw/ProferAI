@@ -66,7 +66,11 @@ test('包态：内测同/低正式基线零提示零下载；多源回退、更�
     Object.assign(app, { getVersion: () => '0.15.84' })
     await checkForUpdates()
     expect(download).toHaveBeenCalledTimes(1)
-    expect(getUpdateStatus()).toMatchObject({ status: 'available', version: '0.15.85' })
+    // 检查一有结论就返回，下载在后台跑：状态直接进入 downloading，不再等下载完成。
+    expect(getUpdateStatus()).toMatchObject({ status: 'downloading', version: '0.15.85' })
+    // 下载失败会回到可重试状态；downloading 期间会跳过检查，所以这里必须先把状态推进到终态。
+    handlers.get('error')?.(new Error('模拟下载失败') as never)
+    expect(getUpdateStatus().status).toBe('error')
     Object.assign(app, { getVersion: () => '0.15.85-internal.4' })
     candidate = '0.16.0'
     failCount = 2
@@ -74,7 +78,7 @@ test('包态：内测同/低正式基线零提示零下载；多源回退、更�
     await checkForUpdates()
     expect(setFeedURL).toHaveBeenCalledTimes(3)
     expect(download).toHaveBeenCalledTimes(2)
-    expect(getUpdateStatus()).toMatchObject({ status: 'available', version: '0.16.0' })
+    expect(getUpdateStatus()).toMatchObject({ status: 'downloading', version: '0.16.0' })
     handlers.get('update-downloaded')?.({ version: candidate })
     expect(getUpdateStatus()).toEqual({ status: 'downloaded', version: '0.16.0' })
   } finally {
