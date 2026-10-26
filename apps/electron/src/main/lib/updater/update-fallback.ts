@@ -4,11 +4,14 @@ export async function runWithUpdateSourceFallback<T>(
   sources: readonly UpdateSource[],
   attempt: (source: UpdateSource) => Promise<T>,
   onFailure?: (source: UpdateSource, error: unknown) => void,
+  /** 整轮已被判死（例如总预算超时）时提前收手，不再对剩余源发请求。 */
+  shouldAbort?: () => boolean,
 ): Promise<T> {
   const failures: string[] = []
   let hasSuccessfulNoUpdate = false
 
   for (const source of sources) {
+    if (shouldAbort?.()) return false as T
     try {
       const result = await attempt(source)
       // `false` means the source is reachable but has no applicable update.

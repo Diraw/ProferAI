@@ -73,6 +73,18 @@ describe('宿主图表双路径', () => {
     }
   })
 
+  test('提示框走 HTML 渲染：richText 会让悬停期间整块 SVG 每帧重绘（图表闪动）', () => {
+    const option = buildChartOption(bar, { foreground: '#111', muted: '#777', border: '#ddd', background: '#fff' })
+    const tooltip = option.tooltip as { renderMode?: string; confine?: boolean; backgroundColor?: string; textStyle?: { color?: string } }
+    // richText 的提示框是图表 SVG 内部的文本节点，ECharts 每次 mousemove 都销毁重建它，
+    // 整块 SVG（含 decal 图案）随之重绘——实测 hover 期间 100% 的移动都触发重绘。
+    // 改回 richText 就等于把这个闪动带回来，所以这里钉死 HTML 渲染。
+    expect(tooltip.renderMode).toBe('html')
+    expect(tooltip.confine).toBe(true)
+    expect(tooltip.backgroundColor).toBe('#fff')
+    expect(tooltip.textStyle?.color).toBe('#111')
+  })
+
   test('图表系列色跟随主题 token：皮肤覆写 --chart-* 时不再回落默认调色板', () => {
     const ocean = chartThemeFromTokens({ '--chart-1': '205 58% 42%', '--chart-2': '188 55% 38%' })
     const terminal = chartThemeFromTokens({ '--chart-1': '100 40% 52%', '--chart-2': '70 35% 58%' })

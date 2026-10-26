@@ -110,7 +110,7 @@ export function ExpandedSidebar({ s }: { s: SidebarModel }): React.ReactElement 
   return (
     <div className="relative flex h-full flex-col overflow-hidden px-2.5 pb-2.5">
       {/* Agent / Chat 切换 + 搜索：Profer 的标志性分段控件固定在列表顶部，
-          搜索作为它的同级图标按钮放在右侧（mt-2 对齐分段控件的 34px 轨道）。
+          搜索作为它的同级图标按钮放在右侧（mt-2 对齐分段控件的 40px 轨道）。
           收起态由 rail 上的两个模式图标承担。 */}
       <div className="flex flex-none items-start gap-1.5">
         <div className="min-w-0 flex-1">

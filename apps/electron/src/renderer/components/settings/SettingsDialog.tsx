@@ -34,9 +34,15 @@ export function SettingsDialog({ tabsOverride }: SettingsDialogProps): React.Rea
   return (
     <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
       <DialogPrimitive.Portal>
-        {/* 轻遮罩 — 与 Dialog primitive 统一使用 Surface Contract overlay。 */}
+        {/* 轻遮罩 — 与 Dialog primitive 统一使用 Surface Contract overlay。
+         *
+         * 不要加 backdrop-blur：这是覆盖整窗的模糊层，背景里任何重绘（侧栏相对时间
+         * 每分钟刷新、积分条轮询、飞书在场上报）都会触发整张背景纹理重新采样，
+         * 表现为面板外的遮罩区域周期性闪动。v0.9.11 (#340)、v0.9.40、v0.9.11 之后的
+         * #873 都因同一原因移除过；本文件在 2026-09-04 的重构里又写了回来。
+         * 失去模糊后靠提高遮罩不透明度（/40 → /50）补回聚焦感。 */}
         <DialogPrimitive.Overlay
-          className="fixed inset-0 z-[100] bg-overlay/40 backdrop-blur-sm titlebar-no-drag transition-opacity duration-100 data-[state=open]:opacity-100 data-[state=closed]:opacity-0"
+          className="fixed inset-0 z-[100] bg-overlay/50 titlebar-no-drag transition-opacity duration-100 data-[state=open]:opacity-100 data-[state=closed]:opacity-0"
         />
         <DialogPrimitive.Content
           ref={dialogRef}

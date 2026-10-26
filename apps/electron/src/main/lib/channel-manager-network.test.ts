@@ -289,19 +289,104 @@ describe('F15：严格模型目录与完整分页', () => {
   })
 })
 
+describe('Pi 本机 Ollama 目录拉取', () => {
+  test('Given 本机 Ollama + Pi runtime When 拉取目录 Then 保留原生 /api/tags', async () => {
+    responder = async () => json(valid('ollama'))
+    const result = await fetchModels(input('ollama', { baseUrl: 'http://127.0.0.1:11434', runtime: 'pi' }))
+    expect(result.success).toBe(true)
+    expect(new URL(requests[0]!.url).pathname).toBe('/api/tags')
+  })
+})
+
 describe('Claude-only 渠道目录拉取', () => {
-  test('Given Claude-only 且配置了 Claude 端点 When 拉取目录 Then 请求 Claude 端点而非主地址', async () => {
+  test('Given Claude-only 且配置了 Claude 端点 When 拉取目录 Then 按 SDK 语义请求 /v1/models', async () => {
     responder = async () => json(valid('anthropic'))
     const result = await fetchModels(input('openai', { runtime: 'claude', agentBaseUrl: 'https://fixture.invalid/anthropic' }))
     expect(result.success).toBe(true)
     expect(requests).toHaveLength(1)
-    expect(requests[0]?.url).toMatch(/^https:\/\/fixture\.invalid\/anthropic\/models/)
+    expect(requests[0]?.url).toMatch(/^https:\/\/fixture\.invalid\/anthropic\/v1\/models/)
+  })
+
+  test('Given Claude-only 且带 /anthropic 路径 When 测试生成 Then 请求 /anthropic/v1/messages', async () => {
+    responder = async () => json({ content: [{ type: 'text', text: 'ok' }] })
+    const result = await testChannelDirect(input('openai', {
+      runtime: 'claude',
+      agentBaseUrl: 'https://fixture.invalid/anthropic',
+      modelId: 'fixture-model',
+    }))
+    expect(result.success).toBe(true)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe('https://fixture.invalid/anthropic/v1/messages')
   })
 
   test('Given Claude 端点无法推导 When 拉取目录 Then 明确失败且不发送请求', async () => {
     const result = await fetchModels(input('xai', { runtime: 'claude' }))
     expect(result).toMatchObject({ success: false, models: [] })
     expect(requests).toHaveLength(0)
+  })
+})
+
+describe('P0-3：Chat / Claude / Pi 的 Anthropic 端点统一', () => {
+  const messagePayload = { content: [{ type: 'text', text: 'ok' }] }
+
+  test('Given provider=anthropic 且 base 为 /anthropic When Chat 测试/发现 Then 与 Agent 一致请求 /anthropic/v1', async () => {
+    responder = async ({ url }) => json(url.includes('/messages') ? messagePayload : valid('anthropic'))
+    const fixture = input('anthropic', { baseUrl: 'https://fixture.invalid/anthropic' })
+    expect((await testChannelDirect(fixture)).success).toBe(true)
+    expect((await fetchModels(fixture)).success).toBe(true)
+    expect(requests.map(({ url }) => url)).toEqual([
+      'https://fixture.invalid/anthropic/v1/models',
+      'https://fixture.invalid/anthropic/v1/models',
+    ])
+    expect((await testChannelDirect({ ...fixture, modelId: 'fixture-model' })).success).toBe(true)
+    expect(requests.at(-1)!.url).toBe('https://fixture.invalid/anthropic/v1/messages')
+  })
+
+  test('Given anthropic-compatible 且 base 为 /anthropic When Chat 测试 Then 不再直接请求协议根', async () => {
+    responder = async () => json(messagePayload)
+    const result = await testChannelDirect(input('anthropic-compatible', {
+      baseUrl: 'https://fixture.invalid/anthropic',
+      modelId: 'fixture-model',
+    }))
+    expect(result.success).toBe(true)
+    expect(requests[0]!.url).toBe('https://fixture.invalid/anthropic/v1/messages')
+  })
+
+  test('Given Pi + Anthropic 协议 When 测试/发现 Then 使用 Agent 端点并拼 /v1', async () => {
+    responder = async ({ url }) => json(url.includes('/messages') ? messagePayload : valid('anthropic'))
+    const fixture = input('anthropic', {
+      baseUrl: 'https://fixture.invalid/native',
+      agentBaseUrl: 'https://fixture.invalid/anthropic',
+      runtime: 'pi',
+    })
+    expect((await testChannelDirect({ ...fixture, modelId: 'fixture-model' })).success).toBe(true)
+    expect(requests.at(-1)!.url).toBe('https://fixture.invalid/anthropic/v1/messages')
+    expect((await fetchModels(fixture)).success).toBe(true)
+    expect(requests.at(-1)!.url).toBe('https://fixture.invalid/anthropic/v1/models')
+  })
+
+  test('Given deepseek / minimax 的 /anthropic 根路径 When Chat 测试 Then 保持 /anthropic/v1/messages', async () => {
+    responder = async () => json(messagePayload)
+    for (const provider of ['deepseek', 'minimax'] as const) {
+      requests.length = 0
+      const result = await testChannelDirect(input(provider, {
+        baseUrl: 'https://fixture.invalid/anthropic',
+        modelId: 'fixture-model',
+      }))
+      expect(result.success).toBe(true)
+      expect(requests[0]!.url).toBe('https://fixture.invalid/anthropic/v1/messages')
+    }
+  })
+
+  test('Given Pi + 非 Anthropic 协议 When 测试 Then 仍走原生 OpenAI 端点', async () => {
+    responder = async () => json({ choices: [{ message: { content: 'fixture' } }] })
+    const result = await testChannelDirect(input('deepseek', {
+      baseUrl: 'https://fixture.invalid/v1',
+      runtime: 'pi',
+      modelId: 'fixture-model',
+    }))
+    expect(result.success).toBe(true)
+    expect(requests[0]!.url).toBe('https://fixture.invalid/v1/chat/completions')
   })
 })
 

@@ -26,9 +26,14 @@ export const DOMESTIC_UPDATE_FEED_URL = 'https://profer.cn/profer-updates/'
  * `getUpdateSources` 中移除（客户端在它之后仍有 GitHub 兜底）。
  */
 export const DOMESTIC_FALLBACK_UPDATE_FEED_URL = 'https://updates.profer.cn/'
-/** 单个更新源的请求超时。注意：这是「请求级」超时，串行回退时每个死源都会各吃满一次。 */
-export const UPDATE_REQUEST_TIMEOUT_MS = 30_000
-/** 并行探活超时。黑洞型故障（丢包不回 RST）下，探活必须远早于 30s 的请求超时放弃。 */
+/**
+ * 并行探活超时。黑洞型故障（丢包不回 RST）下，探活必须远早于真正的元数据请求放弃。
+ *
+ * 注意：元数据请求本身的截止时间**不在**这里，也不能写进 electron-updater 的
+ * provider `timeout` 字段——6.8.9 的 ElectronHttpExecutor 不设请求超时，
+ * provider 配置里的 `timeout` 不会被任何 provider 读取（已在 node_modules 核对）。
+ * 真正的超时在 auto-updater.ts 的 UPDATE_CHECK_DEADLINE_MS / 总预算上执行。
+ */
 export const UPDATE_PROBE_TIMEOUT_MS = 4_000
 
 const GITHUB_UPDATE_SOURCE: UpdateSource = {
@@ -39,7 +44,6 @@ const GITHUB_UPDATE_SOURCE: UpdateSource = {
     owner: 'Yuan-lai-ru-ci',
     repo: 'ProferAI',
     releaseType: 'release',
-    timeout: UPDATE_REQUEST_TIMEOUT_MS,
   },
   probeUrl: null,
 }
@@ -88,7 +92,7 @@ export function isSecureUpdateFeedUrl(value: unknown): value is string {
  * 目录，发布时必须同时提供各自平台的元数据和安装包。
  *
  * 这里返回的只是「声明顺序」。实际尝试顺序由 `orderSourcesByReachability` 按并发探活
- * 结果重排——否则一个指向黑洞 IP 的源会让每次检查都先白等满 30s 超时。
+ * 结果重排——否则一个指向黑洞 IP 的源会让每次检查都先白等满一次元数据超时。
  */
 export function getUpdateSources(
   overrideUrl = process.env.PROFER_UPDATE_FEED_URL,
@@ -112,7 +116,6 @@ export function getUpdateSources(
     configuration: {
       provider: 'generic',
       url: feedUrl,
-      timeout: UPDATE_REQUEST_TIMEOUT_MS,
     },
     probeUrl: joinMetadataUrl(feedUrl, metadataFile),
   })

@@ -6,7 +6,10 @@
 
 // localStorage key 迁移：proma-* → profer-*（一次性，必须在任何模块读 localStorage 前执行）
 import { migrateLocalStorageKeys } from '@/lib/localstorage-migration'
+import { installPenClickAdaptation } from '@/lib/pen-click-adaptation'
 migrateLocalStorageKeys()
+// 手写笔点按侧栏/标签等 draggable 元素时，别被当成拖动
+installPenClickAdaptation()
 
 // 引入 Inter Variable 自托管字体（含 400/500/600/700 等所有字重）
 // index.css 声明了全部语言子集（latin/latin-ext/cyrillic/greek/vietnamese 等），

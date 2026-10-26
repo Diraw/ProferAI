@@ -55,7 +55,7 @@ describe('F10/F13/F19：23 Provider 表驱动本地协议矩阵', () => {
         : provider === 'custom' ? 'https://fixture.invalid/v1/chat/completions'
         : provider === 'google' ? 'https://fixture.invalid' : 'https://fixture.invalid/v1'
       const apiKey = provider === 'zhipu-coding-team' ? 'api_key=fixture-key;organization=fixture-org' : 'fixture-key'
-      const channel = { provider, enabled: true, agentRuntimes: ['pi', 'claude'] as Array<'pi' | 'claude'> }
+      const channel = { provider, enabled: true, baseUrl: provider === 'openai-codex' ? '' : 'https://fixture.invalid/v1', agentRuntimes: ['pi', 'claude'] as Array<'pi' | 'claude'> }
       expect(isChannelEnabledForChat(channel)).toBe(provider !== 'openai-codex')
       expect(isChannelEnabledForRuntime(channel, 'pi')).toBe(true)
       expect(isChannelEnabledForRuntime(channel, 'claude')).toBe(provider !== 'xai' && provider !== 'openai-codex')
@@ -92,16 +92,18 @@ describe('F10/F13/F19：23 Provider 表驱动本地协议矩阵', () => {
     })
   }
 
-  test('真实 ModelSelector：Chat 排除订阅，Pi 保留订阅，Claude 拒绝 xAI/Codex', () => {
-    const common = { enabled: true, apiKey: 'fixture-encrypted', models: [{ id: 'fixture-model', enabled: true, name: 'Fixture' }], agentRuntimes: ['pi', 'claude'] }
+  test('真实 ModelSelector：Chat 排除订阅与无 Chat 端点的渠道，Pi 保留订阅，Claude 拒绝 xAI/Codex', () => {
+    const common = { enabled: true, apiKey: 'fixture-encrypted', baseUrl: 'https://fixture.invalid/v1', models: [{ id: 'fixture-model', enabled: true, name: 'Fixture' }], agentRuntimes: ['pi', 'claude'] }
     const channels = [
-      { ...common, id: 'fixture-codex', provider: 'openai-codex' },
+      { ...common, id: 'fixture-codex', provider: 'openai-codex', baseUrl: '' },
       { ...common, id: 'fixture-xai-oauth', provider: 'xai', credentialMode: 'oauth' },
       { ...common, id: 'fixture-xai-key', provider: 'xai', credentialMode: 'api-key' },
       { ...common, id: 'fixture-openai', provider: 'openai' },
+      // 只勾 Claude 的渠道：agentBaseUrl 有值但 Chat Base URL 为空，只能出现在 Agent 选择器里。
+      { ...common, id: 'fixture-claude-only', provider: 'anthropic', baseUrl: '', agentRuntimes: ['claude'] },
     ]
     expect(selector(channels)).toHaveLength(2)
     expect(selector(channels, undefined, undefined, 'openai', true)).toHaveLength(4)
-    expect(selector(channels, undefined, undefined, 'anthropic', true)).toHaveLength(1)
+    expect(selector(channels, undefined, undefined, 'anthropic', true)).toHaveLength(2)
   })
 })

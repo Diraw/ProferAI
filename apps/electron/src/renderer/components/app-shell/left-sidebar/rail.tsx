@@ -72,10 +72,10 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
       {mode === 'agent' && (
         <span
           aria-hidden="true"
-          className="absolute -left-[7px] top-[10px] h-[14px] w-[2px] rounded-[2px] bg-primary"
+          className="absolute -left-[7px] top-[11px] h-[14px] w-[2px] rounded-[2px] bg-primary"
         />
       )}
-      <Bot size={17} />
+      <Bot size={19} />
     </button>
   )
 
@@ -87,7 +87,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
     >
       {/* 列表开关：展开时收起、收起时展开 */}
       <SidebarRailEntry
-        icon={sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+        icon={sidebarCollapsed ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}
         label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
         tooltip={`${sidebarCollapsed ? '展开' : '收起'}侧边栏 (${collapseShortcut})`}
         onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -97,7 +97,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
       {sidebarCollapsed && (
         <>
           <SidebarRailEntry
-            icon={<Plus size={17} />}
+            icon={<Plus size={19} />}
             label={mode === 'agent' ? '新建 Agent 会话' : '新建 Chat 对话'}
             tooltip={
               <>
@@ -109,7 +109,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
             navigationItem="new-session"
           />
           <SidebarRailEntry
-            icon={<Search size={17} />}
+            icon={<Search size={19} />}
             label="搜索"
             tooltip="搜索会话"
             onClick={() => setSearchDialogOpen(true)}
@@ -136,10 +136,10 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
                   {mode === 'chat' && (
                     <span
                       aria-hidden="true"
-                      className="absolute -left-[7px] top-[10px] h-[14px] w-[2px] rounded-[2px] bg-primary"
+                      className="absolute -left-[7px] top-[11px] h-[14px] w-[2px] rounded-[2px] bg-primary"
                     />
                   )}
-                  <MessageSquare size={17} />
+                  <MessageSquare size={19} />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="right">Chat 模式</TooltipContent>
@@ -155,7 +155,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
           规划中心原先是一个入口 + 内部三个 tab；拆分后 rail 直接给出三个并列入口，
           主窗口内的 tab 条随之下线（独立规划窗口仍保留 tab）。 */}
       <SidebarRailEntry
-        icon={<ListTodo size={17} />}
+        icon={<ListTodo size={19} />}
         label={`Todo，${todoOpenCount} 项待完成`}
         tooltip={`Todo（${todoOpenCount} 项待完成）`}
         active={activeView === 'planning' && planningTab === 'todos'}
@@ -163,7 +163,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
         navigationItem={PLANNING_NAV_ITEM.todos}
       />
       <SidebarRailEntry
-        icon={<CalendarDays size={17} />}
+        icon={<CalendarDays size={19} />}
         label={`日程，今天 ${todayCalendarCount} 个安排`}
         tooltip={`日程（今天 ${todayCalendarCount} 个安排）`}
         active={activeView === 'planning' && planningTab === 'calendar'}
@@ -171,7 +171,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
         navigationItem={PLANNING_NAV_ITEM.calendar}
       />
       <SidebarRailEntry
-        icon={<Clock size={17} />}
+        icon={<Clock size={19} />}
         label={`定时任务，${automationCount} 个任务`}
         tooltip={`定时任务（${automationCount} 个）`}
         active={activeView === 'planning' && planningTab === 'automations'}
@@ -180,7 +180,7 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
       />
       {mode === 'agent' && (
         <SidebarRailEntry
-          icon={<Blocks size={17} />}
+          icon={<Blocks size={19} />}
           label={`Agent 技能，${capabilities?.skills.length ?? 0} 个能力${skillsUpdateCount > 0 ? `，${skillsUpdateCount} 个可更新` : ''}`}
           tooltip={skillsUpdateCount > 0 ? `Agent 技能（${skillsUpdateCount} 个可更新）` : 'Agent 技能'}
           active={activeView === 'agent-skills'}
@@ -203,9 +203,9 @@ export function SidebarRail({ s, topOffset }: { s: SidebarModel; topOffset: numb
             onClick={() => setSettingsOpen(true)}
             className={cn(RAIL_BUTTON_CLASS, RAIL_BUTTON_IDLE_CLASS)}
           >
-            <UserAvatar avatar={userProfile.avatar} size={26} />
+            <UserAvatar avatar={userProfile.avatar} size={28} />
             {(hasUpdate || hasEnvironmentIssues) && (
-              <span className="absolute right-[6px] top-[6px] size-[5px] rounded-full bg-red-500" />
+              <span className="absolute right-[7px] top-[7px] size-[5px] rounded-full bg-red-500" />
             )}
           </button>
         </TooltipTrigger>

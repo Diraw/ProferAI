@@ -321,9 +321,11 @@ describe('resolveAnthropicMessagesUrl', () => {
     )
   })
 
-  test('anthropic-compatible 不向用户填写的地址追加后缀', () => {
+  test('anthropic-compatible 非端点路径按协议根补全 /v1/messages', () => {
+    // 统一语义后只有「已填完整端点（…/messages）」才原样使用：其它路径按协议根补全，
+    // 否则 Chat 会像修复前那样直接请求协议根（例如 /anthropic 根本没有 messages 端点）。
     expect(resolveAnthropicMessagesUrl('https://gateway.example.com/custom-path', 'anthropic-compatible')).toBe(
-      'https://gateway.example.com/custom-path',
+      'https://gateway.example.com/custom-path/v1/messages',
     )
   })
 
@@ -402,6 +404,95 @@ describe('resolveAnthropicModelsUrl', () => {
 
   test('Ollama 模型列表使用 OpenAI-compatible /v1/models', () => {
     expect(resolveAnthropicModelsUrl('http://127.0.0.1:11434', 'ollama')).toBe('http://127.0.0.1:11434/v1/models')
+  })
+})
+
+describe('统一 Anthropic 端点推导（chat / sdk）', () => {
+  // P0-3：Chat 与 Claude/Pi 必须用同一份推导。四种常见输入在两种模式下结果一致，
+  // 只有「用户直接填了非 /v1 版本的完整端点」这类 SDK 无法消费的输入才保留差异。
+  const providers = ['anthropic', 'anthropic-compatible', 'custom', 'deepseek', 'minimax'] as const
+  const cases = [
+    ['https://gw.example.com/anthropic', 'https://gw.example.com/anthropic/v1/messages', 'https://gw.example.com/anthropic/v1/models'],
+    ['https://gw.example.com', 'https://gw.example.com/v1/messages', 'https://gw.example.com/v1/models'],
+    ['https://gw.example.com/v1', 'https://gw.example.com/v1/messages', 'https://gw.example.com/v1/models'],
+    ['https://gw.example.com/v1/messages', 'https://gw.example.com/v1/messages', 'https://gw.example.com/v1/models'],
+  ] as const
+
+  for (const provider of providers) {
+    test(`${provider}: /anthropic、根、/v1、/v1/messages 在 chat 与 sdk 下结果一致`, () => {
+      for (const [input, messages, models] of cases) {
+        expect(resolveAnthropicMessagesUrl(input, provider, 'chat')).toBe(messages)
+        expect(resolveAnthropicMessagesUrl(input, provider, 'sdk')).toBe(messages)
+        expect(resolveAnthropicModelsUrl(input, provider, 'chat')).toBe(models)
+        expect(resolveAnthropicModelsUrl(input, provider, 'sdk')).toBe(models)
+      }
+    })
+  }
+
+  test('sdk 模式严格等于 normalizeAnthropicBaseUrlForSdk + /v1/<kind>', () => {
+    const inputs = [
+      'https://gw.example.com',
+      'https://gw.example.com/',
+      'https://gw.example.com/anthropic',
+      'https://gw.example.com/anthropic/',
+      'https://gw.example.com/anthropic/v1',
+      'https://gw.example.com/anthropic/v1/messages',
+      'https://gw.example.com/coding/v1',
+      'https://gw.example.com/v1/proxy',
+    ]
+    for (const input of inputs) {
+      const sdkBase = normalizeAnthropicBaseUrlForSdk(input)
+      expect(resolveAnthropicMessagesUrl(input, 'anthropic', 'sdk')).toBe(`${sdkBase}/v1/messages`)
+      expect(resolveAnthropicModelsUrl(input, 'anthropic', 'sdk')).toBe(`${sdkBase}/v1/models`)
+    }
+  })
+
+  test('sdk 模式拒绝 query/hash，chat 模式保留路由', () => {
+    const routed = 'https://gw.example.com/anthropic?route=fixture#anchor'
+    expect(resolveAnthropicMessagesUrl(routed, 'anthropic', 'chat')).toBe(
+      'https://gw.example.com/anthropic/v1/messages?route=fixture#anchor',
+    )
+    expect(() => resolveAnthropicMessagesUrl(routed, 'anthropic', 'sdk')).toThrow('query/hash')
+    expect(() => resolveAnthropicModelsUrl(routed, 'anthropic', 'sdk')).toThrow('query/hash')
+  })
+
+  test('小米系列：chat 保留 /anthropic 纠正，sdk 保持纯 SDK 语义（已知例外）', () => {
+    // Chat 历史行为把小米的 OpenAI 兼容 /v1 纠正到 /anthropic；SDK 侧只接受根地址，
+    // 无法还原这个纠正（normalizeAnthropicBaseUrlForSdk 不含 provider 信息）。
+    expect(resolveAnthropicMessagesUrl('https://api.xiaomimimo.com/v1', 'xiaomi', 'chat')).toBe(
+      'https://api.xiaomimimo.com/anthropic/v1/messages',
+    )
+    expect(resolveAnthropicMessagesUrl('https://api.xiaomimimo.com/v1', 'xiaomi', 'sdk')).toBe(
+      'https://api.xiaomimimo.com/v1/messages',
+    )
+    // 官方默认地址（含 /anthropic）两种模式一致。
+    expect(resolveAnthropicMessagesUrl('https://api.xiaomimimo.com/anthropic', 'xiaomi', 'chat')).toBe(
+      'https://api.xiaomimimo.com/anthropic/v1/messages',
+    )
+    expect(resolveAnthropicMessagesUrl('https://api.xiaomimimo.com/anthropic', 'xiaomi', 'sdk')).toBe(
+      'https://api.xiaomimimo.com/anthropic/v1/messages',
+    )
+  })
+
+  test('Kimi / MiniMax 协议根路径在两种模式下都不回归', () => {
+    const cases = [
+      ['kimi-api', 'https://api.moonshot.cn/anthropic', 'https://api.moonshot.cn/anthropic/v1/messages'],
+      ['kimi-coding', 'https://api.kimi.com/coding/v1', 'https://api.kimi.com/coding/v1/messages'],
+      ['minimax', 'https://api.minimaxi.com/anthropic', 'https://api.minimaxi.com/anthropic/v1/messages'],
+    ] as const
+    for (const [provider, input, expected] of cases) {
+      expect(resolveAnthropicMessagesUrl(input, provider, 'chat')).toBe(expected)
+      expect(resolveAnthropicMessagesUrl(input, provider, 'sdk')).toBe(expected)
+    }
+  })
+
+  test('chat 模式保留非 /v1 版本段的完整端点，sdk 模式按 SDK 只认 /v1', () => {
+    expect(resolveAnthropicMessagesUrl('https://gw.example.com/tenant/v2/messages', 'anthropic-compatible', 'chat')).toBe(
+      'https://gw.example.com/tenant/v2/messages',
+    )
+    expect(resolveAnthropicMessagesUrl('https://gw.example.com/tenant/v2/messages', 'anthropic-compatible', 'sdk')).toBe(
+      'https://gw.example.com/tenant/v1/messages',
+    )
   })
 })
 

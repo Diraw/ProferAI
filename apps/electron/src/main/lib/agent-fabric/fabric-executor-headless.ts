@@ -13,7 +13,7 @@
  * （waiting_for_approval + 一次性 token）在 Phase 2/4 补齐。
  */
 
-import type { AgentMessage } from '@profer/shared'
+import { isChannelEnabledForRuntime, type AgentMessage, type AgentRuntime } from '@profer/shared'
 import {
   ArtifactKind,
   type TaskExecution,
@@ -24,6 +24,7 @@ import {
 import { runRegisteredHeadlessAgent, stopRegisteredAgent } from '../agent-headless-runner-registry'
 import { stopAgent, agentEventBus } from '../agent-service'
 import { createAgentSession } from '../agent-session-manager'
+import { getChannelById } from '../channel-manager'
 import { getSettings } from '../settings-service'
 import type { AgentFabricConfig } from './fabric-config'
 
@@ -106,15 +107,37 @@ export function createHeadlessTaskExecutor(deps: HeadlessExecutorDeps): TaskExec
             reporter.fail('未配置模型渠道（settings.agentChannelId 为空），无法执行 Fabric 任务')
             return
           }
-          const modelId = deps.config.defaultModelId ?? settings.agentModelId
           const workspaceId = execution.task.request.workspaceId || deps.config.defaultWorkspaceId
+          // 内核跟随全局默认（主推 Pi）。写死 'claude' 会让 Pi-only 渠道上的 Fabric 任务必然失败，
+          // 且失败原因埋在 SDK 层，因此这里先按渠道能力校验再建会话。
+          const agentRuntime: AgentRuntime = settings.agentRuntime ?? 'claude'
+          const channel = getChannelById(channelId)
+          if (!channel) {
+            reporter.fail(`Fabric 任务无法执行：渠道不存在（${channelId}）`)
+            return
+          }
+          if (!isChannelEnabledForRuntime(channel, agentRuntime)) {
+            reporter.fail(
+              `Fabric 任务无法执行：渠道「${channel.name}」未启用或未开放 ${agentRuntime} 内核；`
+              + `请在该渠道设置中勾选 ${agentRuntime}，或在设置中切换默认 Agent 内核`,
+            )
+            return
+          }
+          // 默认模型可能来自另一个渠道；回退到该渠道第一个启用模型，避免带着不存在的模型启动。
+          const preferredModelId = deps.config.defaultModelId ?? settings.agentModelId
+          const modelId = channel.models.find((model) => model.id === preferredModelId && model.enabled)?.id
+            ?? channel.models.find((model) => model.enabled)?.id
+          if (!modelId) {
+            reporter.fail(`Fabric 任务无法执行：渠道「${channel.name}」没有启用的模型`)
+            return
+          }
 
           const session = createAgentSession(
             `[Fabric] ${execution.task.request.objective.slice(0, 40)}`,
             channelId,
             workspaceId,
             modelId,
-            'claude',
+            agentRuntime,
             false,
             execution.task.request.preset,
           )

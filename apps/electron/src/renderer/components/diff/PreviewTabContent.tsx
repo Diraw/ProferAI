@@ -8,7 +8,7 @@
 
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
-import { FolderOpen } from 'lucide-react'
+import { FolderOpen, X } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@profer/ui/primitives/tooltip'
 import { toast } from 'sonner'
 import {
@@ -16,6 +16,7 @@ import {
 } from '@/atoms/agent-atoms'
 import { getFileBaseName } from '@/atoms/tab-atoms'
 import { previewFilesByTabAtom } from '@/atoms/preview-atoms'
+import { useCloseTab } from '@/hooks/useCloseTab'
 import { IMAGE_PREVIEW_EXTS } from '@/lib/preview-extension-sets'
 import { cn } from '@/lib/utils'
 import { DefaultAppOpenButton } from './DefaultAppOpenButton'
@@ -32,10 +33,28 @@ interface PreviewTabContentProps {
 export function PreviewTabContent({ tabId, sessionId, filePath }: PreviewTabContentProps): React.ReactElement {
   const filesByTab = useAtomValue(previewFilesByTabAtom)
   const sessionPathMap = useAtomValue(agentSessionPathMapAtom)
+  // 与顶栏 Tab 的 ×、Cmd+W 走同一条关闭路径：连带清理该预览 Tab 的文件元数据。
+  const { requestClose } = useCloseTab()
 
   const currentFile = filesByTab.get(tabId) ?? null
   const sessionPath = sessionPathMap.get(sessionId) ?? ''
   const fileName = getFileBaseName(filePath)
+
+  const closePreviewButton = (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={() => requestClose(tabId)}
+          className="flex items-center justify-center size-6 shrink-0 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded transition-colors"
+          aria-label="关闭预览"
+        >
+          <X className="size-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom"><p>关闭预览</p></TooltipContent>
+    </Tooltip>
+  )
 
   if (!currentFile) {
     return (
@@ -44,6 +63,7 @@ export function PreviewTabContent({ tabId, sessionId, filePath }: PreviewTabCont
           <div className="min-w-0 flex-1 text-xs font-medium text-muted-foreground">
             {fileName}
           </div>
+          {closePreviewButton}
         </div>
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
           预览状态已失效，请重新打开该文件
@@ -100,6 +120,7 @@ export function PreviewTabContent({ tabId, sessionId, filePath }: PreviewTabCont
             </TooltipTrigger>
             <TooltipContent side="bottom"><p>在文件管理器中显示</p></TooltipContent>
           </Tooltip>
+          {closePreviewButton}
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">

@@ -6,7 +6,8 @@ test('表单连接测试使用启用模型并分别检查已勾选内核', () =>
   expect(form).toContain("const selectedModel = models.find((model) => model.enabled)?.id")
   expect(form).toContain('Promise.all(runtimes.map(async (runtime)')
   expect(form).toContain('modelId: selectedModel')
-  expect(form).toContain("runtime === 'claude' ? { agentBaseUrl }")
+  expect(form).toContain("runtime === 'claude' || (runtime === 'pi' && piConsumesAnthropicEndpoint)")
+  expect(form).toContain('consumesAgentEndpoint ? { agentBaseUrl }')
 })
 
 test('设备登出先确认且失败不会自动关闭确认框', () => {

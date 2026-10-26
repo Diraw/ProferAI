@@ -237,6 +237,38 @@ describe('xAI 局部更新及官方保护', () => {
     deleteChannel(channel.id)
     expect(listChannels()).toEqual([])
   })
+
+  test('P1-6：旧配置的派生 agentBaseUrl 落盘后被清理，改主地址后不再回写旧值', () => {
+    const channel = fixtureChannel({
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: 'https://gateway.example.com/v1',
+      agentRuntimes: ['pi', 'claude'],
+    })
+    writeConfig([channel])
+
+    // 读取时把「等于推导值」的 agentBaseUrl 从持久化里清掉。
+    expect(listChannels()[0]?.agentBaseUrl).toBeUndefined()
+    expect(readFileSync(channelsPath, 'utf-8')).not.toContain('agentBaseUrl')
+
+    // 改主地址后运行时按新地址推导，不再指向旧网关。
+    const updated = updateChannel(channel.id, { baseUrl: 'https://relay.example.com/v1' })
+    expect(updated.baseUrl).toBe('https://relay.example.com/v1')
+    expect(updated.agentBaseUrl).toBeUndefined()
+    expect(readFileSync(channelsPath, 'utf-8')).not.toContain('agentBaseUrl')
+  })
+
+  test('P1-6：用户显式指定的 agentBaseUrl 不会因归一化被删', () => {
+    const channel = fixtureChannel({
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: 'https://relay.example.com/anthropic',
+      agentRuntimes: ['pi', 'claude'],
+    })
+    writeConfig([channel])
+
+    expect(listChannels()[0]?.agentBaseUrl).toBe('https://relay.example.com/anthropic')
+  })
 })
 
 describe('Codex 额度使用 access 而不是 OAuth JSON', () => {

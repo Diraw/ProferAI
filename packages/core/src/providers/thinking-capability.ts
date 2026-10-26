@@ -2,7 +2,8 @@
  * Claude 思考模式能力检测
  *
  * Anthropic 在 Claude 4.6+ 引入了 adaptive thinking，协议与旧版 extended thinking 不兼容：
- * - Opus 4.7 / Mythos Preview：只支持 adaptive，发送旧版 `{type: 'enabled', budget_tokens}` 会 400
+ * - Claude 5.x（Haiku/Sonnet/Opus/Fable）/ Opus 4.7 / 4.8 / Mythos Preview：只支持 adaptive，
+ *   发送旧版 `{type: 'enabled', budget_tokens}` 会 400
  * - Opus 4.6 / Sonnet 4.6：两种都支持，adaptive 为推荐
  * - 更老的 Claude 系列（Sonnet 4.5 / Opus 4.5 / 3.x 等）：只支持 manual
  *
@@ -12,6 +13,7 @@
  * 本模块根据模型 ID 推断思考协议，供适配器构造请求体时分支使用。
  */
 import type { ProviderType } from '@profer/shared'
+import { isClaudeAdaptiveThinkingModel } from '@profer/shared'
 
 /** 思考协议能力 */
 export type ThinkingMode =
@@ -88,14 +90,10 @@ export function detectThinkingCapability(
     return { mode: 'manual-only', disableStrategy: 'explicit-disabled' }
   }
 
-  // Claude Mythos Preview：adaptive 是默认且唯一，不接受 disabled
-  if (startsWith(modelId, 'claude-mythos-preview')) {
+  // Claude 5.x（Haiku/Sonnet/Opus/Fable）与 Opus 4.7/4.8：只接受 adaptive。
+  // 关闭思考时必须省略 thinking 字段；这些模型也不接受旧版 budget_tokens。
+  if (isClaudeAdaptiveThinkingModel(modelId)) {
     return { mode: 'adaptive-only', disableStrategy: 'omit-field' }
-  }
-
-  // Claude Opus 4.7:adaptive 唯一模式
-  if (startsWith(modelId, 'claude-opus-4-7')) {
-    return { mode: 'adaptive-only', disableStrategy: 'explicit-disabled' }
   }
 
   // Claude Opus 4.6 / Sonnet 4.6：两者都支持，优先 adaptive

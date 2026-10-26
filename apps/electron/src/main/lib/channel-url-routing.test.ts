@@ -23,7 +23,20 @@ describe('渠道 Chat/Agent URL 路由', () => {
 
     expect(result.changed).toBe(true)
     expect(result.channel.baseUrl).toBe('https://api.deepseek.com')
-    expect(result.channel.agentBaseUrl).toBe('https://api.deepseek.com/anthropic')
+    // 派生值不落库：迁移后 agentBaseUrl 交给运行时按官方根地址推导出 /anthropic。
+    expect(result.channel.agentBaseUrl).toBeUndefined()
+    expect(JSON.stringify(result.channel)).not.toContain('agentBaseUrl')
+    expect(inferAgentBaseUrl(result.channel.provider, result.channel.baseUrl, result.channel.agentBaseUrl))
+      .toBe('https://api.deepseek.com/anthropic')
+  })
+
+  test('Given DeepSeek 旧 Anthropic Base URL 带有显式第三方 Agent 入口 When 迁移 Then 保留显式值', () => {
+    const result = normalizeChannelForCurrentSchema(channel({
+      agentBaseUrl: 'https://gateway.example.com/anthropic',
+    }))
+
+    expect(result.channel.baseUrl).toBe('https://api.deepseek.com')
+    expect(result.channel.agentBaseUrl).toBe('https://gateway.example.com/anthropic')
   })
 
   test('Given DeepSeek Chat Base URL When 推导 Agent URL Then 使用 Anthropic 兼容入口', () => {
@@ -39,7 +52,9 @@ describe('渠道 Chat/Agent URL 路由', () => {
 
     expect(result.changed).toBe(true)
     expect(result.channel.baseUrl).toBe('https://api.deepseek.com')
-    expect(result.channel.agentBaseUrl).toBe('https://api.deepseek.com/anthropic')
+    expect(result.channel.agentBaseUrl).toBeUndefined()
+    expect(inferAgentBaseUrl(result.channel.provider, result.channel.baseUrl, result.channel.agentBaseUrl))
+      .toBe('https://api.deepseek.com/anthropic')
   })
 
   test('Given DeepSeek 渠道指向第三方网关 When 迁移 Then 不得被官方默认值覆盖', () => {
@@ -48,7 +63,86 @@ describe('渠道 Chat/Agent URL 路由', () => {
     }))
 
     expect(result.channel.baseUrl).toBe('https://gateway.example.com/anthropic')
-    expect(result.channel.agentBaseUrl).toBe('https://gateway.example.com/anthropic')
+    // 第三方地址的 Agent 入口等于推导值，同样不落库；运行时按当前地址推导。
+    expect(result.channel.agentBaseUrl).toBeUndefined()
+    expect(inferAgentBaseUrl(result.channel.provider, result.channel.baseUrl, result.channel.agentBaseUrl))
+      .toBe('https://gateway.example.com/anthropic')
+  })
+
+  test('Given 历史配置把推导值持久化进 agentBaseUrl When 归一化 Then 删除该字段且运行时结果不变', () => {
+    // 典型形态：老版本 normalize 把 Anthropic 官方入口写回 agentBaseUrl。
+    const result = normalizeChannelForCurrentSchema(channel({
+      provider: 'anthropic',
+      baseUrl: 'https://cn.clawnode.cn',
+      agentBaseUrl: 'https://cn.clawnode.cn/',
+    }))
+
+    expect(result.changed).toBe(true)
+    expect(result.channel.agentBaseUrl).toBeUndefined()
+    expect(inferAgentBaseUrl(result.channel.provider, result.channel.baseUrl, result.channel.agentBaseUrl))
+      .toBe('https://cn.clawnode.cn')
+
+    // 幂等：清理过一次后不再反复改写配置。
+    const again = normalizeChannelForCurrentSchema(result.channel)
+    expect(again.changed).toBe(false)
+    expect(again.channel.agentBaseUrl).toBeUndefined()
+  })
+
+  test('Given agentBaseUrl 是用户显式指定的另一入口 When 归一化 Then 保留', () => {
+    const result = normalizeChannelForCurrentSchema(channel({
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: 'https://relay.example.com/anthropic',
+    }))
+
+    expect(result.channel.agentBaseUrl).toBe('https://relay.example.com/anthropic')
+    expect(inferAgentBaseUrl(result.channel.provider, result.channel.baseUrl, result.channel.agentBaseUrl))
+      .toBe('https://relay.example.com/anthropic')
+  })
+
+  test('Given serverManaged 渠道的服务端 agentBaseUrl 等于推导值 When 归一化 Then 清理', () => {
+    const result = normalizeChannelForCurrentSchema(channel({
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: 'https://gateway.example.com/v1',
+      serverManaged: true,
+    }))
+
+    expect(result.channel.agentBaseUrl).toBeUndefined()
+  })
+
+  test('Given serverManaged 渠道的服务端 agentBaseUrl 不同于推导值 When 归一化 Then 保留', () => {
+    const result = normalizeChannelForCurrentSchema(channel({
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: 'https://relay.example.com/anthropic',
+      serverManaged: true,
+    }))
+
+    expect(result.channel.agentBaseUrl).toBe('https://relay.example.com/anthropic')
+  })
+
+  test('Given 只靠 Agent 端点的渠道（主地址为空）When 归一化 Then 保留显式 agentBaseUrl', () => {
+    // Claude-only 渠道可以只填 Agent 端点；推导值为空时不能把它当成「派生值」清掉。
+    const result = normalizeChannelForCurrentSchema(channel({
+      provider: 'custom',
+      baseUrl: '',
+      agentBaseUrl: 'https://relay.example.com',
+      agentRuntimes: ['claude'],
+    }))
+
+    expect(result.channel.agentBaseUrl).toBe('https://relay.example.com')
+  })
+
+  test('Given 空字符串 agentBaseUrl When 归一化 Then 视为未配置并删除字段', () => {
+    const result = normalizeChannelForCurrentSchema(channel({
+      provider: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      agentBaseUrl: '',
+    }))
+
+    expect(result.changed).toBe(true)
+    expect(result.channel.agentBaseUrl).toBeUndefined()
   })
 
   test('Given DeepSeek 的 Base URL 已切到第三方网关 When 仍留有官方 Agent URL Then Agent 跟随新地址', () => {

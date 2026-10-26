@@ -443,17 +443,23 @@ export function groupIntoTurns(messages: SDKMessage[], sessionModelId?: string):
   }
 
   flushTurn()
-  return mergeAdjacentSameModelTurns(groups)
+  return mergeAdjacentTurns(groups)
 }
 
 /**
- * 后处理：合并相邻同模型的 assistant-turn
+ * 后处理：合并同一用户轮次内的相邻 assistant-turn。
  *
- * 当子代理（如 haiku）执行多个工具调用时，中间的 user(tool_result) 消息
- * 可能导致 turn 被拆分为多个碎片。此函数将同模型的相邻 assistant-turn 合并，
- * 同时吸收它们之间的非用户输入 group（如被误判为用户输入的子代理内部消息）。
+ * 拆块来源有两类：
+ * 1. 子代理（如 haiku）执行多个工具调用时，中间的 user(tool_result) 消息把 turn 拆成碎片；
+ * 2. 流式期间插进来的断组 system 消息（compacting / interruption_record 等渲染为 null，
+ *    用户看不到分隔），或模型 id 在同一轮里变了（`global:` / `cn:` 前缀差异）。
+ *
+ * 两类都不应该让用户看到第二个模型头像：一条用户消息只对应一个助手块。因此这里只按
+ * 「是否还是同一轮」合并，不再要求 model 相同；头像取首条 assistant 消息的模型。
+ * 仍然阻断合并的只有：真正的用户输入、可见的分隔条（压缩边界 / 审批拒绝 / 压缩跳过）、
+ * 以及后台任务唤醒后开始的新一轮。
  */
-function mergeAdjacentSameModelTurns(groups: MessageGroup[]): MessageGroup[] {
+function mergeAdjacentTurns(groups: MessageGroup[]): MessageGroup[] {
   if (groups.length <= 1) return groups
 
   const result: MessageGroup[] = []
@@ -470,17 +476,15 @@ function mergeAdjacentSameModelTurns(groups: MessageGroup[]): MessageGroup[] {
       continue
     }
 
-    // 向前查找可合并的同模型 assistant-turn（跳过非 user-input 的中间 group）
+    // 向前查找可合并的 assistant-turn（跳过非 user-input 的中间 group）
     let mergeTargetIdx = -1
     for (let i = result.length - 1; i >= 0; i--) {
       const prev = result[i]!
       if (prev.type === 'user') break // 真正的用户输入阻断合并
       if (prev.type === 'system' && ['compact_boundary', 'permission_denied', 'compact_skipped'].includes((prev.message as SDKSystemMessage).subtype ?? '')) break
       if (prev.type === 'assistant-turn') {
-        if (prev.model === group.model) {
-          mergeTargetIdx = i
-        }
-        break // 遇到第一个 assistant-turn 就停止（不跨越不同模型的 turn）
+        mergeTargetIdx = i
+        break
       }
       // system 或其他 group：继续向前查找
     }

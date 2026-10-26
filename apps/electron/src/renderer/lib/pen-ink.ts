@@ -181,11 +181,13 @@ export interface InkExportOptions {
   padding?: number
   background?: string
   color?: string
+  /** 笔画加粗倍数：OCR 对细笔画不敏感，导出识别图时可以加粗 */
+  weight?: number
 }
 
 /** 把笔迹渲染成白底 PNG 的 canvas；调用方负责 toBlob/insert。 */
 export function renderInkCanvas(strokes: InkStroke[], options: InkExportOptions = {}): HTMLCanvasElement | null {
-  const { scale = 2, padding = 16, background = '#ffffff', color = '#111827' } = options
+  const { scale = 2, padding = 16, background = '#ffffff', color = '#111827', weight = 1 } = options
   const bounds = computeInkBounds(strokes, padding)
   if (!bounds) return null
 
@@ -201,7 +203,7 @@ export function renderInkCanvas(strokes: InkStroke[], options: InkExportOptions 
   ctx.setTransform(scale, 0, 0, scale, -bounds.x * scale, -bounds.y * scale)
   ctx.fillStyle = color
   for (const stroke of strokes) {
-    ctx.fill(buildStrokePath(stroke.points, stroke.size))
+    ctx.fill(buildStrokePath(stroke.points, stroke.size * weight))
   }
   return canvas
 }

@@ -47,8 +47,10 @@ export function UpdateDialog(): React.ReactElement | null {
   }, [])
 
   React.useEffect(() => {
+    // 检查与下载已经解耦：主进程发现新版本后会立刻转入 downloading，两帧可能合并成
+    // 一次渲染，只等 available 会让弹窗彻底不出现。downloading 带版本时同样视为首次发现。
     if (
-      updateStatus.status === 'available' &&
+      (updateStatus.status === 'available' || updateStatus.status === 'downloading') &&
       !updateStatus.manualUrl &&
       updateStatus.version &&
       shownVersionRef.current !== updateStatus.version

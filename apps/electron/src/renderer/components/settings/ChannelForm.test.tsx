@@ -138,6 +138,210 @@ describe('ChannelForm 真实事件与退出控制器接线（隔离 hook 宿主�
     return form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes(label))!
   }
 
+  test('F22：只勾 Claude 时 Anthropic 端点独立支撑测试与模型发现，并显示自动补全尾缀', async () => {
+    const requests: unknown[] = []
+    const tests: unknown[] = []
+    const channel: Channel = {
+      ...fixture,
+      provider: 'custom',
+      baseUrl: '',
+      agentBaseUrl: 'https://relay.example.com',
+      agentRuntimes: ['claude'],
+      models: [],
+    }
+    const form = setup(channel, {
+      fetchModels: async (input: unknown) => {
+        requests.push(input)
+        return { success: true, message: 'fixture-discovery', models: [] } satisfies FetchModelsResult
+      },
+      testChannelDirect: async (input: unknown) => { tests.push(input); return { success: true, message: 'fixture-test' } },
+    })
+    await tick(); form.render()
+
+    expect(String(form.field('Anthropic 端点').description)).toContain('预览：https://relay.example.com/v1/messages；已按协议根地址补全 /v1/messages')
+
+    // /anthropic 路径必须按 SDK 语义补 /v1/messages，不能只补 /messages。
+    ;(form.field('Anthropic 端点').onChange as (value: string) => void)('https://relay.example.com/anthropic')
+    form.render()
+    expect(String(form.field('Anthropic 端点').description)).toContain('预览：https://relay.example.com/anthropic/v1/messages；已按协议根地址补全 /v1/messages')
+    ;(form.field('Anthropic 端点').onChange as (value: string) => void)('https://relay.example.com')
+    form.render()
+
+    const discoveryButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('从供应商获取'))!
+    expect(discoveryButton.props.disabled).toBe(false)
+    ;(discoveryButton.props.onClick as () => void)()
+    await tick()
+    expect(requests[0]).toMatchObject({ runtime: 'claude', baseUrl: '', agentBaseUrl: 'https://relay.example.com' })
+
+    const testButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('测试连接'))!
+    expect(testButton.props.disabled).toBe(false)
+    await (testButton.props.onClick as () => Promise<void>)()
+    await tick()
+    expect(tests[0]).toMatchObject({ runtime: 'claude', baseUrl: '', agentBaseUrl: 'https://relay.example.com' })
+  })
+
+  test('P0-1：只勾 Pi 的 Anthropic 协议渠道由 Agent 端点支撑测试与发现，标签不与主端点重名', async () => {
+    const requests: unknown[] = []
+    const tests: unknown[] = []
+    const channel: Channel = {
+      ...fixture,
+      provider: 'anthropic-compatible',
+      baseUrl: '',
+      agentBaseUrl: 'https://relay.example.com',
+      agentRuntimes: ['pi'],
+      models: [],
+    }
+    const form = setup(channel, {
+      fetchModels: async (input: unknown) => {
+        requests.push(input)
+        return { success: true, message: 'fixture-discovery', models: [] } satisfies FetchModelsResult
+      },
+      testChannelDirect: async (input: unknown) => { tests.push(input); return { success: true, message: 'fixture-test' } },
+    })
+    await tick(); form.render()
+
+    // 主端点仍叫「Anthropic 端点」，Agent 字段必须改名，否则表单出现两个同名字段。
+    expect(form.field('Anthropic 端点').value).toBe('')
+    const agentField = form.field('Agent Anthropic 端点')
+    expect(agentField.value).toBe('https://relay.example.com')
+    expect(String(agentField.description)).toContain('预览：https://relay.example.com/v1/messages；已按协议根地址补全 /v1/messages')
+
+    const discoveryButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('从供应商获取'))!
+    expect(discoveryButton.props.disabled).toBe(false)
+    ;(discoveryButton.props.onClick as () => void)()
+    await tick()
+    // Pi 走 Anthropic 协议时目录发现必须打 Agent 端点，而不是空的 Chat 主地址。
+    expect(requests[0]).toMatchObject({ runtime: 'pi', baseUrl: '', agentBaseUrl: 'https://relay.example.com' })
+
+    const testButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('测试连接'))!
+    expect(testButton.props.disabled).toBe(false)
+    await (testButton.props.onClick as () => Promise<void>)()
+    await tick()
+    expect(tests).toHaveLength(1)
+    expect(tests[0]).toMatchObject({ runtime: 'pi', baseUrl: '', agentBaseUrl: 'https://relay.example.com' })
+  })
+
+  test('P0-1：Claude 与 Anthropic 协议的 Pi 同时勾选时，发现/测试都按 Agent 端点', async () => {
+    const requests: unknown[] = []
+    const tests: unknown[] = []
+    const channel: Channel = {
+      ...fixture,
+      provider: 'anthropic-compatible',
+      baseUrl: 'https://chat.example.com/v1',
+      agentBaseUrl: 'https://relay.example.com',
+      agentRuntimes: ['pi', 'claude'],
+      models: [],
+    }
+    const form = setup(channel, {
+      fetchModels: async (input: unknown) => {
+        requests.push(input)
+        return { success: true, message: 'fixture-discovery', models: [] } satisfies FetchModelsResult
+      },
+      testChannelDirect: async (input: unknown) => { tests.push(input); return { success: true, message: 'fixture-test' } },
+    })
+    await tick(); form.render()
+
+    const discoveryButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('从供应商获取'))!
+    ;(discoveryButton.props.onClick as () => void)()
+    await tick()
+    expect(requests[0]).toMatchObject({ runtime: 'claude', agentBaseUrl: 'https://relay.example.com' })
+
+    const testButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('测试连接'))!
+    await (testButton.props.onClick as () => Promise<void>)()
+    await tick()
+    // 两个内核消费同一个 Agent 端点，不能因为 Chat 主地址存在就改测主地址。
+    expect(tests).toHaveLength(2)
+    expect(tests.map((input) => (input as { runtime?: string }).runtime).sort()).toEqual(['claude', 'pi'])
+    for (const input of tests) expect(input).toMatchObject({ agentBaseUrl: 'https://relay.example.com' })
+  })
+
+  test('P0-1：只勾 Pi 的非 Anthropic 协议渠道仍要求主地址', async () => {
+    const channel: Channel = {
+      ...fixture,
+      provider: 'openai',
+      baseUrl: '',
+      agentBaseUrl: 'https://relay.example.com',
+      agentRuntimes: ['pi'],
+      models: [],
+    }
+    const form = setup(channel)
+    await tick(); form.render()
+
+    const discoveryButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('从供应商获取'))!
+    const testButton = form.elements().find((element) => typeof element.props.onClick === 'function' && JSON.stringify(element.props.children)?.includes('测试连接'))!
+    expect(discoveryButton.props.disabled).toBe(true)
+    expect(testButton.props.disabled).toBe(true)
+    // 非 Anthropic 协议不显示 Agent 端点字段，避免用户误以为它能替代主地址。
+    expect(form.elements().some((element) => element.props.label === 'Agent Anthropic 端点')).toBe(false)
+  })
+
+  test('P1-6：先改 Anthropic 端点再改主地址时，旧派生值不被当作显式 Agent 入口保存', async () => {
+    const channel: Channel = {
+      ...fixture,
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      // 老版本 normalize 把推导值写回了 agentBaseUrl；表单编辑过它就更容易被当成显式值。
+      agentBaseUrl: 'https://gateway.example.com/v1',
+      agentRuntimes: ['pi', 'claude'],
+    }
+    const form = setup(channel)
+    await tick(); form.render()
+    ;(form.field('Anthropic 端点').onChange as (value: string) => void)('https://gateway.example.com/v1/')
+    form.render()
+    ;(form.field('OpenAI 端点').onChange as (value: string) => void)('https://relay.example.com/v1')
+    form.render()
+
+    expect(form.field('Anthropic 端点').value).toBe('')
+    expect(await store.get(channelFormControllerAtom)!.flush()).toBe(true)
+    const patch = form.updates.at(-1) ?? {}
+    expect(patch.baseUrl).toBe('https://relay.example.com/v1')
+    expect('agentBaseUrl' in patch).toBe(false)
+  })
+
+  test('P1-6：用户填了与旧推导不同的 Agent 入口时，改主地址仍保留该显式值', async () => {
+    const channel: Channel = {
+      ...fixture,
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: '',
+      agentRuntimes: ['pi', 'claude'],
+    }
+    const form = setup(channel)
+    await tick(); form.render()
+    ;(form.field('Anthropic 端点').onChange as (value: string) => void)('https://relay.example.com/anthropic')
+    form.render()
+    ;(form.field('OpenAI 端点').onChange as (value: string) => void)('https://other.example.com/v1')
+    form.render()
+
+    expect(form.field('Anthropic 端点').value).toBe('https://relay.example.com/anthropic')
+    expect(await store.get(channelFormControllerAtom)!.flush()).toBe(true)
+    const patch = form.updates.at(-1) ?? {}
+    expect(patch.baseUrl).toBe('https://other.example.com/v1')
+    expect(patch.agentBaseUrl).toBe('https://relay.example.com/anthropic')
+  })
+
+  test('P1-6：编辑已有渠道的显式 Agent 入口，只改主地址时仍保留', async () => {
+    const channel: Channel = {
+      ...fixture,
+      provider: 'openai',
+      baseUrl: 'https://gateway.example.com/v1',
+      agentBaseUrl: 'https://relay.example.com/anthropic',
+      agentRuntimes: ['pi', 'claude'],
+    }
+    const form = setup(channel)
+    await tick(); form.render()
+    ;(form.field('OpenAI 端点').onChange as (value: string) => void)('https://other.example.com/v1')
+    form.render()
+
+    // 初始持久值本来就不同于主地址的推导值，属于显式覆盖；改主地址不能把它清掉。
+    expect(form.field('Anthropic 端点').value).toBe('https://relay.example.com/anthropic')
+    expect(await store.get(channelFormControllerAtom)!.flush()).toBe(true)
+    const patch = form.updates.at(-1) ?? {}
+    expect(patch.baseUrl).toBe('https://other.example.com/v1')
+    // 值没变，增量补丁不需要重复携带；关键是它没有被清空。
+    expect(patch.agentBaseUrl).toBeUndefined()
+  })
+
   test('F21：地址形态与渠道协议错配时预览明确提示', () => {
     const cases: Array<[string, string, string, string]> = [
       ['anthropic-compatible', 'Anthropic 端点', 'https://fixture.invalid/v1', '/v1/messages 结尾'],

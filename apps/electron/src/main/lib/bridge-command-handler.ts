@@ -8,8 +8,14 @@
  */
 
 import { BrowserWindow } from 'electron'
-import type { AgentExternalRunSource, AgentStreamPayload } from '@profer/shared'
-import { AGENT_IPC_CHANNELS, isVisibleAgentSession, resolveAgentAttachmentPrompt } from '@profer/shared'
+import type { AgentExternalRunSource, AgentRuntime, AgentStreamPayload } from '@profer/shared'
+import {
+  AGENT_IPC_CHANNELS,
+  isChannelEnabledForRuntime,
+  isVisibleAgentSession,
+  normalizeAgentRuntime,
+  resolveAgentAttachmentPrompt,
+} from '@profer/shared'
 import { createAgentSession, listAgentSessions, getAgentSessionMeta } from './agent-session-manager'
 import {
   listAgentWorkspacesByUpdatedAt,
@@ -26,6 +32,10 @@ import {
   resolveChannelByIndex,
   resolveModelByIndex,
   describeBindingModel,
+  describeAgentRuntime,
+  resolveChannelIdForRuntime,
+  resolveModelIdForChannel,
+  type RuntimeChannelSelection,
 } from './bridge-model-utils'
 
 // ===== 接口定义 =====
@@ -73,6 +83,14 @@ export interface BridgeChatBinding {
   workspaceId: string
   channelId: string
   modelId?: string
+  /**
+   * 会话使用的 Agent 内核。
+   *
+   * 可选：旧持久化数据里没有该字段，读取时按
+   * `binding.agentRuntime ?? getAgentSessionMeta(sessionId)?.agentRuntime ?? 全局设置` 回退，
+   * 避免把老会话误判成 Claude 内核。
+   */
+  agentRuntime?: AgentRuntime
 }
 
 /** Agent 回复缓冲 */
@@ -143,8 +161,13 @@ export class BridgeCommandHandler {
     if (existing) return existing
 
     const settings = getSettings()
-    const channelId = settings.agentChannelId
-    if (!channelId) return null
+    if (!settings.agentChannelId) return null
+
+    const agentRuntime = normalizeAgentRuntime(settings.agentRuntime)
+    const picked = this.pickChannelForRuntime(agentRuntime)
+    if (!picked) return null
+    const channelId = picked.channelId
+    const modelId = resolveModelIdForChannel(channelId, picked.fellBack ? undefined : settings.agentModelId)
 
     const workspaceId = this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? ''
 
@@ -152,6 +175,8 @@ export class BridgeCommandHandler {
       `${this.config.platformName}会话`,
       channelId,
       workspaceId || undefined,
+      modelId,
+      agentRuntime,
     )
 
     const binding: BridgeChatBinding = {
@@ -159,7 +184,8 @@ export class BridgeCommandHandler {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: settings.agentModelId ?? undefined,
+      modelId,
+      agentRuntime,
     }
     this.chatBindings.set(chatId, binding)
     this.sessionToChat.set(session.id, chatId)
@@ -257,6 +283,31 @@ export class BridgeCommandHandler {
     }
   }
 
+  /**
+   * 解析某个 chat 当前应使用的 Agent 内核。
+   *
+   * 顺序：binding（建会话时写入） > 会话元数据（旧 binding 无字段时推导） > 全局设置。
+   */
+  private resolveChatRuntime(binding?: BridgeChatBinding): AgentRuntime {
+    const sessionRuntime = binding ? getAgentSessionMeta(binding.sessionId)?.agentRuntime : undefined
+    return normalizeAgentRuntime(binding?.agentRuntime ?? sessionRuntime ?? getSettings().agentRuntime)
+  }
+
+  /**
+   * 为指定内核挑选建会话用的渠道。
+   *
+   * 默认渠道与内核不兼容时回退到第一个可用渠道（并在回复里说明），
+   * 避免建出「一发送就报内核不匹配」的会话。
+   */
+  private pickChannelForRuntime(agentRuntime: AgentRuntime): RuntimeChannelSelection | null {
+    return resolveChannelIdForRuntime(getSettings().agentChannelId, agentRuntime)
+  }
+
+  /** 回退到其它渠道时的提示语 */
+  private describeChannelFallback(agentRuntime: AgentRuntime): string {
+    return `⚠️ 默认渠道未启用 ${describeAgentRuntime(agentRuntime)} 内核，已自动改用其它可用渠道。可用 /model 重新选择。`
+  }
+
   // ===== 命令实现 =====
 
   private async sendHelp(chatId: string, contextData?: unknown): Promise<void> {
@@ -277,11 +328,24 @@ export class BridgeCommandHandler {
 
   private async createNewSession(chatId: string, title?: string, contextData?: unknown): Promise<void> {
     const settings = getSettings()
-    const channelId = settings.agentChannelId
-    if (!channelId) {
+    if (!settings.agentChannelId) {
       await this.send(chatId, '请先在 Profer 设置中选择 Agent 渠道。', contextData)
       return
     }
+
+    // 会话内核跟随全局设置，不能隐式退回 Claude（Pi-only 渠道会发送失败）
+    const agentRuntime = normalizeAgentRuntime(settings.agentRuntime)
+    const picked = this.pickChannelForRuntime(agentRuntime)
+    if (!picked) {
+      await this.send(
+        chatId,
+        `暂无同时启用 ${describeAgentRuntime(agentRuntime)} 内核的可用渠道，请先在 Profer 渠道设置中启用。`,
+        contextData,
+      )
+      return
+    }
+    const channelId = picked.channelId
+    const modelId = resolveModelIdForChannel(channelId, picked.fellBack ? undefined : settings.agentModelId)
 
     // 确定工作区
     const workspaceId = this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? ''
@@ -290,6 +354,8 @@ export class BridgeCommandHandler {
       title || '新会话',
       channelId,
       workspaceId || undefined,
+      modelId,
+      agentRuntime,
     )
 
     // 清理旧绑定
@@ -303,7 +369,8 @@ export class BridgeCommandHandler {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: settings.agentModelId ?? undefined,
+      modelId,
+      agentRuntime,
     }
     this.chatBindings.set(chatId, binding)
     this.sessionToChat.set(session.id, chatId)
@@ -311,7 +378,12 @@ export class BridgeCommandHandler {
     // 通知渲染进程刷新会话列表
     this.notifySessionCreated(session.id, session.title)
 
-    await this.send(chatId, `✅ 已创建 Agent 会话: ${session.title} (${session.id.slice(0, 8)})`, contextData)
+    const fallbackNotice = picked.fellBack ? `\n${this.describeChannelFallback(agentRuntime)}` : ''
+    await this.send(
+      chatId,
+      `✅ 已创建 Agent 会话: ${session.title} (${session.id.slice(0, 8)})${fallbackNotice}`,
+      contextData,
+    )
   }
 
   private async handleListCommand(chatId: string, contextData?: unknown): Promise<void> {
@@ -396,17 +468,40 @@ export class BridgeCommandHandler {
       this.sessionToChat.delete(oldBinding.sessionId)
     }
 
+    // 会话内核以会话元数据为准（切换到的会话可能本来就是 Pi 会话）
+    const agentRuntime = normalizeAgentRuntime(match.agentRuntime ?? settings.agentRuntime)
+    // 会话历史渠道可能未启用该内核，此时回退到第一个可用渠道，避免切过去就发送失败
+    const preferredChannelId = match.channelId ?? settings.agentChannelId ?? ''
+    const picked = preferredChannelId
+      ? resolveChannelIdForRuntime(preferredChannelId, agentRuntime)
+      : null
+    if (!picked) {
+      await this.send(
+        chatId,
+        `会话「${match.title}」使用 ${describeAgentRuntime(agentRuntime)} 内核，但暂无同时启用该内核的可用渠道，请先在 Profer 渠道设置中启用。`,
+        contextData,
+      )
+      return
+    }
+
     const binding: BridgeChatBinding = {
       chatId,
       sessionId: match.id,
       workspaceId: match.workspaceId ?? this.config.getDefaultWorkspaceId?.() ?? settings.agentWorkspaceId ?? '',
-      channelId: match.channelId ?? settings.agentChannelId ?? '',
-      modelId: settings.agentModelId ?? undefined,
+      channelId: picked.channelId,
+      // 优先保留目标会话自己的模型；不属于回退渠道时取该渠道第一个启用模型。
+      modelId: resolveModelIdForChannel(picked.channelId, match.modelId ?? settings.agentModelId),
+      agentRuntime,
     }
     this.chatBindings.set(chatId, binding)
     this.sessionToChat.set(match.id, chatId)
 
-    await this.send(chatId, `✅ 已切换到会话: ${match.title} (${match.id.slice(0, 8)})`, contextData)
+    const fallbackNotice = picked.fellBack ? `\n${this.describeChannelFallback(agentRuntime)}` : ''
+    await this.send(
+      chatId,
+      `✅ 已切换到会话: ${match.title} (${match.id.slice(0, 8)})${fallbackNotice}`,
+      contextData,
+    )
   }
 
   private async handleWorkspaceCommand(chatId: string, arg?: string, contextData?: unknown): Promise<void> {
@@ -491,6 +586,7 @@ export class BridgeCommandHandler {
       const effModelId = binding.modelId ?? nowSettings.agentModelId
       const modelInfo = describeBindingModel(effChannelId, effModelId)
       lines.push(`模型: ${modelInfo.channelName} / ${modelInfo.modelName}${modelInfo.valid ? '' : '（已失效）'}`)
+      lines.push(`内核: ${describeAgentRuntime(this.resolveChatRuntime(binding))}`)
     } else {
       lines.push('会话: 未绑定（发送消息将自动创建）')
     }
@@ -566,11 +662,15 @@ export class BridgeCommandHandler {
    * - /model <渠道> <模型> 切换到该渠道的该模型
    */
   private async handleModelCommand(chatId: string, arg: string, contextData?: unknown): Promise<void> {
-    const channels = listSwitchableChannels()
+    const binding = this.chatBindings.get(chatId)
+    // 渠道列表必须按当前会话内核过滤：否则会把 Pi 会话切到只勾了 Claude 的渠道
+    const agentRuntime = this.resolveChatRuntime(binding)
+    const runtimeLabel = describeAgentRuntime(agentRuntime)
+    const channels = listSwitchableChannels(agentRuntime)
     if (channels.length === 0) {
       await this.send(
         chatId,
-        '暂无可用渠道。请先在 Profer 设置中配置并启用渠道（需填入 API Key 且至少启用一个模型）。',
+        `当前会话使用 ${runtimeLabel} 内核，暂无同时启用该内核的可用渠道。请先在 Profer 设置中配置并启用渠道（需填入 API Key、至少启用一个模型，并勾选 ${runtimeLabel} 内核）。`,
         contextData,
       )
       return
@@ -580,8 +680,7 @@ export class BridgeCommandHandler {
 
     // /model — 列出渠道
     if (parts.length === 0) {
-      const binding = this.chatBindings.get(chatId)
-      const lines = ['📡 可用渠道:']
+      const lines = [`📡 可用渠道（当前内核: ${runtimeLabel}）:`]
       channels.forEach((c, i) => {
         const marker = binding?.channelId === c.id ? ' ← 当前' : ''
         lines.push(`  ${i + 1}. ${c.name}（${getEnabledModels(c).length} 个模型）${marker}`)
@@ -592,11 +691,25 @@ export class BridgeCommandHandler {
       return
     }
 
-    // 解析渠道
+    // 解析渠道（序号基于上面已过滤的列表，与用户看到的一致）
     const channelIdx = Number(parts[0])
-    const channel = resolveChannelByIndex(channelIdx)
+    const channel = resolveChannelByIndex(channelIdx, agentRuntime)
     if (!channel) {
-      await this.send(chatId, `未找到渠道 "${parts[0]}"。使用 /model 查看可用渠道。`, contextData)
+      await this.send(
+        chatId,
+        `未找到渠道 "${parts[0]}"（当前内核: ${runtimeLabel}）。使用 /model 查看可用渠道。`,
+        contextData,
+      )
+      return
+    }
+
+    // 防御：列表与切换之间渠道配置可能被改，明确拒绝而不是静默失败
+    if (!isChannelEnabledForRuntime(channel, agentRuntime)) {
+      await this.send(
+        chatId,
+        `渠道「${channel.name}」未启用 ${runtimeLabel} 内核，无法用于当前会话。请选择其它渠道，或在 Profer 渠道设置中启用 ${runtimeLabel} 内核。`,
+        contextData,
+      )
       return
     }
 
@@ -604,7 +717,6 @@ export class BridgeCommandHandler {
 
     // /model <渠道> — 列出该渠道模型
     if (parts.length === 1) {
-      const binding = this.chatBindings.get(chatId)
       const lines = [`🤖 ${channel.name} 的可用模型:`]
       models.forEach((m, i) => {
         const isCurrent = binding?.channelId === channel.id && binding?.modelId === m.id
@@ -629,17 +741,17 @@ export class BridgeCommandHandler {
     }
 
     // 切换需要一个 binding 承载；没有则自动创建
-    let binding = this.chatBindings.get(chatId)
-    if (!binding) {
-      binding = this.ensureBinding(chatId) ?? undefined
-      if (!binding) {
+    let targetBinding = this.chatBindings.get(chatId)
+    if (!targetBinding) {
+      targetBinding = this.ensureBinding(chatId) ?? undefined
+      if (!targetBinding) {
         await this.send(chatId, '请先发送一条消息创建会话，或在 Profer 设置中选择 Agent 渠道。', contextData)
         return
       }
     }
 
-    binding.channelId = channel.id
-    binding.modelId = model.id
+    targetBinding.channelId = channel.id
+    targetBinding.modelId = model.id
 
     await this.send(
       chatId,
@@ -698,8 +810,22 @@ export class BridgeCommandHandler {
 
     // 渠道/模型解析：binding（per-chat 用户在 IM 里切过的）优先，其次全局设置
     const latestSettings = getSettings()
-    const latestChannelId = binding.channelId || latestSettings.agentChannelId || ''
-    const modelId = binding.modelId ?? latestSettings.agentModelId
+    const agentRuntime = this.resolveChatRuntime(binding)
+    const preferredChannelId = binding.channelId || latestSettings.agentChannelId || ''
+    // 旧 binding 可能指向未启用当前内核的渠道；不兼容时回退到可用渠道，避免发送阶段才报错
+    const picked = preferredChannelId
+      ? resolveChannelIdForRuntime(preferredChannelId, agentRuntime)
+      : null
+    if (picked?.fellBack) {
+      this.log(`渠道 ${preferredChannelId} 未启用 ${describeAgentRuntime(agentRuntime)} 内核，本次发送改用 ${picked.channelId}`)
+    }
+    const latestChannelId = picked?.channelId ?? preferredChannelId
+    // 回退到其它渠道时，binding/全局模型往往不属于新渠道；必须按新渠道重新选一个，
+    // 否则 orchestrator 会回落到默认模型（claude-sonnet-4-6），与渠道能力不匹配。
+    const modelId = resolveModelIdForChannel(
+      latestChannelId,
+      binding.modelId ?? latestSettings.agentModelId,
+    )
 
     // 如果有附件，拼接 <attached_files> 块到用户消息前
     const fileReferences = attachments?.length

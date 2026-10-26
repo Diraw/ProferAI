@@ -1811,19 +1811,46 @@
   height: 0;
 }
 
-/* 左侧会话/项目列表：默认不露出滚动条，鼠标进入列表后才显示，仍支持滚轮和触控板滚动。 */
+/* 左侧会话/项目列表：默认不露出滚动条，鼠标进入列表后才显示，仍支持滚轮和触控板滚动。
+ *
+ * 必须把 scrollbar-width/color 交回 auto（同上方对话区）：一旦设成 thin，Chromium
+ * 走 Fluent overlay 滚动条——不占布局空间、直接画在会话行右侧，且 ::-webkit-scrollbar
+ * 的宽度被忽略（列表里原本那行 `width: 6px` 从来没生效）。
+ *
+ * 占位槽位不能留在列表内边缘，否则 6px 会从内容里扣、行右边缘整体左移。
+ * 用 margin-right 把容器伸进侧栏自身 px-2.5 的右侧留白，padding-right 只留 2px 作
+ * 行与滚动条的间隔：内容宽度仍是 281px（行、悬停底、操作按钮位置都不动），
+ * 6px 滚动条落在留白里，距侧栏边缘 2px。改留白/条宽时这两个数字要一起调。
+ * scrollbar-gutter: stable 让槽位常驻，列表从「不满」变「可滚」时内容不左右跳。 */
 .sidebar-session-scroll {
-  scrollbar-width: none;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+  scrollbar-gutter: stable;
+  margin-right: -8px;
+  padding-right: 2px;
   -ms-overflow-style: none;
 }
-.sidebar-session-scroll::-webkit-scrollbar {
-  width: 0;
-}
 .sidebar-session-scroll:hover {
-  scrollbar-width: thin;
+  /* 覆盖全局 `*:hover` 的 scrollbar-color 加深规则：保持 auto，否则又回 overlay。 */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
 }
-.sidebar-session-scroll:hover::-webkit-scrollbar {
+.sidebar-session-scroll::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
+}
+.sidebar-session-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-session-scroll::-webkit-scrollbar-thumb {
+  background-color: transparent;
+}
+.sidebar-session-scroll:hover::-webkit-scrollbar-thumb {
+  /* 与对话区滚动时的 0.45 对齐；旧 overlay 条实际约 0.5，别调太淡。 */
+  background-color: hsl(var(--muted-foreground) / 0.45);
+}
+.sidebar-session-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--muted-foreground) / 0.5);
 }
 
 /* ===== 面板分隔拖动条 =====

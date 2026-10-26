@@ -571,6 +571,47 @@ describe('Pi runtime DeepSeek 双协议端点判定', () => {
   })
 })
 
+describe('Pi runtime Claude adaptive thinking metadata', () => {
+  test('Given Claude Haiku 5.5 on an Anthropic channel When registered Then forces adaptive thinking and omits disabled thinking', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-claude-haiku-5-5',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'anthropic',
+      baseUrl: 'https://www.anzhiyu.com/',
+      model: 'claude-haiku-5-5',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.api).toBe('anthropic-messages')
+    expect(result.model.compat).toMatchObject({ forceAdaptiveThinking: true })
+    // off=null 让 Pi 省略 thinking 字段，而不是发送这些模型不接受的 disabled。
+    expect(result.model.thinkingLevelMap).toMatchObject({ off: null, low: 'low', high: 'high', max: 'max' })
+  })
+
+  test('Given Claude Haiku 4.5 When registered Then keeps the legacy manual thinking path', async () => {
+    const sdk = await import('@earendil-works/pi-coding-agent')
+    const result = await buildModel(sdk, {
+      sessionId: 'session-claude-haiku-4-5',
+      prompt: 'hi',
+      apiKey: 'sk-test',
+      provider: 'anthropic',
+      baseUrl: 'https://www.anzhiyu.com/',
+      model: 'claude-haiku-4-5',
+      permissionMode: 'plan',
+      systemPrompt: 'system',
+      piAgentDir: '/tmp/pi-agent',
+      piSessionDir: '/tmp/pi-session',
+    })
+
+    expect(result.model.compat ?? {}).not.toMatchObject({ forceAdaptiveThinking: true })
+  })
+})
+
 describe('Pi runtime GLM-5.3 fallback and reasoning metadata', () => {
   test('Given GLM-5.3 is absent from the Pi catalog When registered for Zhipu Then preserves 1M context, 128K output, and official thinking toggle', async () => {
     const sdk = await import('@earendil-works/pi-coding-agent')

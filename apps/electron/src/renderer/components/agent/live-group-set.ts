@@ -31,7 +31,7 @@ export function buildLiveGroupSet({
       continue
     }
 
-    // assistant-turn 可能被 mergeAdjacentSameModelTurns 合并，
+    // assistant-turn 可能被 mergeAdjacentTurns 合并，
     // 需检查任意一条 assistantMessage 是否来自实时流。
     if (group.assistantMessages.some((message) => liveSet.has(message as SDKMessage))) {
       result.add(group)

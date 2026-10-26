@@ -7,7 +7,7 @@
  */
 
 const { spawnSync } = require('node:child_process')
-const { mkdirSync } = require('node:fs')
+const { existsSync, mkdirSync, statSync } = require('node:fs')
 const { join } = require('node:path')
 
 if (process.platform !== 'darwin') {
@@ -20,6 +20,15 @@ const source = join(root, 'resources', 'pen-ocr', 'PenOcr.swift')
 const output = join(root, 'resources', 'bin', 'pen-ocr')
 
 mkdirSync(join(root, 'resources', 'bin'), { recursive: true })
+
+// 源码没变就不重编译。
+// macOS 上「新出现的未签名二进制」第一次执行会被系统安全扫描，实测要 30s 左右；
+// 每次 dev 启动都重编译，就等于每次首识别都要等半分钟。
+const force = process.argv.includes('--force')
+if (!force && existsSync(output) && statSync(output).mtimeMs > statSync(source).mtimeMs) {
+  console.log('[pen-ocr] 已是最新，跳过编译')
+  process.exit(0)
+}
 
 const result = spawnSync(
   'swiftc',

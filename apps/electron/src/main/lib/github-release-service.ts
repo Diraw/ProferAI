@@ -18,6 +18,14 @@ const GITHUB_REPO = {
   repo: 'ProferAI',
 }
 
+/**
+ * GitHub API 单次请求上限。
+ *
+ * 裸 `fetch` 没有默认超时，代理半开或连接后不返回数据时同样会永久挂起。
+ * 开发版检查更新、版本历史都走这里，挂死就会表现为界面一直转圈。
+ */
+const GITHUB_FETCH_TIMEOUT_MS = 10_000
+
 /** Release 缓存 */
 interface ReleaseCache {
   data: GitHubRelease[]
@@ -56,6 +64,7 @@ async function fetchFromGitHub<T>(endpoint: string): Promise<T> {
       'Accept': 'application/vnd.github+json',
       'User-Agent': 'Profer-Desktop-App',
     },
+    signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
   })
 
   if (response.status === 403 || response.status === 429) {

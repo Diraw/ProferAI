@@ -28,6 +28,7 @@ import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_URLS, extractZhipuCodingTeamApi
 import { getFetchFn } from './proxy-fetch'
 import { getEffectiveProxyUrl } from './proxy-settings-service'
 import { assertSdkBaseUrlSupportsRouting, isAnthropicShapedEndpoint, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveAnthropicModelsUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl, resolveOpenAIModelsUrl, getProferUserAgent } from '@profer/core'
+import type { AnthropicEndpointMode } from '@profer/core'
 import { parseMiniMaxGeneralQuotaWindows } from './channel-plan-quota-parsers'
 import { parseCodexPlanQuotaResponse } from './codex-plan-quota'
 import { loginCodexOAuth, refreshCodexOAuth } from './codex-oauth-service'
@@ -1044,6 +1045,9 @@ export async function testChannel(channelId: string): Promise<ChannelTestResult>
  *
  * 未指定模型时只校验目录；指定模型时调用真实的 Messages 端点。
  * Kimi Coding Plan 必须发送 Profer User-Agent，否则返回 403。
+ *
+ * `endpointMode` 决定端点推导语义（见 core 的 resolveAnthropicProtocolUrl）：
+ * Chat 直连用 `chat`，Claude/Pi 运行时（SDK 自行拼 /v1/messages）必须用 `sdk`。
  */
 async function testAnthropicCompatible(
   baseUrl: string,
@@ -1052,11 +1056,12 @@ async function testAnthropicCompatible(
   provider: ProviderType = 'anthropic',
   modelId?: string,
   signal?: AbortSignal,
+  endpointMode: AnthropicEndpointMode = 'chat',
 ): Promise<ChannelTestResult> {
   if (!modelId?.trim()) {
     const result = provider === 'ollama'
       ? await fetchOllamaModels(baseUrl, apiKey, proxyUrl, signal)
-      : await fetchAnthropicCompatibleModels(baseUrl, apiKey, proxyUrl, provider, signal)
+      : await fetchAnthropicCompatibleModels(baseUrl, apiKey, proxyUrl, provider, signal, endpointMode)
     return { success: result.success, message: result.success ? '模型目录可达（未验证模型生成）' : result.message }
   }
   const fetchFn = getFetchFn(proxyUrl)
@@ -1081,7 +1086,7 @@ async function testAnthropicCompatible(
     headers.Authorization = `Bearer ${apiKey}`
   }
 
-  const endpoint = resolveAnthropicMessagesUrl(baseUrl, provider)
+  const endpoint = resolveAnthropicMessagesUrl(baseUrl, provider, endpointMode)
   const response = await fetchFn(endpoint, withTimeout({
     signal,
     method: 'POST',
@@ -1712,6 +1717,25 @@ export async function getChannelPlanQuota(channelId: string): Promise<import('@p
 // ===== 直接测试连接 =====
 
 /**
+ * Agent 测试/发现必须使用运行时真正消费的 Base URL（与 agent-runtime-credentials 对齐）。
+ *
+ * Claude 恒用 inferAgentBaseUrl；Pi 只有 Anthropic 协议渠道才吃 agentBaseUrl，
+ * 其余协议直接用原生 Base URL。
+ */
+function resolveAgentRuntimeBaseUrl(input: FetchModelsInput): string | undefined {
+  if (input.runtime === 'claude') return inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+  return resolveProviderNativeProtocol(input.provider, input.baseUrl, input.apiProtocol) === 'anthropic-messages'
+    ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
+    : input.baseUrl
+}
+
+/** Pi 运行时是否走 Anthropic 协议（决定是否吃 agentBaseUrl、是否拼 /v1/messages）。 */
+function piUsesAnthropicProtocol(input: FetchModelsInput): boolean {
+  return input.runtime === 'pi'
+    && resolveProviderNativeProtocol(input.provider, input.baseUrl, input.apiProtocol) === 'anthropic-messages'
+}
+
+/**
  * 直接测试连接（无需已保存渠道）
  *
  * 使用传入的明文凭证直接向提供商发送测试请求。
@@ -1724,14 +1748,10 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
     // 测试地址必须与运行时实际消费的派生地址一致（resolveRuntimeBaseUrl 的分派）：
     // Claude 用 inferAgentBaseUrl；Pi 对 Anthropic 协议渠道也吃 agentBaseUrl，
     // 不能只用 input.baseUrl——否则「测试通过 ≠ Agent 可用」。
+    const agentRuntimeUrl = input.runtime ? resolveAgentRuntimeBaseUrl(input) : undefined
     if (input.runtime) {
-      const runtimeUrl = input.runtime === 'claude'
-        ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
-        : resolveProviderNativeProtocol(input.provider, input.baseUrl, input.apiProtocol) === 'anthropic-messages'
-          ? inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
-          : input.baseUrl
       try {
-        if (runtimeUrl) assertSdkBaseUrlSupportsRouting(runtimeUrl)
+        if (agentRuntimeUrl) assertSdkBaseUrlSupportsRouting(agentRuntimeUrl)
       } catch (error) {
         return { success: false, message: error instanceof Error ? error.message : 'Agent SDK 端点无效' }
       }
@@ -1745,17 +1765,39 @@ export async function testChannelDirect(input: FetchModelsInput, signal?: AbortS
       if (input.provider === 'xai' || input.provider === 'openai-codex') {
         return { success: false, message: '此供应商不支持 Claude 内核测试' }
       }
-      const agentUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
-      if (!agentUrl) return { success: false, message: '未配置 Claude 端点' }
-      const provider = claudeProtocolProvider(input.provider)
-      const result = await testAnthropicCompatible(agentUrl, input.apiKey, proxyUrl, provider, input.modelId, signal)
+      if (!agentRuntimeUrl) return { success: false, message: '未配置 Claude 端点' }
+      // 与 Claude SDK 的实际请求地址对齐：SDK 把 ANTHROPIC_BASE_URL 规范化后自行拼 /v1/messages，
+      // 不能用 Chat 的 /messages 推导（否则 /anthropic 这类路径会测到不存在的端点）。
+      const result = await testAnthropicCompatible(
+        agentRuntimeUrl,
+        input.apiKey,
+        proxyUrl,
+        claudeProtocolProvider(input.provider),
+        input.modelId,
+        signal,
+        'sdk',
+      )
       return { ...result, message: `Claude 端点：${result.message}` }
+    }
+    // Pi 的 Anthropic 协议渠道同理：Pi 的 SDK 也自行拼 /v1/messages，
+    // 测试必须打同一地址，否则「Chat 能用、Agent 404」这类漂移无法被发现。
+    if (piUsesAnthropicProtocol(input)) {
+      if (!agentRuntimeUrl) return { success: false, message: '未配置 Agent 端点' }
+      return await testAnthropicCompatible(
+        agentRuntimeUrl,
+        input.apiKey,
+        proxyUrl,
+        input.provider,
+        input.modelId,
+        signal,
+        'sdk',
+      )
     }
     if (input.provider === 'deepseek' && isAnthropicShapedEndpoint(input.baseUrl)) {
       return await testAnthropicCompatible(input.baseUrl, input.apiKey, proxyUrl, input.provider, input.modelId, signal)
     }
-    // 远程 Ollama 的 Pi runtime 使用 OpenAI Chat Completions；本机 Ollama 保留
-    // 现有 Anthropic 兼容测试路径，避免把本机 Agent sentinel 当成网络协议。
+    // 远程 Ollama 的 Pi runtime 使用 OpenAI Chat Completions；本机 Ollama 已在上面按
+    // Anthropic 协议（Pi）或下面的 Chat 路径处理，避免把本机 Agent sentinel 当成网络协议。
     const directAdapterKind = input.provider === 'ollama' && input.runtime === 'pi' && !isLocalOllamaBaseUrl(input.baseUrl)
       ? 'openai'
       : input.provider === 'ollama' ? 'anthropic' : resolveChatAdapterKind(input.provider)
@@ -1802,7 +1844,24 @@ export async function fetchModels(input: FetchModelsInput, signal?: AbortSignal)
       }
       const claudeUrl = inferAgentBaseUrl(input.provider, input.baseUrl, input.agentBaseUrl)
       if (!claudeUrl) return { success: false, message: '未配置 Claude 端点', models: [] }
-      return await fetchAnthropicCompatibleModels(claudeUrl, input.apiKey, proxyUrl, claudeProtocolProvider(input.provider), signal)
+      // SDK 自行拼接 /v1/models，目录发现必须与 Claude 实际请求地址一致。
+      return await fetchAnthropicCompatibleModels(
+        claudeUrl,
+        input.apiKey,
+        proxyUrl,
+        claudeProtocolProvider(input.provider),
+        signal,
+        'sdk',
+      )
+    }
+    // Pi 的 Anthropic 协议渠道：Pi SDK 同样自行拼 /v1/messages、/v1/models，
+    // 目录发现不能走 Chat 的 /models 语义。
+    // 本机 Ollama 例外：它虽然有 Anthropic 兼容的 /v1/messages，但模型目录仍以
+    // 原生 /api/tags 为准；不要因为 Agent 协议是 Anthropic 就把目录切到 /v1/models。
+    if (piUsesAnthropicProtocol(input) && input.provider !== 'ollama') {
+      const piUrl = resolveAgentRuntimeBaseUrl(input)
+      if (!piUrl) return { success: false, message: '未配置 Agent 端点', models: [] }
+      return await fetchAnthropicCompatibleModels(piUrl, input.apiKey, proxyUrl, input.provider, signal, 'sdk')
     }
     switch (resolveChatAdapterKind(input.provider)) {
       case 'anthropic':
@@ -1916,8 +1975,9 @@ async function fetchAnthropicCompatibleModels(
   proxyUrl?: string,
   provider: ProviderType = 'anthropic',
   signal?: AbortSignal,
+  endpointMode: AnthropicEndpointMode = 'chat',
 ): Promise<FetchModelsResult> {
-  const url = new URL(resolveAnthropicModelsUrl(baseUrl, provider))
+  const url = new URL(resolveAnthropicModelsUrl(baseUrl, provider, endpointMode))
   const fetchFn = getFetchFn(proxyUrl)
 
   const headers: Record<string, string> = {

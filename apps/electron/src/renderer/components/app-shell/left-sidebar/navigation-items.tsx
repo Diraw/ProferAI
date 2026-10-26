@@ -48,7 +48,8 @@ export function renderWorkspaceSortIcon(mode: WorkspaceSortMode): React.ReactEle
  * 主区 p-2（8）+ TabBar 内容行偏移（1）+ 内容行高度（37）= 46。
  * 用「标签本体」而不是 40px 外框的底边（48）：视觉上对的是那颗 Tab 的下沿，
  * 外框底部还有 2px 的留白 gutter，对齐它反而会多出 2px 缝。
- * 平台无关：macOS 与 Windows 的 TabBar 几何一致。
+ * macOS 与 Windows 的 TabBar 几何一致，但这个值只在 macOS 生效：Windows 顶部没有
+ * 红绿灯，侧栏不需要给顶栏让位，LeftSidebar 会直接取 0（见那里的说明）。
  */
 export const SIDEBAR_PANEL_TOP = 8 + TOPBAR_CONTENT_OFFSET + TOPBAR_CONTENT_HEIGHT
 
@@ -62,14 +63,14 @@ export const SIDEBAR_ROW_GAP = 7
 /**
  * rail 图标列的顶部留白。
  *
- * ModeSwitcher 的 pt-2（8px）+ 轨道 40px 是列表表头；rail 按钮 34px，
- * 取 8 + (40 - 34) / 2 = 11，让第一个图标与分段控件光学居中在同一条带上。
+ * ModeSwitcher 的 pt-2（8px）+ 轨道 40px 是列表表头；rail 按钮 36px，
+ * 取 8 + (40 - 36) / 2 = 10，让第一个图标与分段控件光学居中在同一条带上。
  */
-export const SIDEBAR_HEADER_INSET = 11
+export const SIDEBAR_HEADER_INSET = 10
 
-/** rail 图标按钮：34×34、圆角 9、间距 3；不用描边和阴影 */
+/** rail 图标按钮：36×36、圆角 9、间距 3；不用描边和阴影 */
 export const RAIL_BUTTON_CLASS =
-  'relative flex size-[34px] flex-none items-center justify-center rounded-[9px] transition-colors duration-100 titlebar-no-drag focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
+  'relative flex size-[36px] flex-none items-center justify-center rounded-[9px] transition-colors duration-100 titlebar-no-drag focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
 export const RAIL_BUTTON_ACTIVE_CLASS = 'bg-foreground/[0.085] text-foreground'
 export const RAIL_BUTTON_IDLE_CLASS =
   'text-foreground/[0.58] hover:bg-foreground/[0.045] hover:text-foreground/[0.82]'
@@ -120,14 +121,14 @@ export function SidebarRailEntry({
           {active && (
             <span
               aria-hidden="true"
-              className="absolute -left-[7px] top-[10px] h-[14px] w-[2px] rounded-[2px] bg-primary"
+              className="absolute -left-[7px] top-[11px] h-[14px] w-[2px] rounded-[2px] bg-primary"
             />
           )}
           {icon}
           {dot && (
             <span
               aria-hidden="true"
-              className="absolute right-[7px] top-[7px] size-[5px] rounded-full bg-primary"
+              className="absolute right-[8px] top-[8px] size-[5px] rounded-full bg-primary"
             />
           )}
         </button>

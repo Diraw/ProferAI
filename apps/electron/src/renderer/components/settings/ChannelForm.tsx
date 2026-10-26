@@ -52,7 +52,7 @@ import type {
   ProviderType,
   XaiApiProtocol,
 } from '@profer/shared'
-import { isAnthropicShapedEndpoint, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl } from '@profer/core'
+import { inferAgentBaseUrl, isAnthropicShapedEndpoint, normalizeBaseUrl, normalizeGoogleBaseUrl, resolveAnthropicMessagesUrl, resolveOpenAIChatCompletionsUrl, resolveOpenAIResponsesUrl } from '@profer/core'
 import { getProviderLogo } from '@/lib/model-logo'
 import { applyModelDiscoveryResult, buildModelDiscoveryAttemptKey, shouldAutoDiscoverModels } from '@/lib/channel-model-discovery'
 import { addManualModel } from '@/lib/channel-manual-model'
@@ -117,6 +117,11 @@ const PROVIDER_CHAT_PATHS: Record<ProviderType, string> = Object.fromEntries(
 const ANTHROPIC_PROTOCOL_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>(
   (Object.keys(PROVIDER_CAPABILITIES) as ProviderType[]).filter((p) => PROVIDER_CAPABILITIES[p].chatProtocol === 'anthropic'),
 )
+
+/** 两个端点是否等价：只忽略首尾空白与末尾斜杠，不做路径猜测。 */
+function isSameEndpoint(left: string, right: string): boolean {
+  return normalizeBaseUrl(left) === normalizeBaseUrl(right)
+}
 
 /** 根据 Ollama 地址提示请求是否会离开本机。 */
 function getOllamaNetworkScope(baseUrl: string): string {
@@ -186,6 +191,42 @@ function buildPreviewUrl(baseUrl: string, provider: ProviderType, xaiApiProtocol
   if (provider === 'openai-responses') return resolveOpenAIResponsesUrl(baseUrl, provider)
   if (provider === 'google') return `${normalizeGoogleBaseUrl(trimmed)}${PROVIDER_CHAT_PATHS[provider]}`
   return resolveOpenAIChatCompletionsUrl(baseUrl, provider)
+}
+
+/**
+ * 生成 Claude / Anthropic 协议端点预览。
+ *
+ * 与 OpenAI 端点预览同构：必须显示运行时实际请求的完整地址和自动补全的尾缀，
+ * 否则用户只能靠猜判断自己填的是协议根地址还是完整端点。
+ */
+function buildAnthropicPreviewUrl(endpoint: string, provider: ProviderType): string {
+  const trimmed = endpoint.trim().replace(/\/+$/, '')
+  if (!trimmed) return ''
+  // 与 Claude/Pi 的 Anthropic 协议路径共用同一份 SDK 推导：SDK 会自行拼接 /v1/messages，
+  // 因此预览必须展示「规范化根地址 + /v1/messages」，不能按 Chat 的 /messages 推导。
+  let resolved: string
+  try {
+    resolved = resolveAnthropicMessagesUrl(trimmed, provider, 'sdk')
+  } catch (error) {
+    // 不回显地址：query 中可能带路由凭据，与 assertSdkBaseUrlSupportsRouting 的约束一致。
+    return error instanceof Error ? error.message : '该地址不能用于 Agent SDK'
+  }
+  if (resolved === trimmed) return `${resolved}；按原地址请求，请确认它是完整请求端点`
+  const suffix = appendedPathSuffix(trimmed, resolved)
+  return suffix
+    ? `${resolved}；已按协议根地址补全 ${suffix}`
+    : `${resolved}；已自动补全请求路径`
+}
+
+/** 取出 resolved 相对 source 自动追加的 path 尾缀；含 query/hash 等无法安全比较时返回空串。 */
+function appendedPathSuffix(source: string, resolved: string): string {
+  try {
+    const before = new URL(source).pathname.replace(/\/+$/, '')
+    const after = new URL(resolved).pathname.replace(/\/+$/, '')
+    return after.startsWith(before) ? after.slice(before.length) : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -300,8 +341,19 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const [oauthConfigured, setOauthConfigured] = React.useState(channel?.provider === 'xai' && channel.credentialMode === 'oauth')
   const [agentExperimentalEnabled, setAgentExperimentalEnabled] = React.useState(channel?.provider === 'xai' && (channel.agentRuntimes ?? inferAgentRuntimeModes(channel)).includes('pi'))
   const [agentBaseUrl, setAgentBaseUrl] = React.useState(channel?.agentBaseUrl ?? '')
-  /** 用户是否手改过 Anthropic 端点；未改过就不回传，交给主进程按 OpenAI 端点推导。 */
-  const agentBaseUrlEditedRef = React.useRef(false)
+  /**
+   * 用户是否显式指定过 Anthropic 端点；未显式指定就不回传，交给主进程按主地址推导。
+   *
+   * 编辑已有渠道时，如果持久化的 agentBaseUrl 与当前主地址的推导值不同，它本身就是
+   * 用户/服务端的显式覆盖，必须视为已编辑；否则改主地址会把它误清空。
+   */
+  const agentBaseUrlEditedRef = React.useRef(
+    Boolean(channel?.agentBaseUrl?.trim())
+      && !isSameEndpoint(
+        channel!.agentBaseUrl!.trim(),
+        inferAgentBaseUrl(channel!.provider, channel!.baseUrl, undefined) ?? '',
+      ),
+  )
   /**
    * Agent 内核勾选。可用性由用户决定，不再按渠道类型加门禁。
    * 老配置没有该字段时，按 provider 规则推导出初值（与迁移逻辑一致）。
@@ -331,12 +383,45 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
   const piConsumesAnthropicEndpoint = piEnabled && resolveProviderNativeProtocol(provider, baseUrl) === 'anthropic-messages'
   const showOpenAIEndpoint = piEnabled || !claudeEnabled
   const showAnthropicEndpoint = claudeEnabled || piConsumesAnthropicEndpoint
+  // Agent 端点就绪判定：Claude 与「Anthropic 协议的 Pi」都吃 Anthropic/Agent 端点，
+  // 与主进程 resolveAgentRuntimeBaseUrl 同规则；不能再用空的 baseUrl 一刀切拦住它们。
+  const claudeEndpoint = inferAgentBaseUrl(provider, baseUrl, agentBaseUrl)
+  const claudeEndpointReady = Boolean(claudeEndpoint?.trim())
+  const claudeOnly = claudeEnabled && !piEnabled
+  /** 单个内核真正消费的端点是否就绪：Claude / Anthropic 协议 Pi 看 Agent 端点，其余看主地址。 */
+  const runtimeEndpointReady = (runtime?: AgentRuntimeMode): boolean => {
+    if (runtime === 'claude') return claudeEndpointReady
+    if (runtime === 'pi') return piConsumesAnthropicEndpoint ? claudeEndpointReady : Boolean(baseUrl.trim())
+    return Boolean(baseUrl.trim())
+  }
+  /**
+   * 模型发现只发一次请求，按「谁消费这个端点」选运行时：
+   * - 只勾 Claude → Claude 的 Agent 端点（与只勾 Claude 的历史行为一致）
+   * - Pi 走 Anthropic 协议（含与 Claude 同时勾选）→ Agent 端点；同时勾选时 Claude/Pi 同址，
+   *   沿用 Claude 探测，避免改变混合渠道的目录来源
+   * - 其余（OpenAI 协议的 Pi / 仅 Chat）→ 主地址
+   */
+  const discoveryRuntime: AgentRuntimeMode | undefined = claudeOnly
+    ? 'claude'
+    : piConsumesAnthropicEndpoint ? (claudeEnabled ? 'claude' : 'pi') : undefined
+  /** 目录请求与自动发现去重键使用的地址：Agent 运行时用推导后的 Agent 端点，否则用主地址。 */
+  const discoveryBaseUrl = discoveryRuntime ? claudeEndpoint ?? '' : baseUrl
+  const discoveryEndpointReady = runtimeEndpointReady(discoveryRuntime)
+  const testEndpointReady = agentRuntimes.length
+    ? agentRuntimes.some((runtime) => runtimeEndpointReady(runtime))
+    : Boolean(baseUrl.trim())
+  const claudeEndpointPreview = claudeEndpoint ? buildAnthropicPreviewUrl(claudeEndpoint, provider) : ''
   // 端点字段标签按协议语义动态化，不再固定叫「OpenAI 端点」：Anthropic 协议渠道
   // 的主地址其实是 Anthropic 端点，写「OpenAI 端点」是误导（「Pi 必须配 OpenAI 端点」
   // 这个表象的根源）。
   const primaryEndpointLabel = PROVIDER_CAPABILITIES[provider].chatProtocol === 'anthropic'
     ? 'Anthropic 端点'
     : 'OpenAI 端点'
+  // 主端点本身就是 Anthropic 端点、两个地址字段又同时可见时，Agent 字段必须改名，
+  // 否则表单上出现两个同名「Anthropic 端点」。只显示一个字段时保持原名，避免影响既有布局与测试。
+  const agentEndpointLabel = primaryEndpointLabel === 'Anthropic 端点' && showOpenAIEndpoint && showAnthropicEndpoint
+    ? 'Agent Anthropic 端点'
+    : 'Anthropic 端点'
   const [apiKey, setApiKey] = React.useState('')
   const keyEditedRef = React.useRef(false)
   const keyRevisionRef = React.useRef(0)
@@ -405,7 +490,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       void window.electronAPI.cancelChannelRequest(id).catch(() => {})
     }
   }, [])
-  const requestKey = JSON.stringify([provider, baseUrl, apiKey, credentialMode, apiProtocol])
+  const requestKey = JSON.stringify([provider, baseUrl, agentBaseUrl, apiKey, credentialMode, apiProtocol])
   const requestKeyRef = React.useRef(requestKey)
   requestKeyRef.current = requestKey
   const testKey = JSON.stringify([requestKey, agentBaseUrl, agentRuntimes, models.find((model) => model.enabled)?.id])
@@ -584,6 +669,28 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     setModels([])
   }
 
+  /**
+   * 主地址（OpenAI / Anthropic 端点）变化。
+   *
+   * Agent 端点是由主地址推导的派生值：如果把它当显式值留在表单里，保存时会写回持久化，
+   * 之后运行时优先用它，表现为「换了地址，Agent 还打旧地址」。因此只要用户没有真正
+   * 覆盖（未手改过，或填的就是旧地址的推导值），就清空字段并重置「已编辑」标记；
+   * 用户填了与旧推导不同的显式 Agent 入口时保留。
+   */
+  const handleBaseUrlChange = (value: string): void => {
+    discoveryRequestRef.current += 1
+    testRequestRef.current += 1
+    const explicitAgentUrl = agentBaseUrl.trim()
+    const derivedFromPreviousBaseUrl = inferAgentBaseUrl(provider, baseUrl, undefined)
+    const followsDerivedValue = explicitAgentUrl === ''
+      || (derivedFromPreviousBaseUrl !== undefined && isSameEndpoint(explicitAgentUrl, derivedFromPreviousBaseUrl))
+    setBaseUrl(value)
+    if (!agentBaseUrlEditedRef.current || followsDerivedValue) {
+      agentBaseUrlEditedRef.current = false
+      setAgentBaseUrl('')
+    }
+  }
+
   /** 添加模型 */
   const handleAddModel = (): void => {
     const result = addManualModel(models, newModelId, newModelName)
@@ -634,7 +741,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
    *
    * Ollama 走本机 /api/tags，不需要 Key；其余供应商必须同时有地址与凭证。
    */
-  const canDiscoverModels = Boolean(baseUrl.trim())
+  const canDiscoverModels = discoveryEndpointReady
     && (provider === 'ollama' || Boolean(apiKey.trim()))
     && !oauthCredentials
 
@@ -656,15 +763,14 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
     if (!options?.keepPreviousResult) setFetchResult(null)
 
     try {
-      // 只配置 Claude 的渠道按 Claude 端点拉取目录；混合或 Pi 渠道保持主地址。
-      const claudeOnly = agentRuntimes.length === 1 && agentRuntimes[0] === 'claude'
+      // 目录探测跟着内核走：Claude / Anthropic 协议的 Pi 用 Agent 端点，其余用主地址。
       const result = await window.electronAPI.fetchModels({
         requestId: networkId,
         provider,
         baseUrl,
         apiKey,
         ...(provider === 'xai' && credentialMode !== 'oauth' ? { apiProtocol } : {}),
-        ...(claudeOnly ? { runtime: 'claude' as const, agentBaseUrl } : {}),
+        ...(discoveryRuntime ? { runtime: discoveryRuntime, agentBaseUrl } : {}),
       })
 
       if (!mountedRef.current || !isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) return
@@ -681,11 +787,15 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       activeNetworkRequestsRef.current.delete(networkId)
       if (mountedRef.current && isCurrentAsyncRequest(requestId, discoveryRequestRef.current, key, requestKeyRef.current)) setFetchingModels(false)
     }
-  }, [canDiscoverModels, provider, baseUrl, apiKey, apiProtocol, credentialMode, agentRuntimes, agentBaseUrl])
+  }, [canDiscoverModels, provider, baseUrl, apiKey, apiProtocol, credentialMode, discoveryRuntime, agentBaseUrl])
 
   /** 手动「从供应商获取」：覆盖上一次结果提示，并记下尝试键避免与自动发现重复请求 */
   const handleFetchModels = (): void => {
-    autoDiscoveryKeyRef.current = buildModelDiscoveryAttemptKey({ provider, baseUrl, apiKey })
+    autoDiscoveryKeyRef.current = buildModelDiscoveryAttemptKey({
+      provider,
+      baseUrl: discoveryBaseUrl,
+      apiKey,
+    })
     void runModelDiscovery()
   }
 
@@ -697,7 +807,11 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
    * 改地址 / 改 Key / 手动点击「从供应商获取」都会重新发起。
    */
   React.useEffect(() => {
-    const attemptKey = buildModelDiscoveryAttemptKey({ provider, baseUrl, apiKey })
+    const attemptKey = buildModelDiscoveryAttemptKey({
+      provider,
+      baseUrl: discoveryBaseUrl,
+      apiKey,
+    })
     const shouldDiscover = shouldAutoDiscoverModels({
       canDiscover: canDiscoverModels,
       modelCount: models.length,
@@ -714,12 +828,12 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
       void runModelDiscovery({ keepPreviousResult: true })
     }, AUTO_DISCOVERY_DELAY)
     return () => clearTimeout(timer)
-  }, [isEdit, apiKeyLoaded, models.length, fetchingModels, canDiscoverModels, provider, baseUrl, apiKey, credentialMode, runModelDiscovery])
+  }, [isEdit, apiKeyLoaded, models.length, fetchingModels, canDiscoverModels, provider, baseUrl, apiKey, credentialMode, discoveryRuntime, discoveryBaseUrl, runModelDiscovery])
 
   /** 测试连接（直接使用表单当前值，无需先保存） */
   const handleTest = async (): Promise<void> => {
     if (oauthCredentials) return
-    if ((provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()) return
+    if ((provider !== 'ollama' && !apiKey.trim()) || !testEndpointReady) return
 
     cancelNetworkRequests('test')
     setTesting(true)
@@ -730,17 +844,21 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
 
     try {
       const selectedModel = models.find((model) => model.enabled)?.id
-      const runtimes: Array<AgentRuntimeMode | undefined> = agentRuntimes.length ? agentRuntimes : [undefined]
+      // 只测当前真正填了端点的内核：空 baseUrl 不能连累 Anthropic 协议的 Pi/Claude。
+      const readyRuntimes = agentRuntimes.filter((runtime) => runtimeEndpointReady(runtime))
+      const runtimes: Array<AgentRuntimeMode | undefined> = readyRuntimes.length ? readyRuntimes : [undefined]
       const results = await Promise.all(runtimes.map(async (runtime) => {
         const networkId = `${formRequestScopeRef.current}-test-${requestId}-${runtime ?? 'chat'}`
         networkIds.push(networkId)
         activeNetworkRequestsRef.current.set(networkId, 'test')
+        // Claude 与 Anthropic 协议的 Pi 都从 agentBaseUrl 推导请求地址，必须一起传下去。
+        const consumesAgentEndpoint = runtime === 'claude' || (runtime === 'pi' && piConsumesAnthropicEndpoint)
         const result = await window.electronAPI.testChannelDirect({
           requestId: networkId,
           provider, baseUrl, apiKey, runtime,
           ...(provider === 'xai' && credentialMode !== 'oauth' ? { apiProtocol } : {}),
           ...(selectedModel ? { modelId: selectedModel } : {}),
-          ...(runtime === 'claude' ? { agentBaseUrl } : {}),
+          ...(consumesAgentEndpoint ? { agentBaseUrl } : {}),
         })
         return { ...result, message: `${runtime === 'claude' ? 'Claude' : runtime === 'pi' ? 'Pi / Chat' : 'Chat'}：${result.message}` }
       }))
@@ -1103,7 +1221,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
             <SettingsInput
               label={primaryEndpointLabel}
               value={baseUrl}
-              onChange={(value) => { discoveryRequestRef.current += 1; testRequestRef.current += 1; setBaseUrl(value) }}
+              onChange={(value) => handleBaseUrlChange(value)}
               placeholder="https://api.example.com/v1"
               description={baseUrl.trim()
                 ? provider === 'ollama'
@@ -1121,15 +1239,20 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
           */}
           {showAnthropicEndpoint && (
             <SettingsInput
-              label="Anthropic 端点"
+              label={agentEndpointLabel}
               value={agentBaseUrl}
               onChange={(value) => { agentBaseUrlEditedRef.current = true; setAgentBaseUrl(value) }}
               placeholder={PROVIDER_DEFAULT_AGENT_URLS[provider]}
-              description={provider === 'deepseek'
-                ? 'Claude/Pi 内核使用；留空自动推导：官方地址用官方入口，第三方地址沿用主地址'
-                : PROVIDER_DEFAULT_AGENT_URLS[provider]
-                  ? 'Claude/Pi 内核使用；留空用官方默认入口'
-                  : 'Claude/Pi 内核使用；留空沿用主地址'}
+              description={(() => {
+                // 只勾 Claude 时不要写成「Claude/Pi」，否则仍像被 Pi 绑定。
+                const audience = claudeEnabled && piEnabled ? 'Claude/Pi 内核使用' : claudeEnabled ? 'Claude 内核使用' : 'Pi 内核使用'
+                const guidance = provider === 'deepseek'
+                  ? `${audience}；留空自动推导：官方地址用官方入口，第三方地址沿用主地址`
+                  : PROVIDER_DEFAULT_AGENT_URLS[provider]
+                    ? `${audience}；留空用官方默认入口`
+                    : `${audience}；留空沿用主地址`
+                return claudeEndpointPreview ? `预览：${claudeEndpointPreview}；${guidance}` : guidance
+              })()}
             />
           )}
           {/* API Key + 测试连接同行 */}
@@ -1146,7 +1269,7 @@ export function ChannelForm({ channel, onSaved, onAgentEligibilityChange, onCanc
                   setTesting(false)
                   setTestResult({ success: false, cancelled: true, message: '测试已取消' })
                 } : handleTest}
-                disabled={oauthCredentials || (provider !== 'ollama' && !apiKey.trim()) || !baseUrl.trim()}
+                disabled={oauthCredentials || (provider !== 'ollama' && !apiKey.trim()) || !testEndpointReady}
                 className="h-7 text-xs"
               >
                 {testing ? (

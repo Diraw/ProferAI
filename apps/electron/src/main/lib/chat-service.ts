@@ -15,7 +15,7 @@ import { routePluginModel } from './plugins/plugin-routing'
 
 import { randomUUID } from 'node:crypto'
 import type { WebContents } from 'electron'
-import { CHAT_IPC_CHANNELS, isChannelEnabledForChat, resolveXaiCredentialMode } from '@profer/shared'
+import { CHAT_IPC_CHANNELS, getChatUnavailableReason, isChannelEnabledForChat, resolveXaiCredentialMode } from '@profer/shared'
 import { pushChatStream } from './chat-stream-bus'
 import type { Channel, ChatSendInput, ChatMessage, ConversationMeta, GenerateTitleInput, FileAttachment, ChatToolActivity, KnowledgeReference } from '@profer/shared'
 import {
@@ -258,12 +258,17 @@ export async function sendMessage(
     return
   }
   if (!isChannelEnabledForChat(channel)) {
+    // 按真实原因报错：只填了 Agent 端点的渠道不能被说成「仅支持 Pi Agent」，
+    // 否则用户会去改内核勾选，而真正缺的是 Chat 端点。
+    const reason = getChatUnavailableReason(channel)
     pushChatStream(webContents, conversationId, CHAT_IPC_CHANNELS.STREAM_ERROR, {
       conversationId,
       runId,
-      error: channel.enabled
-        ? '当前渠道仅支持 Pi Agent，不能用于 Chat，请重新选择可用模型'
-        : '当前渠道已停用，请重新选择可用模型',
+      error: reason === 'no-endpoint'
+        ? '当前渠道未配置 Chat 端点（只填写了 Agent 端点），不能用于 Chat，请重新选择 Chat 模型'
+        : reason === 'disabled'
+          ? '当前渠道已停用，请重新选择可用模型'
+          : '当前渠道仅支持 Pi Agent，不能用于 Chat，请重新选择可用模型',
     })
     return
   }

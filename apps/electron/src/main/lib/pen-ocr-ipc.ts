@@ -55,7 +55,7 @@ async function recognizeOnMac(imagePath: string): Promise<string> {
   if (!helper) throw new Error('pen-ocr helper missing')
 
   const stdout = await new Promise<string>((resolve, reject) => {
-    execFile(helper, [imagePath], { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 }, (error, out, err) => {
+    execFile(helper, [imagePath], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 }, (error, out, err) => {
       if (error) {
         reject(new Error(typeof err === 'string' && err.length > 0 ? err : error.message))
         return
@@ -131,9 +131,27 @@ export async function recognizeHandwriting(pngBase64: string): Promise<PenOcrRes
   }
 }
 
+/** 1x1 透明 PNG：预热用，不关心结果 */
+const WARMUP_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/**
+ * 预热识别链路。
+ *
+ * 新编译的二进制/首次启动的 PowerShell 第一次执行都要几秒到几十秒（系统安全扫描、
+ * 运行时初始化）。在应用启动后空闲时跑一次空图，用户第一次手写就不会卡在冷启动上。
+ */
+function warmUpPenOcr(): void {
+  if (process.platform !== 'darwin' && process.platform !== 'win32') return
+  setTimeout(() => {
+    void recognizeHandwriting(`data:image/png;base64,${WARMUP_PNG}`).catch(() => undefined)
+  }, 3000)
+}
+
 export function registerPenOcrIpc(): void {
   ipcMain.handle('pen:recognize', async (_event, pngBase64: string): Promise<PenOcrResult> => {
     if (typeof pngBase64 !== 'string') return { text: '', error: 'recognize-failed' }
     return recognizeHandwriting(pngBase64)
   })
+  warmUpPenOcr()
 }

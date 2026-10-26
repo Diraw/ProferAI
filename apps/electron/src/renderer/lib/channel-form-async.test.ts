@@ -127,6 +127,18 @@ describe('渠道表单异步控制', () => {
     expect(validateChannelCreation({ ...input, provider: 'ollama', apiKey: '' })).toBeNull()
     expect(validateChannelCreation({ ...input, provider: 'xai', credentialMode: 'oauth', apiKey: '' })).toBeNull()
     expect(validateChannelCreation({ ...input, provider: 'openai-codex', baseUrl: '', apiKey: '' })).toBeNull()
+    // 只勾 Claude 时由 Anthropic 端点独立满足「有服务端点」；两者都空仍拒绝。
+    expect(validateChannelCreation({ ...input, provider: 'custom', baseUrl: '', agentBaseUrl: 'https://relay.example.com', agentRuntimes: ['claude'] })).toBeNull()
+    expect(validateChannelCreation({ ...input, provider: 'custom', baseUrl: '', agentBaseUrl: '', agentRuntimes: ['claude'] })).not.toBeNull()
+    // P0-1：Pi 走 Anthropic 协议时与 Claude 同规则，Agent 端点可以替代空的 baseUrl。
+    expect(validateChannelCreation({ ...input, provider: 'anthropic-compatible', baseUrl: '', agentBaseUrl: 'https://relay.example.com', agentRuntimes: ['pi'] })).toBeNull()
+    expect(validateChannelCreation({ ...input, provider: 'anthropic-compatible', baseUrl: '', agentBaseUrl: '', agentRuntimes: ['pi'] })).not.toBeNull()
+    expect(validateChannelCreation({ ...input, provider: 'anthropic-compatible', baseUrl: '', agentBaseUrl: 'https://relay.example.com', agentRuntimes: ['pi', 'claude'] })).toBeNull()
+    // Pi 走 OpenAI 协议时必须填主地址；即使同时勾了 Claude 也不能被 Agent 端点掩盖。
+    expect(validateChannelCreation({ ...input, provider: 'openai', baseUrl: '', agentBaseUrl: 'https://relay.example.com', agentRuntimes: ['pi'] })).not.toBeNull()
+    expect(validateChannelCreation({ ...input, provider: 'openai', baseUrl: '', agentBaseUrl: 'https://relay.example.com', agentRuntimes: ['pi', 'claude'] })).not.toBeNull()
+    // 未勾任何内核时主地址仍是 Chat 地址，Agent 端点不能豁免。
+    expect(validateChannelCreation({ ...input, provider: 'anthropic-compatible', baseUrl: '', agentBaseUrl: 'https://relay.example.com', agentRuntimes: [] })).not.toBeNull()
   })
   test('旧请求返回时必须同时满足 request id 和配置 key', () => {
     expect(isCurrentAsyncRequest(2, 2, 'provider=b', 'provider=b')).toBe(true)

@@ -288,7 +288,30 @@ bun run generate:icons    # 生成应用图标
 | `config-paths.ts` | 配置路径管理：`~/.profer/` 目录结构 |
 | `user-profile-service.ts` | 用户档案持久化 |
 | `settings-service.ts` | 应用设置持久化（主题等） |
-| `updater/` | 自动更新：Electron Updater 集成 |
+| `updater/` | 自动更新：Electron Updater 集成（超时契约见下） |
+
+#### 自动更新的超时契约（不要退化）
+
+`electron-updater` 6.8.9 的 `ElectronHttpExecutor` **没有任何请求超时**，provider 配置里的
+`timeout` 字段也不会被任何 provider 读取（已在 `node_modules/electron-updater/out` 核对）。
+只要连接建立后对方不回数据（代理半开、CDN 卡住、丢包不回 RST），`checkForUpdates()`
+既不 resolve 也不 reject，界面就会永久停在「正在检查」，而且 in-flight 锁永不释放，
+之后每次手动检查都合并进同一个死 Promise。
+
+因此四条约束必须同时成立，缺一条就会复现「版本获取无限转圈」：
+
+1. `auto-updater.ts` 的 `withDeadline` 给每个源的元数据检查（`UPDATE_CHECK_DEADLINE_MS`）
+   和整轮检查（`UPDATE_CHECK_TOTAL_DEADLINE_MS`）各封一道硬顶，超时即收敛成 `error` 状态；
+2. in-flight 任务带时间戳，超过 `UPDATE_INFLIGHT_STALE_MS` 允许新检查接管（`hasLiveInFlight`）；
+3. 检查阶段**不等待下载**：`checkSource` 只负责发现版本，下载由 `startBackgroundDownload`
+   在后台跑，用 `download-progress` 事件驱动状态，并用 `UPDATE_DOWNLOAD_STALL_MS` 判定停滞；
+4. 放弃一轮时必须清掉 `electron-updater` 内部的 `checkForUpdatesPromise` / `downloadPromise`
+   缓存（`releaseStuckUpdaterPromise`）。这两个字段只在 resolve/reject 时清空，超时只是
+   「我们不等了」，底层 promise 仍挂起；不清缓存的话下一次检查/下载会直接复用它，症状从
+   「无限转圈」变成「每次检查都超时」，用户只能重启应用。
+
+渲染层同样有两道兜底：`AboutSettings` 的 `CHECK_UI_DEADLINE_MS` 保证按钮一定会恢复可点，
+`update-deadline.test.ts` / `auto-updater-timeout.test.ts` 守住上述行为。
 
 ### AI Provider 适配器（`packages/core/src/providers/`）
 

@@ -912,14 +912,6 @@ function buildWorkspaceList() {
   }))
 }
 
-function remoteChannelProtocol(provider: string): 'openai' | 'anthropic' {
-  return new Set([
-    'anthropic', 'anthropic-compatible', 'deepseek', 'kimi-api', 'kimi-coding',
-    'zhipu-coding', 'zhipu-coding-team', 'minimax', 'xiaomi',
-    'xiaomi-token-plan', 'qwen-anthropic',
-  ]).has(provider) ? 'anthropic' : 'openai'
-}
-
 /** 渠道列表（脱敏，仅暴露移动端发消息需要的字段） */
 function buildChannelList() {
   return listSwitchableChannels().map((c) => ({

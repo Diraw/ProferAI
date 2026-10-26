@@ -265,9 +265,14 @@ export class AnthropicAdapter implements ProviderAdapter {
     this.providerType = providerType
   }
 
-  /** 根据 provider 类型选择 URL 规范化方式 */
+  /**
+   * Chat 直连端点：与 Claude/Pi SDK 共用 core 的统一推导（协议根 + /v1/messages）。
+   *
+   * 这里显式使用 `chat` 模式：Chat 用 fetch 直连，允许 query/hash 路由与用户填写的
+   * 完整端点；SDK 模式（拒绝 query/hash）只给运行时测试与模型发现用。
+   */
   private normalizeUrl(baseUrl: string): string {
-    return resolveAnthropicMessagesUrl(baseUrl, this.providerType)
+    return resolveAnthropicMessagesUrl(baseUrl, this.providerType, 'chat')
   }
 
   /**
@@ -332,6 +337,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     // 根据模型能力选择思考协议
     // - adaptive-only / adaptive-preferred：发 { type: 'adaptive', display: 'summarized' }
     //   （Opus 4.7 的 display 默认是 'omitted'，需显式 'summarized' 才能收到 thinking 文本流）
+    //   同时补 output_config.effort='high'：Claude 5.x 要求 adaptive + effort 成对出现。
     // - manual-only：发旧版 { type: 'enabled', budget_tokens }
     // - effort-based-max（DeepSeek v4 系列）：{type: 'enabled'} + output_config.effort='max'
     //   DeepSeek v4 默认就开启思考，所以关闭时必须显式 {type: 'disabled'}
@@ -348,6 +354,10 @@ export class AnthropicAdapter implements ProviderAdapter {
           type: 'adaptive',
           display: 'summarized',
         }
+        // Claude 5.x 的 400 提示明确要求「adaptive + output_config.effort」：只发 adaptive
+        // 会被拒。Chat 没有思考档位输入，取 Claude adaptive 档案的默认档 high
+        // （CLAUDE_ADAPTIVE_PROFILE.defaultLevel），与 Pi 侧默认行为一致。
+        body.output_config = { effort: 'high' }
       } else if (capability.mode === 'manual-only') {
         body.thinking = {
           type: 'enabled',

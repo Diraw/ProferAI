@@ -100,7 +100,20 @@ export function buildChartOption(spec: VisualizationChartSpec, theme: ChartTheme
     animation: false, color: [...(theme.palette ?? DEFAULT_CHART_PALETTE)], backgroundColor: 'transparent',
     textStyle: { color: theme.foreground, fontFamily: theme.fontFamily, fontSize: 12 },
     aria: { enabled: true, decal: { show: true } },
-    tooltip: { trigger: spec.chartType === 'line' ? 'axis' : 'item', renderMode: 'richText', confine: true, backgroundColor: theme.background, borderColor: theme.border, textStyle: { color: theme.foreground } },
+    // 提示框必须是 HTML 渲染（ECharts 默认值），不能改成 `richText`：
+    // richText 的提示框画在图表自己的 SVG 里，而 ECharts 每次 mousemove 都会把那段文本
+    // 节点销毁重建（实测沿着一根柱子移动 134 次 = 增删各 804 个节点），整块 SVG 连同
+    // decal 图案每帧重绘一次——表现就是鼠标在柱子上移动时图表持续闪动。
+    // HTML 渲染的提示框是图表外的一个 `pointer-events:none` 的 div，悬停期间 SVG 零重绘。
+    tooltip: {
+      trigger: spec.chartType === 'line' ? 'axis' : 'item',
+      renderMode: 'html',
+      confine: true,
+      borderWidth: 1,
+      backgroundColor: theme.background,
+      borderColor: theme.border,
+      textStyle: { color: theme.foreground, fontSize: 12, ...(theme.fontFamily ? { fontFamily: theme.fontFamily } : {}) },
+    },
     legend: { bottom: 0, type: 'scroll', textStyle: { color: theme.muted }, selected: Object.fromEntries(names.map((name) => [name, !hidden.includes(name)])) },
     ...(spec.chartType === 'pie' ? {} : {
       grid: { left: 12, right: 16, top: 12, bottom: 52, outerBoundsMode: 'same', outerBoundsContain: 'all' },
