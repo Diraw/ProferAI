@@ -20,6 +20,14 @@ function assistantText(text: string): SDKMessage {
   } as unknown as SDKMessage
 }
 
+function assistantTextWithModel(text: string, model: string): SDKMessage {
+  return {
+    type: 'assistant',
+    message: { content: [{ type: 'text', text }], model },
+    parent_tool_use_id: null,
+  } as unknown as SDKMessage
+}
+
 function systemMessage(subtype: string, extra: Record<string, unknown> = {}): SDKMessage {
   return { type: 'system', subtype, ...extra } as unknown as SDKMessage
 }
@@ -104,6 +112,34 @@ function assistantTurn(blocks: string[][]): MessageGroup {
     })),
   } as unknown as MessageGroup
 }
+
+describe('同一轮内的助手块合并', () => {
+  test('Given 中间插入了不可见的中断记录且前后模型 id 不同 When 分组 Then 只保留一个助手块', () => {
+    const groups = groupIntoTurns([
+      userText('继续'),
+      assistantTextWithModel('第一段', 'global:deepseek-v4.1-flash'),
+      systemMessage('interruption_record'),
+      assistantTextWithModel('第二段', 'cn:deepseek-v4.1-flash'),
+    ])
+
+    expect(groups.map((group) => group.type)).toEqual(['user', 'assistant-turn', 'system'])
+    const turn = groups[1]
+    expect(turn?.type === 'assistant-turn' ? turn.assistantMessages.length : 0).toBe(2)
+    // 头像取首条消息的模型，不会因为后半段换了渠道就多出一个头像
+    expect(turn?.type === 'assistant-turn' ? turn.model : undefined).toBe('global:deepseek-v4.1-flash')
+  })
+
+  test('Given 真正的用户输入 When 分组 Then 仍然拆成两轮', () => {
+    const groups = groupIntoTurns([
+      userText('第一个问题'),
+      assistantTextWithModel('答一', 'global:deepseek-v4.1-flash'),
+      userText('第二个问题'),
+      assistantTextWithModel('答二', 'cn:deepseek-v4.1-flash'),
+    ])
+
+    expect(groups.map((group) => group.type)).toEqual(['user', 'assistant-turn', 'user', 'assistant-turn'])
+  })
+})
 
 describe('assistant-turn 迷你地图预览', () => {
   test('多个 text 块按空格拼接（与 join 语义一致）', () => {

@@ -943,7 +943,9 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
             {/* 有实时助手内容时：显示运行指示器或占位（防止 streaming 结束到 Actions Bar 出现之间的高度跳动） */}
             {/* 不使用 mt：ConversationContent 的 gap-1(4px) 已提供间距，
                 匹配内部 MessageActions 的 gap-0.5(2px)+mt-0.5(2px)=4px 间距 */}
-            {hasLiveAssistantContent && !suppressAgentRunning && (showAgentRunningIndicator || retrying) && (
+            {/* 历史还在加载时（切回大会话）allGroups 为空，不能据此认为“本轮没有内容”，
+                先只画不带头像的运行行，避免加载完成后同一轮再画一次头像。 */}
+            {(hasLiveAssistantContent || messagesLoaded === false) && !suppressAgentRunning && (showAgentRunningIndicator || retrying) && (
               <div className="pl-[56px] min-h-[28px]">
                 {retrying && <RetryingNotice retrying={retrying} />}
                 {showAgentRunningIndicator && <AgentRunningIndicator startedAt={startedAt} />}
@@ -954,7 +956,7 @@ export function AgentMessages({ sessionId, sessionModelId, agentRuntime, message
             {/* 注意：工具活动已通过 SDK 渲染路径（liveGroups）展示 */}
             {/* 本轮已有内容时只续接正文，不再画第二份头像/模型名：同一轮内的流式正文 */}
             {/* 属于上面那条消息，另起一个 header 会让人以为模型回了两条。 */}
-            {!hasLiveAssistantContent && !suppressAgentRunning && (showAgentRunningIndicator || visibleContent || retrying) && (
+            {!hasLiveAssistantContent && messagesLoaded !== false && !suppressAgentRunning && (showAgentRunningIndicator || visibleContent || retrying) && (
               <Message from="assistant">
                 {!currentTurnHasAssistantContent && (
                   <MessageHeader
