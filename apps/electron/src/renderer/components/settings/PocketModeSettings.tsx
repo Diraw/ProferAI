@@ -317,6 +317,11 @@ export function PocketModeSettings(): React.ReactElement {
               {status.error}
             </div>
           )}
+          {!status.error && status.notice && (
+            <div className="border-t border-border bg-muted/40 px-4 py-3 text-xs leading-5 text-muted-foreground">
+              {status.notice}
+            </div>
+          )}
           <div className="flex flex-col gap-2.5 px-4 py-3.5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">

@@ -138,7 +138,7 @@ function api(overrides: Props = {}) {
   } })
 }
 const voice: VoiceDictationSettings = { provider: 'doubao', enabled: false, appId: 'fixture-app', accessToken: 'fixture-token', resourceId: 'fixture-resource', endpointMode: 'async', language: '', customHotwords: '', outputMode: 'auto' }
-const pocket: PocketModeStatus = { enabled: false, running: false, port: 7788, defaultPort: 7788, localUrl: null, lanUrl: null, token: null, publicEndpoint: null, error: null }
+const pocket: PocketModeStatus = { enabled: false, running: false, port: 7788, defaultPort: 7788, localUrl: null, lanUrl: null, token: null, publicEndpoint: null, error: null, notice: null }
 const click = (props: Props) => (props.onClick as (event: { preventDefault: () => void }) => unknown)({ preventDefault() {} })
 const feedback = (host: ReturnType<typeof mount>, contains: string) => host.elements().find((item) => typeof item.props.message === 'string' && item.props.message.includes(contains))!.props
 function child(host: ReturnType<typeof mount>, name: string, props?: Props) {

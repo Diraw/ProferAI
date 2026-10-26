@@ -443,6 +443,8 @@ export interface PocketModeStatus {
   publicEndpoint: PocketPublicEndpoint | null
   /** 最近一次启动失败原因；服务恢复后清空。 */
   error: string | null
+  /** 启动时的非致命提示（如端口被占已自动改用其他端口）；无需提示时为 null */
+  notice: string | null
 }
 
 export const SKIN_IPC_CHANNELS = {
