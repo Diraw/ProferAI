@@ -48,7 +48,8 @@ export function renderWorkspaceSortIcon(mode: WorkspaceSortMode): React.ReactEle
  * 主区 p-2（8）+ TabBar 内容行偏移（1）+ 内容行高度（37）= 46。
  * 用「标签本体」而不是 40px 外框的底边（48）：视觉上对的是那颗 Tab 的下沿，
  * 外框底部还有 2px 的留白 gutter，对齐它反而会多出 2px 缝。
- * 平台无关：macOS 与 Windows 的 TabBar 几何一致。
+ * macOS 与 Windows 的 TabBar 几何一致，但这个值只在 macOS 生效：Windows 顶部没有
+ * 红绿灯，侧栏不需要给顶栏让位，LeftSidebar 会直接取 0（见那里的说明）。
  */
 export const SIDEBAR_PANEL_TOP = 8 + TOPBAR_CONTENT_OFFSET + TOPBAR_CONTENT_HEIGHT
 
