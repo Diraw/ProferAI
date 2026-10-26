@@ -26,6 +26,7 @@ import { SidebarDialogs } from "./left-sidebar/sidebar-dialogs";
 import { SIDEBAR_HEADER_INSET, SIDEBAR_PANEL_TOP, SidebarWindowDragStrip } from "./left-sidebar/navigation-items";
 import { useTabBarBottomOffset } from "./left-sidebar/use-tabbar-offset";
 import { MacTrafficLights } from "./MacTrafficLights";
+import { detectIsWindows } from "@profer/ui";
 
 export type { LeftSidebarProps } from "./left-sidebar/types";
 import type { LeftSidebarProps } from "./left-sidebar/types";
@@ -48,7 +49,11 @@ export function LeftSidebar({
   const sidebarCollapsed = s.sidebarCollapsed;
   const listWidth = width ?? DEFAULT_LIST_WIDTH;
   // 面板顶边与 Tab 标签本体下沿对齐：运行时量真实 DOM，量不到才用常量兜底。
-  const panelTop = useTabBarBottomOffset(SIDEBAR_PANEL_TOP);
+  const measuredPanelTop = useTabBarBottomOffset(SIDEBAR_PANEL_TOP);
+  // Windows 顶部没有红绿灯，侧栏不需要给顶栏让位：rail 与列表直接顶到窗口上沿。
+  // 此时 ModeSwitcher 轨道（pt-2 + 40）与主区 TabBar 外框（p-2 + 40）同高，横竖都对得上。
+  const isWindows = React.useMemo(() => detectIsWindows(), []);
+  const panelTop = isWindows ? 0 : measuredPanelTop;
 
   return (
     <div
@@ -70,8 +75,10 @@ export function LeftSidebar({
       }}
     >
       {/* 顶部拖拽留白整条覆盖 rail + 列表，高度取 Tab 标签本体的下沿（运行时实测）；
-          rail 图标与列表内容都从这条线开始，红绿灯（18–38）落在它上方。 */}
-      <SidebarWindowDragStrip height={panelTop} />
+          rail 图标与列表内容都从这条线开始，红绿灯（18–38）落在它上方。
+          Windows 的 panelTop 为 0（没有红绿灯要让位），不再渲染这条 0 高拖拽条；
+          窗口拖动交给 AppShell 顶部那条全局 8px 拖拽带。 */}
+      {panelTop > 0 && <SidebarWindowDragStrip height={panelTop} />}
 
       <div className="flex h-full min-h-0">
         {/* rail 透明，直接露出外壳的着色层；收起态占满 58px。 */}
