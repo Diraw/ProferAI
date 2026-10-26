@@ -856,10 +856,10 @@ function ChatViewInner({ conversationId }: ChatViewProps): React.ReactElement {
         onDeleteMessage={handleDeleteMessage}
       />
 
-      {/* 提示词编辑侧栏 */}
+      {/* 提示词编辑侧栏：折叠时不占布局宽度，否则聊天区（含输入框）会被挤偏、左右不对称 */}
       <div className={cn(
         'chat-prompt-sidebar relative flex-shrink-0 transition-[width] duration-300 ease-in-out overflow-hidden titlebar-drag-region',
-        promptSidebarOpen ? 'w-[300px] border-l' : 'w-10'
+        promptSidebarOpen ? 'w-[300px] border-l' : 'w-0'
       )}>
         <div className={cn(
           'w-[300px] h-full transition-opacity duration-200 titlebar-no-drag',
