@@ -62,14 +62,14 @@ export const SIDEBAR_ROW_GAP = 7
 /**
  * rail 图标列的顶部留白。
  *
- * ModeSwitcher 的 pt-2（8px）+ 轨道 40px 是列表表头；rail 按钮 34px，
- * 取 8 + (40 - 34) / 2 = 11，让第一个图标与分段控件光学居中在同一条带上。
+ * ModeSwitcher 的 pt-2（8px）+ 轨道 40px 是列表表头；rail 按钮 36px，
+ * 取 8 + (40 - 36) / 2 = 10，让第一个图标与分段控件光学居中在同一条带上。
  */
-export const SIDEBAR_HEADER_INSET = 11
+export const SIDEBAR_HEADER_INSET = 10
 
-/** rail 图标按钮：34×34、圆角 9、间距 3；不用描边和阴影 */
+/** rail 图标按钮：36×36、圆角 9、间距 3；不用描边和阴影 */
 export const RAIL_BUTTON_CLASS =
-  'relative flex size-[34px] flex-none items-center justify-center rounded-[9px] transition-colors duration-100 titlebar-no-drag focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
+  'relative flex size-[36px] flex-none items-center justify-center rounded-[9px] transition-colors duration-100 titlebar-no-drag focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
 export const RAIL_BUTTON_ACTIVE_CLASS = 'bg-foreground/[0.085] text-foreground'
 export const RAIL_BUTTON_IDLE_CLASS =
   'text-foreground/[0.58] hover:bg-foreground/[0.045] hover:text-foreground/[0.82]'
@@ -120,14 +120,14 @@ export function SidebarRailEntry({
           {active && (
             <span
               aria-hidden="true"
-              className="absolute -left-[7px] top-[10px] h-[14px] w-[2px] rounded-[2px] bg-primary"
+              className="absolute -left-[7px] top-[11px] h-[14px] w-[2px] rounded-[2px] bg-primary"
             />
           )}
           {icon}
           {dot && (
             <span
               aria-hidden="true"
-              className="absolute right-[7px] top-[7px] size-[5px] rounded-full bg-primary"
+              className="absolute right-[8px] top-[8px] size-[5px] rounded-full bg-primary"
             />
           )}
         </button>

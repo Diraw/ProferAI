@@ -11,7 +11,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import {
-  Pencil, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, Star, X, XCircle, XSquare,
+  Pencil, Pin, Trash2, MoreHorizontal, Clock, GitBranch, GitFork, Globe, Loader2, ChevronRight, FolderOpen, GripVertical, Settings, ArrowRightLeft, Archive, ArchiveRestore, Plus, Mail, MailOpen, Sparkles, X, XCircle, XSquare,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useShortcut } from '@/hooks/useShortcut'
@@ -82,14 +82,14 @@ export interface AgentProjectGroup {
 }
 
 /**
- * 置顶标记：实心星号。
+ * 置顶标记：实心大头针。
  *
- * 缩进行（depth=1）把星号放进左侧 26px 缩进留白里，绝对定位、不占标题宽度，
+ * 缩进行（depth=1）把大头针放进左侧 26px 缩进留白里，绝对定位、不占标题宽度，
  * 这样置顶行与普通行的标题仍然左对齐；非缩进行没有留白可用，退回标题前内联显示。
  */
-function PinnedStar({ gutter }: { gutter: boolean }): React.ReactElement {
+function PinnedPin({ gutter }: { gutter: boolean }): React.ReactElement {
   return (
-    <Star
+    <Pin
       size={11}
       aria-label="已置顶"
       className={cn(
@@ -313,7 +313,7 @@ export function SessionItemActions({
             )}
             onClick={onTogglePin}
           >
-            {pinned ? <Star size={14} className="fill-current" /> : <Star size={14} />}
+            {pinned ? <Pin size={14} className="fill-current" /> : <Pin size={14} />}
           </button>
         </SafeTooltip>
         <SafeTooltip
@@ -498,7 +498,7 @@ export const ConversationItem = React.memo(function ConversationItem({
     <>
       {renderCloseMenuGroup(MenuItem, MenuSeparator, { onCloseTab, onCloseOtherTabs, onCloseAllTabs })}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onTogglePin(conversation.id)}>
-        {isPinned ? <Star size={14} className="fill-current" /> : <Star size={14} />}
+        {isPinned ? <Pin size={14} className="fill-current" /> : <Pin size={14} />}
         {isPinned ? '取消置顶' : '置顶对话'}
       </MenuItem>
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => startEdit()}>
@@ -589,8 +589,8 @@ export const ConversationItem = React.memo(function ConversationItem({
                 'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
                 active ? 'text-foreground' : 'text-foreground/[0.62]'
               )}>
-                {/* 置顶标记：星号落在左侧缩进留白里，不挤动标题 */}
-                {showPinIcon && <PinnedStar gutter={depth === 1} />}
+                {/* 置顶标记：大头针落在左侧缩进留白里，不挤动标题 */}
+                {showPinIcon && <PinnedPin gutter={depth === 1} />}
                 {regeneratingTitle ? (
                   <>
                     <Loader2 size={11} className="flex-shrink-0 text-info animate-spin" aria-label="正在重新生成标题" />
@@ -809,7 +809,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
     <>
       {renderCloseMenuGroup(MenuItem, MenuSeparator, { onCloseTab, onCloseOtherTabs, onCloseAllTabs })}
       <MenuItem className="text-xs py-1 [&>svg]:size-3.5" onSelect={() => onTogglePin(session.id)}>
-        {session.pinned ? <Star size={14} className="fill-current" /> : <Star size={14} />}
+        {session.pinned ? <Pin size={14} className="fill-current" /> : <Pin size={14} />}
         {session.pinned ? '取消置顶' : '置顶会话'}
       </MenuItem>
       {canMove && (
@@ -922,7 +922,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 'truncate text-[13px] leading-[18px] flex items-center gap-1.5',
                 active ? 'text-foreground' : 'text-foreground/[0.62]'
               )}>
-                {showPinIcon && <PinnedStar gutter={depth === 1} />}
+                {showPinIcon && <PinnedPin gutter={depth === 1} />}
                 {session.sourceAutomationId && !session.sourceDelegationId && (
                   <Clock size={11} className="flex-shrink-0 text-foreground/40" />
                 )}
