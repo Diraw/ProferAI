@@ -63,6 +63,10 @@ let abandonedRound = -1
 
 /** 下载看门狗：attempt 每次下载自增，用来作废旧尝试的迟到回调。 */
 let downloadAttempt = 0
+/** 当前下载的 promise，停滞时用它比对 electron-updater 的内部缓存。 */
+let inFlightDownload: Promise<unknown> | null = null
+/** 当前正在等元数据的 checkForUpdates() promise，总预算判死时用它清掉内部缓存。 */
+let inFlightCheck: Promise<unknown> | null = null
 let lastDownloadProgressAt = 0
 let downloadWatchdog: ReturnType<typeof setInterval> | null = null
 
@@ -115,6 +119,11 @@ function startDownloadWatchdog(attempt: number): void {
     if (idleMs < UPDATE_DOWNLOAD_STALL_MS) return
     downloadAttempt += 1
     stopDownloadWatchdog()
+    // 下载同样会在 electron-updater 内部缓存 promise，不清掉的话重试只会拿到同一个死 promise。
+    if (inFlightDownload) {
+      releaseStuckUpdaterPromise('downloadPromise', inFlightDownload)
+      inFlightDownload = null
+    }
     console.warn(`[更新] 下载停滞 ${Math.round(idleMs / 1000)}s，放弃本次下载`)
     setStatus({
       status: 'error',
@@ -144,12 +153,37 @@ function startBackgroundDownload(version: string): void {
     progress: { percent: 0, transferred: 0, total: 0, bytesPerSecond: 0 },
   })
   startDownloadWatchdog(attempt)
-  void autoUpdater.downloadUpdate().catch((error) => {
+  const pendingDownload = autoUpdater.downloadUpdate()
+  inFlightDownload = pendingDownload
+  void pendingDownload.then(() => {
+    if (inFlightDownload === pendingDownload) inFlightDownload = null
+  }).catch((error) => {
+    if (inFlightDownload === pendingDownload) inFlightDownload = null
     if (attempt !== downloadAttempt) return
     stopDownloadWatchdog()
     console.error('[更新] 下载更新失败:', error)
     setStatus({ status: 'error', error: `下载更新失败：${errorMessage(error)}` })
   })
+}
+
+/**
+ * 丢掉 electron-updater 内部缓存的挂死 promise。
+ *
+ * `checkForUpdates()` / `downloadUpdate()` 都会把进行中的 promise 缓存在实例字段
+ * `checkForUpdatesPromise` / `downloadPromise` 上，**只在 resolve/reject 时清空**。
+ * 我们的截止时间只是「不再等」，底层请求仍然挂起，于是缓存永久指向同一个死 promise：
+ * 之后每次检查/下载都直接复用它，界面就从「无限转圈」变成「每次检查都超时」，
+ * 用户只能重启应用。放弃一轮时必须把仍是同一个 promise 的缓存清掉，下一次才会真正
+ * 重新发起请求。只在身份一致时清空，避免误清后来者。
+ */
+function releaseStuckUpdaterPromise(
+  field: 'checkForUpdatesPromise' | 'downloadPromise',
+  pending: unknown,
+): void {
+  const internals = autoUpdater as unknown as Record<string, unknown>
+  if (internals[field] !== pending) return
+  internals[field] = null
+  console.warn(`[更新] 已清理挂死的 ${field}，下一次操作会重新发起请求`)
 }
 
 /**
@@ -162,11 +196,22 @@ async function checkSource(source: UpdateSource, round: number): Promise<boolean
   autoUpdater.setFeedURL(source.configuration)
   console.log(`[更新] 尝试更新源: ${source.label}`)
 
-  const result = await withDeadline(
-    autoUpdater.checkForUpdates(),
-    UPDATE_CHECK_DEADLINE_MS,
-    `检查${source.label}元数据`,
-  )
+  const pendingCheck = autoUpdater.checkForUpdates()
+  inFlightCheck = pendingCheck
+  let result: Awaited<ReturnType<typeof autoUpdater.checkForUpdates>>
+  try {
+    result = await withDeadline(
+      pendingCheck,
+      UPDATE_CHECK_DEADLINE_MS,
+      `检查${source.label}元数据`,
+    )
+  } catch (error) {
+    // 超时意味着这个请求不会再回来：清掉 electron-updater 的缓存，否则下一轮只会复用它。
+    if (error instanceof UpdateTimeoutError) releaseStuckUpdaterPromise('checkForUpdatesPromise', pendingCheck)
+    throw error
+  } finally {
+    if (inFlightCheck === pendingCheck) inFlightCheck = null
+  }
 
   // 本轮已被总预算判死，或底层请求晚到：结果作废。
   if (round !== currentRound || round === abandonedRound) return false
@@ -308,6 +353,12 @@ async function runUpdateCheck(): Promise<void> {
   } catch (error) {
     abandonedRound = round
     if (error instanceof UpdateTimeoutError) {
+      // 整轮被总预算判死时，挂死的是最后那个还在等元数据的源；它的 promise 会永久留在
+      // electron-updater 的缓存里，必须在这里一并清掉，否则下一轮检查只会复用它。
+      if (inFlightCheck) {
+        releaseStuckUpdaterPromise('checkForUpdatesPromise', inFlightCheck)
+        inFlightCheck = null
+      }
       console.error('[更新] 检查更新超时，已停止等待:', error.message)
       setStatus({ status: 'error', error: `${error.message}，请检查网络或代理后重试` })
       return

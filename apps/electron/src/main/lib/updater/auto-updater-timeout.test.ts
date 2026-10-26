@@ -63,6 +63,37 @@ test('一次挂死不会毒化后续检查：下一次手动检查仍能正常�
   expect(getUpdateStatus()).toEqual({ status: 'not-available' })
 })
 
+test('挂死的请求不会把 electron-updater 内部缓存永久钉死：下一轮仍能真正发起请求', async () => {
+  // 复刻 electron-updater 6.8.9 的真实语义：第一次 checkForUpdates() 的 promise 会缓存在
+  // 实例字段 checkForUpdatesPromise 上，只在 resolve/reject 时清空；请求挂死时该缓存
+  // 永久指向同一个死 promise，之后每次 checkForUpdates() 都直接复用它。
+  type UpdaterInternals = { checkForUpdatesPromise?: Promise<unknown> | null }
+  const internals = updater as unknown as UpdaterInternals
+  let requests = 0
+  updater.checkForUpdates = (() => {
+    if (internals.checkForUpdatesPromise) return internals.checkForUpdatesPromise
+    requests += 1
+    const pending: Promise<unknown> = checkImpl().finally(() => {
+      if (internals.checkForUpdatesPromise === pending) internals.checkForUpdatesPromise = null
+    })
+    internals.checkForUpdatesPromise = pending
+    return pending
+  }) as unknown as typeof updater.checkForUpdates
+
+  checkImpl = () => new Promise(() => {})
+  await checkForUpdates()
+  const firstRoundRequests = requests
+  expect(firstRoundRequests).toBe(1)
+  expect(getUpdateStatus().status).toBe('error')
+
+  // 挂死的那一轮被放弃后，下一次检查必须真的重新发请求，而不是复用死 promise。
+  checkImpl = async () => ({ isUpdateAvailable: false })
+  await checkForUpdates()
+
+  expect(requests).toBeGreaterThan(firstRoundRequests)
+  expect(getUpdateStatus()).toEqual({ status: 'not-available' })
+})
+
 test('检查阶段不等待下载：下载永不结束时检查仍然立刻返回 downloading', async () => {
   checkImpl = async () => ({ isUpdateAvailable: true, updateInfo: { version: '0.16.1' } })
   const startedAt = Date.now()
