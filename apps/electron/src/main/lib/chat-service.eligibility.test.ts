@@ -93,6 +93,15 @@ describe('Chat 服务资格与事件（完全 mock）', () => {
       expect(decrypts).toBe(0); expect(requests).toHaveLength(0); expect(persisted).toHaveLength(0)
     })
   }
+  test('Claude-only 渠道没有 Chat 端点时报告端点缺失，而不是仅支持 Pi Agent', async () => {
+    channels = [{ ...fixture, provider: 'anthropic', baseUrl: '', agentRuntimes: ['claude'] }]
+    await sendMessage(input, null)
+    expect(events).toHaveLength(1)
+    expect(events[0]?.topic).toBe(CHAT_IPC_CHANNELS.STREAM_ERROR)
+    expect(events[0]?.payload.error).toContain('未配置 Chat 端点')
+    expect(events[0]?.payload.error).not.toContain('仅支持 Pi Agent')
+    expect(decrypts).toBe(0); expect(requests).toHaveLength(0); expect(persisted).toHaveLength(0)
+  })
   test('停用/缺失的绑定模型不解密、不请求、不替换其它 enabled 模型', async () => {
     for (const modelId of ['model', 'missing']) {
       channels = [{ ...fixture, models: [{ id: 'model', name: 'Model', enabled: false }, fixture.models[1]!] }]

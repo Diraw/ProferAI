@@ -165,19 +165,62 @@ export function inferAgentRuntimeModes(
   return isAgentCompatibleProvider(channel.provider) ? ['pi', 'claude'] : ['pi']
 }
 
+/** Chat 资格判定只需要这几个字段；代管字段可选，方便未持久化的临时对象复用。 */
+export type ChatEligibilityChannel = Pick<Channel, 'provider' | 'enabled' | 'credentialMode' | 'baseUrl'>
+  & Partial<Pick<Channel, 'serverManaged' | 'directDataPlane' | 'id'>>
+
+/** Chat 不可用的原因；`null` 表示可以发送。 */
+export type ChatUnavailableReason =
+  /** 渠道已停用。 */
+  | 'disabled'
+  /** 订阅凭据（Codex / xAI OAuth）只有 Pi 实现，Chat 没有对应端点。 */
+  | 'subscription-only'
+  /** 自配渠道没填 Chat 端点（典型是只填了 Anthropic Agent 端点的 Claude-only 渠道）。 */
+  | 'no-endpoint'
+
+/**
+ * 渠道是否配置了可用的 Chat 端点。
+ *
+ * Chat 请求直接用渠道的 `baseUrl` 拼端点（不像 Agent 会推导默认地址），所以自配渠道
+ * 只要 `baseUrl` 为空就没有 Chat 能力——只勾 Claude 的渠道允许 `baseUrl` 为空，
+ * 它的 `agentBaseUrl` 只服务 Agent，不能拿来发 Chat。
+ *
+ * 官方代管渠道豁免：它们经 Team Server Relay 转发，`baseUrl` 为空也能发送。
+ * 但 `directDataPlane` 渠道绕开 Relay 直连数据面，仍然需要自己的 `baseUrl`。
+ */
+export function hasChatEndpoint(
+  channel: Pick<Channel, 'baseUrl'> & Partial<Pick<Channel, 'serverManaged' | 'directDataPlane' | 'id'>>,
+): boolean {
+  // 与官方渠道判定（serverManaged 或历史 newapi-* 前缀）保持一致，但直连数据面不享受豁免。
+  const managedByRelay = (channel.serverManaged === true || channel.id?.startsWith('newapi-') === true)
+    && channel.directDataPlane !== true
+  return managedByRelay || channel.baseUrl.trim() !== ''
+}
+
+/**
+ * Chat 不可用的原因；可用时返回 `null`。
+ *
+ * UI 与主进程共用这一份判定，避免「选择器能选到、发送时才失败」，
+ * 也避免把「没配 Chat 端点」误报成「仅支持 Pi Agent」。
+ */
+export function getChatUnavailableReason(channel: ChatEligibilityChannel): ChatUnavailableReason | null {
+  if (!channel.enabled) return 'disabled'
+  // 历史 xAI OAuth 标识由主进程读取时补齐。
+  if (channel.provider === 'openai-codex'
+    || (channel.provider === 'xai' && channel.credentialMode === 'oauth')) return 'subscription-only'
+  return hasChatEndpoint(channel) ? null : 'no-endpoint'
+}
+
+/** Chat 不接受仅供 Pi 的订阅凭据，也不接受没有 Chat 端点的渠道。 */
+export function isChannelEnabledForChat(channel: ChatEligibilityChannel): boolean {
+  return getChatUnavailableReason(channel) === null
+}
+
 /**
  * 该渠道在指定 Agent 内核下是否可用。
  *
  * 勾选优先；缺失时回退到 provider 推导，保证未迁移的老配置行为不变。
  */
-/** Chat 不接受仅供 Pi 的订阅凭据；历史 xAI OAuth 标识由主进程读取时补齐。 */
-export function isChannelEnabledForChat(
-  channel: Pick<Channel, 'provider' | 'enabled' | 'credentialMode'>,
-): boolean {
-  return channel.enabled && channel.provider !== 'openai-codex'
-    && !(channel.provider === 'xai' && channel.credentialMode === 'oauth')
-}
-
 export function isChannelEnabledForRuntime(
   channel: Pick<Channel, 'provider' | 'enabled' | 'agentExperimentalEnabled' | 'agentRuntimes'>,
   runtime: AgentRuntimeMode,
@@ -525,9 +568,9 @@ export interface FetchModelsInput {
   apiProtocol?: XaiApiProtocol
   /** 连接测试可选：验证指定模型生成；未指定时仅检查模型目录。 */
   modelId?: string
-  /** 连接测试可选：Claude 使用独立 Anthropic 端点，Pi 使用渠道原生协议。 */
+  /** 连接测试/模型发现可选：Claude 使用独立 Anthropic 端点，Pi 使用渠道原生协议。 */
   runtime?: AgentRuntimeMode
-  /** 连接测试可选：独立 Claude 端点；模型发现仍使用 baseUrl。 */
+  /** 连接测试/模型发现可选：独立 Anthropic 端点；Claude 以及 Anthropic 协议的 Pi 会消费它。 */
   agentBaseUrl?: string
 }
 

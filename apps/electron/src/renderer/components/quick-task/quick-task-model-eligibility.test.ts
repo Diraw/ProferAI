@@ -27,6 +27,11 @@ describe('QuickTask 模型资格（fixture）', () => {
   test('Chat 拒绝 Agent-only / Codex / OAuth，并拒绝停用模型', () => {
     const selectedModel = { channelId: 'fixture-channel', modelId: 'fixture-model' }
     expect(resolveQuickTaskModelInfo('chat', {}, [channel()], selectedModel)).toEqual({ channelName: 'Fixture Channel', modelId: 'fixture-model' })
+    // 只勾 Claude 且没有 Chat 端点的渠道：Agent 可用，快速任务 Chat 不可用。
+    const claudeOnly = channel({ provider: 'anthropic', baseUrl: '', agentRuntimes: ['claude'] })
+    expect(resolveQuickTaskModelInfo('chat', {}, [claudeOnly], selectedModel)).toBeNull()
+    expect(resolveQuickTaskModelInfo('agent', { agentChannelId: 'fixture-channel', agentModelId: 'fixture-model', agentRuntime: 'claude' }, [claudeOnly]))
+      .toEqual({ channelName: 'Fixture Channel', modelId: 'fixture-model' })
     expect(resolveQuickTaskModelInfo('chat', {}, [channel({ provider: 'openai-codex' })], selectedModel)).toBeNull()
     expect(resolveQuickTaskModelInfo('chat', {}, [channel({ provider: 'xai', credentialMode: 'oauth' })], selectedModel)).toBeNull()
     expect(resolveQuickTaskModelInfo('chat', {}, [channel({ provider: 'xai', credentialMode: 'api-key' })], selectedModel)).toEqual({ channelName: 'Fixture Channel', modelId: 'fixture-model' })

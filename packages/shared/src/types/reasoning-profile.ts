@@ -56,7 +56,7 @@ export interface ReasoningEncoding {
 }
 
 export interface ReasoningProfile {
-  id: 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'kimi-k3' | 'glm-5.2' | 'glm-5.3' | 'grok-4.6' | 'openai-reasoning-standard' | 'openai-reasoning-max' | 'openai-reasoning-astra'
+  id: 'deepseek-v4-flash' | 'deepseek-v4-pro' | 'kimi-k3' | 'glm-5.2' | 'glm-5.3' | 'grok-4.6' | 'openai-reasoning-standard' | 'openai-reasoning-max' | 'openai-reasoning-astra' | 'claude-adaptive'
   levels: readonly AgentThinkingLevel[]
   defaultLevel: AgentThinkingLevel
   normalize(level: AgentThinkingLevel | undefined): AgentThinkingLevel
@@ -345,6 +345,60 @@ const OPENAI_MAX_PROFILE: ReasoningProfile = {
   },
 }
 
+/**
+ * Claude 5.x（含 Haiku/Sonnet/Opus/Fable）与 Opus 4.7/4.8 只接受 adaptive thinking。
+ *
+ * Anthropic 对这些模型发送旧版 `{ type: 'enabled', budget_tokens }` 会直接 400：
+ * 「requires adaptive thinking; omit thinking or use thinking.type=adaptive and output_config.effort」。
+ * 旧版 Claude 4.5 及以下仍走 manual，不能误伤。
+ */
+export function isClaudeAdaptiveThinkingModel(modelId: string): boolean {
+  // 中转站常把模型写成 `anthropic/claude-haiku-5-5` 这类带 provider 前缀的 ID；
+  // 能力判定只看模型族，不能因为前缀漏掉 adaptive 要求。
+  const normalized = modelId.trim().toLowerCase()
+  const id = normalized.includes('/') ? normalized.slice(normalized.lastIndexOf('/') + 1) : normalized
+  if (!id.startsWith('claude-')) return false
+  if (id.startsWith('claude-mythos-preview')) return true
+  // claude-<family>-5...：fable / haiku / opus / sonnet 的 5.x 代际。
+  if (/^claude-[a-z]+-5(?:-|$)/.test(id)) return true
+  // Opus 4.7 / 4.8 已切到 adaptive-only。
+  if (/^claude-opus-4-(?:7|8)(?:-|$)/.test(id)) return true
+  return false
+}
+
+const CLAUDE_ADAPTIVE_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const satisfies readonly AgentThinkingLevel[]
+
+/**
+ * Adaptive Claude 的档位映射。
+ *
+ * off 必须为 null：Pi 会因此省略 thinking 字段，而不是发送这些模型不接受的
+ * `{ type: 'disabled' }`。xhigh 统一落到 max，因为原生 xhigh 只在部分型号可用，
+ * 而 max 是所有 adaptive Claude 都支持的共同上限。
+ */
+const CLAUDE_ADAPTIVE_EFFORT_MAP: ReasoningEffortMap = {
+  off: null,
+  minimal: 'low',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'max',
+  max: 'max',
+}
+
+function normalizeClaudeAdaptiveLevel(level: AgentThinkingLevel | undefined): AgentThinkingLevel {
+  return level ?? 'high'
+}
+
+const CLAUDE_ADAPTIVE_PROFILE: ReasoningProfile = {
+  id: 'claude-adaptive',
+  levels: CLAUDE_ADAPTIVE_LEVELS,
+  defaultLevel: 'high',
+  normalize: normalizeClaudeAdaptiveLevel,
+  encodings: {
+    'anthropic-messages': { kind: 'adaptive-effort', effortMap: CLAUDE_ADAPTIVE_EFFORT_MAP },
+  },
+}
+
 export const REASONING_PROFILES: readonly ReasoningProfile[] = [
   DEEPSEEK_V4_FLASH_PROFILE,
   DEEPSEEK_V4_PRO_PROFILE,
@@ -355,6 +409,7 @@ export const REASONING_PROFILES: readonly ReasoningProfile[] = [
   OPENAI_STANDARD_PROFILE,
   OPENAI_MAX_PROFILE,
   OPENAI_ASTRA_PROFILE,
+  CLAUDE_ADAPTIVE_PROFILE,
 ]
 
 /** 仅按模型 ID 匹配，再以实际 transport 确认该模型是否有已验证的协议 encoding。 */
@@ -381,10 +436,12 @@ export function resolveReasoningProfile(input: ResolveReasoningProfileInput): Re
             ? GLM_52_PROFILE
             : modelId === 'grok-4.6'
               ? GROK_46_PROFILE
-              : isOpenAITransport && isOpenAIReasoningModel
-              ? modelId === 'gpt-6-astra' ? OPENAI_ASTRA_PROFILE
-                : /^gpt-5\.6(?:-|$)/.test(modelId) ? OPENAI_MAX_PROFILE : OPENAI_STANDARD_PROFILE
-              : undefined
+              : isClaudeAdaptiveThinkingModel(modelId)
+                ? CLAUDE_ADAPTIVE_PROFILE
+                : isOpenAITransport && isOpenAIReasoningModel
+                  ? modelId === 'gpt-6-astra' ? OPENAI_ASTRA_PROFILE
+                    : /^gpt-5\.6(?:-|$)/.test(modelId) ? OPENAI_MAX_PROFILE : OPENAI_STANDARD_PROFILE
+                  : undefined
 
   return profile?.encodings[input.transport] ? profile : undefined
 }

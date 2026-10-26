@@ -1,98 +1,8 @@
 import type { Channel, ChannelsConfig, ProviderType } from '@profer/shared'
-import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, inferAgentRuntimeModes, isAgentCompatibleProvider } from '@profer/shared'
-import { isAnthropicShapedEndpoint, normalizeBaseUrl } from '@profer/core'
+import { PROVIDER_DEFAULT_URLS, inferAgentRuntimeModes } from '@profer/shared'
+import { inferAgentBaseUrl, isOfficialDeepSeekAgentUrl, isOfficialDeepSeekV1Url, normalizeBaseUrl } from '@profer/core'
 
-/** 是否指向 DeepSeek 官方域名；第三方网关不得被官方默认值迁移逻辑覆盖。 */
-function isOfficialDeepSeekHost(baseUrl?: string): boolean {
-  if (!baseUrl) return false
-  try {
-    return new URL(baseUrl).hostname.toLowerCase() === 'api.deepseek.com'
-  } catch {
-    return baseUrl.trim().toLowerCase().includes('api.deepseek.com')
-  }
-}
-
-/**
- * 官方 DeepSeek Anthropic Agent 入口（含历史迁移遗留的写法）。
- *
- * 该地址只是官方推导结果，并非用户意图；用户把 Chat Base URL 切到第三方
- * 网关后，不能再让它继续把 Agent 请求送回官方端点。
- */
-function isOfficialDeepSeekAgentUrl(baseUrl?: string): boolean {
-  const raw = baseUrl?.trim()
-  if (!raw || !isOfficialDeepSeekHost(raw)) return false
-  let path: string
-  try {
-    path = new URL(raw).pathname
-  } catch {
-    path = raw.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+/, '')
-  }
-  const normalized = path.replace(/\/+$/, '').toLowerCase()
-  return normalized === '/anthropic' || normalized === '/anthropic/v1' || normalized === '/anthropic/v1/messages'
-}
-
-// Pi 原生 API 渠道（Pi 直接消费 baseUrl 而不是 agentBaseUrl）从能力描述符派生：
-// 即「原生协议不是 anthropic-messages」的 provider。原先手工枚举的 openai /
-// openai-responses / opencode-go-openai / zhipu / doubao / qwen / google / custom / xai
-// 正好是「非 anthropic 协议」集合，与派生结果等价，不再单独维护。
-const PI_NATIVE_BASE_URL_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>(
-  (Object.keys(PROVIDER_CAPABILITIES) as ProviderType[]).filter(
-    (provider) => !PROVIDER_CAPABILITIES[provider].isAnthropicProtocol
-      // openai-codex 虽非 anthropic 协议，但走 OAuth 内置目录、baseUrl 为空，
-      // 不属于「Pi 复用用户配置 baseUrl」的场景，与原手工集合保持一致排除。
-      && provider !== 'openai-codex',
-  ),
-)
-
-function isOfficialDeepSeekV1Url(baseUrl?: string): boolean {
-  if (!baseUrl) return false
-  try {
-    const url = new URL(baseUrl)
-    return url.hostname === 'api.deepseek.com' && url.pathname.replace(/\/+$/, '') === '/v1'
-  } catch {
-    return baseUrl.trim().replace(/\/+$/, '') === 'https://api.deepseek.com/v1'
-  }
-}
-
-export function inferAgentBaseUrl(provider: ProviderType, baseUrl?: string, agentBaseUrl?: string): string | undefined {
-  const explicit = agentBaseUrl?.trim()
-
-  if (provider === 'deepseek') {
-    // 显式配置的非官方 Agent 入口优先：同时提供双协议的网关可以单独指定。
-    if (explicit && !isOfficialDeepSeekAgentUrl(explicit)) return explicit
-    // 官方 Agent 默认值不再优先于当前 Chat Base URL。历史配置把官方默认值
-    // 持久化进 agentBaseUrl，用户切换 Base URL 后 Agent 会继续打旧地址，
-    // 这是「换了 URL 仍请求不到」的根因。Agent 必须跟随当前 Base URL 推导。
-    if (isAnthropicShapedEndpoint(baseUrl)) return normalizeBaseUrl(baseUrl ?? '')
-    if (!baseUrl?.trim() || isOfficialDeepSeekHost(baseUrl)) return PROVIDER_DEFAULT_AGENT_URLS.deepseek
-    return normalizeBaseUrl(baseUrl)
-  }
-
-  if (explicit) return explicit
-
-  if (provider === 'ollama') {
-    const normalized = normalizeBaseUrl(baseUrl ?? '')
-    return normalized ? normalized.replace(/\/v1$/, '') : undefined
-  }
-
-  if (provider === 'anthropic-compatible') {
-    return baseUrl?.trim() ? normalizeBaseUrl(baseUrl) : undefined
-  }
-
-  // 用户显式填了主地址时优先于官方默认入口：否则 Pi-only 的 Anthropic 渠道指向
-  // 自建网关时，Pi 请求会被静默打到官方地址，而能覆盖这个行为的 agentBaseUrl
-  // 字段此前在 UI 上被隐藏（该字段现已对勾 Pi 的 Anthropic 协议渠道可见）。
-  if (baseUrl?.trim() && PROVIDER_DEFAULT_AGENT_URLS[provider] && baseUrl.trim() !== PROVIDER_DEFAULT_URLS[provider]) {
-    return normalizeBaseUrl(baseUrl)
-  }
-
-  // Pi 原生 API 渠道没有独立的 Anthropic Agent endpoint，必须复用用户配置的
-  // Base URL；否则会把 undefined 传入模型注册层。
-  return PROVIDER_DEFAULT_AGENT_URLS[provider]
-    ?? (isAgentCompatibleProvider(provider) || PI_NATIVE_BASE_URL_PROVIDERS.has(provider)
-      ? baseUrl?.trim()
-      : undefined)
-}
+export { inferAgentBaseUrl }
 
 export function normalizeChannelForCurrentSchema(channel: Channel): { channel: Channel; changed: boolean } {
   let changed = false
@@ -132,9 +42,22 @@ export function normalizeChannelForCurrentSchema(channel: Channel): { channel: C
     }
   }
 
-  const inferredAgentBaseUrl = inferAgentBaseUrl(next.provider, next.baseUrl, next.agentBaseUrl)
-  if (inferredAgentBaseUrl && next.agentBaseUrl !== inferredAgentBaseUrl) {
-    next = { ...next, agentBaseUrl: inferredAgentBaseUrl }
+  // agentBaseUrl 是按 baseUrl 推导出来的派生值，不能落库：一旦写回持久化，用户之后改
+  // 主 baseUrl 时旧值会被当成「显式覆盖」继续生效（换了地址，Agent 还打旧地址）。
+  // 因此只保留与推导值不同的显式指定；其余情况删除字段，交给运行时按当前 baseUrl 推导。
+  // 注意 serverManaged 渠道由服务端带来的显式 agentBaseUrl 同样只在「等于推导值」时清理。
+  const derivedAgentBaseUrl = inferAgentBaseUrl(next.provider, next.baseUrl, undefined)
+  const explicitAgentBaseUrl = next.agentBaseUrl?.trim()
+  if (!explicitAgentBaseUrl) {
+    if (next.agentBaseUrl !== undefined) {
+      next = { ...next, agentBaseUrl: undefined }
+      changed = true
+    }
+  } else if (derivedAgentBaseUrl && normalizeBaseUrl(explicitAgentBaseUrl) === normalizeBaseUrl(derivedAgentBaseUrl)) {
+    next = { ...next, agentBaseUrl: undefined }
+    changed = true
+  } else if (explicitAgentBaseUrl !== next.agentBaseUrl) {
+    next = { ...next, agentBaseUrl: explicitAgentBaseUrl }
     changed = true
   }
 

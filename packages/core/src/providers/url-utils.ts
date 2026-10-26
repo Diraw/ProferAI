@@ -6,6 +6,7 @@
  */
 
 import type { ProviderType } from '@profer/shared'
+import { PROVIDER_CAPABILITIES, PROVIDER_DEFAULT_AGENT_URLS, PROVIDER_DEFAULT_URLS, isAgentCompatibleProvider } from '@profer/shared'
 
 /** 只变换 pathname，查询路由与 fragment 始终留在端点末尾。 */
 function mapUrlPath(rawUrl: string, transform: (path: string) => string): string {
@@ -162,6 +163,104 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return trimTrailingUrlPathSlash(baseUrl)
 }
 
+/** 是否指向 DeepSeek 官方域名；第三方网关不得被官方默认值迁移逻辑覆盖。 */
+export function isOfficialDeepSeekHost(baseUrl?: string): boolean {
+  if (!baseUrl) return false
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === 'api.deepseek.com'
+  } catch {
+    return baseUrl.trim().toLowerCase().includes('api.deepseek.com')
+  }
+}
+
+/**
+ * 官方 DeepSeek Anthropic Agent 入口（含历史迁移遗留的写法）。
+ *
+ * 该地址只是官方推导结果，并非用户意图；用户把 Chat Base URL 切到第三方
+ * 网关后，不能再让它继续把 Agent 请求送回官方端点。
+ */
+export function isOfficialDeepSeekAgentUrl(baseUrl?: string): boolean {
+  const raw = baseUrl?.trim()
+  if (!raw || !isOfficialDeepSeekHost(raw)) return false
+  let path: string
+  try {
+    path = new URL(raw).pathname
+  } catch {
+    path = raw.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+/, '')
+  }
+  const normalized = path.replace(/\/+$/, '').toLowerCase()
+  return normalized === '/anthropic' || normalized === '/anthropic/v1' || normalized === '/anthropic/v1/messages'
+}
+
+export function isOfficialDeepSeekV1Url(baseUrl?: string): boolean {
+  if (!baseUrl) return false
+  try {
+    const url = new URL(baseUrl)
+    return url.hostname === 'api.deepseek.com' && url.pathname.replace(/\/+$/, '') === '/v1'
+  } catch {
+    return baseUrl.trim().replace(/\/+$/, '') === 'https://api.deepseek.com/v1'
+  }
+}
+
+// Pi 原生 API 渠道（Pi 直接消费 baseUrl 而不是 agentBaseUrl）从能力描述符派生：
+// 即「原生协议不是 anthropic-messages」的 provider。原先手工枚举的 openai /
+// openai-responses / opencode-go-openai / zhipu / doubao / qwen / google / custom / xai
+// 正好是「非 anthropic 协议」集合，与派生结果等价，不再单独维护。
+const PI_NATIVE_BASE_URL_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>(
+  (Object.keys(PROVIDER_CAPABILITIES) as ProviderType[]).filter(
+    (provider) => !PROVIDER_CAPABILITIES[provider].isAnthropicProtocol
+      // openai-codex 虽非 anthropic 协议，但走 OAuth 内置目录、baseUrl 为空，
+      // 不属于「Pi 复用用户配置 baseUrl」的场景，与原手工集合保持一致排除。
+      && provider !== 'openai-codex',
+  ),
+)
+
+/**
+ * 推导 Agent（Anthropic 协议）实际消费的 Base URL。
+ *
+ * 渲染层（端点预览）与主进程（测试连接、模型发现、运行时凭据）必须共用这一份推导，
+ * 否则表单上显示/校验的地址会和实际请求地址漂移。
+ */
+export function inferAgentBaseUrl(provider: ProviderType, baseUrl?: string, agentBaseUrl?: string): string | undefined {
+  const explicit = agentBaseUrl?.trim()
+
+  if (provider === 'deepseek') {
+    // 显式配置的非官方 Agent 入口优先：同时提供双协议的网关可以单独指定。
+    if (explicit && !isOfficialDeepSeekAgentUrl(explicit)) return explicit
+    // 官方 Agent 默认值不再优先于当前 Chat Base URL。历史配置把官方默认值
+    // 持久化进 agentBaseUrl，用户切换 Base URL 后 Agent 会继续打旧地址，
+    // 这是「换了 URL 仍请求不到」的根因。Agent 必须跟随当前 Base URL 推导。
+    if (isAnthropicShapedEndpoint(baseUrl)) return normalizeBaseUrl(baseUrl ?? '')
+    if (!baseUrl?.trim() || isOfficialDeepSeekHost(baseUrl)) return PROVIDER_DEFAULT_AGENT_URLS.deepseek
+    return normalizeBaseUrl(baseUrl)
+  }
+
+  if (explicit) return explicit
+
+  if (provider === 'ollama') {
+    const normalized = normalizeBaseUrl(baseUrl ?? '')
+    return normalized ? normalized.replace(/\/v1$/, '') : undefined
+  }
+
+  if (provider === 'anthropic-compatible') {
+    return baseUrl?.trim() ? normalizeBaseUrl(baseUrl) : undefined
+  }
+
+  // 用户显式填了主地址时优先于官方默认入口：否则 Pi-only 的 Anthropic 渠道指向
+  // 自建网关时，Pi 请求会被静默打到官方地址，而能覆盖这个行为的 agentBaseUrl
+  // 字段此前在 UI 上被隐藏（该字段现已对勾 Pi 的 Anthropic 协议渠道可见）。
+  if (baseUrl?.trim() && PROVIDER_DEFAULT_AGENT_URLS[provider] && baseUrl.trim() !== PROVIDER_DEFAULT_URLS[provider]) {
+    return normalizeBaseUrl(baseUrl)
+  }
+
+  // Pi 原生 API 渠道没有独立的 Anthropic Agent endpoint，必须复用用户配置的
+  // Base URL；否则会把 undefined 传入模型注册层。
+  return PROVIDER_DEFAULT_AGENT_URLS[provider]
+    ?? (isAgentCompatibleProvider(provider) || PI_NATIVE_BASE_URL_PROVIDERS.has(provider)
+      ? baseUrl?.trim()
+      : undefined)
+}
+
 /**
  * 规范化 Gemini 原生协议的 Base URL（返回协议根）。
  *
@@ -295,7 +394,10 @@ export function resolveOpenAIModelsUrl(baseUrl: string): string {
 /**
  * 根据 Anthropic 协议供应商类型选择对应的 URL 规范化策略。
  *
- * 统一收口 channel-manager 和 AnthropicAdapter 中重复的条件分支逻辑。
+ * @deprecated 运行时与 Chat 的端点推导已统一到 resolveAnthropicMessagesUrl /
+ * resolveAnthropicModelsUrl（chat/sdk 两种模式），本函数仅保留给历史调用方与
+ * 单测，新代码不要再直接使用，否则会重新引入「两套语义」。
+ *
  * 仅适用于走 Anthropic 协议且允许填写协议根路径的内置供应商。
  *
  * DeepSeek / Kimi 等以 `/anthropic` 为协议根路径的供应商，实际端点仍位于
@@ -324,44 +426,106 @@ export function normalizeAnthropicProviderUrl(baseUrl: string, provider: Provide
 }
 
 /**
+ * Anthropic 端点解析模式。
+ *
+ * - `chat`：Profer 自己发请求（Chat 适配器 / 连接测试 / 模型发现）。可以直接带
+ *   query/hash 路由，也允许用户填写完整端点。
+ * - `sdk`：Claude / Pi 的 Anthropic SDK 消费的地址。SDK 只接受协议根并自行拼接
+ *   `/v1/messages`，所以必须按 SDK 语义推导，且不能带 query/hash。
+ */
+export type AnthropicEndpointMode = 'chat' | 'sdk'
+
+/** 小米系列渠道的 Anthropic 入口固定在 `/anthropic` 下（历史 Chat 行为）。 */
+function isXiaomiAnthropicProvider(provider: ProviderType): boolean {
+  return provider === 'xiaomi' || provider === 'xiaomi-token-plan'
+}
+
+/**
+ * Chat 直连使用的 Anthropic 协议根（含版本段）。
+ *
+ * 只处理 pathname，query/hash 路由原样留在端点末尾：
+ * - 裸域名 → 补 `/v1`
+ * - `/anthropic` → `/anthropic/v1`
+ * - 已含版本段（`/coding/v1`、`/proxy/v2`）→ 保持不变
+ * - 小米系列 → 固定纠正到 `/anthropic/v1`（用户常把 OpenAI 兼容的 `/v1` 填进来）
+ */
+function resolveChatAnthropicVersionedRoot(baseUrl: string, provider: ProviderType): string {
+  if (isXiaomiAnthropicProvider(provider)) {
+    return mapUrlPath(baseUrl, () => '/anthropic/v1')
+  }
+  return mapUrlPath(baseUrl, (path) => {
+    const root = path.replace(/\/(messages|models)$/, '')
+    if (/\/v\d+$/.test(root)) return root || '/'
+    return `${root === '/' ? '' : root}/v1`
+  })
+}
+
+/**
+ * 统一的 Anthropic 协议端点解析（messages / models）。
+ *
+ * 历史上 Chat 走 `normalizeAnthropicProviderUrl + /messages`，而 Agent/Pi 走
+ * `normalizeAnthropicBaseUrlForSdk + /v1/messages`，两套语义并存导致同一个渠道在
+ * Chat / Agent 下打到不同路径（`/anthropic/messages` vs `/anthropic/v1/messages`，
+ * 甚至 anthropic-compatible 直接请求协议根）。本函数是唯一事实源：
+ * - `sdk` 模式严格等价于 Claude/Pi SDK：`normalizeAnthropicBaseUrlForSdk(base) + /v1/<kind>`
+ * - `chat` 模式与 SDK 对齐（协议根补 `/v1`），但保留 Chat 的两项能力：
+ *   完整端点原样使用、query/hash 路由可用
+ */
+function resolveAnthropicProtocolUrl(
+  baseUrl: string,
+  provider: ProviderType,
+  kind: 'messages' | 'models',
+  mode: AnthropicEndpointMode,
+): string {
+  const trimmed = baseUrl.trim()
+  if (!trimmed) return trimmed
+
+  if (mode === 'sdk') {
+    // SDK 自行拼接 /v1/<kind>；normalizeAnthropicBaseUrlForSdk 同时拒绝 query/hash 路由。
+    return appendUrlPath(normalizeAnthropicBaseUrlForSdk(trimmed), `/v1/${kind}`)
+  }
+
+  // Chat 允许用户直接填写完整端点（anthropic-compatible 迁移后就是这样存储的）。
+  if (hasPathSuffix(trimmed, '/messages') || hasPathSuffix(trimmed, '/models')) {
+    const current = hasPathSuffix(trimmed, '/messages') ? '/messages' : '/models'
+    return trimTrailingUrlPathSlash(replacePathSuffix(trimmed, current, `/${kind}`))
+  }
+
+  return appendUrlPath(resolveChatAnthropicVersionedRoot(trimmed, provider), `/${kind}`)
+}
+
+/**
  * 解析 Anthropic Messages 请求地址。
  *
- * Anthropic 兼容格式要求用户直接填写完整请求端点。
- * 内置 Anthropic 协议供应商仍允许填写协议根地址，例如：
- * - minimax: "https://api.minimaxi.com/anthropic" → ".../anthropic/v1/messages"
- * - anthropic-compatible: "https://gateway.example.com/v1/messages" → 原样使用
+ * 默认 `chat` 模式供 Chat 适配器、连接测试、模型发现使用；`sdk` 模式供 Claude/Pi
+ * 运行时（测试连接、目录发现）使用，两者语义一致，见 resolveAnthropicProtocolUrl。
+ *
+ * 例如（chat 与 sdk 结果一致）：
+ * - "https://gw/anthropic" → "https://gw/anthropic/v1/messages"
+ * - "https://gw" → "https://gw/v1/messages"
+ * - "https://gw/v1" → "https://gw/v1/messages"
+ * - "https://gw/v1/messages" → "https://gw/v1/messages"
  */
-export function resolveAnthropicMessagesUrl(baseUrl: string, provider: ProviderType): string {
-  if (provider === 'ollama') {
-    return mapUrlPath(baseUrl, (path) => `${path.replace(/\/v1$/, '')}/v1/messages`)
-  }
-  if (provider === 'anthropic-compatible') {
-    return trimTrailingUrlPathSlash(baseUrl)
-  }
-  if (provider === 'xiaomi' || provider === 'xiaomi-token-plan') {
-    return mapUrlPath(baseUrl, () => '/anthropic/v1/messages')
-  }
-  if (hasPathSuffix(baseUrl, '/messages')) {
-    return trimTrailingUrlPathSlash(baseUrl)
-  }
-  return appendUrlPath(normalizeAnthropicProviderUrl(baseUrl, provider), '/messages')
+export function resolveAnthropicMessagesUrl(
+  baseUrl: string,
+  provider: ProviderType,
+  mode: AnthropicEndpointMode = 'chat',
+): string {
+  return resolveAnthropicProtocolUrl(baseUrl, provider, 'messages', mode)
 }
 
 /**
  * 解析 Anthropic Models 地址。
  *
- * Anthropic 兼容格式使用用户填写的请求地址推导同级模型端点；
- * 内置供应商按协议根地址推导 /models。
+ * 与 resolveAnthropicMessagesUrl 共用同一份推导：Chat 从完整端点换同级端点，
+ * SDK 模式从协议根拼 `/v1/models`。
  */
-export function resolveAnthropicModelsUrl(baseUrl: string, provider: ProviderType): string {
-  if (provider === 'ollama') {
-    return mapUrlPath(baseUrl, (path) => `${path.replace(/\/v1$/, '')}/v1/models`)
-  }
-  if (hasPathSuffix(baseUrl, '/messages')) {
-    return replacePathSuffix(baseUrl, '/messages', '/models')
-  }
-  if (hasPathSuffix(baseUrl, '/models')) return trimTrailingUrlPathSlash(baseUrl)
-  return appendUrlPath(normalizeAnthropicProviderUrl(baseUrl, provider), '/models')
+export function resolveAnthropicModelsUrl(
+  baseUrl: string,
+  provider: ProviderType,
+  mode: AnthropicEndpointMode = 'chat',
+): string {
+  return resolveAnthropicProtocolUrl(baseUrl, provider, 'models', mode)
 }
 
 /**

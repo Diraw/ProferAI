@@ -41,6 +41,16 @@ describe('Chat per-conversation 模型绑定（本地 fixture）', () => {
     store.set(channelsAtom, [])
     expect(store.get(conversationModelAtomFamily('a'))).toBeNull()
   })
+  test('Claude-only 渠道没有 Chat 端点时不能作为 Chat 绑定，代管渠道为空地址仍可用', () => {
+    const store = setup()
+    store.set(conversationsAtom, [conversation('a')])
+    store.set(conversationModelsAtom, new Map([['a', { channelId: 'claude-only', modelId: 'model' }]]))
+    store.set(channelsAtom, [{ ...baseChannel, id: 'claude-only', provider: 'anthropic', baseUrl: '', agentRuntimes: ['claude'] }])
+    expect(store.get(conversationModelAtomFamily('a'))).toBeNull()
+    // 官方代管渠道走 Relay，baseUrl 为空也能发 Chat。
+    store.set(channelsAtom, [{ ...baseChannel, id: 'claude-only', serverManaged: true, baseUrl: '' }])
+    expect(store.get(conversationModelAtomFamily('a'))).toEqual({ channelId: 'claude-only', modelId: 'model' })
+  })
   test('Chat 不展示 OAuth-only xAI 与 Codex，未登录不展示官方缓存', () => {
     const store = setup()
     const oauth = { ...baseChannel, id: 'xai-oauth', provider: 'xai' as const, credentialMode: 'oauth' as const }

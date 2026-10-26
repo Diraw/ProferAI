@@ -5,6 +5,8 @@
  * 通知模式、IPC 通道常量。
  */
 
+import type { AgentRuntime } from './agent-provider'
+
 // ===== 飞书 Bot 配置 =====
 
 /** 飞书 Bot 应用配置（持久化到 ~/.proma/feishu.json）— 旧格式，向后兼容 */
@@ -147,6 +149,13 @@ export interface FeishuChatBinding {
   channelId: string
   /** 模型 ID */
   modelId?: string
+  /**
+   * 会话使用的 Agent 内核。
+   *
+   * 可选：旧持久化 binding 没有该字段，读取时按
+   * `binding.agentRuntime ?? 会话元数据 agentRuntime ?? 全局设置` 回退。
+   */
+  agentRuntime?: AgentRuntime
   /** 绑定来源：飞书主动绑定或 Profer 桌面 Session 镜像 */
   source?: 'feishu' | 'session-mirror'
   /** 聊天类型（单聊或群聊） */

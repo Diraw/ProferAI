@@ -27,7 +27,8 @@ import type {
   SDKAssistantMessage,
   SDKUserMessage,
 } from '@profer/shared'
-import { FEISHU_IPC_CHANNELS, AGENT_IPC_CHANNELS, isVisibleAgentSession, resolveAgentAttachmentPrompt } from '@profer/shared'
+import { FEISHU_IPC_CHANNELS, AGENT_IPC_CHANNELS, isChannelEnabledForRuntime, isVisibleAgentSession, normalizeAgentRuntime, resolveAgentAttachmentPrompt } from '@profer/shared'
+import type { AgentRuntime } from '@profer/shared'
 import { getDecryptedBotAppSecret } from './feishu-config'
 import { agentEventBus, runAgentHeadless, stopAgent } from './agent-service'
 import { createAgentSession, listAgentSessions, getAgentSessionMeta } from './agent-session-manager'
@@ -66,6 +67,9 @@ import {
   resolveChannelByIndex,
   resolveModelByIndex,
   describeBindingModel,
+  describeAgentRuntime,
+  resolveChannelIdForRuntime,
+  resolveModelIdForChannel,
 } from './bridge-model-utils'
 import type { ToolSummary, FormattedAgentResult, WorkspaceListItem } from './feishu-message'
 import { CardStream } from './feishu/card-stream'
@@ -373,6 +377,8 @@ class FeishuBridge {
           if (appSettings.agentModelId) {
             b.modelId = appSettings.agentModelId
           }
+          // 旧 binding 无 agentRuntime：以会话元数据为准回填，避免误判成 Claude 内核
+          b.agentRuntime = normalizeAgentRuntime(session.agentRuntime ?? b.agentRuntime)
           this.chatBindings.set(b.chatId, b)
           this.sessionToChat.set(b.sessionId, b.chatId)
         }
@@ -458,6 +464,8 @@ class FeishuBridge {
       this.sessionToChat.delete(binding.sessionId)
       binding.sessionId = input.sessionId
       this.sessionToChat.set(input.sessionId, input.chatId)
+      // 新会话的内核可能与旧会话不同，必须重算，否则 /model 会按错内核过滤
+      binding.agentRuntime = this.resolveChatRuntime({ ...binding, agentRuntime: undefined })
     }
 
     this.saveBindings()
@@ -519,6 +527,7 @@ class FeishuBridge {
       workspaceId,
       channelId,
       modelId: this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
+      agentRuntime: normalizeAgentRuntime(session.agentRuntime),
       source: 'session-mirror',
       chatType: 'group',
       groupName,
@@ -1042,17 +1051,35 @@ class FeishuBridge {
     }
 
     // 渠道/模型：Bot 配置 > 应用设置
-    const channelId = this.botConfig.defaultChannelId ?? appSettings.agentChannelId
-    if (!channelId) {
+    const preferredChannelId = this.botConfig.defaultChannelId ?? appSettings.agentChannelId
+    if (!preferredChannelId) {
       await this.sendMessage(chatId, '请先在 Profer Agent 设置中选择渠道。')
       return
     }
+
+    // 会话内核跟随全局设置，不能隐式退回 Claude（Pi-only 渠道会发送失败）
+    const agentRuntime = normalizeAgentRuntime(appSettings.agentRuntime)
+    const picked = resolveChannelIdForRuntime(preferredChannelId, agentRuntime)
+    if (!picked) {
+      await this.sendMessage(
+        chatId,
+        `暂无同时启用 ${describeAgentRuntime(agentRuntime)} 内核的可用渠道，请先在 Profer 渠道设置中启用。`,
+      )
+      return
+    }
+    const channelId = picked.channelId
+    const modelId = resolveModelIdForChannel(
+      channelId,
+      this.botConfig.defaultModelId ?? appSettings.agentModelId,
+    )
 
     // 创建会话（使用默认标题，首次对话完成后会自动生成标题）
     const session = await createAgentSession(
       title,
       channelId,
       workspaceId,
+      modelId,
+      agentRuntime,
     )
 
     // 绑定
@@ -1063,7 +1090,8 @@ class FeishuBridge {
       sessionId: session.id,
       workspaceId,
       channelId,
-      modelId: this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
+      modelId,
+      agentRuntime,
       source: 'feishu',
       chatType: msgCtx.chatType,
       groupName: msgCtx.groupName,
@@ -1083,7 +1111,22 @@ class FeishuBridge {
       })
     }
 
-    await this.sendMessage(chatId, `已创建会话 (${session.id.slice(0, 8)})`)
+    await this.sendMessage(
+      chatId,
+      picked.fellBack
+        ? `已创建会话 (${session.id.slice(0, 8)})\n⚠️ 默认渠道未启用 ${describeAgentRuntime(agentRuntime)} 内核，已自动改用其它可用渠道。可用 /model 重新选择。`
+        : `已创建会话 (${session.id.slice(0, 8)})`,
+    )
+  }
+
+  /**
+   * 解析某个 chat 当前应使用的 Agent 内核。
+   *
+   * 顺序：binding（建会话时写入） > 会话元数据（旧 binding 无字段时推导） > 全局设置。
+   */
+  private resolveChatRuntime(binding?: FeishuChatBinding): AgentRuntime {
+    const sessionRuntime = binding ? getAgentSessionMeta(binding.sessionId)?.agentRuntime : undefined
+    return normalizeAgentRuntime(binding?.agentRuntime ?? sessionRuntime ?? getSettings().agentRuntime)
   }
 
   private findBindingBySessionId(sessionId: string): FeishuChatBinding | undefined {
@@ -1253,14 +1296,34 @@ class FeishuBridge {
     }
 
     const appSettings = getSettings()
+    // 切换到的会话可能本来就是 Pi 会话，内核以会话元数据为准
+    const agentRuntime = normalizeAgentRuntime(match.agentRuntime ?? appSettings.agentRuntime)
+    // 会话历史渠道可能未启用该内核，此时回退到第一个可用渠道，避免切过去就发送失败
+    const preferredChannelId = match.channelId ?? this.botConfig.defaultChannelId ?? appSettings.agentChannelId ?? ''
+    const picked = preferredChannelId
+      ? resolveChannelIdForRuntime(preferredChannelId, agentRuntime)
+      : null
+    if (!picked) {
+      await this.sendMessage(
+        chatId,
+        `会话「${match.title}」使用 ${describeAgentRuntime(agentRuntime)} 内核，但暂无同时启用该内核的可用渠道，请先在 Profer 渠道设置中启用。`,
+      )
+      return
+    }
+
+    const modelId = resolveModelIdForChannel(
+      picked.channelId,
+      match.modelId ?? this.botConfig.defaultModelId ?? appSettings.agentModelId,
+    )
     const binding: FeishuChatBinding = {
       chatId,
       botId: this.botConfig.id,
       userId: msgCtx.senderOpenId,
       sessionId: match.id,
       workspaceId: match.workspaceId ?? this.botConfig.defaultWorkspaceId ?? appSettings.agentWorkspaceId ?? '',
-      channelId: match.channelId ?? appSettings.agentChannelId ?? '',
-      modelId: this.botConfig.defaultModelId ?? appSettings.agentModelId ?? undefined,
+      channelId: picked.channelId,
+      modelId,
+      agentRuntime,
       source: 'feishu',
       chatType: msgCtx.chatType,
       groupName: msgCtx.groupName,
@@ -1271,7 +1334,12 @@ class FeishuBridge {
     this.updateStatus({ activeBindings: this.chatBindings.size })
     this.saveBindings()
 
-    await this.sendMessage(chatId, `已切换到会话: ${match.title} (${match.id.slice(0, 8)})`)
+    await this.sendMessage(
+      chatId,
+      picked.fellBack
+        ? `已切换到会话: ${match.title} (${match.id.slice(0, 8)})\n⚠️ 会话原渠道未启用 ${describeAgentRuntime(agentRuntime)} 内核，已自动改用其它可用渠道。可用 /model 重新选择。`
+        : `已切换到会话: ${match.title} (${match.id.slice(0, 8)})`,
+    )
   }
 
   private async handleWorkspaceCommand(msgCtx: FeishuMessageContext, arg?: string): Promise<void> {
@@ -1359,6 +1427,7 @@ class FeishuBridge {
       const effModelId = binding.modelId || this.botConfig.defaultModelId || nowSettings.agentModelId
       const modelInfo = describeBindingModel(effChannelId, effModelId)
       lines.push(`**模型**: ${modelInfo.channelName} / ${modelInfo.modelName}${modelInfo.valid ? '' : '（已失效）'}`)
+      lines.push(`**内核**: ${describeAgentRuntime(this.resolveChatRuntime(binding))}`)
     } else {
       lines.push('**会话**: 未绑定（发送消息将自动创建）')
     }
@@ -1453,17 +1522,20 @@ class FeishuBridge {
    */
   private async handleModelCommand(msgCtx: FeishuMessageContext, arg: string): Promise<void> {
     const { chatId } = msgCtx
-    const channels = listSwitchableChannels()
+    const binding = this.chatBindings.get(chatId)
+    // 渠道列表必须按当前会话内核过滤：否则会把 Pi 会话切到只勾了 Claude 的渠道
+    const agentRuntime = this.resolveChatRuntime(binding)
+    const runtimeLabel = describeAgentRuntime(agentRuntime)
+    const channels = listSwitchableChannels(agentRuntime)
     if (channels.length === 0) {
       await this.sendMessage(
         chatId,
-        '暂无可用渠道。请先在 Profer 设置中配置并启用渠道（需填入 API Key 且至少启用一个模型）。',
+        `当前会话使用 ${runtimeLabel} 内核，暂无同时启用该内核的可用渠道。请先在 Profer 设置中配置并启用渠道（需填入 API Key、至少启用一个模型，并勾选 ${runtimeLabel} 内核）。`,
       )
       return
     }
 
     const parts = arg.split(/\s+/).filter(Boolean)
-    const binding = this.chatBindings.get(chatId)
 
     // /model — 列出渠道
     if (parts.length === 0) {
@@ -1477,11 +1549,23 @@ class FeishuBridge {
       return
     }
 
-    // 解析渠道
+    // 解析渠道（序号基于已按内核过滤的列表，与用户看到的一致）
     const channelIdx = Number(parts[0])
-    const channel = resolveChannelByIndex(channelIdx)
+    const channel = resolveChannelByIndex(channelIdx, agentRuntime)
     if (!channel) {
-      await this.sendMessage(chatId, `未找到渠道 "${parts[0]}"。使用 /model 查看可用渠道。`)
+      await this.sendMessage(
+        chatId,
+        `未找到渠道 "${parts[0]}"（当前内核: ${runtimeLabel}）。使用 /model 查看可用渠道。`,
+      )
+      return
+    }
+
+    // 防御：列表与切换之间渠道配置可能被改，明确拒绝而不是静默失败
+    if (!isChannelEnabledForRuntime(channel, agentRuntime)) {
+      await this.sendMessage(
+        chatId,
+        `渠道「${channel.name}」未启用 ${runtimeLabel} 内核，无法用于当前会话。请选择其它渠道，或在 Profer 渠道设置中启用 ${runtimeLabel} 内核。`,
+      )
       return
     }
 
@@ -1693,8 +1777,23 @@ class FeishuBridge {
 
     // 渠道/模型解析：binding（per-chat 用户在 IM 里切过的）优先，其次 Bot 配置、应用设置
     const latestSettings = getSettings()
-    const channelId = binding.channelId || this.botConfig.defaultChannelId || latestSettings.agentChannelId || ''
-    const modelId = binding.modelId || this.botConfig.defaultModelId || latestSettings.agentModelId
+    const agentRuntime = this.resolveChatRuntime(binding)
+    const preferredChannelId = binding.channelId || this.botConfig.defaultChannelId || latestSettings.agentChannelId || ''
+    // 旧 binding 可能指向未启用当前内核的渠道；不兼容时回退到可用渠道，避免发送阶段才报错
+    const picked = preferredChannelId
+      ? resolveChannelIdForRuntime(preferredChannelId, agentRuntime)
+      : null
+    if (picked?.fellBack) {
+      console.warn(
+        `[飞书 Bridge] 渠道 ${preferredChannelId} 未启用 ${describeAgentRuntime(agentRuntime)} 内核，本次发送改用 ${picked.channelId}`,
+      )
+    }
+    const channelId = picked?.channelId ?? preferredChannelId
+    // 回退渠道时全局/绑定模型可能不属于新渠道，按渠道重新解析，避免落到默认 claude 模型。
+    const modelId = resolveModelIdForChannel(
+      channelId,
+      binding.modelId || this.botConfig.defaultModelId || latestSettings.agentModelId,
+    )
 
     const input: AgentSendInput = {
       sessionId: binding.sessionId,

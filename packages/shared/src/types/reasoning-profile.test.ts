@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveReasoningProfile } from './reasoning-profile'
+import { isClaudeAdaptiveThinkingModel, resolveReasoningProfile } from './reasoning-profile'
 
 describe('GLM-5.3 reasoning profile', () => {
   test('Given GPT-6 Astra When resolving Then exposes five supported effort levels', () => {
@@ -48,5 +48,46 @@ describe('GLM-5.3 reasoning profile', () => {
   test('Given DeepSeek 旧世代模型 When resolving Then 短名别名不误扩档位', () => {
     expect(resolveReasoningProfile({ modelId: 'deepseek-chat', transport: 'anthropic-messages' })).toBeUndefined()
     expect(resolveReasoningProfile({ modelId: 'deepseek-reasoner', transport: 'anthropic-messages' })).toBeUndefined()
+  })
+})
+
+describe('Claude adaptive thinking profile', () => {
+  test('Given claude-haiku-5-5 When resolving on Anthropic transport Then uses adaptive effort and omits thinking when off', () => {
+    const profile = resolveReasoningProfile({ modelId: 'claude-haiku-5-5', transport: 'anthropic-messages' })
+
+    expect(profile?.id).toBe('claude-adaptive')
+    expect(profile?.encodings['anthropic-messages']?.kind).toBe('adaptive-effort')
+    expect(profile?.encodings['anthropic-messages']?.effortMap).toMatchObject({
+      off: null,
+      minimal: 'low',
+      low: 'low',
+      medium: 'medium',
+      high: 'high',
+      xhigh: 'max',
+      max: 'max',
+    })
+  })
+
+  test('Given Claude 5.x families and Opus 4.7/4.8 When checking adaptive support Then only those generations match', () => {
+    for (const modelId of ['claude-haiku-5-5', 'claude-sonnet-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-mythos-preview']) {
+      expect(isClaudeAdaptiveThinkingModel(modelId)).toBe(true)
+    }
+    for (const modelId of ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-3-7-sonnet', 'claude-3-5-sonnet']) {
+      expect(isClaudeAdaptiveThinkingModel(modelId)).toBe(false)
+    }
+  })
+
+  test('Given a provider-prefixed Claude 5.x ID When checking adaptive support Then still matches the model family', () => {
+    expect(isClaudeAdaptiveThinkingModel('anthropic/claude-haiku-5-5')).toBe(true)
+    expect(resolveReasoningProfile({ modelId: 'anthropic/claude-haiku-5-5', transport: 'anthropic-messages' })?.id)
+      .toBe('claude-adaptive')
+  })
+
+  test('Given older Claude When resolving Then it keeps the manual protocol instead of claiming adaptive', () => {
+    expect(resolveReasoningProfile({ modelId: 'claude-haiku-4-5', transport: 'anthropic-messages' })).toBeUndefined()
+  })
+
+  test('Given a Claude model on an OpenAI transport When resolving Then no Anthropic encoding is exposed', () => {
+    expect(resolveReasoningProfile({ modelId: 'claude-opus-5', transport: 'openai-completions' })).toBeUndefined()
   })
 })
