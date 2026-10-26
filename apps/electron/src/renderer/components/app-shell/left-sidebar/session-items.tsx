@@ -940,7 +940,8 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                 ) : hasBrowser ? (
                   <Globe size={11} className="flex-shrink-0 text-foreground/40" aria-label="该会话正在使用浏览器" />
                 ) : null}
-                <span className="truncate">{session.title}</span>
+                {/* 会话名占满剩余空间（flex-1），右侧只留给子会话箭头/数字 */}
+                <span className="flex-1 min-w-0 truncate">{session.title}</span>
                 {/* 草稿标记：输入框有未发送内容 */}
                 {hasDraft && (
                   <Pencil size={11} className="flex-shrink-0 text-foreground/40" aria-label="输入框有未发送内容" />
@@ -958,7 +959,7 @@ export const AgentSessionItem = React.memo(function AgentSessionItem({
                       event.stopPropagation()
                       delegationSummary.onToggle()
                     }}
-                    className="flex-shrink-0 inline-flex items-center gap-0.5 text-[12px] leading-4 text-foreground/45 hover:text-foreground/65 transition-colors"
+                    className="ml-auto flex-shrink-0 inline-flex items-center gap-0.5 text-[12px] leading-4 text-foreground/45 hover:text-foreground/65 transition-colors"
                   >
                     <ChevronRight
                       size={10}
