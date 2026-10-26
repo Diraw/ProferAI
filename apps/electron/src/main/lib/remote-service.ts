@@ -154,8 +154,14 @@ async function ensurePublicTlsServer(): Promise<void> {
   // 证书换了（公网 IP 变更/轮换）：旧连接已经无法再用新证书继续信任，全部断开重连。
   closePublicTlsServer()
   const server = createTlsServer({ key: identity.key, cert: identity.cert, minVersion: 'TLSv1.2' }, (_req, res) => { res.writeHead(404); res.end() })
+  server.on('tlsClientError', (error, socket) => {
+    console.log('[Remote] 公网 TLS 握手失败:', error.message, '| peer=', socket.remoteAddress ?? '?')
+  })
   server.on('upgrade', (req, socket, head) => {
-    if (req.url !== '/ws' || !wss) { socket.destroy(); return }
+    // 只比 pathname：手动连接是 `/ws?token=...`，整串比较会把带 query 的合法请求直接断掉。
+    const pathname = (req.url ?? '').split('?')[0]
+    console.log('[Remote] 公网 TLS 升级请求:', req.url, '| protocol=', req.headers['sec-websocket-protocol'] ?? '(legacy)')
+    if (pathname !== '/ws' || !wss) { socket.destroy(); return }
     wss.handleUpgrade(req, socket, head, (ws) => {
       // 这条连接端到端是 TLS（手机校验了自签证书指纹），允许走 `?token=` 手动连接路径。
       publicTlsSockets.add(ws)
@@ -186,7 +192,7 @@ async function startRemoteFrpNow(rotate = false): Promise<import('./remote-frp-s
   const store = new RemoteTlsStore(join(app.getPath('userData'), 'remote-tls'), protectSecret, revealSecret)
   const id = await store.ensure(c.serverAddr, rotate)
   const server = createTlsServer({ key: id.key, cert: id.cert, minVersion: 'TLSv1.2' }, (_req, res) => { res.writeHead(404); res.end() })
-  server.on('upgrade', (req, socket, head) => { if (req.url !== '/ws' || !wss) { socket.destroy(); return }; wss.handleUpgrade(req, socket, head, (ws) => { tlsSockets.add(ws); ws.once('close', () => tlsSockets.delete(ws)); wss?.emit('connection', ws, req) }) })
+  server.on('upgrade', (req, socket, head) => { const pathname = (req.url ?? '').split('?')[0]; if (pathname !== '/ws' || !wss) { socket.destroy(); return }; wss.handleUpgrade(req, socket, head, (ws) => { tlsSockets.add(ws); ws.once('close', () => tlsSockets.delete(ws)); wss?.emit('connection', ws, req) }) })
   const port = await new Promise<number>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve((server.address() as AddressInfo).port) }) })
   tlsServer = server; tlsIdentity = id
   try { return await startFrp(port) } catch (error) { await closeRemoteTls(); throw error }
@@ -203,6 +209,13 @@ export async function getRemotePairingQr(): Promise<{ dataUrl: string; expiresAt
   const compact = hasPublic
     ? createCompactPairingQrV3(profile, qr.pairingCode, qr.expiresAt)
     : createCompactPairingQr(profile, qr.pairingCode, qr.expiresAt)
+  console.log(
+    '[Remote] 配对二维码',
+    hasPublic ? 'v3' : 'v2',
+    '| 局域网=', (compact as { h?: string }).h ?? '?',
+    '| 公网=', (compact as { p?: string }).p ?? '(无)',
+    '| 指纹=', (compact as { k?: string }).k ? '有' : '(无)',
+  )
   const QRCode = (await import('qrcode')).default
   return { dataUrl: await QRCode.toDataURL(JSON.stringify(compact), { width: hasPublic ? 480 : 320, margin: 2, errorCorrectionLevel: 'M' }), expiresAt: qr.expiresAt }
 }
@@ -2343,6 +2356,7 @@ function startRemoteServiceAttempt(port: number): Promise<RemoteListenOutcome> {
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const peer = req.socket.remoteAddress?.replace(/^::ffff:/, '') ?? ''
     const legacy = ws.protocol !== REMOTE_PROTOCOL
+    console.log('[Remote] 新连接 peer=', peer, '| protocol=', ws.protocol || '(legacy)', '| tls=', tlsSockets.has(ws) || publicTlsSockets.has(ws))
     if (legacy) {
       // 旧 query 路径只接受可信传输：
       // - 端到端 TLS（自建穿透的 pinned 链路 / 内置 FRP）；
