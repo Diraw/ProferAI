@@ -54,13 +54,47 @@ export function buildQuotedSelectionBlock(quotedSelection: QuotedSelection): str
   if (quotedSelection.sourceType && quotedSelection.sourceType !== 'file') {
     const safeSource = escapeXmlAttribute(quotedSelection.sourceType)
     const safeLabel = escapeXmlAttribute(quotedSelection.sourceLabel ?? quotedSelection.filePath)
-    const safeMessageId = escapeXmlAttribute(quotedSelection.messageId ?? '')
-    const safeRole = escapeXmlAttribute(quotedSelection.messageRole ?? '')
-    return `<quoted_context source="${safeSource}" label="${safeLabel}" message_id="${safeMessageId}" role="${safeRole}">\n${safeText}\n</quoted_context>\n\n`
+    // 只写有值的属性：空 message_id/role 在多引用场景会成倍放噪。
+    const messageAttr = quotedSelection.messageId
+      ? ` message_id="${escapeXmlAttribute(quotedSelection.messageId)}"`
+      : ''
+    const roleAttr = quotedSelection.messageRole
+      ? ` role="${escapeXmlAttribute(quotedSelection.messageRole)}"`
+      : ''
+    return `<quoted_context source="${safeSource}" label="${safeLabel}"${messageAttr}${roleAttr}>\n${safeText}\n</quoted_context>\n\n`
   }
 
   const safePath = escapeXmlAttribute(quotedSelection.filePath)
-  return `<quoted_file path="${safePath}">\n${safeText}\n</quoted_file>\n\n`
+  // 行号只在能算出时写入，便于模型定位同一文件里的多段引用。
+  const startLineAttr = typeof quotedSelection.startLine === 'number' ? ` start_line="${quotedSelection.startLine}"` : ''
+  const endLineAttr = typeof quotedSelection.endLine === 'number' ? ` end_line="${quotedSelection.endLine}"` : ''
+  return `<quoted_file path="${safePath}"${startLineAttr}${endLineAttr}>\n${safeText}\n</quoted_file>\n\n`
+}
+
+/** 引用去重键：来源类型 + 来源标识 + 选中文本。 */
+export function getQuotedSelectionKey(quotedSelection: QuotedSelection): string {
+  const source = quotedSelection.sourceType ?? 'file'
+  const origin = source === 'file'
+    ? quotedSelection.filePath
+    : quotedSelection.messageId ?? quotedSelection.filePath
+  return `${source}\u0000${origin}\u0000${quotedSelection.text}`
+}
+
+/** 追加一条引用；已存在同来源同文本时返回 duplicate=true 且列表不变。 */
+export function appendQuotedSelection(
+  list: readonly QuotedSelection[],
+  quotedSelection: QuotedSelection,
+): { list: QuotedSelection[]; duplicate: boolean } {
+  const key = getQuotedSelectionKey(quotedSelection)
+  if (list.some((item) => getQuotedSelectionKey(item) === key)) {
+    return { list: [...list], duplicate: true }
+  }
+  return { list: [...list, quotedSelection], duplicate: false }
+}
+
+/** 多条引用按顺序拼成前缀块；顺序即用户在引用列表里看到的顺序。 */
+export function buildQuotedSelectionsPrefix(list: readonly QuotedSelection[]): string {
+  return list.map((item) => buildQuotedSelectionBlock(item)).join('')
 }
 
 function normalizeContextSourceType(value: string | undefined): QuotedSelectionSourceType {

@@ -84,7 +84,6 @@ export function upsertAgentSessionProjection(
     presetReference: projection.presetReference ?? undefined,
     openAIThinkingLevel: projection.openAIThinkingLevel ?? undefined,
     codexFastMode: projection.codexFastMode,
-    autoQueueSendEnabled: projection.autoQueueSendEnabled,
     workspaceId: projection.workspaceId ?? undefined,
     pinned: projection.pinned,
     archived: projection.archived,

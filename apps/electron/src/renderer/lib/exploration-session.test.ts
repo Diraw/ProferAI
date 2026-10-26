@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKMessage } from '@profer/shared'
 import { buildExplorationReferenceDraft, getLatestExplorationConclusion, mergeExplorationMessages, resolveForkActionAvailability, resolveLatestExplorationSourceMessageId } from './exploration-session'
-import { parseQueuedMessageMentions } from './agent-message-queue'
+import { parseMessageMentions } from './agent-message-payload'
 
 function message(uuid: string, text: string): SDKMessage {
   return {
@@ -82,7 +82,7 @@ describe('探索分支引用', () => {
 
   test('Given 带回生成的 session mention When 解析发送文本 Then 保留分支 ID 并移除展示标签', () => {
     const result = buildExplorationReferenceDraft('branch-1', '探索方案')
-    const parsed = parseQueuedMessageMentions(`请吸收\n${result.markdown}`)
+    const parsed = parseMessageMentions(`请吸收\n${result.markdown}`)
     expect(parsed.mentionedSessionIds).toEqual(['branch-1'])
     expect(parsed.cleanedText).toBe('请吸收\n这是探索后的新增内容：')
   })

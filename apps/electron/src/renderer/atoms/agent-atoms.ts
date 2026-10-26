@@ -13,7 +13,6 @@ import { manualReadConfirmEnabledAtom } from './agent-unread-settings'
 import { deriveUnreadIdsFromSessions } from '@/lib/agent-unread-derive'
 import { calculateDockBadgeCount, countPendingRequests } from '@/lib/dock-badge-count'
 import { deriveAgentRuntimeDisplay } from '@/domains/agent-runtime/agent-runtime-display-policy'
-import type { AgentQueuedMessage } from '@/lib/agent-message-queue'
 import type { SessionFileChange } from '@/lib/session-file-changes'
 
 /** 活动状态 */
@@ -317,41 +316,6 @@ export const workspaceFilesVersionAtom = atom(0)
 
 /** 已读文件版本号 — 打开文件面板时同步到当前版本，用于「文件面板按钮红点只在有新变化时显示」的判断 */
 export const seenFilesVersionAtom = atom(0)
-
-// ===== Agent 运行中追加消息队列 Atoms =====
-
-/** 全局队列 Map — 以 sessionId 为 key，存运行中用户追加、待发送的消息 */
-export const agentSessionMessageQueueAtom = atom<Map<string, AgentQueuedMessage[]>>(new Map())
-
-/**
- * 单个 session 的追加消息队列派生 atom（读写）— 按 sessionId 切片
- * read：返回当前 session 的数组（空数组兜底）
- * write：接受新数组或 updater 函数，写回时空数组转为 delete，避免 Map 长期残留空 entry
- */
-/**
- * 每会话「队列自动发送」开关的运行时缓存：true 表示当前轮次结束后自动发送队首。
- * 权威值持久化在会话 meta；此 atom 仅缓存当前渲染进程中的会话状态。
- */
-export const agentQueueAutoSendMapAtom = atom<Map<string, boolean>>(new Map())
-
-export const agentMessageQueueAtomFamily = atomFamily((sessionId: string) =>
-  atom(
-    (get) => get(agentSessionMessageQueueAtom).get(sessionId) ?? [],
-    (_get, set, update: AgentQueuedMessage[] | ((prev: AgentQueuedMessage[]) => AgentQueuedMessage[])) => {
-      set(agentSessionMessageQueueAtom, (prev) => {
-        const current = prev.get(sessionId) ?? []
-        const next = typeof update === 'function' ? update(current) : update
-        const map = new Map(prev)
-        if (next.length === 0) {
-          map.delete(sessionId)
-        } else {
-          map.set(sessionId, next)
-        }
-        return map
-      })
-    },
-  ),
-)
 
 // ===== 侧面板 Atoms =====
 

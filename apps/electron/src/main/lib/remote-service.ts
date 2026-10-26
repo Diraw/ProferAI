@@ -824,7 +824,6 @@ export function buildSessionItem(s: ReturnType<typeof listAgentSessions>[number]
     openAIThinkingLevel: s.openAIThinkingLevel ?? null,
     codexFastMode: s.codexFastMode ?? false,
     agentEffort: s.agentEffort ?? null,
-    autoQueueSendEnabled: s.autoQueueSendEnabled ?? true,
     completedButUnconfirmed: s.completedButUnconfirmed ?? false,
     stoppedByUser: s.stoppedByUser ?? false,
     lastInterruptReason: s.lastInterruptReason ?? null,

@@ -877,9 +877,6 @@ export interface ElectronAPI {
   clearGoal: (sessionId: string) => Promise<void>
   onGoalEvent: (callback: (event: import('@profer/shared').AgentGoalEvent) => void) => () => void
 
-  /** 更新指定会话的队列自动发送开关 */
-  updateAgentQueueAutoSend: (sessionId: string, enabled: boolean) => Promise<import('@profer/shared').AgentSessionMeta>
-
   // ===== Agent 队列消息 =====
 
   /** 流式追加发送 Agent 消息（Agent 运行中） */
@@ -2563,10 +2560,6 @@ const electronAPI: ElectronAPI = {
     const listener = (_event: Electron.IpcRendererEvent, data: import('@profer/shared').AgentGoalEvent) => callback(data)
     ipcRenderer.on(AGENT_IPC_CHANNELS.GOAL_EVENT, listener)
     return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.GOAL_EVENT, listener)
-  },
-
-  updateAgentQueueAutoSend: (sessionId: string, enabled: boolean) => {
-    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_QUEUE_AUTO_SEND, sessionId, enabled)
   },
 
   // Agent 队列消息

@@ -10,8 +10,9 @@ import { useAtomValue, useSetAtom, useStore } from 'jotai'
 import { toast } from 'sonner'
 import { agentSessionsAtom } from '@/atoms/agent-atoms'
 import { openExplorationBranchTab } from '@/lib/exploration-tab'
-import { quotedSelectionMapAtom } from '@/atoms/preview-atoms'
+import { quotedSelectionsMapAtom } from '@/atoms/preview-atoms'
 import type { QuotedSelection } from '@/atoms/preview-atoms'
+import { appendQuotedSelection } from '@/lib/quoted-selection'
 import { SELECTION_ACTION_TARGET_SELECTOR } from '@/lib/quoted-selection'
 import {
   AGENT_BLOCK_ID_ATTRIBUTE,
@@ -94,7 +95,7 @@ export function AgentHistorySelectionLayer({
   rootRef,
   explorationEnabled = true,
 }: AgentHistorySelectionLayerProps): React.ReactElement | null {
-  const setQuotedSelectionMap = useSetAtom(quotedSelectionMapAtom)
+  const setQuotedSelectionsMap = useSetAtom(quotedSelectionsMapAtom)
   const store = useStore()
   const agentSessions = useAtomValue(agentSessionsAtom)
   const setAgentSessions = useSetAtom(agentSessionsAtom)
@@ -248,23 +249,30 @@ export function AgentHistorySelectionLayer({
 
   const handleAddToAgent = React.useCallback((): void => {
     if (!selection) return
-    setQuotedSelectionMap((prev) => {
+    const quotedSelection: QuotedSelection = {
+      text: selection.text,
+      filePath: selection.sourceLabel,
+      sourceType: 'agent-history',
+      sourceLabel: selection.sourceLabel,
+      messageId: selection.messageId,
+      messageRole: selection.messageRole,
+      capturedAt: Date.now(),
+    }
+    let duplicate = false
+    setQuotedSelectionsMap((prev) => {
+      const list = prev.get(sessionId) ?? []
+      const appended = appendQuotedSelection(list, quotedSelection)
+      duplicate = appended.duplicate
+      if (appended.duplicate) return prev
       const next = new Map(prev)
-      next.set(sessionId, {
-        text: selection.text,
-        filePath: selection.sourceLabel,
-        sourceType: 'agent-history',
-        sourceLabel: selection.sourceLabel,
-        messageId: selection.messageId,
-        messageRole: selection.messageRole,
-        capturedAt: Date.now(),
-      })
+      next.set(sessionId, appended.list)
       return next
     })
     window.getSelection()?.removeAllRanges()
     clearSelection()
-    toast.success('已添加到 Agent 引用')
-  }, [clearSelection, selection, sessionId, setQuotedSelectionMap])
+    if (duplicate) toast.info('这段已经在引用列表里')
+    else toast.success('已添加到 Agent 引用')
+  }, [clearSelection, selection, sessionId, setQuotedSelectionsMap])
 
   React.useEffect(() => {
     const onQuoteCurrentSelection = (): void => handleAddToAgent()
@@ -302,7 +310,7 @@ export function AgentHistorySelectionLayer({
         capturedAt: Date.now(),
       }
       setAgentSessions((prev) => prev.some((item) => item.id === branch.id) ? prev : [branch, ...prev])
-      setQuotedSelectionMap((prev) => new Map(prev).set(branch.id, quotedSelection))
+      setQuotedSelectionsMap((prev) => new Map(prev).set(branch.id, [quotedSelection]))
       // 分支成为父会话上下文内的顶栏 Tab：激活分支，并自动与父会话并排（焦点在分支）。
       openExplorationBranchTab(store, sessionId, { sessionId: branch.id, title: branch.title || '探索分支' }, { autoGroup: true })
       window.getSelection()?.removeAllRanges()
@@ -314,7 +322,7 @@ export function AgentHistorySelectionLayer({
     } finally {
       openExplorationPendingRef.current = false
     }
-  }, [agentSessions, clearSelection, selection, sessionId, setAgentSessions, setQuotedSelectionMap, store])
+  }, [agentSessions, clearSelection, selection, sessionId, setAgentSessions, setQuotedSelectionsMap, store])
 
   // 工具栏「探索」按钮接手划词：嵌入的探索分支内不再允许二级探索。
   React.useEffect(() => {

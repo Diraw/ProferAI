@@ -2250,24 +2250,6 @@ export function registerIpcHandlers(): void {
     }
   )
 
-  // 更新会话队列自动发送开关。该设置与 Agent 是否运行无关，停止按钮必须始终能完成。
-  ipcMain.handle(
-    AGENT_IPC_CHANNELS.UPDATE_QUEUE_AUTO_SEND,
-    async (event, sessionId: string, enabled: boolean): Promise<AgentSessionMeta> => {
-      assertSensitiveAgentIpcSender(event)
-      if (typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 200) {
-        throw new Error('Agent 会话标识无效')
-      }
-      if (typeof enabled !== 'boolean') {
-        throw new Error(`无效的队列自动发送状态: ${String(enabled)}`)
-      }
-      if (!getAgentSessionMeta(sessionId)) {
-        throw new Error(`Agent 会话不存在: ${sessionId}`)
-      }
-      return updateAgentSessionUiMeta(sessionId, { autoQueueSendEnabled: enabled })
-    },
-  )
-
   // 空闲会话更新渠道与模型；运行中及 background waiting 均由 active 状态保护。
   ipcMain.handle(
     AGENT_IPC_CHANNELS.UPDATE_SESSION_MODEL,

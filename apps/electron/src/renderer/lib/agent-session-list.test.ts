@@ -118,7 +118,6 @@ describe('upsertAgentSessionProjection', () => {
     presetReference: null,
     openAIThinkingLevel: null,
     codexFastMode: false,
-    autoQueueSendEnabled: true,
     agentEffort: null,
     attachedDirectories: [],
     attachedFiles: [],

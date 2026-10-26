@@ -74,24 +74,22 @@ export interface QuotedSelection {
   endLine?: number
   /** 捕获时间戳 */
   capturedAt: number
+  /**
+   * 引用产生方式：`browser-selection` 表示浏览器列划词自动引用（只保留最新一条），
+   * 缺省/`manual` 表示用户手动点的引用（独立累积，不互相覆盖）。
+   */
+  origin?: 'manual' | 'browser-selection'
 }
 
-/** 每会话的引用选中文本 Map（每次新选中覆盖旧值） */
-export const quotedSelectionMapAtom = atom<Map<string, QuotedSelection>>(new Map())
-
-/** 当前会话的引用选中文本（派生） */
-export const currentQuotedSelectionAtom = atom<QuotedSelection | null>((get) => {
-  const sessionId = get(currentAgentSessionIdAtom)
-  if (!sessionId) return null
-  return get(quotedSelectionMapAtom).get(sessionId) ?? null
-})
+/** 每会话的待发送引用列表：按添加顺序累积，发送时整组消费清空 */
+export const quotedSelectionsMapAtom = atom<Map<string, QuotedSelection[]>>(new Map())
 
 // ===== 中断说明 chip（Agent 任务非正常结束时显示）=====
 
 /**
  * 中断说明 chip 状态：会话级「待注入前缀」
  *
- * 独立于用户主动引用（quotedSelectionMapAtom），两者在同一 chip 行并排显示、
+ * 独立于用户主动引用（quotedSelectionsMapAtom），两者在同一 chip 行并排显示、
  * 各自独立移除/注入，互不覆盖。
  */
 export interface AgentInterruptionState {

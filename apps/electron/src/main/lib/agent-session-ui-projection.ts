@@ -33,7 +33,6 @@ export function buildAgentSessionUiProjection(meta: AgentSessionMeta): AgentSess
     presetReference,
     openAIThinkingLevel: meta.openAIThinkingLevel ?? null,
     codexFastMode: meta.codexFastMode ?? false,
-    autoQueueSendEnabled: meta.autoQueueSendEnabled ?? true,
     agentEffort: meta.agentEffort ?? null,
     attachedDirectories: meta.attachedDirectories ?? [],
     attachedFiles: meta.attachedFiles ?? [],

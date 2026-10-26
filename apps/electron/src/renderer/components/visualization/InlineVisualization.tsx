@@ -4,7 +4,8 @@ import { Download, RotateCcw } from 'lucide-react'
 import type { VisualizationRecord, VisualizationContent, VisualizationViewState, VisualizationQuote } from '@profer/shared'
 import { visualizationViewStatesAtom, visualizationHeightsAtom } from '@/atoms/visualization-atoms'
 import { visualizationStateKey } from '@/lib/visualization-lifecycle'
-import { quotedSelectionMapAtom } from '@/atoms/preview-atoms'
+import { quotedSelectionsMapAtom } from '@/atoms/preview-atoms'
+import { appendQuotedSelection } from '@/lib/quoted-selection'
 import { useOptionalConversationScroll } from '@/components/ai-elements/conversation-scroll'
 import { VisualizationHost } from './VisualizationHost'
 
@@ -20,7 +21,7 @@ export function VisualizationResultInline({ record, sessionId }: { record: Visua
   const height = heights.get(key) ?? 240
   const states = useAtomValue(visualizationViewStatesAtom)
   const setStates = useSetAtom(visualizationViewStatesAtom)
-  const setQuotes = useSetAtom(quotedSelectionMapAtom)
+  const setQuotes = useSetAtom(quotedSelectionsMapAtom)
   const [content, setContent] = React.useState<VisualizationContent | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [reload, setReload] = React.useState(0)
@@ -97,9 +98,21 @@ export function VisualizationResultInline({ record, sessionId }: { record: Visua
   const quote = () => {
     if (!selectedQuote || owner !== record.sessionId) return
     setQuotes((previous) => {
-      const next = new Map(previous)
-      next.set(owner, { sourceType: 'visualization', filePath: '', sourceLabel: `${record.title} · ${selectedQuote.label}`, text: selectedQuote.text, visualization: selectedQuote, capturedAt: Date.now() })
-      return next
+      const list = previous.get(owner) ?? []
+      const appended = appendQuotedSelection(list, {
+        sourceType: 'visualization',
+        filePath: '',
+        sourceLabel: `${record.title} · ${selectedQuote.label}`,
+        text: selectedQuote.text,
+        visualization: selectedQuote,
+        capturedAt: Date.now(),
+      })
+      if (!appended.duplicate) {
+        const next = new Map(previous)
+        next.set(owner, appended.list)
+        return next
+      }
+      return previous
     })
   }
   // 可视化在会话流里是一个独立对象，不是回复正文的延续：外框沿用代码块/Mermaid 的
