@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { PairingManager, createBinding, secretHash } from './remote-pairing'
-import { createCompactPairingQr, parseCompactPairingQr, parsePairingQr, parseRemoteProfile, validateEndpoint, type RemoteProfile } from '@profer/shared'
+import { createCompactPairingQr, createCompactPairingQrV3, parseCompactPairingQr, parseCompactPairingQrV3, parsePairingQr, parseRemoteProfile, validateEndpoint, type RemoteProfile } from '@profer/shared'
 import { parse } from 'smol-toml'
 import { createHash } from 'node:crypto'
 import { deploymentFiles, renderDeploymentInstructions, renderFrpcToml, selectFrpAsset, validateArchiveEntry, validateFrpConfig, verifySha256, type FrpConfig, type FrpServerAsset } from './remote-frp-core'
@@ -110,5 +110,48 @@ describe('FRP configuration, official assets and deployment', () => {
     expect(files['README.md']).not.toContain('1. 安装官方 frps')
     expect(files['README.md']).toContain('不需要你预先准备 frps 二进制')
     expect(files['README.md']).toContain('bash deploy.sh')
+  })
+})
+describe('public endpoint compact QR (v3)', () => {
+  const pin = { algorithm: 'spki-sha256' as const, value: `sha256/${'A'.repeat(43)}=` }
+  const lan = { url: 'ws://192.168.1.2:7788/ws', scope: 'lan' as const }
+  const pinnedProfile: RemoteProfile = { schemaVersion: 2, deviceId: 'desktop-123', deviceName: 'Desktop', updatedAt: 1, endpoints: [lan, { url: 'wss://203.0.113.7:17788/ws', scope: 'public', trustMode: 'pinned', pin }] }
+  const domainProfile: RemoteProfile = { schemaVersion: 2, deviceId: 'desktop-123', deviceName: 'Desktop', updatedAt: 1, endpoints: [lan, { url: 'wss://remote.example.com:443/ws', scope: 'public', trustMode: 'system' }] }
+  const now = Date.now()
+
+  test('pinned public endpoint roundtrips with pin and stays scannable', () => {
+    const code = 'a'.repeat(64)
+    const qr = createCompactPairingQrV3(pinnedProfile, code, now + 300000)
+    expect(qr.v).toBe(3); expect(qr.p).toBe('203.0.113.7:17788'); expect(qr.k).toBe(pin.value)
+    expect(JSON.stringify(qr).length).toBeLessThan(400)
+    const parsed = parseCompactPairingQrV3(qr, now)
+    expect(parsed.endpoints).toEqual([lan, { url: 'wss://203.0.113.7:17788/ws', scope: 'public', trustMode: 'pinned', pin }])
+    expect(parsed.pairingCode).toBe(code)
+    expect(parsePairingQr(JSON.stringify(qr), now).endpoints).toHaveLength(2)
+  })
+
+  test('domain public endpoint uses system trust without pin', () => {
+    const qr = createCompactPairingQrV3(domainProfile, 'b'.repeat(64), now + 300000)
+    expect(qr.k).toBeUndefined(); expect(qr.p).toBe('remote.example.com:443')
+    const parsed = parseCompactPairingQrV3(qr, now)
+    expect(parsed.endpoints[1]).toEqual({ url: 'wss://remote.example.com/ws', scope: 'public', trustMode: 'system' })
+  })
+
+  test('rejects plaintext, missing/extra pin, unknown keys and expired codes', () => {
+    const qr = createCompactPairingQrV3(pinnedProfile, 'c'.repeat(64), now + 300000)
+    const { k: _pin, ...withoutPin } = qr
+    expect(() => parseCompactPairingQrV3(withoutPin, now)).toThrow()
+    expect(() => parseCompactPairingQrV3({ ...qr, p: '203.0.113.7:0' }, now)).toThrow()
+    expect(() => parseCompactPairingQrV3({ ...qr, k: 'sha256/bad' }, now)).toThrow()
+    expect(() => parseCompactPairingQrV3({ ...qr, extra: 'SECRET' }, now)).toThrow()
+    expect(() => parseCompactPairingQrV3({ ...qr, h: 'remote.example.com:7788' }, now)).toThrow()
+    expect(() => parseCompactPairingQrV3({ ...qr, x: Math.floor(now / 1000) - 1 }, now)).toThrow('过期')
+    expect(() => createCompactPairingQrV3(domainProfile, 'd'.repeat(64), now + 300000)).not.toThrow()
+    // 域名端点带 pin 属于混淆输入，直接拒绝。
+    const domainQr = createCompactPairingQrV3(domainProfile, 'e'.repeat(64), now + 300000)
+    expect(() => parseCompactPairingQrV3({ ...domainQr, k: pin.value }, now)).toThrow('不能携带 pin')
+    // 缺少公网端点时不能发 v3，调用方应退回 v2。
+    expect(() => createCompactPairingQrV3({ ...domainProfile, endpoints: [lan] }, 'f'.repeat(64), now + 300000)).toThrow('缺少公网端点')
+    expect(createCompactPairingQr({ ...domainProfile, endpoints: [lan] }, 'f'.repeat(64), now + 300000).v).toBe(2)
   })
 })

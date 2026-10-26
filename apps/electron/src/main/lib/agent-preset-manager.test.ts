@@ -162,6 +162,21 @@ describe('全局预设与作用域引用', () => {
     expect(() => normalizePresetReference({ ...reference, workspaceSlug: WS_A })).toThrow('不得携带 workspaceSlug')
   })
 
+  test('工作区默认的 user-global 预设在 standard 停用时仍出现在工作区列表', () => {
+    const projectLead = createGlobalAgentPreset({ name: '项目领航', description: '' })
+    const reference = { presetId: projectLead.id, presetScope: 'user-global' as const }
+    disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_STANDARD, presetScope: 'builtin-meta' })
+    setDefaultPresetReference(WS_A, reference)
+
+    expect(getDefaultPresetId(WS_A)).toBe(projectLead.id)
+    expect(listAgentPresets(WS_A).find((preset) => preset.id === projectLead.id)).toMatchObject({
+      id: projectLead.id,
+      scope: 'user-global',
+      enabledInWorkspace: true,
+    })
+    expect(listAgentPresets(WS_A).find((preset) => preset.id === BUILTIN_PRESET_STANDARD)?.enabledInWorkspace).toBe(false)
+  })
+
   test('Given global source When copying Then workspace copy records source', () => {
     const source = createGlobalAgentPreset({ name: '全局研究', description: '跨区' })
     const copied = copyPresetToWorkspace({ presetId: source.id, presetScope: 'user-global' }, WS_A)
@@ -198,6 +213,32 @@ describe('全局预设与作用域引用', () => {
     })
   })
 
+  test('defaultPresetReference 是有效全局默认时覆盖过时的 standard ID', () => {
+    const projectLead = createGlobalAgentPreset({ name: '项目领航', description: '' })
+    setDefaultPresetReference(WS_A, { presetId: projectLead.id, presetScope: 'user-global' })
+    const path = join(tmpDir, WS_A, 'agent-presets.json')
+    const config = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    config.defaultPresetId = BUILTIN_PRESET_STANDARD
+    config.disabledGlobalPresetIds = [BUILTIN_PRESET_STANDARD]
+    writeFileSync(path, JSON.stringify(config, null, 2))
+
+    expect(getDefaultPresetId(WS_A)).toBe(projectLead.id)
+    expect(listAgentPresets(WS_A).find((preset) => preset.id === projectLead.id)?.enabledInWorkspace).toBe(true)
+    expect(listAgentPresets(WS_A).find((preset) => preset.id === BUILTIN_PRESET_STANDARD)?.enabledInWorkspace).toBe(false)
+  })
+
+  test('显式清空的默认预设不会被过期引用复活', () => {
+    const projectLead = createGlobalAgentPreset({ name: '项目领航', description: '' })
+    setDefaultPresetReference(WS_A, { presetId: projectLead.id, presetScope: 'user-global' })
+    const path = join(tmpDir, WS_A, 'agent-presets.json')
+    const config = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    config.defaultPresetId = ''
+    config.defaultPresetExplicitlyCleared = true
+    writeFileSync(path, JSON.stringify(config, null, 2))
+
+    expect(getDefaultPresetId(WS_A)).toBe('')
+  })
+
   test('关闭元预设的直接选择入口后，基于它的工作区岗位仍可独立选择和解析', () => {
     const derived = createAgentPreset(WS_A, { name: '代码派生岗位', description: '', basePresetId: BUILTIN_PRESET_CODE })
     disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_CODE, presetScope: 'builtin-meta' })
@@ -213,6 +254,10 @@ describe('全局预设与作用域引用', () => {
   test('禁用 standard 默认预设时自动改用 code，供加号新建会话继承', () => {
     disableGlobalPresetInWorkspace(WS_A, { presetId: BUILTIN_PRESET_STANDARD, presetScope: 'builtin-meta' })
     expect(getDefaultPresetId(WS_A)).toBe(BUILTIN_PRESET_CODE)
+    expect(JSON.parse(readFileSync(join(tmpDir, WS_A, 'agent-presets.json'), 'utf8')).defaultPresetReference).toMatchObject({
+      presetId: BUILTIN_PRESET_CODE,
+      presetScope: 'builtin-meta',
+    })
   })
 
   test('仅当工作区没有任何可用预设时才清空默认值', () => {

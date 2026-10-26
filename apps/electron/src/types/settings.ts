@@ -419,6 +419,17 @@ export interface PersistedTabSettings {
 }
 
 /** 移动模式（Pocket 远程接入）服务状态与连接信息 */
+export interface PocketPublicEndpoint {
+  /** 公网 IP（v4/v6）或域名 */
+  host: string
+  port: number
+  /** 二维码/手机使用的完整 WSS 地址 */
+  url: string
+  trustMode: 'pinned' | 'system'
+  /** 仅 IP 端点有：手动连接时需要填的证书指纹 */
+  pin: string | null
+}
+
 export interface PocketModeStatus {
   enabled: boolean
   running: boolean
@@ -428,8 +439,12 @@ export interface PocketModeStatus {
   localUrl: string | null
   lanUrl: string | null
   token: string | null
+  /** 手动配置的公网连接地址；未配置为 null */
+  publicEndpoint: PocketPublicEndpoint | null
   /** 最近一次启动失败原因；服务恢复后清空。 */
   error: string | null
+  /** 启动时的非致命提示（如端口被占已自动改用其他端口）；无需提示时为 null */
+  notice: string | null
 }
 
 export const SKIN_IPC_CHANNELS = {
@@ -472,6 +487,8 @@ export const SETTINGS_IPC_CHANNELS = {
   SET_POCKET_MODE_ENABLED: 'settings:set-pocket-mode-enabled',
   /** 设置移动模式服务端口（保存并热应用；服务运行时自动重启） */
   SET_POCKET_MODE_PORT: 'settings:set-pocket-mode-port',
+  /** 保存手动公网连接地址（自建 FRP/端口映射）；服务运行时自动重启 */
+  SET_POCKET_PUBLIC_ENDPOINT: 'settings:set-pocket-public-endpoint',
   /** 获取安卓版 APK 扫码下载二维码（指向官网 profer.cn 域名；始终返回） */
   GET_APK_QR: 'settings:get-apk-qr',
 } as const

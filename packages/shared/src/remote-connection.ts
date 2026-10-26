@@ -109,10 +109,78 @@ export function parseCompactPairingQr(input: unknown, now = Date.now()): Pairing
     expiresAt,
   }
 }
+/**
+ * 精简配对二维码（v3）：在 v2 的基础上再带一组公网端点，供用户自建 FRP/端口映射后扫码直连。
+ * 字段：v=3、d=deviceId、h=局域网 host:port、p=公网 host:port、k=公网自签证书 SPKI pin（仅 IP 公网端点）、
+ * c=pairingCode、x=过期时间（Unix 秒）。
+ *
+ * 公网端点的信任模式由 p 的主机形态决定：IP 必须带 pin（自签 TLS），域名必须不带 pin（系统可信证书）。
+ */
+export interface CompactPairingQrV3 { v: 3; d: string; h: string; p: string; k?: string; c: string; x: number }
+const COMPACT_QR_V3_KEYS = ['v', 'd', 'h', 'p', 'k', 'c', 'x']
+const PIN_VALUE = /^sha256\/[A-Za-z0-9+/]{43}=$/
+function compactHostname(value: string): string {
+  let url: URL
+  try { url = new URL(`wss://${value}/ws`) } catch { throw new Error('连接端点无效') }
+  return url.hostname.replace(/^\[|\]$/g, '')
+}
+function isIpHost(host: string): boolean { return /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':') }
+export function createCompactPairingQrV3(profile: RemoteProfile, pairingCode: string, expiresAt: number): CompactPairingQrV3 {
+  const lan = profile.endpoints.find((e) => e.scope === 'lan' && e.url.startsWith('ws://'))
+  const pub = profile.endpoints.find((e) => e.scope === 'public')
+  if (!lan) throw new Error('缺少局域网端点')
+  if (!pub) throw new Error('缺少公网端点')
+  const lanUrl = new URL(lan.url)
+  const pubUrl = new URL(pub.url)
+  if (!lanUrl.port || lanUrl.pathname !== '/ws' || lanUrl.search || lanUrl.username || lanUrl.password) throw new Error('连接端点无效')
+  if (!pubUrl.port && pubUrl.protocol !== 'wss:') throw new Error('连接端点无效')
+  if (pubUrl.pathname !== '/ws' || pubUrl.search || pubUrl.username || pubUrl.password || pubUrl.protocol !== 'wss:') throw new Error('连接端点无效')
+  if (!/^[a-f0-9]{64}$/.test(pairingCode)) throw new Error('配对码无效')
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) throw new Error('配对码已过期')
+  // wss 的 443 会被 URL 规范化掉，但二维码里必须显式带端口，解析端才能统一按 host:port 处理。
+  const pubHost = `${pubUrl.hostname}:${pubUrl.port || '443'}`
+  const base = { v: 3 as const, d: profile.deviceId, h: lanUrl.host, p: pubHost, c: pairingCode, x: Math.floor(expiresAt / 1000) }
+  if (pub.trustMode === 'pinned') {
+    if (!pub.pin || !PIN_VALUE.test(pub.pin.value)) throw new Error('pin 无效')
+    return { ...base, k: pub.pin.value }
+  }
+  return base
+}
+export function parseCompactPairingQrV3(input: unknown, now = Date.now()): PairingQr {
+  const p = record(input, COMPACT_QR_V3_KEYS)
+  if (p.v !== 3 || typeof p.d !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(p.d) ||
+    typeof p.c !== 'string' || !/^[a-f0-9]{64}$/.test(p.c) ||
+    typeof p.x !== 'number' || !Number.isSafeInteger(p.x) || p.x <= 0 || p.x > 9_007_199_254_740) throw new Error('二维码无效')
+  const lanHost = compactHost(p.h)
+  const pubHost = compactHost(p.p)
+  const expiresAt = p.x * 1000
+  const issuedAt = expiresAt - PAIRING_TTL_MS
+  if (issuedAt > now + 30_000) throw new Error('二维码无效')
+  if (expiresAt <= now) throw new Error('二维码已过期，请在电脑刷新')
+  const lanEndpoint = validateEndpoint({ url: `ws://${lanHost}/ws`, scope: 'lan' })
+  const pubHostname = compactHostname(pubHost)
+  const publicEndpoint = isIpHost(pubHostname)
+    ? validateEndpoint({ url: `wss://${pubHost}/ws`, scope: 'public', trustMode: 'pinned', pin: { algorithm: 'spki-sha256', value: p.k } })
+    : p.k === undefined
+      ? validateEndpoint({ url: `wss://${pubHost}/ws`, scope: 'public', trustMode: 'system' })
+      : (() => { throw new Error('域名公网端点不能携带 pin') })()
+  return {
+    schemaVersion: 2,
+    deviceId: p.d,
+    deviceName: '电脑',
+    updatedAt: issuedAt,
+    endpoints: [lanEndpoint, publicEndpoint],
+    kind: 'profer-pairing',
+    pairingCode: p.c,
+    issuedAt,
+    expiresAt,
+  }
+}
 export function parsePairingQr(text: string, now = Date.now()): PairingQr {
   if (new TextEncoder().encode(text).length > 8192) throw new Error('二维码过大')
   let input: unknown
   try { input = JSON.parse(text) } catch { throw new Error('二维码损坏') }
+  if (input && typeof input === 'object' && (input as { v?: unknown }).v === 3) return parseCompactPairingQrV3(input, now)
   if (input && typeof input === 'object' && (input as { v?: unknown }).v === 2) return parseCompactPairingQr(input, now)
   const p = record(input, QR_KEYS)
   const parsed = profile(p)

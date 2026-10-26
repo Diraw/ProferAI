@@ -26,6 +26,9 @@ import { createServer as createTlsServer, type Server as TlsServer } from 'node:
 import { RemoteTlsStore, validateTlsIdentity, type TlsIdentity } from './remote-tls-identity'
 import { publicMode } from './remote-frp-core'
 import { createServer, Server as HttpServer, IncomingMessage } from 'node:http'
+import { Server as NetServer } from 'node:net'
+import { createProtocolSniffer } from './remote-protocol-sniffer'
+import { isTrustedLegacyTransport } from './remote-legacy-trust'
 import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -58,7 +61,7 @@ import {
   searchAgentSessionMessages,
 } from './agent-session-manager'
 import { getAgentSessionsDir, getConfigDir, getAgentSessionWorkspacePath, getAgentWorkspacePath, getWorkspaceFilesDir } from './config-paths'
-import { getSettings } from './settings-service'
+import { getSettings, updateSettings } from './settings-service'
 import { projectAgentPayloadForPocket, projectSdkMessageForPocket } from './pocket-agent-projection'
 import {
   listAgentWorkspaces,
@@ -113,9 +116,10 @@ import { getAllToolInfos } from './chat-tool-registry'
 import { updateToolState } from './chat-tool-config'
 import { RemoteAgentEventLog, type RemoteAgentEventRecord } from './remote-agent-event-log'
 import { RemoteAgentReplayRegistry, type RemoteReplayRecord } from './remote-agent-replay-registry'
-import { REMOTE_PROTOCOL, createCompactPairingQr, isPrivateHost, type RemoteProfile } from '@profer/shared'
+import { REMOTE_PROTOCOL, createCompactPairingQr, createCompactPairingQrV3, type RemoteProfile } from '@profer/shared'
 import { authenticateRemote, getConnectionProfile, listBindings, loadRemoteToken, pairDevice, pairingManager, refreshPairing, revokeBinding, protectSecret, revealSecret } from './remote-identity'
 import { getFrpStatus, getFrpPublicEndpoint, startFrp, stopFrp, ensureFrpReady } from './remote-frp-service'
+import { ensurePublicTlsIdentity, getPublicEndpoint, getPublicEndpointInfo, type PublicEndpointInfo } from './remote-public-endpoint'
 import { RemoteLifecycleQueue, closeOwnedHttp } from './remote-lifecycle'
 const remoteLifecycle = new RemoteLifecycleQueue()
 import { RemoteRelayClient, type RemoteRelaySink } from './remote-relay-client'
@@ -124,10 +128,58 @@ let profileTimer: ReturnType<typeof setInterval> | null = null
 let tlsServer: TlsServer | null = null
 let tlsIdentity: TlsIdentity | null = null
 const tlsSockets = new Set<WebSocket>()
+/** 手动公网地址（用户自建穿透）的自签 TLS 服务；与内置 FRP 的 tlsServer 互相独立。 */
+let publicTlsServer: TlsServer | null = null
+let publicTlsCert = ''
+/** 走公网自签 TLS 的客户端连接（仅用于「是否可信链路」判定与证书轮换时清理）。 */
+const publicTlsSockets = new Set<WebSocket>()
+/** 单端口协议嗅探前端：同一端口同时接受明文 ws 与 TLS wss。 */
+let frontServer: NetServer | null = null
+function closePublicTlsServer(): void {
+  for (const ws of publicTlsSockets) { try { ws.terminate() } catch { /* ignore */ } }
+  publicTlsSockets.clear()
+  publicTlsServer = null
+  publicTlsCert = ''
+}
+/**
+ * 确保公网自签 TLS 服务与当前配置一致。
+ * 证书只用于用户自建穿透的 IP 端点；域名端点由用户自己的反代终止 TLS，不在这里建服务。
+ */
+async function ensurePublicTlsServer(): Promise<void> {
+  if (!wss) return
+  let identity: TlsIdentity | null = null
+  try { identity = await ensurePublicTlsIdentity() } catch (error) { console.error('[Remote] 公网自签证书生成失败:', error) }
+  if (!identity) { closePublicTlsServer(); return }
+  if (publicTlsServer && publicTlsCert === identity.cert) return
+  // 证书换了（公网 IP 变更/轮换）：旧连接已经无法再用新证书继续信任，全部断开重连。
+  closePublicTlsServer()
+  const server = createTlsServer({ key: identity.key, cert: identity.cert, minVersion: 'TLSv1.2' }, (_req, res) => { res.writeHead(404); res.end() })
+  server.on('tlsClientError', (error, socket) => {
+    console.log('[Remote] 公网 TLS 握手失败:', error.message, '| peer=', socket.remoteAddress ?? '?')
+  })
+  server.on('upgrade', (req, socket, head) => {
+    // 只比 pathname：手动连接是 `/ws?token=...`，整串比较会把带 query 的合法请求直接断掉。
+    const pathname = (req.url ?? '').split('?')[0]
+    console.log('[Remote] 公网 TLS 升级请求:', req.url, '| protocol=', req.headers['sec-websocket-protocol'] ?? '(legacy)')
+    if (pathname !== '/ws' || !wss) { socket.destroy(); return }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      // 这条连接端到端是 TLS（手机校验了自签证书指纹），允许走 `?token=` 手动连接路径。
+      publicTlsSockets.add(ws)
+      ws.once('close', () => publicTlsSockets.delete(ws))
+      wss?.emit('connection', ws, req)
+    })
+  })
+  publicTlsServer = server
+  publicTlsCert = identity.cert
+}
 export function getRemoteProfile(): RemoteProfile {
   let valid = false
   try { if (tlsIdentity) { validateTlsIdentity(tlsIdentity.cert, tlsIdentity.key, tlsIdentity.publicIp); valid = true } } catch { /* 过期身份不能进入 QR */ }
-  return getConnectionProfile(getPort(), getFrpStatus().running ? getFrpPublicEndpoint(valid ? tlsIdentity?.pin : undefined, valid ? tlsIdentity?.publicIp : undefined) : undefined)
+  // 公网端点来源：内置 FRP 运行中用它；否则用手动配置的公网 IP/域名（用户自建穿透）。
+  const publicEndpoint = getFrpStatus().running
+    ? getFrpPublicEndpoint(valid ? tlsIdentity?.pin : undefined, valid ? tlsIdentity?.publicIp : undefined)
+    : getPublicEndpoint()
+  return getConnectionProfile(getPort(), publicEndpoint)
 }
 export function getRemoteTlsCertificate(): { cert: string } | undefined { return tlsIdentity && tlsServer ? { cert: tlsIdentity.cert } : undefined }
 async function closeRemoteTls(): Promise<void> { const old = tlsServer; tlsServer = null; tlsIdentity = null; for (const ws of tlsSockets) { authenticatedClients.delete(ws); ws.terminate() }; tlsSockets.clear(); if (old) await closeOwnedHttp(old) }
@@ -140,7 +192,7 @@ async function startRemoteFrpNow(rotate = false): Promise<import('./remote-frp-s
   const store = new RemoteTlsStore(join(app.getPath('userData'), 'remote-tls'), protectSecret, revealSecret)
   const id = await store.ensure(c.serverAddr, rotate)
   const server = createTlsServer({ key: id.key, cert: id.cert, minVersion: 'TLSv1.2' }, (_req, res) => { res.writeHead(404); res.end() })
-  server.on('upgrade', (req, socket, head) => { if (req.url !== '/ws' || !wss) { socket.destroy(); return }; wss.handleUpgrade(req, socket, head, (ws) => { tlsSockets.add(ws); ws.once('close', () => tlsSockets.delete(ws)); wss?.emit('connection', ws, req) }) })
+  server.on('upgrade', (req, socket, head) => { const pathname = (req.url ?? '').split('?')[0]; if (pathname !== '/ws' || !wss) { socket.destroy(); return }; wss.handleUpgrade(req, socket, head, (ws) => { tlsSockets.add(ws); ws.once('close', () => tlsSockets.delete(ws)); wss?.emit('connection', ws, req) }) })
   const port = await new Promise<number>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve((server.address() as AddressInfo).port) }) })
   tlsServer = server; tlsIdentity = id
   try { return await startFrp(port) } catch (error) { await closeRemoteTls(); throw error }
@@ -148,12 +200,24 @@ async function startRemoteFrpNow(rotate = false): Promise<import('./remote-frp-s
 export function rotateRemoteTls(): Promise<import('./remote-frp-service').FrpStatus> { return startRemoteFrp(true) }
 export async function getRemotePairingQr(): Promise<{ dataUrl: string; expiresAt: number }> {
   if (!listenAddress) throw new Error('请先开启移动模式')
+  // 公网 IP 场景先确保自签身份存在：二维码里的 pin 与正在监听的证书必须是同一份。
+  await ensurePublicTlsServer()
   const profile = getRemoteProfile()
   const qr = refreshPairing(profile)
-  // 只放配对必需字段：v/d/h/c/x。完整 profile 在 paired 响应里返回，避免二维码行列过多。
-  const compact = createCompactPairingQr(profile, qr.pairingCode, qr.expiresAt)
+  const hasPublic = profile.endpoints.some((e) => e.scope === 'public')
+  // v2 只带局域网端点；配了公网地址就发 v3（多带 p/k 两个字段），保持旧版 App 仍能读 v2。
+  const compact = hasPublic
+    ? createCompactPairingQrV3(profile, qr.pairingCode, qr.expiresAt)
+    : createCompactPairingQr(profile, qr.pairingCode, qr.expiresAt)
+  console.log(
+    '[Remote] 配对二维码',
+    hasPublic ? 'v3' : 'v2',
+    '| 局域网=', (compact as { h?: string }).h ?? '?',
+    '| 公网=', (compact as { p?: string }).p ?? '(无)',
+    '| 指纹=', (compact as { k?: string }).k ? '有' : '(无)',
+  )
   const QRCode = (await import('qrcode')).default
-  return { dataUrl: await QRCode.toDataURL(JSON.stringify(compact), { width: 320, margin: 2, errorCorrectionLevel: 'M' }), expiresAt: qr.expiresAt }
+  return { dataUrl: await QRCode.toDataURL(JSON.stringify(compact), { width: hasPublic ? 480 : 320, margin: 2, errorCorrectionLevel: 'M' }), expiresAt: qr.expiresAt }
 }
 export function getRemotePairingAudit() { return pairingManager.getAudit() }
 export function getRemoteBindings() { return listBindings() }
@@ -167,6 +231,18 @@ export const DEFAULT_REMOTE_PORT = 7788
 
 /** 开发模式默认监听端口：与正式版（7788）区分，避免与打包版实例并存时 EADDRINUSE */
 export const DEV_DEFAULT_REMOTE_PORT = 7789
+
+/**
+ * 端口被占时的候选数量：从首选端口向后顺延（7788 → 7789 → …）。
+ * 只顺延、不随机：选中后会持久化，手机端保存的地址才能长期有效。
+ */
+export const REMOTE_PORT_FALLBACK_COUNT = 12
+
+/**
+ * 首选端口的重试节奏（毫秒）。关闭窗口/自动更新时旧进程要先把远控服务停干净才退出，
+ * 这段时间端口仍被占着；先等一会儿再换端口，绝大多数情况能原地恢复。
+ */
+const REMOTE_PORT_RETRY_DELAYS_MS = [0, 600, 1800]
 
 /** 访问令牌（首次启动生成并持久化，或由环境变量指定） */
 let accessToken: string | null = null
@@ -189,6 +265,9 @@ let chatBusUnsubscribe: (() => void) | null = null
 
 /** 记录当前监听地址（用于启动日志提示） */
 let listenAddress: string | null = null
+
+/** 实际绑定的端口：端口被占而顺延时与配置端口不同，状态/二维码/转发都以它为准。 */
+let activeListenPort: number | null = null
 
 /** 服务实例 ID：Pocket 发现主进程重启后清除旧 cursor，改走快照恢复。 */
 let serverInstanceId = randomUUID()
@@ -525,11 +604,16 @@ export interface RemoteServiceStatus {
   localUrl: string | null
   lanUrl: string | null
   token: string | null
+  /** 用户手动配置的公网连接地址（自建 FRP/端口映射）；未配置为 null。 */
+  publicEndpoint: PublicEndpointInfo | null
   /** 最近一次启动失败原因；服务恢复后清空。 */
   error: string | null
+  /** 启动时的非致命提示（如端口被占已自动改用其他端口）；不需要提示时为 null。 */
+  notice: string | null
 }
 
 let remoteError: string | null = null
+let remoteNotice: string | null = null
 
 function getLanUrl(port: number): string | null {
   try {
@@ -553,7 +637,9 @@ export function getRemoteServiceStatus(): RemoteServiceStatus {
     localUrl: listenAddress,
     lanUrl: listenAddress ? getLanUrl(port) : null,
     token: listenAddress ? accessToken : null,
+    publicEndpoint: getPublicEndpointInfo(),
     error: remoteError,
+    notice: remoteNotice,
   }
 }
 
@@ -562,8 +648,9 @@ export function setRemoteServiceEnabled(enabled: boolean): Promise<RemoteService
   return remoteLifecycle.run(async () => { runtimeEnabled = enabled; if (enabled) await startRemoteServiceReady(); else await stopRemoteServiceNow(); return getRemoteServiceStatus() })
 }
 
-/** 解析监听端口：设置页保存的端口优先，其次 PROFER_REMOTE_PORT 环境变量，最后默认 7788。 */
+/** 解析监听端口：已监听时以实际绑定端口为准（可能因占用而顺延）；否则设置页保存的端口优先，其次 PROFER_REMOTE_PORT，最后默认 7788。 */
 function getPort(): number {
+  if (activeListenPort) return activeListenPort
   const saved = getSettings().pocketModePort
   if (saved) {
     if (Number.isInteger(saved) && saved > 0 && saved < 65536) return saved
@@ -2047,25 +2134,20 @@ export async function handleRemoteCommand(
  * @returns 启动后的监听地址（未启用时返回 null）
  */
 export function startRemoteService(): Promise<string | null> { return remoteLifecycle.run(startRemoteServiceReady) }
+
+/**
+ * 启动远程服务：先试首选端口，被占则按候选序列顺延，选中后持久化。
+ * 全程不向外抛异常：失败只写入 status.error，由设置页呈现，不能变成主进程崩溃框。
+ */
 async function startRemoteServiceReady(): Promise<string | null> {
-  startRemoteServiceNow()
-  if (!httpServer || listenAddress) return listenAddress
-  const server = httpServer
-  const address = await new Promise<string | null>((resolve) => {
-    const done = (): void => { server.removeListener('error', done); server.removeListener('listening', done); resolve(listenAddress) }
-    server.once('error', done); server.once('listening', done)
-  })
-  // 当前阶段不启用 FRP 内网穿透：不再按草稿自动拉起 frpc，二维码只包含局域网端点。
-  return address
-}
-function startRemoteServiceNow(): string | null {
-  if (isStarted) return listenAddress
+  if (isStarted && listenAddress) return listenAddress
   if (!isRemoteEnabled()) {
     console.log('[Remote] 未启用（设置页未开启移动模式，且 PROFER_REMOTE 未设置）')
     return null
   }
   isStarted = true
   remoteError = null
+  remoteNotice = null
 
   // 初始化 token
   accessToken = null
@@ -2075,7 +2157,81 @@ function startRemoteServiceNow(): string | null {
     return null
   }
 
-  const port = getPort()
+  const preferred = getPort()
+  const candidates = remotePortCandidates(preferred)
+  let lastCode: string | null = null
+  let lastMessage = ''
+
+  for (const [index, port] of candidates.entries()) {
+    // 首选端口多等几次（旧进程可能正在退出）；后续候选只试一次，避免启动被拖太久。
+    const delays = index === 0 ? REMOTE_PORT_RETRY_DELAYS_MS : [0]
+    for (const delay of delays) {
+      if (delay > 0) await sleep(delay)
+      let outcome: RemoteListenOutcome
+      try {
+        outcome = await startRemoteServiceAttempt(port)
+      } catch (error) {
+        // 建 server/sniffer 本身抛错也不能冒泡成主进程崩溃。
+        const err = error as NodeJS.ErrnoException
+        outcome = { kind: 'error', code: err?.code ?? null, message: err?.message || '未知错误' }
+      }
+      if (outcome.kind === 'listening') {
+        await adoptRemotePort(port, preferred)
+        return listenAddress
+      }
+      lastCode = outcome.code
+      lastMessage = outcome.message
+      // 不是端口冲突（地址非法/权限不足等），换端口也没用。
+      if (outcome.code !== 'EADDRINUSE') break
+    }
+    if (lastCode !== 'EADDRINUSE') break
+  }
+
+  isStarted = false
+  listenAddress = null
+  remoteError = lastCode === 'EADDRINUSE'
+    ? `端口 ${preferred}${candidates.length > 1 ? `-${candidates[candidates.length - 1]}` : ''} 均已被占用，请在设置中改用其他端口。`
+    : `移动模式服务启动失败：${lastMessage || '未知错误'}`
+  console.error('[Remote]', remoteError)
+  return null
+}
+
+/** 端口候选：首选端口 + 向后顺延的若干端口。不随机，手机端才能长期复用同一地址。 */
+function remotePortCandidates(preferred: number): number[] {
+  const list: number[] = []
+  for (let i = 0; i < REMOTE_PORT_FALLBACK_COUNT; i += 1) {
+    const port = preferred + i
+    if (port > 65535) break
+    list.push(port)
+  }
+  return list
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 顺延到其他端口后持久化，并给出「需要重新扫码」的提示；下次启动直接复用该端口。 */
+async function adoptRemotePort(port: number, preferred: number): Promise<void> {
+  if (port === preferred) return
+  remoteNotice = `端口 ${preferred} 已被占用，已自动改用 ${port}。请在手机上重新扫码配对。`
+  console.warn('[Remote]', remoteNotice)
+  // 端口来自环境变量时以环境变量为准，不覆盖用户设置。
+  if (process.env.PROFER_REMOTE_PORT) return
+  try {
+    updateSettings({ pocketModePort: port })
+  } catch (error) {
+    console.error('[Remote] 保存端口失败:', error)
+  }
+}
+
+type RemoteListenOutcome = { kind: 'listening' } | { kind: 'error'; code: string | null; message: string }
+
+/**
+ * 在指定端口上做一次监听尝试。
+ * 端口冲突通过 error 事件返回；即使 listen 同步抛错也收进返回值，不冒泡。
+ */
+function startRemoteServiceAttempt(port: number): Promise<RemoteListenOutcome> {
   httpServer = createServer((req, res) => {
     // 健康检查（容忍 query，如 /health?token=xxx）
     if ((req.url || '').split('?')[0] === '/health') {
@@ -2200,9 +2356,20 @@ function startRemoteServiceNow(): string | null {
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const peer = req.socket.remoteAddress?.replace(/^::ffff:/, '') ?? ''
     const legacy = ws.protocol !== REMOTE_PROTOCOL
+    console.log('[Remote] 新连接 peer=', peer, '| protocol=', ws.protocol || '(legacy)', '| tls=', tlsSockets.has(ws) || publicTlsSockets.has(ws))
     if (legacy) {
-      // 旧 query 仅兼容直接私网请求，不接受代理后的旧协议。
-      if (!isPrivateHost(peer) || tlsSockets.has(ws) || req.headers.forwarded || req.headers['x-forwarded-for'] || req.headers['x-forwarded-proto'] || !checkToken(req)) { ws.close(4001, 'unauthorized'); return }
+      // 旧 query 路径只接受可信传输：
+      // - 端到端 TLS（自建穿透的 pinned 链路 / 内置 FRP）；
+      // - 私网直连；
+      // - 本机反代（域名场景由 Caddy/Nginx 终止 TLS 后转发到本机）。
+      // 公网明文永不接受旧协议：token 是共享凭据，不能在明文链路上传。
+      const hasProxyHeaders = Boolean(req.headers.forwarded || req.headers['x-forwarded-for'] || req.headers['x-forwarded-proto'])
+      const trustedTransport = isTrustedLegacyTransport({
+        peer,
+        encrypted: tlsSockets.has(ws) || publicTlsSockets.has(ws),
+        hasProxyHeaders,
+      })
+      if (!trustedTransport || !checkToken(req)) { ws.close(4001, 'unauthorized'); return }
       authenticatedClients.set(ws, 'legacy')
       establish(ws, req)
       return
@@ -2327,58 +2494,92 @@ function startRemoteServiceNow(): string | null {
   // 监听地址：默认 0.0.0.0（局域网设备可访问，移动端通过电脑局域网 IP:端口 访问）。
   // 安全性由 accessToken 鉴权保障。可用 PROFER_REMOTE_HOST 覆盖（如设为 127.0.0.1 即仅本机）。
   const HOST = process.env.PROFER_REMOTE_HOST || '0.0.0.0'
-  httpServer.on('error', (err: NodeJS.ErrnoException) => {
-    // listen() 是异步的；端口冲突不能冒泡成 Electron 主进程未捕获异常。
-    isStarted = false
-    listenAddress = null
-    remoteError = err.code === 'EADDRINUSE'
-      ? `端口 ${port} 已被占用，请关闭占用它的 Profer 实例，或在设置中改用其他端口。`
-      : `移动模式服务启动失败：${err.message || '未知错误'}`
-    console.error('[Remote]', remoteError, err)
-
-    eventBusUnsubscribe?.()
-    eventBusUnsubscribe = null
-    chatBusUnsubscribe?.()
-    chatBusUnsubscribe = null
-    try { wss?.close() } catch { /* ignore */ }
-    wss = null
-    remoteRelayClient?.stop()
-    remoteRelayClient = null
-    remoteRelaySink = null
-    const failedServer = httpServer
-    httpServer = null
-    try { failedServer?.close() } catch { /* ignore */ }
+  // 单端口双协议：首字节 0x16 是 TLS 握手，交给公网自签服务；其余走明文 HTTP/ws。
+  // 这样用户自建 FRP 只需把公网端口映射到本机端口，不必额外开端口。
+  const front = createProtocolSniffer((tls) => {
+    const target = tls ? publicTlsServer : httpServer
+    if (!target) return null
+    // Electron 主进程跑在 Node 上，http/https server 会从 `connection` 事件接管 socket。
+    return (socket) => { target.emit('connection', socket) }
   })
+  frontServer = front
 
-  httpServer.listen(port, HOST, () => {
-    const addr = httpServer?.address() as AddressInfo | null
-    const actualPort = addr?.port ?? port
-    listenAddress = `http://127.0.0.1:${actualPort}`
-    // 探测局域网 IP（仅供日志提示，不保证一定成功）
-    let lanIp = '局域网IP'
-    try {
-      for (const name of Object.keys(networkInterfaces())) {
-        for (const net of networkInterfaces()[name] || []) {
-          if (net.family === 'IPv4' && !net.internal) { lanIp = net.address; break }
+  return new Promise<RemoteListenOutcome>((resolve) => {
+    let settled = false
+    const settle = (outcome: RemoteListenOutcome): void => {
+      if (settled) return
+      settled = true
+      front.removeListener('listening', onListening)
+      front.removeListener('error', onError)
+      resolve(outcome)
+    }
+    const onListening = (): void => {
+      const addr = front.address() as AddressInfo | null
+      const actualPort = addr?.port ?? port
+      listenAddress = `http://127.0.0.1:${actualPort}`
+      activeListenPort = actualPort
+      remoteError = null
+      // 探测局域网 IP（仅供日志提示，不保证一定成功）
+      let lanIp = '局域网IP'
+      try {
+        for (const name of Object.keys(networkInterfaces())) {
+          for (const net of networkInterfaces()[name] || []) {
+            if (net.family === 'IPv4' && !net.internal) { lanIp = net.address; break }
+          }
+          if (lanIp !== '局域网IP') break
         }
-        if (lanIp !== '局域网IP') break
-      }
-    } catch { /* ignore */ }
-    console.log('\n════════════════════════════════════════════════════')
-    console.log('[Remote] Profer 移动版已启动')
-    console.log(`[Remote] 本机访问:  ${listenAddress}`)
-    console.log(`[Remote] 移动端访问:  http://${lanIp}:${actualPort}`)
-    console.log('[Remote] 连接凭据已保护，请从设置页配对')
-    console.log('════════════════════════════════════════════════════\n')
+      } catch { /* ignore */ }
+      console.log('\n════════════════════════════════════════════════════')
+      console.log('[Remote] Profer 移动版已启动')
+      console.log(`[Remote] 本机访问:  ${listenAddress}`)
+      console.log(`[Remote] 移动端访问:  http://${lanIp}:${actualPort}`)
+      console.log('[Remote] 连接凭据已保护，请从设置页配对')
+      console.log('════════════════════════════════════════════════════\n')
+      console.log(`[Remote] 服务已在 ${HOST}:${actualPort} 就绪`)
+      // 公网自签证书异步准备，不阻塞明文监听；二维码生成前还会再确保一次。
+      void ensurePublicTlsServer()
+      settle({ kind: 'listening' })
+    }
+    const onError = (err: NodeJS.ErrnoException): void => {
+      // listen() 是异步的；端口冲突不能冒泡成 Electron 主进程未捕获异常。
+      teardownRemoteAttempt(front)
+      settle({ kind: 'error', code: err.code ?? null, message: err.message || '未知错误' })
+    }
+    front.once('listening', onListening)
+    front.once('error', onError)
+    try {
+      front.listen(port, HOST)
+    } catch (err) {
+      // 极端情况（端口非法/无权限）listen 可能同步抛错，同样只能收进状态。
+      const error = err as NodeJS.ErrnoException
+      teardownRemoteAttempt(front)
+      settle({ kind: 'error', code: error.code ?? null, message: error.message || '未知错误' })
+    }
   })
+}
 
-  // Electron 主进程可能因 GUI/生命周期时序影响异步 bind，做一次就绪校验告警
-  httpServer.on('listening', () => {
-    remoteError = null
-    console.log(`[Remote] 服务已在 ${HOST}:${port} 就绪`)
-  })
-
-  return listenAddress
+/** 一次监听尝试失败后的清理：只回收本次尝试创建的资源，isStarted 由调用方决定。 */
+function teardownRemoteAttempt(front: NetServer): void {
+  eventBusUnsubscribe?.()
+  eventBusUnsubscribe = null
+  chatBusUnsubscribe?.()
+  chatBusUnsubscribe = null
+  if (idleSweepTimer) {
+    clearInterval(idleSweepTimer)
+    idleSweepTimer = null
+  }
+  try { wss?.close() } catch { /* ignore */ }
+  wss = null
+  closePublicTlsServer()
+  remoteRelayClient?.stop()
+  remoteRelayClient = null
+  remoteRelaySink = null
+  if (frontServer === front) frontServer = null
+  try { front.close() } catch { /* ignore */ }
+  activeListenPort = null
+  const failedServer = httpServer
+  httpServer = null
+  try { failedServer?.close() } catch { /* ignore */ }
 }
 
 /** 停止 Profer Remote Service */
@@ -2388,6 +2589,10 @@ async function stopRemoteServiceNow(): Promise<void> {
   if (profileTimer) clearInterval(profileTimer)
   profileTimer = null
   const frpExit = stopFrp()
+  // 先停监听、立刻把端口让出来：退出/重启期间新进程马上就要 bind 同一端口。
+  const front = frontServer
+  frontServer = null
+  try { front?.close() } catch { /* ignore */ }
   for (const client of wss?.clients ?? []) { authenticatedClients.delete(client); client.close(1001, 'service stopped'); client.terminate() }
   remoteRelayClient?.stop()
   remoteRelayClient = null
@@ -2409,6 +2614,7 @@ async function stopRemoteServiceNow(): Promise<void> {
     wss?.close()
   } catch { /* ignore */ }
   wss = null
+  closePublicTlsServer()
   const server = httpServer
   httpServer = null
   await Promise.all([frpExit, server ? closeOwnedHttp(server) : Promise.resolve(), closeRemoteTls()])
@@ -2416,6 +2622,8 @@ async function stopRemoteServiceNow(): Promise<void> {
   serverInstanceId = randomUUID()
   isStarted = false
   listenAddress = null
+  activeListenPort = null
   remoteError = null
+  remoteNotice = null
   console.log('[Remote] 移动版服务已停止')
 }

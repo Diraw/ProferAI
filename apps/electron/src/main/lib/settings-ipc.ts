@@ -9,6 +9,7 @@ import { app, BrowserWindow, ipcMain, nativeTheme } from 'electron'
 import { SETTINGS_IPC_CHANNELS, type AppSettings } from '../../types'
 import { getSettings, updateSettings } from './settings-service'
 import { getRemoteServiceStatus, setRemoteServiceEnabled, restartRemoteService } from './remote-service'
+import { savePublicEndpointConfig, ensurePublicTlsIdentity } from './remote-public-endpoint'
 import { updateWindowFrameAppearance } from './titlebar-overlay'
 import { syncFeishuSyncSleepBlocker } from './feishu-sleep-blocker'
 
@@ -112,6 +113,18 @@ export function registerSettingsIpc(): void {
       }
       updateSettings({ pocketModePort: n })
       // 服务运行中则停掉旧端口并重启；未运行时新端口在下次启动时生效。
+      return restartRemoteService()
+    },
+  )
+
+  // 保存手动公网连接地址（用户自建 FRP/端口映射）。
+  // 服务运行中重启一次：自签证书与二维码都要跟着新地址重建。
+  ipcMain.handle(
+    SETTINGS_IPC_CHANNELS.SET_POCKET_PUBLIC_ENDPOINT,
+    async (_event, input: unknown) => {
+      savePublicEndpointConfig(input === null ? null : input)
+      // 先生成自签身份，让状态里能立即拿到指纹；失败不阻塞保存，二维码生成时还会重试。
+      try { await ensurePublicTlsIdentity() } catch (error) { console.error('[移动模式] 公网自签证书生成失败:', error) }
       return restartRemoteService()
     },
   )

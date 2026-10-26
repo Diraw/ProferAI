@@ -605,6 +605,8 @@ export interface ElectronAPI {
   setPocketModeEnabled: (enabled: boolean) => Promise<PocketModeStatus>
   /** 设置移动模式服务端口（保存并热应用，服务运行中自动重启） */
   setPocketModePort: (port: number) => Promise<PocketModeStatus>
+  /** 保存手动公网连接地址（传 null 清除）；服务运行中会重启以重建 TLS 与二维码 */
+  setPocketPublicEndpoint: (input: { host: string; port: number } | null) => Promise<PocketModeStatus>
   /** 获取安卓版 APK 扫码下载信息（官网地址/二维码/文件名） */
   getProferApkQr: () => Promise<{ url: string; dataUrl: string; fileName: string }>
 
@@ -2187,6 +2189,9 @@ const electronAPI: ElectronAPI = {
   },
   setPocketModePort: (port: number) => {
     return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.SET_POCKET_MODE_PORT, port) as Promise<PocketModeStatus>
+  },
+  setPocketPublicEndpoint: (input) => {
+    return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.SET_POCKET_PUBLIC_ENDPOINT, input) as Promise<PocketModeStatus>
   },
   getProferApkQr: () => {
     return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.GET_APK_QR) as Promise<{ url: string; dataUrl: string; fileName: string }>
