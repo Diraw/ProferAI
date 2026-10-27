@@ -6,7 +6,7 @@
 
 import { ipcMain, nativeTheme, shell, dialog, BrowserWindow, app, Notification } from 'electron'
 import type { WebContents } from 'electron'
-import { isAbsolute, join, relative, resolve, sep, dirname, basename, extname } from 'node:path'
+import { isAbsolute, join, relative, resolve, dirname, basename, extname } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
@@ -105,7 +105,7 @@ import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
 import { listBookmarks, addBookmark, removeBookmark, listHistory, clearHistory } from './lib/browser-start-page-store'
 import { getMainRepoRoot } from './lib/git-diff-service'
 import { registerProferDirectoryPath, registerProferFilePath } from './lib/local-file-protocol'
-import { isPathInsideAnyRoot, isReadOnlyPreviewPathAllowed } from './lib/preview-path-policy'
+import { isPathInsideAnyRoot, isReadOnlyPreviewPathAllowed, isResolvedPathUnderRoot, isSameResolvedPath } from './lib/preview-path-policy'
 import { registerUpdaterIpc } from './lib/updater/updater-ipc'
 import { registerChannelIpc } from './lib/channel-ipc'
 import { listChannels,
@@ -4353,8 +4353,8 @@ export function registerIpcHandlers(): void {
       const resolvedAllowedFiles = await Promise.all(
         allowedFiles.map((file) => realpath(resolve(file)).catch(() => resolve(file)))
       )
-      const isAllowed = resolvedAllowedDirs.some((dir) => safePath.startsWith(dir + sep) || safePath === dir)
-        || resolvedAllowedFiles.some((file) => safePath === file)
+      const isAllowed = resolvedAllowedDirs.some((dir) => isResolvedPathUnderRoot(safePath, dir))
+        || resolvedAllowedFiles.some((file) => isSameResolvedPath(safePath, file))
       if (!isAllowed) {
         throw new Error('访问路径不在允许范围内')
       }

@@ -1,5 +1,6 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
-import { isAbsolute, resolve, sep } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
+import { isResolvedPathUnderRoot } from './preview-path-policy'
 
 /**
  * Remote WS file preview is deliberately stricter than the desktop IPC policy.
@@ -28,7 +29,8 @@ function realpathIfExisting(path: string): string | null {
 }
 
 function isInsideDirectory(path: string, root: string): boolean {
-  return path === root || path.startsWith(root + sep)
+  // 两侧此处已 realpath，只需大小写折叠（Windows 文件系统大小写不敏感）
+  return isResolvedPathUnderRoot(path, root)
 }
 
 /**

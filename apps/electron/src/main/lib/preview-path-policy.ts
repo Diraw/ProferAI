@@ -97,15 +97,27 @@ function matchesRoot(normalizedTarget: string, normalizedRoot: string): boolean 
 }
 
 /**
+ * 前缀判定（不做 realpath，纯字符串比较）。
+ *
+ * 调用方已经 realpath 过、或刻意不想触发系统调用的热路径用这个；
+ * 未经处理的路径请用 `isPathInsideRoot`（它会消解符号链接）。
+ */
+export function isResolvedPathUnderRoot(resolvedTarget: string, resolvedRoot: string): boolean {
+  return matchesRoot(normalizePathCase(resolvedTarget), normalizePathCase(resolvedRoot))
+}
+
+/** 两个已 realpath 的路径是否指向同一位置（按平台折叠大小写）。 */
+export function isSameResolvedPath(a: string, b: string): boolean {
+  return normalizePathCase(a) === normalizePathCase(b)
+}
+
+/**
  * 目标路径是否落在根目录内。两侧都会 realpath（消解符号链接）并做平台大小写归一。
  *
  * 供主进程各处「授权根 / 敏感目录」前缀判定复用，避免各写一份 `startsWith` 时漏掉大小写。
  */
 export function isPathInsideRoot(targetPath: string, root: string): boolean {
-  return matchesRoot(
-    normalizePathCase(realpathOrResolve(targetPath)),
-    normalizePathCase(realpathOrResolve(root)),
-  )
+  return isResolvedPathUnderRoot(realpathOrResolve(targetPath), realpathOrResolve(root))
 }
 
 /** 目标路径是否落在任一根目录内（目标只 realpath 一次，根逐个比对）。 */

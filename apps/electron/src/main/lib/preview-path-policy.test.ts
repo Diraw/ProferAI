@@ -8,6 +8,8 @@ import {
   isPathInsideAnyRoot,
   isPathInsideRoot,
   isReadOnlyPreviewPathAllowed,
+  isResolvedPathUnderRoot,
+  isSameResolvedPath,
   isSystemSensitivePath,
   type PreviewPathPolicy,
 } from './preview-path-policy'
@@ -126,5 +128,38 @@ describe('isPathInsideRoot 大小写', () => {
     expect(
       isReadOnlyPreviewPathAllowed(secret.toLowerCase(), { credentialSensitiveRoots: [credentialRoot] }),
     ).toBe(false)
+  })
+})
+
+/** 纯字符串层判定：给已 realpath/resolve 过的调用方复用（不再触碰文件系统）。 */
+describe('isResolvedPathUnderRoot / isSameResolvedPath', () => {
+  const root = join(sep, 'srv', 'workspace')
+  const nested = join(root, 'a', 'b.txt')
+
+  test('前缀命中、根外不命中、同级前缀不误判', () => {
+    expect(isResolvedPathUnderRoot(nested, root)).toBe(true)
+    expect(isResolvedPathUnderRoot(root, root)).toBe(true)
+    expect(isResolvedPathUnderRoot(join(sep, 'srv', 'other', 'b.txt'), root)).toBe(false)
+    // `workspace-evil` 不能被当成 `workspace` 的子目录
+    expect(isResolvedPathUnderRoot(join(sep, 'srv', 'workspace-evil', 'b.txt'), root)).toBe(false)
+  })
+
+  test('文件系统根不会拼出双分隔符', () => {
+    expect(isResolvedPathUnderRoot(nested, sep)).toBe(true)
+  })
+
+  test('路径相等判定', () => {
+    expect(isSameResolvedPath(nested, join(root, 'a', 'b.txt'))).toBe(true)
+    expect(isSameResolvedPath(nested, join(root, 'a', 'c.txt'))).toBe(false)
+    // 相邻文件不能被当成同一路径（精确匹配，不是前缀匹配）
+    expect(isResolvedPathUnderRoot(join(root, 'a', 'b.txt'), join(root, 'a', 'b.txt'))).toBe(true)
+  })
+
+  const windowsOnly = process.platform === 'win32' ? test : test.skip
+
+  windowsOnly('Windows 上大写差异不影响判定', () => {
+    expect(isResolvedPathUnderRoot('c:\\users\\x\\y.txt', 'C:\\Users\\x')).toBe(true)
+    expect(isResolvedPathUnderRoot('C:\\USERS\\X\\Y.TXT', 'c:\\users\\x')).toBe(true)
+    expect(isSameResolvedPath('C:\\Users\\x\\a.txt', 'c:\\users\\X\\A.TXT')).toBe(true)
   })
 })

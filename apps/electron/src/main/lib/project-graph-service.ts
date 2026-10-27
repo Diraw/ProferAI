@@ -8,8 +8,9 @@
  */
 
 import { appendFileSync, existsSync, readFileSync, mkdirSync, lstatSync, realpathSync } from 'node:fs'
-import { basename, dirname, resolve, sep } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { getAgentSessionsDir } from './config-paths'
+import { isResolvedPathUnderRoot } from './preview-path-policy'
 import {
   buildGraphFromEvents,
   parseEventsFromJsonl,
@@ -56,7 +57,8 @@ function realpathCandidate(path: string): string {
 }
 
 function isPathInside(root: string, candidate: string): boolean {
-  return candidate === root || candidate.startsWith(root + sep)
+  // 两侧均来自 realpathCandidate，只需大小写折叠（Windows 文件系统大小写不敏感）
+  return isResolvedPathUnderRoot(candidate, root)
 }
 
 /**

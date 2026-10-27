@@ -7,9 +7,10 @@
  */
 import { ipcMain } from 'electron'
 import { realpathSync, existsSync, rmSync } from 'node:fs'
-import { basename, resolve, sep } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { AGENT_IPC_CHANNELS } from '@profer/shared'
+import { isResolvedPathUnderRoot } from './preview-path-policy'
 
 export function registerHeatmapMigrationIpc(): void {
   ipcMain.handle(AGENT_IPC_CHANNELS.GET_WORKSPACE_HEATMAP_DAILY, async (_, workspaceId: string) => {
@@ -24,7 +25,7 @@ export function registerHeatmapMigrationIpc(): void {
       // 安全校验：解析真实路径，确保只清理 tmpdir 下的 profer-import-* 目录
       const resolved = realpathSync(resolve(tempDir))
       const tmpRoot = realpathSync(tmpdir())
-      if (!resolved.startsWith(tmpRoot + sep)) {
+      if (!isResolvedPathUnderRoot(resolved, tmpRoot)) {
         console.warn('[迁移] 拒绝清理非临时目录:', tempDir)
         return
       }
