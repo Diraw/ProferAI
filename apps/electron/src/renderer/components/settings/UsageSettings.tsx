@@ -85,7 +85,9 @@ import {
   showCurrentSessionSectionAtom,
 } from '@/atoms/sidebar-atoms'
 import {
-  CURRENT_SESSION_VISIBLE_COUNT_OPTIONS,
+  DEFAULT_CURRENT_SESSION_VISIBLE_COUNT,
+  MAX_CURRENT_SESSION_VISIBLE_COUNT,
+  MIN_CURRENT_SESSION_VISIBLE_COUNT,
   normalizeCurrentSessionVisibleCount,
   resolveEffectiveVisibleRows,
 } from '@/lib/current-session-capacity'
@@ -149,10 +151,12 @@ export function UsageSettings(): React.ReactElement {
   const [compactViewportHeightDraft, setCompactViewportHeightDraft] = React.useState(String(DEFAULT_COMPACT_VIEWPORT_HEIGHT))
   const [compactMinHeightDraft, setCompactMinHeightDraft] = React.useState(String(DEFAULT_COMPACT_MIN_HEIGHT))
   const [compactMaxHeightDraft, setCompactMaxHeightDraft] = React.useState(String(DEFAULT_COMPACT_MAX_HEIGHT))
+  // 「当前会话最多显示」用本地字符串草稿：输入过程中不落盘，失焦才归一化保存
+  const [currentSessionCountDraft, setCurrentSessionCountDraft] = React.useState(String(DEFAULT_CURRENT_SESSION_VISIBLE_COUNT))
   // 实时窗口内高：直接告诉用户当前是否达到触发条件（窗口最大化时高度可能远高于阈值）
   const viewportHeight = useWindowInnerHeight()
-  // 「当前会话」档位在矮窗口下会被夹算，设置页直接告诉用户实际能看到几行，
-  // 避免「设了 12 却只看到 8」被当成 bug。与侧栏夹算公式同源。
+  // 「当前会话」上限在矮窗口下会被夹算，设置页直接告诉用户实际能看到几行，
+  // 避免「填了上限却看不满」被当成 bug。与侧栏夹算公式同源。
   const effectiveCurrentSessionRows = resolveEffectiveVisibleRows(currentSessionVisibleCount, viewportHeight)
   // 阈值草稿是否已触发紧凑档（仅用于文案提示；实际切换还带 60px 退出迟滞）
   const compactThresholdDraftNumber = Number(compactViewportHeightDraft.trim())
@@ -303,6 +307,10 @@ export function UsageSettings(): React.ReactElement {
     }
   }, [])
   React.useEffect(() => { void loadSettings() }, [loadSettings])
+  // 初始化器异步读到 settings.json 后同步草稿；保存失败回滚 atom 时也由这里复原输入
+  React.useEffect(() => {
+    setCurrentSessionCountDraft(String(currentSessionVisibleCount))
+  }, [currentSessionVisibleCount])
 
   /** 切换文件预览打开方式：先更新本地态保证交互即时，再落盘。 */
   const handlePreviewOpenModeChange = (value: string): void => {
@@ -391,11 +399,17 @@ export function UsageSettings(): React.ReactElement {
     }
   }
 
-  /** 更新「当前会话」最多显示数：先写 atom 立即生效，落盘失败回滚 */
-  const handleCurrentSessionVisibleCountChange = async (value: string): Promise<void> => {
+  /**
+   * 「当前会话最多显示」失焦时归一化落盘。
+   * 与紧凑档三个输入框同一套范式：输入过程只改草稿，失焦才写 atom + settings.json，
+   * 避免输入「12」时先落盘 1 再落盘 12。空输入回落默认值。
+   */
+  const handleCurrentSessionCountBlur = async (): Promise<void> => {
     if (settingsLoading || Boolean(settingsError)) return
-    const next = normalizeCurrentSessionVisibleCount(Number.parseInt(value, 10))
+    const raw = currentSessionCountDraft.trim()
+    const next = normalizeCurrentSessionVisibleCount(raw === '' ? Number.NaN : Number(raw))
     const previous = currentSessionVisibleCount
+    setCurrentSessionCountDraft(String(next))
     if (next === previous) return
     setCurrentSessionVisibleCount(next)
     try {
@@ -582,25 +596,16 @@ export function UsageSettings(): React.ReactElement {
             checked={showCurrentSessionSection}
             onCheckedChange={setShowCurrentSessionSection}
           />
-          <SettingsRow
+          <SettingsInput
             label="当前会话最多显示"
-            description={`左侧栏「当前会话」区的可见上限；超出后在该区内滚动，下方项目列表始终保留至少 160px。当前窗口高度下约可显示 ${effectiveCurrentSessionRows} 个。`}
-          >
-            <Select
-              disabled={settingsLoading || Boolean(settingsError)}
-              value={String(currentSessionVisibleCount)}
-              onValueChange={(value) => { void handleCurrentSessionVisibleCountChange(value) }}
-            >
-              <SelectTrigger aria-label="当前会话最多显示数" className="w-[120px] h-8 text-[13px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CURRENT_SESSION_VISIBLE_COUNT_OPTIONS.map((count) => (
-                  <SelectItem key={count} value={String(count)}>{count} 个</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </SettingsRow>
+            description={`左侧栏「当前会话」区的可见上限，可填 ${MIN_CURRENT_SESSION_VISIBLE_COUNT}–${MAX_CURRENT_SESSION_VISIBLE_COUNT} 个（默认 ${DEFAULT_CURRENT_SESSION_VISIBLE_COUNT}），失焦后保存；超出后在该区内滚动，下方项目列表始终保留至少 160px。当前窗口高度下约可显示 ${effectiveCurrentSessionRows} 个。`}
+            type="number"
+            value={currentSessionCountDraft}
+            disabled={settingsLoading || Boolean(settingsError)}
+            onChange={setCurrentSessionCountDraft}
+            onBlur={() => { void handleCurrentSessionCountBlur() }}
+            placeholder={String(DEFAULT_CURRENT_SESSION_VISIBLE_COUNT)}
+          />
           <SettingsToggle
             label="侧栏显示我的积分"
             description="关闭后隐藏左侧栏底部的积分余额条，不影响积分与用量页面"

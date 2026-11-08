@@ -64,7 +64,7 @@ export const leftSidebarWidthAtom = atomWithStorage<number>(
  */
 export const currentSessionVisibleCountAtom = atom<number>(DEFAULT_CURRENT_SESSION_VISIBLE_COUNT)
 
-/** 从主进程加载容量档位；读失败保持默认 12（fail-safe） */
+/** 从主进程加载容量数值；读失败保持默认 6（fail-safe） */
 export async function initializeCurrentSessionVisibleCount(
   setCount: (count: number) => void,
 ): Promise<void> {
