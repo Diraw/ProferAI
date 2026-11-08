@@ -79,7 +79,16 @@ import {
   updatePreviewOpenMode,
   composerCompactModeAtom,
 } from '@/atoms/ui-preferences'
-import { showCurrentSessionSectionAtom } from '@/atoms/sidebar-atoms'
+import {
+  currentSessionVisibleCountAtom,
+  persistCurrentSessionVisibleCount,
+  showCurrentSessionSectionAtom,
+} from '@/atoms/sidebar-atoms'
+import {
+  CURRENT_SESSION_VISIBLE_COUNT_OPTIONS,
+  normalizeCurrentSessionVisibleCount,
+  resolveEffectiveVisibleRows,
+} from '@/lib/current-session-capacity'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -121,6 +130,7 @@ export function UsageSettings(): React.ReactElement {
   const [customSounds, setCustomSounds] = useAtom(customNotificationSoundsAtom)
   const [showCreditsInSidebar, setShowCreditsInSidebar] = useAtom(showCreditsInSidebarAtom)
   const [showCurrentSessionSection, setShowCurrentSessionSection] = useAtom(showCurrentSessionSectionAtom)
+  const [currentSessionVisibleCount, setCurrentSessionVisibleCount] = useAtom(currentSessionVisibleCountAtom)
   const [stickyUserMessageEnabled, setStickyUserMessageEnabled] = useAtom(stickyUserMessageEnabledAtom)
   const [smoothScrollEnabled, setSmoothScrollEnabled] = useAtom(smoothScrollEnabledAtom)
   const [smoothScrollForce, setSmoothScrollForce] = useAtom(smoothScrollForceAtom)
@@ -141,6 +151,9 @@ export function UsageSettings(): React.ReactElement {
   const [compactMaxHeightDraft, setCompactMaxHeightDraft] = React.useState(String(DEFAULT_COMPACT_MAX_HEIGHT))
   // 实时窗口内高：直接告诉用户当前是否达到触发条件（窗口最大化时高度可能远高于阈值）
   const viewportHeight = useWindowInnerHeight()
+  // 「当前会话」档位在矮窗口下会被夹算，设置页直接告诉用户实际能看到几行，
+  // 避免「设了 12 却只看到 8」被当成 bug。与侧栏夹算公式同源。
+  const effectiveCurrentSessionRows = resolveEffectiveVisibleRows(currentSessionVisibleCount, viewportHeight)
   // 阈值草稿是否已触发紧凑档（仅用于文案提示；实际切换还带 60px 退出迟滞）
   const compactThresholdDraftNumber = Number(compactViewportHeightDraft.trim())
   const compactTriggered = Number.isFinite(compactThresholdDraftNumber)
@@ -378,6 +391,22 @@ export function UsageSettings(): React.ReactElement {
     }
   }
 
+  /** 更新「当前会话」最多显示数：先写 atom 立即生效，落盘失败回滚 */
+  const handleCurrentSessionVisibleCountChange = async (value: string): Promise<void> => {
+    if (settingsLoading || Boolean(settingsError)) return
+    const next = normalizeCurrentSessionVisibleCount(Number.parseInt(value, 10))
+    const previous = currentSessionVisibleCount
+    if (next === previous) return
+    setCurrentSessionVisibleCount(next)
+    try {
+      await persistCurrentSessionVisibleCount(next)
+    } catch (error) {
+      console.error('[使用偏好] 更新当前会话显示数失败:', error)
+      setCurrentSessionVisibleCount(previous)
+      toast.error('当前会话显示数保存失败，请重试')
+    }
+  }
+
   /** 更新每个工作区的保留会话数 */
   const handleArchiveKeepRecentChange = async (value: string): Promise<void> => {
     if (settingsLoading || settingsError || archiveSaving) return
@@ -553,6 +582,25 @@ export function UsageSettings(): React.ReactElement {
             checked={showCurrentSessionSection}
             onCheckedChange={setShowCurrentSessionSection}
           />
+          <SettingsRow
+            label="当前会话最多显示"
+            description={`左侧栏「当前会话」区的可见上限；超出后在该区内滚动，下方项目列表始终保留至少 160px。当前窗口高度下约可显示 ${effectiveCurrentSessionRows} 个。`}
+          >
+            <Select
+              disabled={settingsLoading || Boolean(settingsError)}
+              value={String(currentSessionVisibleCount)}
+              onValueChange={(value) => { void handleCurrentSessionVisibleCountChange(value) }}
+            >
+              <SelectTrigger aria-label="当前会话最多显示数" className="w-[120px] h-8 text-[13px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CURRENT_SESSION_VISIBLE_COUNT_OPTIONS.map((count) => (
+                  <SelectItem key={count} value={String(count)}>{count} 个</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingsRow>
           <SettingsToggle
             label="侧栏显示我的积分"
             description="关闭后隐藏左侧栏底部的积分余额条，不影响积分与用量页面"
