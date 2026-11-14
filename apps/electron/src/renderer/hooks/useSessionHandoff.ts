@@ -42,6 +42,11 @@ export interface UseSessionHandoffResult {
   /** 交接是否在进行中；调用方据此显示进度并防连点 */
   inFlight: boolean
   startHandoff: () => Promise<void>
+  /**
+   * 交接结果已在主进程产生时（Agent 提议卡片的确认走主进程 IPC），只执行渲染层动作：
+   * 会话列表 / 忽略建议 / 切标签 / 首轮 prompt。不要再跑一次交接。
+   */
+  applyHandoffResult: (result: AgentSessionHandoffResult) => void
 }
 
 export function useSessionHandoff(sessionId: string): UseSessionHandoffResult {
@@ -51,6 +56,27 @@ export function useSessionHandoff(sessionId: string): UseSessionHandoffResult {
   const openSession = useOpenSession()
   const [inFlight, setInFlight] = useAtom(handoffInFlightAtomFamily(sessionId))
 
+  const applyHandoffResult = React.useCallback((result: AgentSessionHandoffResult): void => {
+    setAgentSessions((prev) => (
+      prev.some((session) => session.id === result.session.id) ? prev : [result.session, ...prev]
+    ))
+    // 交接完成后旧会话不再提示：用户刚做过这个动作，立刻再劝一次只会变成噪音。
+    setDismissedIds((prev) => {
+      const next = new Set(prev)
+      next.add(sessionId)
+      return next
+    })
+    openSession('agent', result.session.id, result.session.title)
+    setPendingPrompt({
+      sessionId: result.session.id,
+      message: buildHandoffBootstrapPrompt(result),
+      additionalDirectories: [result.handoffDir],
+    })
+    if (result.handoffSource === 'transcript') {
+      toast.warning('交接文档由转录自动生成（模型撰写未成功），建议先核对内容')
+    }
+  }, [sessionId, openSession, setAgentSessions, setDismissedIds, setPendingPrompt])
+
   const startHandoff = React.useCallback(async (): Promise<void> => {
     if (inFlight || inFlightSessionIds.has(sessionId)) return
     inFlightSessionIds.add(sessionId)
@@ -58,24 +84,7 @@ export function useSessionHandoff(sessionId: string): UseSessionHandoffResult {
     toast.info('正在整理交接文档…', { description: '完成后会自动切到新会话，当前会话保持不变' })
     try {
       const result = await window.electronAPI.createAgentHandoffSession(sessionId)
-      setAgentSessions((prev) => (
-        prev.some((session) => session.id === result.session.id) ? prev : [result.session, ...prev]
-      ))
-      // 交接完成后旧会话不再提示：用户刚做过这个动作，立刻再劝一次只会变成噪音。
-      setDismissedIds((prev) => {
-        const next = new Set(prev)
-        next.add(sessionId)
-        return next
-      })
-      openSession('agent', result.session.id, result.session.title)
-      setPendingPrompt({
-        sessionId: result.session.id,
-        message: buildHandoffBootstrapPrompt(result),
-        additionalDirectories: [result.handoffDir],
-      })
-      if (result.handoffSource === 'transcript') {
-        toast.warning('交接文档由转录自动生成（模型撰写未成功），建议先核对内容')
-      }
+      applyHandoffResult(result)
     } catch (error) {
       console.error('[会话交接] 创建交接会话失败:', error)
       toast.error('交接失败，请重试', {
@@ -85,7 +94,7 @@ export function useSessionHandoff(sessionId: string): UseSessionHandoffResult {
       inFlightSessionIds.delete(sessionId)
       setInFlight(false)
     }
-  }, [sessionId, inFlight, setInFlight, openSession, setAgentSessions, setDismissedIds, setPendingPrompt])
+  }, [sessionId, inFlight, setInFlight, applyHandoffResult])
 
-  return { inFlight, startHandoff }
+  return { inFlight, startHandoff, applyHandoffResult }
 }

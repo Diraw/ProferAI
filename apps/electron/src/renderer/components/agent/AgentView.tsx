@@ -175,6 +175,7 @@ import { AgentMessageQueue } from './AgentMessageQueue'
 import { HandoffSuggestion } from './HandoffSuggestion'
 import { HandoffToolbarButton } from './HandoffToolbarButton'
 import { HandoffConfirmDialog } from './HandoffConfirmDialog'
+import { HandoffProposalBanner } from './HandoffProposalBanner'
 import { useQuoteSourceHighlight } from '@/hooks/useQuoteSourceHighlight'
 import { QuoteSourceMarkers } from './QuoteSourceMarkers'
 import {
@@ -3514,6 +3515,9 @@ export function AgentView({ sessionId, standalone = false }: AgentViewProps): Re
 
           {/* 模型主动提议建立 Goal：不阻塞当前轮，只等用户确认 */}
           <GoalProposalBanner sessionId={sessionId} />
+
+          {/* 模型主动提议交接对话：同样不阻塞，确认后才撰写文档并新建会话 */}
+          <HandoffProposalBanner sessionId={sessionId} />
         </div>
 
         {/* 输入区域 — 交互横幅显示时隐藏，由横幅替代。
